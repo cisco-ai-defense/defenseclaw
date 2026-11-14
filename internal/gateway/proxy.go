@@ -1498,21 +1498,24 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// (GAP-0254); a body that cannot be rewritten is refused while it carries
 	// one.
 	historyCaller, historyScope := p.historyScope(r, mode)
-	freshHistory, refusedHistory := p.history.fresh(historyScope, side.History)
+	freshHistory, refusedHistory := p.history.fresh(r.Context(), historyScope, side.History)
 	var redactedBody []byte
 	var redactions []historyRedaction
 	if len(refusedHistory) > 0 {
+		historyKeep := historyHashSet(side.Segments)
 		if !requestBodyIsSigned(r) {
-			redactedBody, redactions, _ = redactRefusedHistory(body, p.maxBodyValues(), refusedHistory)
+			redactedBody, redactions, _ = redactRefusedHistory(body, p.maxBodyValues(), refusedHistory, historyKeep)
 		}
-		if redactions == nil {
+		// A refused text the request sends again in its current scope is not
+		// removed: the inspection below reads it there (GAP-0265).
+		if redactions == nil && !historyAllKept(refusedHistory, historyKeep) {
 			v := refusedHistoryVerdict()
 			fmt.Fprintf(os.Stderr, "[guardrail] request refused %s: %s\n", label, v.Reason)
 			p.recordTelemetry(r.Context(), "prompt", label, v, 0, mode, true)
 			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, blockMessage(customBlockMsg, "prompt", v.Reason))
 			return
 		}
-		partial.Messages = redactHistoryMessages(partial.Messages, refusedHistory)
+		partial.Messages = redactHistoryMessages(partial.Messages, refusedHistory, historyKeep, p.maxBodyValues())
 	}
 	inspectedSegs := promptSegments(side.Segments, freshHistory)
 	inspectRaw = joinPromptSegments(inspectRaw, inspectedSegs)
@@ -1579,7 +1582,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			// refused request is inspected again (GAP-0244).
 			// Only what the refusal is attributed to keeps it (GAP-0257).
 			blamed := p.refusedSegments(r.Context(), verdict, side.Segments, side.Turn, label, mode)
-			p.history.record(historyCaller, historyScope, promptSegments(blamed, []string{msg}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
+			p.history.record(r.Context(), historyCaller, historyScope, promptSegments(blamed, []string{msg}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
 			// Enqueue a notification BEFORE writing the block
 			// response so the next proxy call (this client's retry,
 			// or any other session) carries the authoritative
@@ -1598,7 +1601,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
 			return
 		}
-		p.history.record(historyCaller, historyScope, inspectedSegs, verdict, false, inspectDegraded.degraded(), p.historySeenMax())
+		p.history.record(r.Context(), historyCaller, historyScope, inspectedSegs, verdict, false, inspectDegraded.degraded(), p.historySeenMax())
 	}
 	if redactedBody != nil {
 		body = redactedBody
@@ -2746,17 +2749,22 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// of a request the proxy refused is removed from the body it forwards
 	// (GAP-0254).
 	historyCaller, historyScope := p.historyScope(r, mode)
-	freshHistory, refusedHistory := p.history.fresh(historyScope, chatSide.History)
+	freshHistory, refusedHistory := p.history.fresh(r.Context(), historyScope, chatSide.History)
 	var redactions []historyRedaction
 	if len(refusedHistory) > 0 {
 		var redacted []byte
+		keep := historyHashSet(chatSide.Segments)
 		if len(req.RawBody) > 0 && !requestBodyIsSigned(r) {
-			redacted, redactions, _ = redactRefusedHistory(req.RawBody, p.maxBodyValues(), refusedHistory)
+			redacted, redactions, _ = redactRefusedHistory(req.RawBody, p.maxBodyValues(), refusedHistory, keep)
 		}
 		var rebuilt struct {
 			Messages []ChatMessage `json:"messages"`
 		}
-		if redactions == nil || json.Unmarshal(redacted, &rebuilt) != nil {
+		switch {
+		case redactions == nil && historyAllKept(refusedHistory, keep):
+			// The refused text is sent again in the current scope: the
+			// inspection below reads it there (GAP-0265).
+		case redactions == nil || json.Unmarshal(redacted, &rebuilt) != nil:
 			v := refusedHistoryVerdict()
 			fmt.Fprintf(os.Stderr, "[guardrail] request refused %s: %s\n", req.Model, v.Reason)
 			p.recordTelemetry(r.Context(), "prompt", req.Model, v, 0, mode, true)
@@ -2767,8 +2775,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				p.writeBlockedResponse(w, req.Model, msg)
 			}
 			return
+		default:
+			req.RawBody, req.Messages = redacted, rebuilt.Messages
 		}
-		req.RawBody, req.Messages = redacted, rebuilt.Messages
 	}
 	inspectedSegs := promptSegments(chatSide.Segments, freshHistory)
 	inspectText = joinPromptSegments(inspectText, inspectedSegs)
@@ -2861,7 +2870,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			blamed := p.refusedSegments(r.Context(), verdict, chatSide.Segments, chatSide.Turn, req.Model, mode)
-			p.history.record(historyCaller, historyScope, promptSegments(blamed, []string{msg}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
+			p.history.record(r.Context(), historyCaller, historyScope, promptSegments(blamed, []string{msg}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
 			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
 			if req.Stream {
@@ -2871,7 +2880,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 			return
 		}
-		p.history.record(historyCaller, historyScope, inspectedSegs, verdict, false, inspectDegraded.degraded(), p.historySeenMax())
+		p.history.record(r.Context(), historyCaller, historyScope, inspectedSegs, verdict, false, inspectDegraded.degraded(), p.historySeenMax())
 	}
 	p.auditHistoryRedactions(r, redactions)
 

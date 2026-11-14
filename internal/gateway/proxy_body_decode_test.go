@@ -170,7 +170,7 @@ func TestPromptWalkHistoryAndAllowlist(t *testing.T) {
 		unreadable string
 	}{
 		{"history is not read again", `{"model":"m","input":[{"role":"user","content":"old"},{"role":"assistant","content":"mid"},{"role":"user","content":"new"}]}`, []string{"new"}, ""},
-		{"system and developer turns are always read", `{"input":[{"role":"system","content":"sys"},{"role":"user","content":"old"},{"role":"assistant","content":"mid"},{"role":"developer","content":"dev"},{"role":"user","content":"new"}]}`, []string{"sys", "dev", "new"}, ""},
+		{"leading system and current developer turns are read", `{"input":[{"role":"system","content":"sys"},{"role":"user","content":"old"},{"role":"assistant","content":"mid"},{"role":"developer","content":"dev"},{"role":"user","content":"new"}]}`, []string{"sys", "dev", "new"}, ""},
 		{"a prefill is read", `{"messages":[{"role":"user","content":"old"},{"role":"assistant","content":"prefill"}]}`, []string{"prefill"}, ""},
 		{"tool results since the last model turn", `{"input":[{"type":"function_call","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":"out1"},{"type":"function_call_output","call_id":"d","output":"out2"}]}`, []string{"out1", "out2"}, ""},
 		{"ids, enums and media are not text", `{"model":"m","id":"x1","input":[{"id":"i1","type":"message","role":"user","status":"completed","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"},{"type":"input_text","text":"hi"}]}],"stream":true,"temperature":0.2}`, []string{"hi"}, ""},

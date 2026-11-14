@@ -395,15 +395,16 @@ type textWalker struct {
 	result int
 	probe  bool
 	// redact, when set, names the refused history segments to remove
-	// (redactRefusedHistory): a turn string whose segment it holds is
-	// replaced in the tree; turn is the index of the turn being read
-	// (-1 outside the turn lists).
+	// (redactRefusedHistory): a turn string whose segment it holds, and keep
+	// does not (the current scope of the request), is replaced in the tree;
+	// turn is the index of the turn being read (-1 outside the turn lists).
 	redact     map[historyHash]historyRefusal
+	keep       map[historyHash]bool
 	redactions []historyRedaction
 	turn       int
-	// curTurn is set while the walker reads a current-scope turn that is
-	// not system or developer text; its strings also go into turnSegs, the
-	// candidates a refusal is attributed to (GAP-0257).
+	// curTurn is set while the walker reads a current turn (turnCurrent: not
+	// a leading system or developer turn); its strings also go into
+	// turnSegs, the candidates a refusal is attributed to (GAP-0257).
 	curTurn   bool
 	turnSegs  []string
 	ambiguous string // why the body can be read two ways, if it can
@@ -499,7 +500,10 @@ func (w *textWalker) walk(n *jnode, key string, depth int) {
 			return
 		}
 		if seg := w.add(n.s); seg != "" && w.redact != nil && w.turn >= 0 {
-			if rf, ok := w.redact[historyHashOf(seg)]; ok {
+			// A refused text the request also sends in its current scope stays:
+			// it is inspected there, and refused again, never replaced
+			// (GAP-0265).
+			if rf, ok := w.redact[historyHashOf(seg)]; ok && !w.keep[historyHashOf(seg)] {
 				n.s = historyRedactedText
 				w.redactions = append(w.redactions, historyRedaction{Turn: w.turn, Rule: rf.rule})
 			}
@@ -618,35 +622,83 @@ func (w *textWalker) callObject(n *jnode, key string) {
 
 // ---- requests -------------------------------------------------------------------
 
-// walkTurns reads a list of turns (chat messages, Responses input items,
-// Anthropic or Converse messages, Gemini contents). System and developer
-// turns, the turns after the model's last turn and a final model turn (a
-// prefill the client wrote) are the current scope: read into segs and
-// inspected on every request. The other turns, the model's last one
-// included, are history: the client can write any of them, so they are read
-// too, into hist, and the proxy inspects each history segment once per actor
-// or session (substrate-1 GAP-0244, proxy_history_seen.go).
-func (w *textWalker) walkTurns(list *jnode) {
-	last := -1
-	for i, it := range list.kids {
-		if it.kind != 'o' {
+// turnPlace is where a turn of a turn list sits (turnPlaces).
+type turnPlace uint8
+
+const (
+	// turnCurrent: after the model's last turn, or a final model turn (a
+	// prefill the client wrote). Read on every request; a refusal is
+	// attributed among these turns (GAP-0257).
+	turnCurrent turnPlace = iota
+	// turnLead: a system or developer turn the list starts with (the
+	// instructions of the client). Read on every request, as the top-level
+	// system text and instructions are; never blamed alone.
+	turnLead
+	// turnHistory: before the model's last turn, or that turn. Read once per
+	// caller (GAP-0244); a refused one is removed (GAP-0254).
+	turnHistory
+)
+
+// turnPlaces places each of the n turns of a list by role and type: at
+// returns them for turn i (ok false for an item that is not an object).
+//
+// A system or developer turn is placed by where it sits, not by its role
+// (GAP-0265): the ones a list starts with are the client's instructions,
+// but one a client puts between the others (Claude Code 2.1 adds role
+// "system" reminders inside messages[], one after a tool result that quotes
+// what the result holds; Codex adds developer items to a Responses input) is
+// a turn of the conversation like any other. Read as the current scope
+// wherever it sat, it was inspected on every later request, never blamed for
+// a refusal and never removable, so one refusal locked the session.
+func turnPlaces(n int, at func(i int) (role, typ string, ok bool)) []turnPlace {
+	places := make([]turnPlace, n)
+	last, lead := -1, 0
+	for i := 0; i < n; i++ {
+		role, typ, ok := at(i)
+		if !ok {
 			continue
 		}
-		w.checkKeys(it)
-		role := strings.ToLower(it.str("role"))
-		typ := it.str("type")
+		role = strings.ToLower(role)
+		if (role == "system" || role == "developer") && lead == i {
+			lead = i + 1
+		}
 		if role == "assistant" || role == "model" || typ == "reasoning" || isCallType(typ) {
 			last = i
 		}
 	}
-	for i, it := range list.kids {
-		hist, user, sys := false, false, false
-		if it.kind == 'o' {
-			role := strings.ToLower(it.str("role"))
-			sys = role == "system" || role == "developer"
-			hist = !sys && (i < last || (i == last && i != len(list.kids)-1))
-			user = role == "user"
+	for i := range places {
+		_, _, ok := at(i)
+		switch {
+		case !ok:
+		case i < lead:
+			places[i] = turnLead
+		case i < last || (i == last && i != n-1):
+			places[i] = turnHistory
 		}
+	}
+	return places
+}
+
+// walkTurns reads a list of turns (chat messages, Responses input items,
+// Anthropic or Converse messages, Gemini contents). The leading system and
+// developer turns and the current turns (turnPlaces) are the current scope:
+// read into segs and inspected on every request. The history turns, the
+// model's last one included, are read too, into hist: the client can write
+// any of them, and the proxy inspects each history segment once per actor or
+// session (substrate-1 GAP-0244, proxy_history_seen.go).
+func (w *textWalker) walkTurns(list *jnode) {
+	for _, it := range list.kids {
+		if it.kind == 'o' {
+			w.checkKeys(it)
+		}
+	}
+	places := turnPlaces(len(list.kids), func(i int) (string, string, bool) {
+		it := list.kids[i]
+		return it.str("role"), it.str("type"), it.kind == 'o'
+	})
+	for i, it := range list.kids {
+		hist := places[i] == turnHistory
+		user := it.kind == 'o' && strings.ToLower(it.str("role")) == "user"
 		if hist {
 			w.history++
 		}
@@ -654,7 +706,7 @@ func (w *textWalker) walkTurns(list *jnode) {
 			w.user++
 		}
 		prevTurn, prevCur := w.turn, w.curTurn
-		w.turn, w.curTurn = i, !hist && !sys
+		w.turn, w.curTurn = i, places[i] == turnCurrent
 		w.walk(it, "", 1)
 		w.turn, w.curTurn = prevTurn, prevCur
 		if user {
@@ -679,9 +731,10 @@ type passthroughSidePrompt struct {
 	// Segments: the proxy inspects what this actor or session has not sent
 	// before (historySeen).
 	History []string
-	// Turn is the strings of Segments that sit in the current turns (not
-	// system or developer text, not instructions or tool definitions): the
-	// candidates a refusal is attributed to (refusedSegments, GAP-0257).
+	// Turn is the strings of Segments that sit in the current turns
+	// (turnCurrent: a system or developer turn there too, not a leading one,
+	// the instructions or the tool definitions): the candidates a refusal is
+	// attributed to (refusedSegments, GAP-0257, GAP-0265).
 	Turn []string
 	// Unreadable is why the body takes the fail mode ("" when it is read).
 	Unreadable string
@@ -789,12 +842,13 @@ type historyRedaction struct {
 }
 
 // redactRefusedHistory rewrites a JSON request body: every turn string whose
-// segment is in refused (the history segments of requests the proxy
-// refused, GAP-0254) is replaced by historyRedactedText. The turns, their
-// roles and order, and every other field stay. ok is false when nothing was
-// replaced (the body is not a JSON object, or holds none of them): the
-// caller then refuses the request.
-func redactRefusedHistory(body []byte, max int, refused map[historyHash]historyRefusal) (out []byte, reds []historyRedaction, ok bool) {
+// segment is in refused (the history segments of requests the proxy refused,
+// GAP-0254) and not in keep (the current scope of the request, which is
+// inspected) is replaced by historyRedactedText. The turns, their roles and
+// order, and every other field stay. ok is false when nothing was replaced
+// (the body is not a JSON object, or holds none of them): the caller then
+// refuses the request.
+func redactRefusedHistory(body []byte, max int, refused map[historyHash]historyRefusal, keep map[historyHash]bool) (out []byte, reds []historyRedaction, ok bool) {
 	trimmed := bytes.TrimSpace(body)
 	if len(refused) == 0 || len(trimmed) == 0 || trimmed[0] != '{' {
 		return nil, nil, false
@@ -803,7 +857,7 @@ func redactRefusedHistory(body []byte, max int, refused map[historyHash]historyR
 	if err != nil || root.kind != 'o' {
 		return nil, nil, false
 	}
-	w := &textWalker{redact: refused}
+	w := &textWalker{redact: refused, keep: keep}
 	w.walkRequest(root)
 	if len(w.redactions) == 0 {
 		return nil, nil, false

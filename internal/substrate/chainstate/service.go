@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/historystore"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 )
@@ -180,8 +181,10 @@ type actorEntry struct {
 	refs     int
 	lastUsed time.Time
 	intents  *intentstore.Process
-	openMu   sync.Mutex
-	purged   bool
+	// history is the proxy's inspect-once record of the actor (GAP-0266).
+	history *historystore.Process
+	openMu  sync.Mutex
+	purged  bool
 	// purgeIdle is a delete that waits for the calls holding the entry.
 	purgeIdle bool
 	// memo is what the callout's chain check answers from (GAP-0179).
@@ -299,6 +302,8 @@ func (s *Service) Register(srv *leader.Server) {
 	srv.Handle(leader.MethodIntentPut, s.logged(leader.MethodIntentPut, leader.Typed(s.IntentPut)))
 	srv.Handle(MethodChainLifecycle, s.logged(MethodChainLifecycle, leader.Typed(s.Lifecycle)))
 	srv.Handle(MethodChainEgress, s.logged(MethodChainEgress, leader.Typed(s.Egress)))
+	srv.Handle(MethodHistorySeen, s.logged(MethodHistorySeen, leader.Typed(s.HistorySeen)))
+	srv.Handle(MethodHistoryRecord, s.logged(MethodHistoryRecord, leader.Typed(s.HistoryRecord)))
 }
 
 // logged logs the errors a handler returns that the transport reports only

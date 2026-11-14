@@ -4,7 +4,6 @@
 package gateway
 
 import (
-	"container/list"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -12,11 +11,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/historystore"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
@@ -39,9 +39,12 @@ import (
 // is refused while it carries the refused turn. In observe mode nothing is
 // refused, so nothing is redacted.
 //
-// The current scope of a request (system, developer and instructions text,
-// tool definitions, the turns after the model's last one) is inspected on
-// every request as before, so a refused request sent again is refused again.
+// The current scope of a request (the top-level system text, instructions
+// and tool definitions, the system and developer turns a turn list starts
+// with, the turns after the model's last one) is inspected on every request
+// as before, so a refused request sent again is refused again. A system or
+// developer turn the client puts between the others is placed like any turn
+// (turnPlaces, GAP-0265).
 //
 // Only a verdict the guardrail reached is recorded (GAP-0255): an inspection
 // in which a stage failed open (AI Defense unreachable or unwired, a failed
@@ -58,18 +61,20 @@ import (
 //
 // The record is bounded and fails safe: one LRU of segment hashes per scope
 // (guardrail.history_seen_max, default config.DefaultHistorySeenMax), at most
-// historySeenMaxScopesPerCaller scopes per caller and historySeenMaxScopes in
-// all (the least recently used scope is dropped whole). A segment that is
-// not in the record, evicted or never seen, is inspected; nothing is skipped
-// on a miss. An evicted refused segment is inspected again and refused again.
-
-// historySeenMaxScopes is the most scopes the record keeps in all, and
-// historySeenMaxScopesPerCaller the most one caller keeps: a caller that
-// rotates sessions drops its own oldest record, not another caller's.
-const (
-	historySeenMaxScopes          = 256
-	historySeenMaxScopesPerCaller = 32
-)
+// historystore.MaxScopesPerCaller scopes per caller and
+// historystore.MaxScopes in all (the least recently used scope is dropped
+// whole). A segment that is not in the record, evicted or never seen, is
+// inspected; nothing is skipped on a miss. An evicted refused segment is
+// inspected again and refused again.
+//
+// The record lives in a historystore.Store (GAP-0266): the proxy's own
+// process store by default (one gateway), the leader's store on Agent
+// Substrate (useSubstrateChains), whose gateway runs several replicas: a turn
+// refused on one replica is refused-known on every other, so the session is
+// not locked by where the next request lands. Only hashes, verdicts and rule
+// identifiers reach the store. A store that fails is warned about and read as
+// empty: every segment is inspected and nothing is skipped or removed, so a
+// store failure never launders a segment.
 
 // historyRedactedText replaces the text of a refused turn the client sends
 // back. It does not start with the block banner, so laundering keeps it.
@@ -79,7 +84,7 @@ const historyRedactedText = "(Removed by DefenseClaw policy: this turn was refus
 // carries a refused turn the proxy cannot remove.
 const historyRefusedFinding = "PROXY-HISTORY-REFUSED-TURN"
 
-type historyHash [16]byte
+type historyHash = historystore.Hash
 
 func historyHashOf(s string) historyHash {
 	sum := sha256.Sum256([]byte(s))
@@ -88,38 +93,54 @@ func historyHashOf(s string) historyHash {
 	return h
 }
 
-// historyVerdict is what became of a segment's request when it was
-// inspected.
-type historyVerdict uint8
+// substrateHistoryStore, when set (a gateway replica on Agent Substrate),
+// is the inspect-once record of every proxy that has no store of its own.
+var substrateHistoryStore atomic.Pointer[historystore.Store]
 
-const (
-	historyAllowed historyVerdict = iota
-	historyAlerted
-	historyRefused
-)
-
-type historyEntry struct {
-	hash    historyHash
-	verdict historyVerdict
-	rule    string // the rule that refused it (historyRefused only)
-}
-
-// historyScopeSet is the LRU of one scope: front is the most recently used
-// segment.
-type historyScopeSet struct {
-	key    string
-	caller string
-	byHash map[historyHash]*list.Element // of *historyEntry
-	order  list.List
+// setSubstrateHistoryStore sets (nil clears) the shared record.
+func setSubstrateHistoryStore(store historystore.Store) {
+	if store == nil {
+		substrateHistoryStore.Store(nil)
+		return
+	}
+	substrateHistoryStore.Store(&store)
 }
 
 // historySeen is the inspect-once record of a proxy. The zero value is
-// ready to use.
+// ready to use: it uses the shared store when one is set, else its own
+// process store.
 type historySeen struct {
-	mu        sync.Mutex
-	scopes    map[string]*list.Element // of *historyScopeSet
-	order     list.List                // front is the most recently used scope
-	perCaller map[string]int
+	// store, when set, is used in place of the shared and process stores
+	// (tests: two proxies that share one record).
+	store historystore.Store
+	own   historystore.Process
+	// lastWarn rate-limits the store warnings (unix nanoseconds).
+	lastWarn atomic.Int64
+}
+
+func (s *historySeen) recordStore() historystore.Store {
+	if s.store != nil {
+		return s.store
+	}
+	if shared := substrateHistoryStore.Load(); shared != nil {
+		return *shared
+	}
+	return &s.own
+}
+
+// historyStoreWarnEvery is the shortest time between two store warnings of
+// one proxy.
+const historyStoreWarnEvery = time.Minute
+
+// warn writes a rate-limited warning that the record could not be read or
+// written; the request goes on with every segment inspected.
+func (s *historySeen) warn(op string, err error) {
+	now := time.Now().UnixNano()
+	last := s.lastWarn.Load()
+	if now-last < int64(historyStoreWarnEvery) || !s.lastWarn.CompareAndSwap(last, now) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] warning: the inspect-once record could not be %s (%v); the request history is inspected in full\n", op, err)
 }
 
 // historyRefusal is a history segment whose request was refused, and the
@@ -131,41 +152,44 @@ type historyRefusal struct {
 
 // fresh splits the history segments of a request: the ones the scope has not
 // had inspected (fresh, each once, in order) and the ones whose request was
-// refused (refused, by hash). A segment the scope has is moved to the front
-// of its LRU. An empty scope (an unverified caller) has no record: every
-// segment is fresh.
-func (s *historySeen) fresh(scope string, segs []string) (fresh []string, refused map[historyHash]historyRefusal) {
+// refused (refused, by hash). An empty scope (an unverified caller) has no
+// record, and a store that fails is read as empty: every segment is fresh.
+func (s *historySeen) fresh(ctx context.Context, scope string, segs []string) (fresh []string, refused map[historyHash]historyRefusal) {
 	if len(segs) == 0 {
 		return nil, nil
 	}
 	fresh = make([]string, 0, len(segs))
 	dup := make(map[historyHash]bool, len(segs))
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var set *historyScopeSet
-	if e, ok := s.scopes[scope]; ok && scope != "" {
-		set = e.Value.(*historyScopeSet)
-		s.order.MoveToFront(e)
-	}
+	hashes := make([]historyHash, 0, len(segs))
+	uniq := make([]string, 0, len(segs))
 	for _, seg := range segs {
 		h := historyHashOf(seg)
-		if dup[h] {
+		if !dup[h] {
+			dup[h] = true
+			hashes = append(hashes, h)
+			uniq = append(uniq, seg)
+		}
+	}
+	var known map[historyHash]historystore.Entry
+	if scope != "" {
+		var err error
+		if known, err = s.recordStore().Seen(ctx, scope, hashes); err != nil {
+			s.warn("read", err)
+			known = nil
+		}
+	}
+	for i, seg := range uniq {
+		ent, ok := known[hashes[i]]
+		if !ok {
+			fresh = append(fresh, seg)
 			continue
 		}
-		dup[h] = true
-		if set != nil {
-			if e, ok := set.byHash[h]; ok {
-				set.order.MoveToFront(e)
-				if ent := e.Value.(*historyEntry); ent.verdict == historyRefused {
-					if refused == nil {
-						refused = map[historyHash]historyRefusal{}
-					}
-					refused[h] = historyRefusal{text: seg, rule: ent.rule}
-				}
-				continue
+		if ent.Verdict == historystore.Refused {
+			if refused == nil {
+				refused = map[historyHash]historyRefusal{}
 			}
+			refused[hashes[i]] = historyRefusal{text: seg, rule: ent.Rule}
 		}
-		fresh = append(fresh, seg)
 	}
 	return fresh, refused
 }
@@ -203,8 +227,8 @@ func historyRule(v *ScanVerdict) string {
 // verdict of a degraded inspection (a stage failed open, or the judge
 // failed) records nothing, so those segments are inspected again; a refusal
 // is recorded whatever stage decided it. max is the per-scope cap (0: the
-// default).
-func (s *historySeen) record(caller, scope string, segs []string, v *ScanVerdict, refused, degraded bool, max int) {
+// default). A store that fails is warned about; nothing is recorded.
+func (s *historySeen) record(ctx context.Context, caller, scope string, segs []string, v *ScanVerdict, refused, degraded bool, max int) {
 	if scope == "" || len(segs) == 0 || v == nil {
 		return
 	}
@@ -214,64 +238,20 @@ func (s *historySeen) record(caller, scope string, segs []string, v *ScanVerdict
 	if max <= 0 {
 		max = config.DefaultHistorySeenMax
 	}
-	verdict, rule := historyAllowed, ""
+	ent := historystore.Entry{Verdict: historystore.Allowed}
 	switch {
 	case refused:
-		verdict, rule = historyRefused, historyRule(v)
+		ent = historystore.Entry{Verdict: historystore.Refused, Rule: historyRule(v)}
 	case v.Action != "" && v.Action != "allow":
-		verdict = historyAlerted
+		ent.Verdict = historystore.Alerted
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.scopes == nil {
-		s.scopes = map[string]*list.Element{}
-		s.perCaller = map[string]int{}
-	}
-	e, ok := s.scopes[scope]
-	if ok {
-		s.order.MoveToFront(e)
-	} else {
-		if s.perCaller[caller] >= historySeenMaxScopesPerCaller {
-			for old := s.order.Back(); old != nil; old = old.Prev() {
-				if old.Value.(*historyScopeSet).caller == caller {
-					s.dropLocked(old)
-					break
-				}
-			}
-		}
-		e = s.order.PushFront(&historyScopeSet{key: scope, caller: caller, byHash: map[historyHash]*list.Element{}})
-		s.scopes[scope] = e
-		s.perCaller[caller]++
-		for s.order.Len() > historySeenMaxScopes {
-			s.dropLocked(s.order.Back())
-		}
-	}
-	set := e.Value.(*historyScopeSet)
+	hashes := make([]historyHash, 0, len(segs))
 	for _, seg := range segs {
-		h := historyHashOf(seg)
-		if el, ok := set.byHash[h]; ok {
-			if ent := el.Value.(*historyEntry); verdict > ent.verdict {
-				ent.verdict, ent.rule = verdict, rule
-			}
-			set.order.MoveToFront(el)
-			continue
-		}
-		set.byHash[h] = set.order.PushFront(&historyEntry{hash: h, verdict: verdict, rule: rule})
+		hashes = append(hashes, historyHashOf(seg))
 	}
-	for set.order.Len() > max {
-		old := set.order.Back()
-		delete(set.byHash, old.Value.(*historyEntry).hash)
-		set.order.Remove(old)
+	if err := s.recordStore().Record(ctx, caller, scope, hashes, ent, max); err != nil {
+		s.warn("written", err)
 	}
-}
-
-func (s *historySeen) dropLocked(e *list.Element) {
-	set := e.Value.(*historyScopeSet)
-	delete(s.scopes, set.key)
-	if s.perCaller[set.caller]--; s.perCaller[set.caller] <= 0 {
-		delete(s.perCaller, set.caller)
-	}
-	s.order.Remove(e)
 }
 
 // historySeenMax is guardrail.history_seen_max (0: the default).
@@ -325,20 +305,41 @@ func promptSegments(current, fresh []string) []string {
 	return append(append(out, current...), fresh...)
 }
 
+// historyHashSet is the set of the hashes of segs (the current scope of a
+// request: the refused text it sends again there is inspected, not removed).
+func historyHashSet(segs []string) map[historyHash]bool {
+	out := make(map[historyHash]bool, len(segs))
+	for _, s := range segs {
+		out[historyHashOf(s)] = true
+	}
+	return out
+}
+
+// historyAllKept reports that every refused segment is also in the current
+// scope (keep): there is nothing to remove, and the inspection reads them.
+func historyAllKept(refused map[historyHash]historyRefusal, keep map[historyHash]bool) bool {
+	for h := range refused {
+		if !keep[h] {
+			return false
+		}
+	}
+	return true
+}
+
 // redactHistoryMessages is msgs with the text of every message that holds a
-// refused segment replaced by historyRedactedText, for the inspectors that
-// read the messages: they see the request the upstream gets.
-func redactHistoryMessages(msgs []ChatMessage, refused map[historyHash]historyRefusal) []ChatMessage {
+// refused segment the request does not also send in its current scope (keep)
+// replaced by historyRedactedText, for the inspectors that read the messages
+// (AI Defense): they see the request the upstream gets. A message is matched
+// by the strings the walker reads from it, exactly (GAP-0265): matching the
+// refused text against the raw JSON missed a tool result whose text JSON
+// escapes (a line break, a quote), so AI Defense was still sent it and refused
+// every later turn, and took any message that merely contained a short
+// refused text, a current turn sending it again included. A message the proxy
+// built itself (no raw content: Gemini parts) is matched by its text.
+func redactHistoryMessages(msgs []ChatMessage, refused map[historyHash]historyRefusal, keep map[historyHash]bool, max int) []ChatMessage {
 	var out []ChatMessage
 	for i, m := range msgs {
-		hit := false
-		for _, rf := range refused {
-			if strings.Contains(m.Content, rf.text) || strings.Contains(string(m.RawContent), rf.text) {
-				hit = true
-				break
-			}
-		}
-		if !hit {
+		if !messageHoldsRefused(m, refused, keep, max) {
 			continue
 		}
 		if out == nil {
@@ -350,6 +351,36 @@ func redactHistoryMessages(msgs []ChatMessage, refused map[historyHash]historyRe
 		return msgs
 	}
 	return out
+}
+
+// messageHoldsRefused reports a message one of whose strings, as the walker
+// reads them, is a refused segment not in keep.
+func messageHoldsRefused(m ChatMessage, refused map[historyHash]historyRefusal, keep map[historyHash]bool, max int) bool {
+	if len(m.RawContent) > 0 {
+		if root, err := parseJSONTree(m.RawContent, max); err == nil {
+			w := &textWalker{turn: -1}
+			if strings.EqualFold(m.Role, "user") {
+				w.user = 1
+			}
+			w.walk(root, "content", 1)
+			for _, s := range w.segs {
+				h := historyHashOf(s)
+				if _, ok := refused[h]; ok && !keep[h] {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	if m.Content == "" || keep[historyHashOf(m.Content)] {
+		return false
+	}
+	for h, rf := range refused {
+		if !keep[h] && strings.Contains(m.Content, rf.text) {
+			return true
+		}
+	}
+	return false
 }
 
 // auditHistoryRedactions writes one audit row per refused history turn the
@@ -380,10 +411,12 @@ const historyBlameMax = 8
 //
 //   - A refusal that is not a guardrail block (an audit that failed closed)
 //     is attributed to nothing: the guardrail allowed the text.
-//   - One current-turn segment (the walker's Turn: not system or developer
-//     text, instructions or tool definitions): that one, with no further
-//     inspection. It is the only text of the request the client can send
-//     back as history, and a refusal keeps managed AI Defense at one call.
+//   - One current-turn segment (the walker's Turn: not a leading system or
+//     developer turn, the instructions or the tool definitions; a system or
+//     developer turn among the current turns is one, GAP-0265): that one,
+//     with no further inspection. It is the only text of the request the
+//     client can send back as history, and a refusal keeps managed AI
+//     Defense at one call.
 //   - Two to historyBlameMax: each is inspected alone, once, and the ones
 //     the guardrail blocks alone are blamed. This runs only on a refusal
 //     with several current turns (one more AI Defense call each, managed).
