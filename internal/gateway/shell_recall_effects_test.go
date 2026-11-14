@@ -141,7 +141,7 @@ func TestShellRecallEffectRulesAreAlertOnlyAndNeverBlock(t *testing.T) {
 				)
 				finding := findingWithID(verdict.DetailedFindings, id)
 				// permissive keeps the MEDIUM source-control rule below its alert floor
-				if finding == nil && !(pack == "permissive" && id == "source_control.clone_then_run_or_adhoc_push") {
+				if finding == nil && (pack != "permissive" || id != "source_control.clone_then_run_or_adhoc_push") {
 					t.Fatalf("%s: rule did not fire; verdict=%+v", pack, verdict)
 				}
 				if finding != nil && (finding.contributesToEnforcement() || !finding.contributesToAlertOnly()) {

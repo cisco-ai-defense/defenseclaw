@@ -117,7 +117,7 @@ func decodeEscapedOperands(command CommandFact) ([]byte, int) {
 					i++
 				}
 				value, width := parseEscapeDigits(digits, 8, 3)
-				if width < 3 && !(c == '0' && width > 0) {
+				if width < 3 && (c != '0' || width <= 0) {
 					decoded = append(decoded, '\\', c)
 					if c == '0' {
 						i--
