@@ -69,7 +69,7 @@ type dmCache struct {
 	bg                           chan struct{}
 	legacyHits                   atomic.Int64
 	background                   atomic.Int64
-	// fill: answer a miss at once with fillStub and fetch the real answer in
+	// fill: answer a miss at once with dmFillStub and fetch the real answer in
 	// the background (see the file comment). fillPending holds the shas
 	// queued, fillWG the fetches in flight.
 	fill                                  bool
@@ -221,7 +221,8 @@ func (c *dmCache) fillEnqueue(sha string, body []byte) {
 	c.fillWG.Add(1)
 	go func() {
 		defer c.fillWG.Done()
-		if c.fetch(sha, body, dmFill) == nil {
+		// Answered means stored: a status the cache does not keep (401, 403, 404 ...) is an unanswered request.
+		if c.fetch(sha, body, dmFill) == nil || c.load(sha) == nil {
 			c.fillUnanswered.Add(1)
 		}
 	}()

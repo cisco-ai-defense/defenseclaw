@@ -131,6 +131,20 @@ func TestDMFillCountsUnanswered(t *testing.T) {
 	}
 }
 
+// An answer the cache does not keep (a 401 from a bad key) is unanswered, not complete.
+func TestDMFillRefusedStatusIsUnanswered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+	defer srv.Close()
+	url, c, err := startDMCache(srv.URL, "", t.TempDir(), false, true, 1, 0, 0, "", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fillPost(t, url, `{"a":1}`)
+	if n := c.fillWait(io.Discard); n != 1 {
+		t.Fatalf("a 401 must leave the request unanswered, got %d", n)
+	}
+}
+
 func TestDMFillExcludesCacheOnly(t *testing.T) {
 	if _, _, err := startDMCache("http://127.0.0.1:1", "", t.TempDir(), true, true, 1, 0, 0, "", 0, ""); err == nil {
 		t.Fatal("-dm-fill with -dm-cache-only must be refused")
