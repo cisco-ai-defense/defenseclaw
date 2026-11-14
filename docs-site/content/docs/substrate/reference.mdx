@@ -185,9 +185,12 @@ The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate
 | `networkPolicy.egress.extra` | Extra NetworkPolicy egress rules for every key-holding pod (gateway, leader, callout). The default allows DNS, the Kubernetes and Substrate APIs, the release's own Services, OTLP and model providers on 443 only. Use it for a private OIDC issuer, a private registry or EKS Pod Identity. See [the EKS page](/docs/substrate/eks#attested-templates-in-a-private-registry) |
 | `networkPolicy.adminFrom` | Who can reach the admin Service |
 | `metrics.prometheusRule.enabled` | Install the alert rules |
+| `homeSizeLimit` | The memory volume each pod keeps its local audit database in (`256Mi`; `managed.dataSizeLimit` in managed mode). It is lost when the pod is replaced. See [Turn on OTLP export](#turn-on-otlp-export) |
 | `observability.local.enabled` | A local collector for trying the chart, and a destination `chart-collector` that exports to it. See [Turn on OTLP export](#turn-on-otlp-export) |
 
 ## Turn on OTLP export
+
+On Agent Substrate, export is the audit record. Each gateway pod keeps a local audit database in a pod volume (an `emptyDir`: in memory, or on disk with `deploymentMode: managed_enterprise`). It is lost when the pod is replaced, for example by a rollout, an eviction or a node move, and each replica holds only the requests it handled. The chart has no persistent volume for it: a volume per replica would still split the history across replicas. Send the records to a collector or a SIEM that keeps them. A gateway started without an export destination logs `no export destination` once.
 
 Export destinations go under `config.observability.destinations` in the chart values. The chart renders `config` into the `defenseclaw-config` ConfigMap, and the gateway reads it from there. There is no `config.otel` key.
 
