@@ -91,14 +91,6 @@ func IsImmediateShellExecutionTool(tool string) bool {
 	}
 }
 
-// UnhintedRawCommandDialect is the grammar Analyze reads command in, for a
-// tool call with no dialect hint (chooseRawCommandDialect), whether or not
-// its grammar signals are mixed.
-func UnhintedRawCommandDialect(tool, command string) Dialect {
-	dialect, _ := chooseRawCommandDialect(tool, "", command)
-	return dialect
-}
-
 // InferredRawCommandDialect is the dialect inferRawCommandDialect reads from
 // the grammar of source, as for a generic execution tool, or DialectNone when
 // its signals are mixed.

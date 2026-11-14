@@ -39,8 +39,8 @@ func windowsHookShellCall(command, cwd string) actionfacts.Input {
 // tool-call security corpus (two statements that make the finding together)
 // and the full NTDS IFM export of the Active Directory conformance pack. The
 // unreadable statement is placed before the first and after the second, joined
-// by a newline: the hook's selection used to place both calls in no dialect,
-// and the readable-statements reading only runs for a call placed in
+// by a newline. The hook's selection places both calls in no dialect, and the
+// readable-statements reading used to run only for a call placed in
 // PowerShell, so strict went from block to allow.
 func TestWindowsHookJudgesTheReadableStatementsOfAPartialPowerShellCall(t *testing.T) {
 	type pinned struct {
@@ -95,11 +95,8 @@ func TestWindowsHookJudgesTheReadableStatementsOfAPartialPowerShellCall(t *testi
 					t.Fatalf("%s: action=%q rules=%v, want %s with %s", pack, got.Action, got.RuleIDs, whole.Action, test.rule)
 				}
 			}
-			if input.DialectHint != actionfacts.DialectPowerShell {
-				t.Fatalf("the hook placed the call in %q, want powershell: its unhinted reading is PowerShell", input.DialectHint)
-			}
-			if facts := actionfacts.Analyze(input); facts.Authoritative() || facts.Parse.Status != actionfacts.StatusPartial {
-				t.Fatalf("the unreadable statement left the parse %q: the test no longer pins a partial reading", facts.Parse.Status)
+			if facts := actionfacts.Analyze(input); facts.Authoritative() || facts.Parse.Dialect != actionfacts.DialectPowerShell {
+				t.Fatalf("the hook's reading is %s/%s: the test no longer pins a partial PowerShell call", facts.Parse.Status, facts.Parse.Dialect)
 			}
 		})
 	}
@@ -138,6 +135,22 @@ func TestWindowsReadingTwinRequests(t *testing.T) {
 		if got := windowsReadingTwinRequests(request, partial); len(got) != 0 {
 			t.Fatalf("%s got %d twins", name, len(got))
 		}
+	}
+	// The hook placed the call in no dialect: its own reading is an ambiguous
+	// PowerShell reading, and the readable statements come from the PowerShell
+	// reading of the same call (rel-1-0-10:GAP-0405).
+	unplaced := hook
+	unplaced.Input.DialectHint = ""
+	ambiguous := partial
+	ambiguous.Parse.Status = actionfacts.StatusAmbiguous
+	if got := windowsReadingTwinRequests(unplaced, ambiguous); len(got) != 1 ||
+		got[0].Input.Command != twin.Input.Command || got[0].Input.DialectHint != actionfacts.DialectPowerShell {
+		t.Fatalf("an unplaced call with an ambiguous PowerShell reading got %d twins, want the readable-statements one", len(got))
+	}
+	ambiguousPOSIX := ambiguous
+	ambiguousPOSIX.Parse.Dialect = actionfacts.DialectPOSIX
+	if got := windowsReadingTwinRequests(unplaced, ambiguousPOSIX); len(got) != 0 {
+		t.Fatalf("an ambiguous POSIX reading got %d twins: the other shell is never read", len(got))
 	}
 	posix := hook
 	posix.Input.DialectHint = actionfacts.DialectPOSIX

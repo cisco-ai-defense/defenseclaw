@@ -4007,15 +4007,6 @@ func trustedUnparsedToolCallReason(reason string) bool {
 // PowerShell statement, pipeline, redirect or expansion is PowerShell code,
 // and reading the whole line as CMD would hide its write. An exact
 // cmd /d /c wrapper that PowerShell cannot read may still use CMD grammar.
-//
-// A call the PowerShell reading reads only in part (one statement it cannot
-// read, not a cap) is still placed in PowerShell when the call's own unhinted
-// reading already reads it as PowerShell (rel-1-0-10:GAP-0405): with no hint
-// the call was judged as an ambiguous PowerShell reading, which proves none of
-// the findings of its readable statements, and the readable-statements reading
-// of the Windows hooks (windowsReadingTwinRequests) only runs for a call
-// placed in PowerShell. No call the unhinted reading puts in another shell is
-// read as PowerShell here, so a Git Bash call keeps its POSIX reading.
 func selectWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
 	tool = strings.ToLower(strings.TrimSpace(tool))
 	switch tool {
@@ -4031,8 +4022,7 @@ func selectWindowsShellDialect(tool, command string, input actionfacts.Input) ac
 		return actionfacts.DialectCMD
 	}
 	input.DialectHint = actionfacts.DialectPowerShell
-	powerShell := actionfacts.Analyze(input)
-	if powerShell.Authoritative() ||
+	if actionfacts.Analyze(input).Authoritative() ||
 		actionfacts.InferredRawCommandDialect(command) == actionfacts.DialectPowerShell {
 		return actionfacts.DialectPowerShell
 	}
@@ -4041,11 +4031,6 @@ func selectWindowsShellDialect(tool, command string, input actionfacts.Input) ac
 		if actionfacts.Analyze(input).Authoritative() {
 			return actionfacts.DialectCMD
 		}
-	}
-	if powerShell.Parse.Status == actionfacts.StatusPartial &&
-		powerShell.Parse.Dialect == actionfacts.DialectPowerShell &&
-		actionfacts.UnhintedRawCommandDialect(input.Tool, command) == actionfacts.DialectPowerShell {
-		return actionfacts.DialectPowerShell
 	}
 	return ""
 }
