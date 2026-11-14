@@ -42,6 +42,12 @@ func TestWindowsHookKeepsWhatThePowerShellReadingProves(t *testing.T) {
 		for _, layout := range []struct{ name, before, after string }{
 			{"before/nl", windowsUnreadableStatement + "\n", ""}, {"after/nl", "", "\n" + windowsUnreadableStatement},
 			{"before/sc", windowsUnreadableStatement + "; ", ""}, {"after/sc", "", "; " + windowsUnreadableStatement},
+			// The Windows corpus builder's own scaffolding variants (benchmarks/s7/wincorpus,
+			// wc_lib.py w_cd and w_tail): a directory change before the fixture and a
+			// trailer after it. The directory change may alter what follows it, so no
+			// statement of the call is read alone; the hook's whole PowerShell reading is
+			// then the extra reading (rel-1-0-10:GAP-0425).
+			{"cd-prefix", `Set-Location C:\Users\alice\proj; `, ""}, {"trailer", "", " ; Write-Output done"},
 		} {
 			command := layout.before + fixture.Command + layout.after
 			input := windowsHookShellCall(command, cwd)
