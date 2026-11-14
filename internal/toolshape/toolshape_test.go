@@ -500,8 +500,8 @@ func TestReviewRound2Mapping(t *testing.T) {
 	if m := mapOf(t, "mcp__x__do", `{"arguments":"{'path': '/home/u/.ssh/id_rsa', 'ok': True}"}`); !has(m, "/home/u/.ssh/id_rsa") {
 		t.Errorf("python literal: %+v", m.Effects)
 	}
-	if m := mapOf(t, "mcp__x__do", `{"arguments":"{\"path\": /home/u/x oops}"}`); m.Truncated.Any() {
-		t.Errorf("unparseable text marked truncated: %v", m.Truncated)
+	if m := mapOf(t, "mcp__x__do", `{"arguments":"{\"path\": /home/u/x oops}"}`); !m.Truncated.Any() {
+		t.Errorf("a JSON-shaped document no reading parses must be unread: %v", m.Truncated)
 	}
 	// Prose that starts with a bracket is text.
 	for _, v := range []string{"[INFO] done", "{{name}} said hi", "[1] see below", "[formatted HTML content]", "[{'entityName': 'AI', 'text': 'x'}]"} {
@@ -539,11 +539,11 @@ func TestContentIsCollectedFromNestedKeys(t *testing.T) {
 	if !strings.Contains(m.Content, "svc:x:0:0") {
 		t.Errorf("edit content: %q", m.Content)
 	}
-	// A body is data: a JSON file's text is not walked as arguments.
-	m = mapOf(t, "mcp__filesystem__write_file", `{"path":"/repo/c.json","content":"{\"path\": \"/etc/shadow\"}"}`)
+	// A plain prose write is data; a JSON body is read as arguments (the lead's decision).
+	m = mapOf(t, "mcp__filesystem__write_file", `{"path":"/repo/c.md","content":"see /etc/shadow"}`)
 	for _, e := range m.Effects {
 		if e.Path == "/etc/shadow" {
-			t.Errorf("content read as arguments: %+v", m.Effects)
+			t.Errorf("prose body read as arguments: %+v", m.Effects)
 		}
 	}
 }
@@ -608,7 +608,7 @@ func TestAddressListsAndVisibleCopies(t *testing.T) {
 	}
 	slices.Sort(prim)
 	slices.Sort(red)
-	if !slices.Equal(prim, []string{"x.com", "x.com", "y.com", "z.com"}) || !slices.Equal(red, []string{"v.com", "w.com"}) {
+	if !slices.Equal(prim, []string{"x.com", "y.com", "z.com"}) || !slices.Equal(red, []string{"v.com", "w.com"}) {
 		t.Errorf("primary %v redirect %v", prim, red)
 	}
 }
@@ -642,16 +642,107 @@ func TestRound3Mapping(t *testing.T) {
 	if m := mapOf(t, "mcp__x__read_file", `{"data":"{\"path\":\"/home/u/.ssh/id_rsa\"}"}`); !has(m, "/home/u/.ssh/id_rsa") {
 		t.Errorf("JSON under data for a read tool: %+v", m.Effects)
 	}
-	if m := mapOf(t, "mcp__filesystem__write_file", `{"path":"/repo/a.json","content":"{\"path\":\"/etc/shadow\"}"}`); has(m, "/etc/shadow") {
-		t.Errorf("a write's body read as arguments: %+v", m.Effects)
+	if m := mapOf(t, "mcp__filesystem__write_file", `{"path":"/repo/a.json","content":"{\"path\":\"/etc/shadow\"}"}`); !has(m, "/etc/shadow") {
+		t.Errorf("a JSON body is read as arguments: %+v", m.Effects)
 	}
 	// A recipient field of more than 64 addresses is recorded.
 	var list []string
-	for i := 0; i < 70; i++ {
+	for i := 0; i < 600; i++ {
 		list = append(list, "u"+strconv.Itoa(i)+"@x.com")
 	}
 	b, _ := json.Marshal(map[string]string{"bcc": strings.Join(list, ", ")})
 	if m := mapOf(t, "mcp__mail__send", string(b)); !m.Truncated.Has(bounded.Items) {
-		t.Errorf("a 70-address field: %v", m.Truncated)
+		t.Errorf("a 600-address field: %v", m.Truncated)
+	}
+}
+
+func TestRound4(t *testing.T) {
+	has := func(m Mapping, path string) bool {
+		for _, e := range m.Effects {
+			if e.Path == path {
+				return true
+			}
+		}
+		return false
+	}
+	// SQL is read whole up to the string bound: a 900 KB benign seed is clean, an attack at its end is found.
+	var seed strings.Builder
+	for seed.Len() < 900_000 {
+		seed.WriteString("INSERT INTO items (id, name) VALUES (1, 'alpha');\n")
+	}
+	b, _ := json.Marshal(map[string]string{"database": "d", "sql": seed.String()})
+	if m := mapOf(t, "mcp__postgres__execute", string(b)); m.Truncated.Any() || len(m.Effects) != 0 {
+		t.Fatalf("900 KB benign seed: truncated=%v effects=%+v", m.Truncated, m.Effects)
+	}
+	b, _ = json.Marshal(map[string]string{"database": "d", "sql": seed.String() + "DROP TABLE users;"})
+	m := mapOf(t, "mcp__postgres__execute", string(b))
+	if m.Truncated.Any() || !slices.Contains(kinds(m), KindSQL) {
+		t.Fatalf("attack at the end of 900 KB: truncated=%v kinds=%v", m.Truncated, kinds(m))
+	}
+	// file: is a file URI only as one; only under a key that can hold a location.
+	for _, v := range []string{"file:../lib", "File: report", "file:./x", "file:name"} {
+		b, _ := json.Marshal(map[string]string{"path": v})
+		if m := mapOf(t, "mcp__x__read_file", string(b)); m.Truncated.Any() {
+			t.Errorf("%q truncated", v)
+		}
+	}
+	b, _ = json.Marshal(map[string]string{"pattern": "file:/etc/shadow", "subject": "file://server/x"})
+	if m := mapOf(t, "mcp__x__grep", string(b)); m.Truncated.Any() || has(m, "/etc/shadow") {
+		t.Errorf("a pattern is text: %+v %v", m.Effects, m.Truncated)
+	}
+	// Content keys: read for a send, a proxy, a JSON value; data for a prose write.
+	if m := mapOf(t, "mcp__mail__send", `{"to":"a@x.com","body":"/home/u/.ssh/id_rsa"}`); !has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("a send body: %+v", m.Effects)
+	}
+	if m := mapOf(t, "mcp__proxy__call_tool", `{"name":"x","arguments":{"text":"/home/u/.ssh/id_rsa"}}`); !has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("a proxy text: %+v", m.Effects)
+	}
+	if m := mapOf(t, "mcp__filesystem__write_file", `{"path":"/repo/n.md","content":"/home/u/.ssh/id_rsa is the key"}`); has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("prose body read: %+v", m.Effects)
+	}
+	// Address lists: one string and an array share the items bound.
+	var addrs []string
+	for i := 0; i < 600; i++ {
+		addrs = append(addrs, "u"+strconv.Itoa(i)+"@x.com")
+	}
+	b, _ = json.Marshal(map[string]string{"bcc": strings.Join(addrs, ", ")})
+	one := mapOf(t, "mcp__mail__send", string(b))
+	b, _ = json.Marshal(map[string][]string{"bcc": addrs})
+	many := mapOf(t, "mcp__mail__send", string(b))
+	if !one.Truncated.Has(bounded.Items) || !many.Truncated.Has(bounded.Items) {
+		t.Errorf("string %v array %v", one.Truncated, many.Truncated)
+	}
+	// Lenient JSON: trailing commas, comments, Python repr; a JSON-shaped document no reading parses is unread.
+	for _, doc := range []string{
+		`{"path": "/home/u/.ssh/id_rsa",}`,
+		"{\"path\": \"/home/u/.ssh/id_rsa\" /* c */}",
+		"{\"path\": \"/home/u/.ssh/id_rsa\" // c\n}",
+		`{'path': '/home/u/.ssh/id_rsa', 'ok': True,}`,
+	} {
+		b, _ := json.Marshal(map[string]string{"arguments": doc})
+		if m := mapOf(t, "mcp__proxy__call_tool", string(b)); !has(m, "/home/u/.ssh/id_rsa") {
+			t.Errorf("%q: %+v", doc, m.Effects)
+		}
+	}
+	if m := mapOf(t, "mcp__proxy__call_tool", `{"arguments":"{\"path\": /home/u/x oops}"}`); !m.Truncated.Any() {
+		t.Errorf("a JSON-shaped document no reading parses must be unread: %v", m.Truncated)
+	}
+	// The verb of a proxy's tool name applies to proxy-shaped calls only.
+	if m := mapOf(t, "mcp__x__do", `{"name":"write_file","path":"/etc/passwd"}`); m.Verb != "" {
+		t.Errorf("a name beside a path is not a proxy: verb %q", m.Verb)
+	}
+	if m := mapOf(t, "mcp__proxy__call_tool", `{"name":"write_file","arguments":{"path":"/etc/passwd"}}`); m.Verb != KindWrite {
+		t.Errorf("a proxy: verb %q", m.Verb)
+	}
+	// A callback is a callback, not a copy.
+	m = mapOf(t, "mcp__http__post", `{"url":"https://api.x.com/v1","callback_url":"https://hooks.y.com/x"}`)
+	var cb int
+	for _, e := range m.Effects {
+		if e.Role == RoleCallback {
+			cb++
+		}
+	}
+	if cb != 1 {
+		t.Errorf("callback effects: %+v", m.Effects)
 	}
 }

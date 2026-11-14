@@ -39,16 +39,15 @@ var shapesYAML []byte
 // the walk records it (bounded.Truncated) and the caller judges the call as
 // unknown at least (internal/guardrail/bounded, the S7 bound rule).
 const (
-	maxDepth     = 16       // object and array nesting (bounded.Depth)
-	maxItems     = 512      // elements of one array (bounded.Items)
-	maxEffects   = 256      // effects of one call (bounded.Effects)
-	maxNodes     = 1 << 16  // values of one walk (bounded.Nodes)
-	maxNested    = 4        // JSON documents nested in string arguments (bounded.Depth)
-	maxString    = 1 << 20  // bytes of one string argument read (bounded.Bytes)
-	maxPath      = 32 << 10 // bytes of a path value (bounded.Bytes); a longer one is still judged
-	maxContent   = 1 << 20  // bytes of write content collected (bounded.Bytes)
-	maxSQL       = 256 << 10
-	maxAddresses = 64 // addresses of one recipient field (bounded.Items)
+	maxDepth   = 16        // object and array nesting (bounded.Depth)
+	maxItems   = 512       // elements of one array (bounded.Items)
+	maxEffects = 256       // effects of one call (bounded.Effects)
+	maxNodes   = 1 << 16   // values of one walk (bounded.Nodes)
+	maxNested  = 4         // JSON documents nested in string arguments (bounded.Depth)
+	maxString  = 1 << 20   // bytes of one string argument read (bounded.Bytes)
+	maxPath    = 32 << 10  // bytes of a path value (bounded.Bytes); a longer one is still judged
+	maxContent = 1 << 20   // bytes of write content collected (bounded.Bytes)
+	maxSQL     = maxString // SQL is read whole, up to the string bound
 )
 
 // Family is the kind of server or tool a call belongs to.
@@ -91,6 +90,7 @@ const (
 	RolePrimary  Role = "primary"
 	RoleRedirect Role = "redirect"
 	RoleURL      Role = "url"
+	RoleCallback Role = "callback" // a URL the call asks to be told at
 )
 
 // Effect is one thing a call does. Reason is always "mcp_semantics": the
@@ -161,6 +161,8 @@ type table struct {
 	SenderKeys    []string            `yaml:"sender_keys"`
 	SearchTokens  []string            `yaml:"search_tokens"`
 	NameKeys      []string            `yaml:"name_keys"`
+	ProxyArgKeys  []string            `yaml:"proxy_arg_keys"`
+	CallbackKeys  []string            `yaml:"callback_keys"`
 
 	verbOf        map[string]Kind
 	pathRead      map[string]bool
@@ -180,6 +182,7 @@ type table struct {
 	contentKey    map[string]bool
 	senderKey     map[string]bool
 	searchToken   map[string]bool
+	callbackKey   map[string]bool
 }
 
 type compiledSetting struct {
@@ -226,6 +229,7 @@ func load() (*table, error) {
 		t.sqlKey, t.sqlGenericKey = set(t.SQLKeys), set(t.SQLGenericKeys)
 		t.codeKey, t.codeToken, t.localHost = set(t.CodeKeys), set(t.CodeToolTokens), set(t.LocalHosts)
 		t.contentKey, t.senderKey, t.searchToken = set(t.ContentKeys), set(t.SenderKeys), set(t.SearchTokens)
+		t.callbackKey = set(t.CallbackKeys)
 		for _, suf := range t.PathKeySuffix {
 			t.pathSuffix = append(t.pathSuffix, "_"+suf)
 		}
@@ -382,7 +386,7 @@ func Map(tool string, args json.RawMessage, server string) (Mapping, error) {
 			w.trunc.Hit(bounded.Nodes) // a document the reader could not parse: unread, not clean
 		}
 	}
-	m.Truncated = w.trunc.Set()
+	m.Truncated = w.trunc.Set(&w.effects, &w.nodes)
 	m.Content = w.content.String()
 	return m, nil
 }
@@ -393,7 +397,15 @@ func Map(tool string, args json.RawMessage, server string) (Mapping, error) {
 // short string decides.
 func (w *walker) proxyVerb(root any) {
 	obj, ok := root.(map[string]any)
-	if !ok || w.m.Verb != "" {
+	if !ok {
+		return
+	}
+	for _, k := range w.t.ProxyArgKeys {
+		if _, has := obj[k]; has {
+			w.proxy = true
+		}
+	}
+	if !w.proxy || w.m.Verb != "" {
 		return
 	}
 	for _, k := range w.t.NameKeys {
@@ -415,16 +427,19 @@ func (w *walker) proxyVerb(root any) {
 // walker reads one call. It is used by pointer (the counters are bound to
 // its Truncated).
 type walker struct {
-	t          *table
-	m          *Mapping
-	trunc      bounded.Truncated
-	effects    bounded.Counter
-	nodes      bounded.Counter
-	content    strings.Builder
-	codeTool   bool
-	dbTool     bool
-	searchTool bool
-	nested     int
+	t            *table
+	m            *Mapping
+	trunc        bounded.Truncated
+	effects      bounded.Counter
+	nodes        bounded.Counter
+	content      strings.Builder
+	codeTool     bool
+	dbTool       bool
+	searchTool   bool
+	proxy        bool // the call has the shape of a proxy tool: a tool name beside its arguments
+	nested       int
+	contentBytes int
+	dests        map[string]bool
 }
 
 func (w *walker) add(e Effect) {
@@ -498,16 +513,18 @@ func (w *walker) str(key, val string) {
 	// Text the call writes: collected for the rules that read it, and never
 	// read as a JSON document (a file body is data).
 	if t.contentKey[key] {
-		if w.content.Len()+len(val) > maxContent {
+		w.contentBytes += len(val)
+		if w.contentBytes > maxContent {
 			w.trunc.Hit(bounded.Bytes)
 		} else {
 			w.content.WriteString(val)
 			w.content.WriteByte('\n')
 		}
-		if w.bodyIsData() {
-			// A write's body is data: it is not read as arguments. A value a
-			// tool that does not write receives under such a key (a path
-			// handed to a read tool as "text") is read like any string.
+		if w.bodyIsData(val) {
+			// A plain write's body is data: it is not read as arguments. A
+			// send or proxy tool's text, a JSON document and a value a tool
+			// that does not write receives under such a key are read like
+			// any string.
 			return
 		}
 	}
@@ -525,21 +542,19 @@ func (w *walker) str(key, val string) {
 			w.nested--
 			return
 		}
-		if inner, ok := decodeLenient([]byte(pythonLiteralToJSON(val))); ok {
-			w.nested++
-			w.value(key, inner, 0)
-			w.nested--
-			return
-		}
-		// Not a document any parser reads: it is text, like prose that starts
-		// with a bracket.
-	}
-	switch p, kind := fileURIPath(val); kind {
-	case fileURIPlaced:
-		val = p
-	case fileURIUnplaced:
+		// A document in the shape of JSON that no lenient reading parses is
+		// unread: the call is unknown, not clean.
 		w.trunc.Hit(bounded.Nodes)
 		return
+	}
+	if t.locationKey(key) {
+		switch p, kind := fileURIPath(val); kind {
+		case fileURIPlaced:
+			val = p
+		case fileURIUnplaced:
+			w.trunc.Hit(bounded.Nodes)
+			return
+		}
 	}
 	if len(val) <= 256 {
 		// A string value can also be a setting (acl: "public-read").
@@ -552,6 +567,8 @@ func (w *walker) str(key, val string) {
 			w.m.Senders = append(w.m.Senders, h)
 		}
 		return
+	case t.callbackKey[key] && looksURL(val):
+		w.destination(key, val, RoleCallback)
 	case t.redirectKey[key] || t.recipientKey[key]:
 		role := RolePrimary
 		if t.redirectKey[key] {
@@ -611,13 +628,14 @@ func addressList(v string, over *bool) []string {
 		if i := strings.LastIndex(part, "<"); i >= 0 && strings.HasSuffix(part, ">") {
 			part = part[i+1 : len(part)-1]
 		}
-		if part != "" {
-			out = append(out, part)
+		if part == "" {
+			continue
 		}
-		if len(out) >= maxAddresses {
+		if len(out) >= maxItems {
 			*over = true
 			break
 		}
+		out = append(out, part)
 	}
 	return out
 }
@@ -642,11 +660,14 @@ func pythonLiteralToJSON(v string) string {
 	})
 }
 
-// bodyIsData reports that a content-style key holds the text the call writes:
-// the verb of the tool (or of the tool a proxy names) is a write, or the call
-// has a content collected beside a path (a write of a body).
-func (w *walker) bodyIsData() bool {
-	return w.m.Verb == KindWrite || w.m.Verb == KindNetSend || w.m.Verb == KindExec
+// bodyIsData reports that a value under a content-style key is the text of a
+// plain write: the tool writes, is neither a send nor a proxy tool, and the
+// value is not a JSON document.
+func (w *walker) bodyIsData(val string) bool {
+	if w.m.Verb != KindWrite || w.proxy || w.m.Family == FamilyMail || w.m.Family == FamilyChat {
+		return false
+	}
+	return !jsonDocument(val)
 }
 
 // path adds a path effect. A path past maxPath is still judged (the native
@@ -683,6 +704,12 @@ func (w *walker) pathKind() Kind {
 // inputKeys always name a file that is read, whatever the verb of the tool name.
 var inputKeys = map[string]bool{"src": true, "source": true, "input": true, "input_path": true, "input_file": true, "from": true}
 
+// locationKey reports a key that can hold a location (a path, a file URI, a
+// URL); a value under any other key is not a location by its spelling alone.
+func (t *table) locationKey(key string) bool {
+	return t.pathRead[key] || t.pathWrite[key] || inputKeys[key] || t.pathKeySuffix(key) || t.urlKey[key]
+}
+
 // pathKeySuffix reports a key that ends in one of the table's path words
 // (relative_path, config_file_name).
 func (t *table) pathKeySuffix(key string) bool {
@@ -709,6 +736,19 @@ func (w *walker) destination(key, val string, role Role) {
 	default:
 		e.Addr = val
 	}
+	// Only the host matters to the rules: a list of addresses at one host is one
+	// effect, so a long mailing list does not exhaust the effect bound.
+	id := string(e.Role) + "\x00" + string(e.Kind) + "\x00" + e.Host + "\x00" + e.Addr
+	if e.Host != "" {
+		id = string(e.Role) + "\x00" + string(e.Kind) + "\x00" + e.Host
+	}
+	if w.dests[id] {
+		return
+	}
+	if w.dests == nil {
+		w.dests = map[string]bool{}
+	}
+	w.dests[id] = true
 	w.add(e)
 }
 
@@ -743,9 +783,78 @@ func decodeLenient(raw []byte) (any, bool) {
 		return v, true
 	}
 	if fixed := replaceNonFinite(raw); fixed != nil {
-		return dec(fixed)
+		if v, ok := dec(fixed); ok {
+			return v, true
+		}
+		raw = fixed
+	}
+	// JSON5-style documents some servers accept: comments and trailing commas.
+	if fixed := stripJSONExtras(raw); fixed != nil {
+		if v, ok := dec(fixed); ok {
+			return v, true
+		}
+		raw = fixed
+	}
+	// Python-literal documents (single quotes, True/False/None).
+	if !strings.Contains(string(raw), `"`) {
+		if v, ok := dec([]byte(pythonLiteralToJSON(string(raw)))); ok {
+			return v, true
+		}
 	}
 	return nil, false
+}
+
+// stripJSONExtras removes // and /* */ comments and trailing commas outside
+// strings. It returns nil when there is nothing to remove.
+func stripJSONExtras(raw []byte) []byte {
+	out := make([]byte, 0, len(raw))
+	var quote byte
+	changed := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		switch {
+		case quote != 0:
+			out = append(out, c)
+			if c == '\\' && i+1 < len(raw) {
+				i++
+				out = append(out, raw[i])
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+			out = append(out, c)
+		case c == '/' && i+1 < len(raw) && raw[i+1] == '/':
+			for i < len(raw) && raw[i] != '\n' {
+				i++
+			}
+			changed = true
+		case c == '/' && i+1 < len(raw) && raw[i+1] == '*':
+			end := strings.Index(string(raw[i+2:]), "*/")
+			if end < 0 {
+				i = len(raw)
+			} else {
+				i += end + 3
+			}
+			changed = true
+		case c == ',':
+			j := i + 1
+			for j < len(raw) && (raw[j] == ' ' || raw[j] == '\t' || raw[j] == '\n' || raw[j] == '\r') {
+				j++
+			}
+			if j < len(raw) && (raw[j] == '}' || raw[j] == ']') {
+				changed = true
+				continue
+			}
+			out = append(out, c)
+		default:
+			out = append(out, c)
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return out
 }
 
 // replaceNonFinite replaces the bare NaN, Infinity and -Infinity literals

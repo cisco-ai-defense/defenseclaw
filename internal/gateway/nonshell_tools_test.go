@@ -280,6 +280,7 @@ func TestNonShellToolRound2Quiet(t *testing.T) {
 		{"cc to a colleague, to a list of external recipients", "mcp__mail__send", `{"to":"a@x.com, b@y.com","cc":"c@acme.ai"}`},
 		{"prose that starts with a bracket and a python literal", "mcp__acme__note", `{"html":"[formatted HTML content]","d":"[{'k': 'v'}]"}`},
 		{"bcc to the recipient's domain", "mcp__mail__send", `{"to":"a@corp.example","bcc":"b@corp.example"}`},
+		{"a job with only a callback_url", "mcp__jobs__submit", `{"job":"nightly","callback_url":"https://hooks.example.com/done"}`},
 		{"callback on the call's own API", "mcp__http__post", `{"url":"https://api.corp.example/v1/x","callback_url":"https://api.corp.example/hook"}`},
 		{"search prose", "mcp__acme__search_issues", `{"query":"drop table of contents"}`},
 		{"prose that starts with a bracket", "mcp__acme__post_comment", `{"note":"[INFO] build finished"}`},
@@ -354,5 +355,29 @@ func TestNonShellSenderNeverExcusesACopy(t *testing.T) {
 		if strict && f.enforcement == findingEnforcementAlertOnly {
 			t.Fatalf("a call that names its account and copies elsewhere is certain in strict: %+v", f)
 		}
+	}
+}
+
+func TestNonShellRound4(t *testing.T) {
+	ctx := context.Background()
+	has := func(got []RuleFinding, id string) bool { _, ok := findingByID(got, id); return ok }
+	var seed strings.Builder
+	for seed.Len() < 900_000 {
+		seed.WriteString("INSERT INTO items (id, name) VALUES (1, 'alpha');\n")
+	}
+	b, _ := json.Marshal(map[string]string{"database": "d", "sql": seed.String()})
+	for _, strict := range []bool{false, true} {
+		if got := nonShellToolFindings(ctx, nonShellReq("mcp__postgres__execute", string(b), strict), nil, ""); len(got) != 0 {
+			t.Fatalf("strict=%v: a 900 KB benign seed: %+v", strict, got)
+		}
+	}
+	b, _ = json.Marshal(map[string]string{"database": "d", "sql": seed.String() + "DROP TABLE users;"})
+	if got := nonShellToolFindings(ctx, nonShellReq("mcp__postgres__execute", string(b), false), nil, ""); !has(got, mcpSQLDestructiveRuleID) {
+		t.Fatalf("an attack at the end of 900 KB: %+v", got)
+	}
+	// A callback to a host that is not the call's own API alerts; the call's own host and a bare callback do not.
+	got := nonShellToolFindings(ctx, nonShellReq("mcp__http__post", `{"url":"https://api.x.com/v1","callback_url":"https://hooks.y.com/x"}`, false), nil, "")
+	if !has(got, mcpSendRedirectRuleID) {
+		t.Fatalf("a callback away from the call's API: %+v", got)
 	}
 }

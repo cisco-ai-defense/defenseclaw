@@ -81,13 +81,17 @@ content_keys: [content, contents, text, data, body, file_text, new_text, new_str
 sender_keys: [from, sender, from_address, from_email, sender_email, account, user_email, reply_to]
 # Name tokens of a search or lookup tool: its query key is a free-text search, not a statement.
 search_tokens: [search, find, lookup, grep, browse, suggest, autocomplete, ask]
+# A call with one of these keys beside a tool name has the shape of a proxy tool.
+proxy_arg_keys: [arguments, args, params, parameters, input]
+# Argument names that hold a URL the call asks to be told at.
+callback_keys: [callback_url, callback, notify_url, webhook_callback]
 # Argument names that hold the name of the tool a proxy tool calls.
 name_keys: [name, tool, tool_name, method]
 # Argument names that carry a URL or host.
 url_keys: [url, urls, uri, endpoint, href, link, webhook, webhook_url, api_endpoint, base_url, host, hostname, server, address]
 # Argument names that redirect output to another party (a copy, a forward, an
 # output sink). A literal address or URL here is a destination of its own.
-redirect_keys: [bcc, bcc_override, bcc_address, forward, forward_to, forward_results_to, forward_copy_to, output_url, results_url, callback_url, callback, export_to, report_to, send_copy_to, mirror_to, cc_override]
+redirect_keys: [bcc, bcc_override, bcc_address, forward, forward_to, forward_results_to, forward_copy_to, output_url, results_url, export_to, report_to, send_copy_to, mirror_to, cc_override]
 # Argument names that name the primary recipients of a send.
 recipient_keys: [to, cc, cc_address, cc_list, bcc_visible, recipient, recipients, to_address, channel, user, users, send_to]
 # Argument names that carry an SQL statement (a generic query key counts only

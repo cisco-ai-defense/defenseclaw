@@ -30,6 +30,14 @@ func init() {
 			gen: nonShellJSONStringCall, seen: nonShellSeenCall},
 		boundedLaneCap{lane: "s7/nonshell mcp-string-bytes", cap: bounded.Bytes, limit: 1 << 20,
 			gen: nonShellFillCall(nonShellBigString), seen: nonShellSeenCall},
+		boundedLaneCap{lane: "s7/nonshell mcp-content-bytes", cap: bounded.Bytes, limit: 1 << 20,
+			gen: nonShellContentCall, seen: nonShellSeenCall},
+		boundedLaneCap{lane: "s7/nonshell mcp-sql-bytes", cap: bounded.Bytes, limit: 1 << 20,
+			gen: nonShellSQLCall, seen: nonShellSeenCall},
+		boundedLaneCap{lane: "s7/nonshell mcp-address-list", cap: bounded.Items, limit: 512,
+			gen: nonShellAddressCall(false), seen: nonShellSeenCall},
+		boundedLaneCap{lane: "s7/nonshell mcp-address-array", cap: bounded.Items, limit: 512,
+			gen: nonShellAddressCall(true), seen: nonShellSeenCall},
 		boundedLaneCap{lane: "s7/nonshell mcp-path-bytes", cap: bounded.Bytes, limit: 32 << 10,
 			gen: nonShellLongPathCall, seen: nonShellSeenCall},
 	)
@@ -73,11 +81,11 @@ func nonShellNest(size int) any {
 	return cur
 }
 
-// nonShellURLs is size request objects, one effect each, none a collector.
+// nonShellURLs is size request objects at distinct hosts, one effect each, none a collector.
 func nonShellURLs(size int) any {
 	out := make([]any, size)
 	for i := range out {
-		out[i] = map[string]any{"url": "https://api.example.com/v1/x"}
+		out[i] = map[string]any{"url": "https://h" + itoaNS(i) + ".example.com/v1/x"}
 	}
 	return out
 }
@@ -156,3 +164,56 @@ func nonShellLongPathCall(size int, shape boundedShape) (boundedLaneCall, bool) 
 }
 
 func jsonMarshalNS(v any) ([]byte, error) { return json.Marshal(v) }
+
+// nonShellContentCall writes size bytes of content in two values (the content bound is the sum).
+func nonShellContentCall(size int, shape boundedShape) (boundedLaneCall, bool) {
+	if shape.nested || shape.multi || shape.seenAfter {
+		return boundedLaneCall{}, false
+	}
+	half := size / 2
+	input := map[string]any{"text": strings.Repeat("a", half), "body": strings.Repeat("b", size-half)}
+	if shape.seen {
+		input["path"] = nonShellSeenPath
+	}
+	return boundedLaneCall{tool: "mcp__acme__post_note", input: input}, true
+}
+
+// nonShellSQLCall is one SQL text of size bytes for a database tool.
+func nonShellSQLCall(size int, shape boundedShape) (boundedLaneCall, bool) {
+	if shape.nested || shape.multi || shape.seenAfter {
+		return boundedLaneCall{}, false
+	}
+	stmt := "SELECT 1;"
+	text := strings.Repeat(stmt, size/len(stmt)) + strings.Repeat(" ", size%len(stmt))
+	input := map[string]any{"database": "d", "sql": text}
+	if shape.seen {
+		input["path"] = nonShellSeenPath
+	}
+	return boundedLaneCall{tool: "mcp__postgres__execute", input: input}, true
+}
+
+// nonShellAddressCall is a copy field of size addresses, as one string or as an array.
+func nonShellAddressCall(array bool) func(int, boundedShape) (boundedLaneCall, bool) {
+	return func(size int, shape boundedShape) (boundedLaneCall, bool) {
+		if shape.nested || shape.multi || shape.seenAfter {
+			return boundedLaneCall{}, false
+		}
+		addrs := make([]string, size)
+		for i := range addrs {
+			addrs[i] = "u" + itoaNS(i) + "@example.com"
+		}
+		var field any = strings.Join(addrs, ", ")
+		if array {
+			list := make([]any, size)
+			for i, a := range addrs {
+				list[i] = a
+			}
+			field = list
+		}
+		input := map[string]any{"cc": field, "to": "a@example.com"}
+		if shape.seen {
+			input["path"] = nonShellSeenPath
+		}
+		return boundedLaneCall{tool: "mcp__mail__send", input: input}, true
+	}
+}

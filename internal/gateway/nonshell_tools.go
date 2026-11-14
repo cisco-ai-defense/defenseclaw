@@ -160,6 +160,12 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 			// finding is uncertain: an alert in every tier, never a block. A
 			// paste, file-drop or webhook-catcher host is a collector for a
 			// fetch as for a send.
+			// A callback URL is judged against the call's own request URLs only;
+			// with none to compare, it has no baseline and adds nothing.
+			if e.Role == toolshape.RoleCallback && len(own) > 0 && e.Host != "" &&
+				!toolshape.LocalHost(e.Host) && !toolshape.PrivateHost(e.Host) && !own[e.Host] {
+				add(mcpSendRedirectRuleID, "callback goes to "+e.Arg, true)
+			}
 			if e.Role == toolshape.RoleRedirect && e.Host != "" &&
 				!toolshape.LocalHost(e.Host) && !toolshape.PrivateHost(e.Host) &&
 				!own[e.Host] {
