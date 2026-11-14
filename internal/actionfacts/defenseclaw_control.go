@@ -8,6 +8,7 @@ package actionfacts
 import (
 	"slices"
 	"strings"
+	"unicode"
 
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -341,37 +342,40 @@ func userSwitchScript(argv []string, name string) (string, bool) {
 	return "", false
 }
 
-// remoteInner returns the command a remote or container launcher runs (ssh,
-// docker exec, kubectl exec). It runs elsewhere, so what it holds is never
-// better than the unknown tier.
+// remoteInner returns the command ssh runs on its target. It runs in
+// another login session, so what it holds is never better than the unknown
+// tier.
 func remoteInner(argv []string, name string) ([]string, bool) {
-	args := argv[1:]
-	valued := map[string]bool{}
-	switch name {
-	case "ssh":
-		for _, option := range []string{"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-b", "-c", "-e", "-E", "-m", "-O", "-S", "-w", "-W", "-B", "-I", "-Q"} {
-			valued[option] = true
-		}
-		skip := 1 // the host operand
-		return afterOptions(args, valued, skip), true
-	case "docker", "podman", "nerdctl", "kubectl", "oc", "lxc", "incus":
-		for index, arg := range args {
-			if arg == "exec" || arg == "run" {
-				for _, option := range []string{"-u", "--user", "-w", "--workdir", "-e", "--env", "-n", "--namespace", "-c", "--container", "--name", "-i", "-t", "-it"} {
-					valued[option] = true
-				}
-				delete(valued, "-i")
-				delete(valued, "-t")
-				delete(valued, "-it")
-				rest := args[index+1:]
-				if cut := slices.Index(rest, "--"); cut >= 0 {
-					return rest[cut+1:], true
-				}
-				return afterOptions(rest, valued, 1), true
-			}
-		}
+	if name != "ssh" {
+		return nil, false
 	}
-	return nil, false
+	valued := map[string]bool{}
+	for _, option := range []string{"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-b", "-c", "-e", "-E", "-m", "-O", "-S", "-w", "-W", "-B", "-I", "-Q"} {
+		valued[option] = true
+	}
+	return afterOptions(argv[1:], valued, 1), true
+}
+
+// sshTargetIsLocal reports an ssh call whose host operand is the loopback
+// address: the command it runs is on this host.
+func sshTargetIsLocal(argv []string) bool {
+	valued := map[string]bool{}
+	for _, option := range []string{"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-b", "-c", "-e", "-E", "-m", "-O", "-S", "-w", "-W", "-B", "-I", "-Q"} {
+		valued[option] = true
+	}
+	operands := afterOptions(argv[1:], valued, 0)
+	if len(operands) == 0 {
+		return false
+	}
+	host := operands[0]
+	if cut := strings.LastIndex(host, "@"); cut >= 0 {
+		host = host[cut+1:]
+	}
+	switch strings.ToLower(strings.Trim(host, "[]")) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }
 
 // afterOptions skips leading options (with the values of valued ones) and
@@ -567,13 +571,27 @@ func (r *controlReader) read(facts Facts, text string, depth int) {
 	unresolved := false
 	switch facts.Parse.Status {
 	case StatusInvalid, StatusLimitExceeded:
-		// The parse did not read the call, or a bound cut it (ONE BOUND rule).
-		unresolved = true
+		// The POSIX grammar rejected the text (a here-string, for one) or a
+		// bound cut the parse, so the facts hold none or part of its
+		// commands. The commands of a bash parse of the text are judged
+		// instead, with no bound but the number of commands, and its
+		// here-documents and here-strings are read as the scripts they are.
+		if commands := bashCommands(text); len(commands) > 0 {
+			facts.Commands = commands
+		}
+		for _, body := range heredocBodies(text) {
+			if containsFold(body, defenseClawNamespace) {
+				r.script(facts, body, depth)
+			}
+		}
 	case StatusAmbiguous, StatusUnsupported:
 		// A construct the parse does not model: unresolved when it left no
 		// command to judge.
 		unresolved = len(facts.Commands) == 0
 	}
+	// What a bound cut and the bash parse could not place is the shared cap
+	// floor's reading (internal/gateway cap floor, ONE BOUND rule), not a
+	// second one here.
 	commands := facts.Commands
 	needTwin := false
 	for _, command := range commands {
@@ -629,7 +647,7 @@ func (r *controlReader) read(facts Facts, text string, depth int) {
 			unresolved = true
 		}
 	}
-	if unresolved && !r.hasProven() {
+	if unresolved && !r.hasProven() && namesProduct(text) {
 		r.add(DefenseClawControlFact{Kind: DefenseClawControlUnproven})
 	}
 }
@@ -653,8 +671,8 @@ func (r *controlReader) command(facts Facts, text string, command CommandFact, a
 			// The program is a word the parse could not resolve (a variable, a
 			// substitution): the call is unresolved when what follows reads as
 			// a DefenseClaw stop, disable or uninstall (or is itself open).
-			kind, decided := judgeDefenseClawCLI(argv[1:], defenseClawNamespace, slices.Contains(argv[1:], ""))
-			return kind != "" || !decided
+			kind, _ := judgeDefenseClawCLI(argv[1:], defenseClawNamespace, slices.Contains(argv[1:], ""))
+			return kind != ""
 		}
 		name := commandBaseName(argv[0])
 		if shellProgram(name) {
@@ -666,7 +684,10 @@ func (r *controlReader) command(facts Facts, text string, command CommandFact, a
 			return r.script(facts, script, depth)
 		}
 		if inner, ok := remoteInner(argv, name); ok {
-			if len(inner) == 0 {
+			// ssh to another machine, a container or a cluster runs somewhere
+			// else: the guard of this host is not the one it stops. Only a
+			// loopback target is this host.
+			if len(inner) == 0 || !sshTargetIsLocal(argv) {
 				return false
 			}
 			r.remote++
@@ -745,7 +766,7 @@ func (r *controlReader) judge(facts Facts, text string, command CommandFact, arg
 			r.pipelineNamesProcess(facts, command) {
 			return proven(DefenseClawControlStop)
 		}
-		if serviceManagerStopVerb(name, words, flags) && dynamic {
+		if serviceManagerStopVerb(name, words, flags) && dynamic && namesProduct(text) {
 			// Its target is a word the parse could not resolve, in a call that
 			// names DefenseClaw.
 			return unproven()
@@ -811,11 +832,38 @@ func (r *controlReader) judge(facts Facts, text string, command CommandFact, arg
 			}
 			return false
 		}
-		if (shellProgram(name) || name == "at" || name == "batch") && stdinRunner(argv[1:]) &&
-			(command.PipelineID != 0 || strings.Contains(text, "<<")) && len(facts.Network) == 0 {
-			// A shell fed a script on stdin (a pipe, a here-document or
-			// here-string): the script is not in the parse.
-			return true
+		if (shellProgram(name) || name == "at" || name == "batch") && stdinRunner(argv[1:]) {
+			// A shell fed a script on stdin. A here-document or here-string
+			// body is read as the script it is; so is the text of a producer
+			// in the pipeline that names DefenseClaw (echo, printf). A
+			// producer whose output is not in the parse (a file, a download)
+			// leaves the script unresolved only when its own words name the
+			// product.
+			unresolved := false
+			for _, body := range heredocBodies(text) {
+				if containsFold(body, defenseClawNamespace) {
+					r.script(facts, body, depth)
+				}
+			}
+			if command.PipelineID != 0 {
+				for _, producer := range facts.Commands {
+					if producer.PipelineID != command.PipelineID || producer.ID >= command.ID || len(producer.Argv) == 0 {
+						continue
+					}
+					if !namesProduct(strings.Join(producer.Argv, " ")) {
+						continue
+					}
+					switch commandBaseName(producer.Argv[0]) {
+					case "echo", "printf":
+						r.script(facts, strings.Join(producer.Argv[1:], " "), depth)
+					default:
+						if len(facts.Network) == 0 {
+							unresolved = true
+						}
+					}
+				}
+			}
+			return unresolved
 		}
 	}
 	return false
@@ -1302,4 +1350,161 @@ func codeStringLiterals(code string) []string {
 		index = end
 	}
 	return literals
+}
+
+// heredocBodies returns the text of each here-document and here-string of
+// the call, with the parts the shell expands left out.
+func heredocBodies(text string) []string {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
+	if err != nil {
+		return nil
+	}
+	var bodies []string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		redir, ok := node.(*syntax.Redirect)
+		if !ok {
+			return true
+		}
+		var word *syntax.Word
+		switch redir.Op {
+		case syntax.Hdoc, syntax.DashHdoc:
+			word = redir.Hdoc
+		case syntax.WordHdoc:
+			word = redir.Word
+		}
+		if word == nil {
+			return true
+		}
+		var body strings.Builder
+		for _, part := range word.Parts {
+			switch part := part.(type) {
+			case *syntax.Lit:
+				body.WriteString(part.Value)
+			case *syntax.SglQuoted:
+				body.WriteString(part.Value)
+			case *syntax.DblQuoted:
+				for _, inner := range part.Parts {
+					if lit, ok := inner.(*syntax.Lit); ok {
+						body.WriteString(lit.Value)
+					}
+				}
+			}
+		}
+		bodies = append(bodies, body.String())
+		return true
+	})
+	return bodies
+}
+
+// defenseClawUnitSegments are the parts after the product namespace that the
+// installers' units, plists and labels use (defenseclaw-gateway,
+// defenseclaw.hook-guardian, com.cisco.defenseclaw.sandbox). A drift test
+// walks packaging/systemd, packaging/launchd and the standalone launchd
+// folders and fails when an installer defines one this list lacks.
+var defenseClawUnitSegments = map[string]bool{
+	"enterprise-apply": true, "enterprise-verify": true, "gateway": true, "gateway-api": true,
+	"gateway-hook": true, "hook-enumerator": true, "hook-guardian": true, "hook-guardian-reconcile": true,
+	"openshell-gateway": true, "sandbox": true, "sensor-helper": true, "apply": true, "verify": true,
+}
+
+// namesProduct reports a call text that names the product itself: a word of
+// the text that is the DefenseClaw program, one of the units, labels or
+// services the installers register, or a Windows service in the product's
+// CamelCase spelling. A path that only passes through a folder or a host
+// named after the project (a checkout, a test file, an ssh alias) does not.
+func namesProduct(text string) bool {
+	separators := "\"'`;|&()<>=,{}[]$#"
+	words := strings.FieldsFunc(text, func(char rune) bool { return unicode.IsSpace(char) || strings.ContainsRune(separators, char) })
+	for _, word := range words {
+		if !containsFold(word, defenseClawNamespace) {
+			continue
+		}
+		base := word
+		if cut := strings.LastIndexAny(base, `/\`); cut >= 0 {
+			base = base[cut+1:]
+		}
+		base = strings.TrimSuffix(strings.TrimSuffix(base, ".exe"), ".EXE")
+		for _, suffix := range []string{".service", ".socket", ".timer", ".path", ".target", ".plist"} {
+			base = strings.TrimSuffix(base, suffix)
+		}
+		lower := strings.ToLower(base)
+		for _, prefix := range []string{"com.cisco.secureclient.", "com.cisco."} {
+			lower = strings.TrimPrefix(lower, prefix)
+		}
+		if !strings.HasPrefix(lower, defenseClawNamespace) {
+			continue
+		}
+		rest := lower[len(defenseClawNamespace):]
+		switch {
+		case rest == "":
+			// The program itself (lower case, as the installers spell it), not
+			// the product's name in a title or a folder.
+			if base == defenseClawNamespace {
+				return true
+			}
+		case (rest[0] == '-' || rest[0] == '.') && defenseClawUnitSegments[rest[1:]]:
+			return true
+		}
+		// A Windows service or task: DefenseClaw, then an upper-case letter or
+		// an underscore (DefenseClawGateway, DefenseClawCertGuardian_<hex>).
+		if index := strings.Index(strings.ToLower(base), defenseClawNamespace); index >= 0 && index+len(defenseClawNamespace) < len(base) {
+			next := base[index+len(defenseClawNamespace)]
+			if next >= 'A' && next <= 'Z' || next == '_' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// maxBashCommands bounds the commands read from the bash parse of a call the
+// POSIX parse rejected or cut. Past it the call is unresolved.
+const maxBashCommands = 4096
+
+// bashCommands returns the simple commands of a bash parse of text, with a
+// word that holds an expansion as "".
+func bashCommands(text string) []CommandFact {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
+	if err != nil {
+		return nil
+	}
+	var commands []CommandFact
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 || len(commands) >= maxBashCommands {
+			return true
+		}
+		argv := make([]string, 0, len(call.Args))
+		for _, word := range call.Args {
+			argv = append(argv, literalWordText(word))
+		}
+		commands = append(commands, CommandFact{ID: int64(len(commands) + 1), Kind: CommandKindProcess, Argv: argv, Executable: argv[0]})
+		return true
+	})
+	return commands
+}
+
+// literalWordText is the text of a word that holds only literals and quotes,
+// and "" when it holds an expansion.
+func literalWordText(word *syntax.Word) string {
+	var out strings.Builder
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			out.WriteString(part.Value)
+		case *syntax.SglQuoted:
+			out.WriteString(part.Value)
+		case *syntax.DblQuoted:
+			for _, inner := range part.Parts {
+				lit, ok := inner.(*syntax.Lit)
+				if !ok {
+					return ""
+				}
+				out.WriteString(lit.Value)
+			}
+		default:
+			return ""
+		}
+	}
+	return out.String()
 }

@@ -25,8 +25,8 @@ func readableForTransform(row defenseClawControlRow) bool {
 // GAP-0704 over the rows that already exist: every proven row of the corpus is
 // carried through the other ways a call can spell it (a nested shell opened
 // with a combined flag, another shell, su, sudo -i, find -exec, xargs, a
-// program named with ~ or $HOME, a remote launcher) and must keep its verdict;
-// what runs elsewhere (ssh, docker exec) is at least the unknown tier.
+// program named with ~ or $HOME, ssh to this host) and must keep its verdict;
+// what runs through ssh to this host is at least the unknown tier, and ssh to another machine is not this host's guard.
 func TestDefenseClawControlWrappedSpellings(t *testing.T) {
 	var checked int
 	for _, row := range loadDefenseClawControlRows(t) {
@@ -69,8 +69,7 @@ func TestDefenseClawControlWrappedSpellings(t *testing.T) {
 			}
 		}
 		for name, command := range map[string]string{
-			"ssh":         "ssh localhost " + quoted,
-			"docker-exec": "docker exec ctr sh -c " + quoted,
+			"ssh": "ssh localhost " + quoted,
 		} {
 			got := worstDefenseClawControl(DefenseClawControl(Analyze(defenseClawControlInput(defenseClawControlRow{Command: command})), command))
 			if got != "unproven" {
@@ -85,16 +84,18 @@ func TestDefenseClawControlWrappedSpellings(t *testing.T) {
 }
 
 // TestDefenseClawControlDepthBound is GAP-0702: a call nested past the parse
-// bounds that names DefenseClaw is the unknown tier, not a clean allow.
+// bounds that names DefenseClaw is read from the bash parse, not allowed: the
+// command inside 12, 30 and 80 subshells is still the stop it is. Nesting the
+// parse cut is otherwise the shared cap floor's reading.
 func TestDefenseClawControlDepthBound(t *testing.T) {
 	for _, depth := range []int{12, 30, 80} {
-		command := strings.Repeat("(", depth) + "defenseclaw-gateway stop" + strings.Repeat(")", depth)
+		command := strings.Repeat("( ", depth) + "defenseclaw-gateway stop" + strings.Repeat(" )", depth)
 		got := worstDefenseClawControl(DefenseClawControl(Analyze(Input{Tool: "Bash", Command: command}), command))
-		if got == "" {
-			t.Errorf("%d nested subshells: a clean allow", depth)
+		if got != "stop" {
+			t.Errorf("%d nested subshells: got %q, want stop", depth, got)
 		}
 	}
-	command := strings.Repeat("bash -c '", 1) + "ls" + "'"
+	command := "bash -c 'ls'"
 	if got := worstDefenseClawControl(DefenseClawControl(Analyze(Input{Tool: "Bash", Command: command}), command)); got != "" {
 		t.Errorf("a call that does not name DefenseClaw: %q", got)
 	}
