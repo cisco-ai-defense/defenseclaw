@@ -17636,7 +17636,10 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             "safe",
             _fix_acp_guard_pins,
             (),
-            ("re-pin the upgraded DefenseClaw ACP guard, or an agent you updated once you confirm it, in the editor entries DefenseClaw wrote",),
+            (
+                "re-pin the upgraded DefenseClaw ACP guard, or an agent you updated once you confirm it, "
+                "in the editor entries DefenseClaw wrote",
+            ),
             False,
             False,
         ),

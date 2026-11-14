@@ -38,7 +38,6 @@ from defenseclaw.file_permissions import (
     protect_private_file,
     read_regular_file_no_follow,
     trusted_runtime_owner,
-    windows_acl_write_error,
     windows_guard_private_file_error,
 )
 from defenseclaw.winquote import powershell_command_line, powershell_literal, run_instruction
