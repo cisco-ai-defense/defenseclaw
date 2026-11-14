@@ -40,22 +40,33 @@ func (m *lruMap[V]) has(key string) bool {
 	return ok
 }
 
+// peek returns the value of key without marking it used.
+func (m *lruMap[V]) peek(key string) (V, bool) {
+	element, ok := m.entries[key]
+	if !ok {
+		var zero V
+		return zero, false
+	}
+	return element.Value.(*lruEntry[V]).value, true
+}
+
 // put stores value under key and marks it used. A full map drops its least
-// recently used entry first, and put reports that entry's key.
-func (m *lruMap[V]) put(key string, value V) (evicted string, dropped bool) {
+// recently used entry first, and put reports that entry's key and value.
+func (m *lruMap[V]) put(key string, value V) (evicted string, evictedValue V, dropped bool) {
 	if element, ok := m.entries[key]; ok {
 		element.Value.(*lruEntry[V]).value = value
 		m.order.MoveToFront(element)
-		return "", false
+		return "", evictedValue, false
 	}
 	for len(m.entries) >= m.max && m.order.Len() > 0 {
 		oldest := m.order.Back()
-		evicted, dropped = oldest.Value.(*lruEntry[V]).key, true
+		entry := oldest.Value.(*lruEntry[V])
+		evicted, evictedValue, dropped = entry.key, entry.value, true
 		delete(m.entries, evicted)
 		m.order.Remove(oldest)
 	}
 	m.entries[key] = m.order.PushFront(&lruEntry[V]{key: key, value: value})
-	return evicted, dropped
+	return evicted, evictedValue, dropped
 }
 
 // remove drops key.

@@ -87,7 +87,7 @@ func acpBoundedStateOverhead() int {
 	permission := []byte(`{"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t"},"options":[]}}`)
 	first, _ := acp.ParseMessageAllowingNullIDErrors(report)
 	second, _ := acp.ParseMessageAllowingNullIDErrors(permission)
-	tracker.Commit(first)
+	tracker.Commit(first, false)
 	return len(tracker.Peek(second)) + 1 // the line break is escaped
 }
 
@@ -131,10 +131,10 @@ func boundedDecideACP(t *testing.T, api *APIServer, env boundedEnv, call bounded
 		var tracker acp.ToolCallTracker
 		target := map[string]any{"sessionUpdate": "tool_call", "toolCallId": "t", "kind": "edit", "title": "Edit",
 			"locations": []any{map[string]any{"path": filepath.Join(env.cwd, "target.txt")}}}
-		tracker.Commit(acpParsedFrame(t, acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": target})))
+		tracker.Commit(acpParsedFrame(t, acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": target})), false)
 		for i := 0; i < size; i++ {
 			other := map[string]any{"sessionUpdate": "tool_call", "toolCallId": fmt.Sprintf("o%d", i), "kind": "read"}
-			tracker.Commit(acpParsedFrame(t, acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": other})))
+			tracker.Commit(acpParsedFrame(t, acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": other})), false)
 		}
 		toolCall = map[string]any{"toolCallId": "t", "title": "Edit"}
 		if seen {
@@ -155,7 +155,7 @@ func boundedDecideACP(t *testing.T, api *APIServer, env boundedEnv, call bounded
 		}
 		var tracker acp.ToolCallTracker
 		report := map[string]any{"sessionUpdate": "tool_call", "toolCallId": "t", "kind": "execute", "title": "Run", "rawInput": map[string]any{"command": command}}
-		tracker.Commit(acpParsedFrame(t, acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": report})))
+		tracker.Commit(acpParsedFrame(t, acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": report})), false)
 		toolCall = map[string]any{"toolCallId": "t", "title": "Run"}
 		guard = tracker.Peek(acpParsedFrame(t, acpFrameJSON(t, 1, "session/request_permission",
 			map[string]any{"sessionId": "s", "options": []any{}, "toolCall": toolCall})))
