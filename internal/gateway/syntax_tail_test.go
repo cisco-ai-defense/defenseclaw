@@ -442,9 +442,9 @@ func TestGAP0535QuotedShellOptionSweepNeverAllowsABlockedBody(t *testing.T) {
 	}
 }
 
-// A shell call whose option word or -c body the walk cannot resolve is
-// recorded on the answer (ACTION-PARSE-FAILURE, detection-only): what the
-// body runs is not known, and the call is not a silent allow.
+// A shell call whose option word or -c body the walk cannot resolve is the
+// unknown tier as an alert in every pack (ACTION-PARSE-FAILURE, never a
+// block): what the body runs is not known.
 func TestGAP0535UnresolvedShellBodyIsRecorded(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fixtures are POSIX shell text")
@@ -454,8 +454,13 @@ func TestGAP0535UnresolvedShellBodyIsRecorded(t *testing.T) {
 			hook := gap0437Server(t, p, "claudecode", "action")
 			cwd := t.TempDir()
 			for _, command := range []string{`bash "$o" 'ls'`, `bash -c "$(cat f)"`, `env bash "$o" 'ls'`} {
-				if out := gap0437Hook(t, hook, cwd, p.name+command, command); !gap0526Names(out, parseFailureRuleID) {
+				out := gap0437Hook(t, hook, cwd, p.name+command, command)
+				if !gap0526Names(out, parseFailureRuleID) {
 					t.Errorf("%s %q: the answer does not record %s: %v", p.name, command, parseFailureRuleID, out)
+				}
+				// The unknown tier as an alert in every pack, never a block.
+				if out["action"] != "alert" {
+					t.Errorf("%s %q: action %v, want alert", p.name, command, out["action"])
 				}
 			}
 			// A shell running a script whose path is dynamic has no -c body.
@@ -481,8 +486,8 @@ func gap0548Differential() string { return strings.Replace(boundedShellSeen, ">>
 // rel-1-0-10:GAP-0548. A proven finding on the readable text of a call the
 // parser rejects decides, at every filler size; a listing of the SSH folder
 // beside the filler is not a keys mutation; and text the parser rejects but
-// a shell runs, writing the DefenseClaw state, is caught by the strict and
-// managed raw-text check of the unread part.
+// a shell runs, writing the DefenseClaw state, is recorded in every pack and
+// alerted by the strict and managed raw-text check of the unread part.
 func TestGAP0548ProvenFindingSurvivesAParseFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fixtures are POSIX shell text")
@@ -508,15 +513,16 @@ func TestGAP0548ProvenFindingSurvivesAParseFailure(t *testing.T) {
 			if out := gap0437Hook(t, hook, home, p.name+"cd", "cd ~/.ssh; a"); out["action"] != "block" {
 				t.Errorf("%s cd into the folder: action %v, want block", p.name, out["action"])
 			}
+			// The strict and managed raw-text check of the unread part ships
+			// alert-only in 1.0.10 (owner traces: a blocking check added 150
+			// false blocks of 56,443 calls in strict): an alert there, the
+			// detection-only record elsewhere.
 			differential := gap0437Hook(t, hook, home, p.name+"diff", gap0548Differential())
 			want := "allow"
-			switch {
-			case p.pack == "strict":
-				want = "block"
-			case p.managed:
+			if p.pack == "strict" || p.managed {
 				want = "alert"
 			}
-			if got := differential["action"]; got != want && got != "block" {
+			if got := differential["action"]; got != want {
 				t.Errorf("%s parser differential: action %v, want %s: %v", p.name, got, want, differential["rule_ids"])
 			}
 			if !gap0526Names(differential, parseFailureRuleID) {

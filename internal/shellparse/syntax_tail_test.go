@@ -77,8 +77,10 @@ func TestReadSyntaxTailCaps(t *testing.T) {
 	if !ok {
 		t.Fatal("not ok")
 	}
-	if len(tail.Statements) != MaxSyntaxTailStatements || !tail.Truncated.Has(bounded.Items) {
-		t.Fatalf("statements %d truncated %q, want %d and the items cap", len(tail.Statements), tail.Truncated.Reason(), MaxSyntaxTailStatements)
+	// The statement cap or the parse budget stops it, whichever comes first.
+	if len(tail.Statements) == 0 || len(tail.Statements) > MaxSyntaxTailStatements ||
+		!tail.Truncated.Has(bounded.Items) && !tail.Truncated.Has(bounded.Bytes) {
+		t.Fatalf("statements %d truncated %q, want at most %d and a cap", len(tail.Statements), tail.Truncated.Reason(), MaxSyntaxTailStatements)
 	}
 	pieces := strings.Repeat("fi;", maxSyntaxTailPieces+10) + "echo z"
 	tail, ok = ReadSyntaxTail(pieces)

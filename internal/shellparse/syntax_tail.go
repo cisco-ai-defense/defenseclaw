@@ -5,7 +5,9 @@ package shellparse
 
 import (
 	"errors"
+	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -66,6 +68,53 @@ func ReadSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	if strings.TrimSpace(command) == "" || !utf8.ValidString(command) || TooDeep(command) {
 		return SyntaxTail{}, false
 	}
+	if cached, hit := syntaxTailMemo.get(command); hit {
+		return cached.tail, cached.ok
+	}
+	tail, ok = readSyntaxTail(command)
+	syntaxTailMemo.put(command, tail, ok)
+	return tail, ok
+}
+
+// syntaxTailMemo keeps the last readings: one hook call asks for the same
+// text from several readers (the per-command split, the target scans at each
+// nesting depth, the gateway's unread-part check), and each reading parses
+// the text up to MaxSyntaxTailRun times per piece.
+var syntaxTailMemo = &syntaxTailCache{entries: map[string]syntaxTailEntry{}}
+
+const syntaxTailCacheEntries = 32
+
+type syntaxTailEntry struct {
+	tail SyntaxTail
+	ok   bool
+}
+
+type syntaxTailCache struct {
+	mu      sync.Mutex
+	entries map[string]syntaxTailEntry
+}
+
+func (c *syntaxTailCache) get(command string) (syntaxTailEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, hit := c.entries[command]
+	if hit {
+		entry.tail.Statements = slices.Clone(entry.tail.Statements)
+	}
+	return entry, hit
+}
+
+func (c *syntaxTailCache) put(command string, tail SyntaxTail, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.entries) >= syntaxTailCacheEntries {
+		clear(c.entries)
+	}
+	tail.Statements = slices.Clone(tail.Statements)
+	c.entries[command] = syntaxTailEntry{tail: tail, ok: ok}
+}
+
+func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	if _, parsed := Parse(command); parsed {
 		return SyntaxTail{}, false
 	}
@@ -74,7 +123,7 @@ func ReadSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 		return SyntaxTail{}, false
 	}
 	var trunc bounded.Truncated
-	budget := bounded.NewCounter(&trunc, bounded.Bytes, 4*len(command)+(64<<10))
+	budget := bounded.NewCounter(&trunc, bounded.Bytes, 2*len(command)+(16<<10))
 	statements := bounded.NewCounter(&trunc, bounded.Items, MaxSyntaxTailStatements)
 	add := func(statement string) {
 		if statements.Take() {
@@ -159,14 +208,18 @@ func previousWordBoundary(command string, floor, at int) int {
 	return floor
 }
 
-// parsesAlone parses statement with the Bash-then-POSIX grammar of Parse,
-// outside the parse cache (the runs are throwaway text), within budget.
+// parsesAlone parses statement with the Bash grammar, outside the parse
+// cache (the runs are throwaway text), within budget.
 func parsesAlone(statement string, budget *bounded.Counter) bool {
 	if !budget.TakeN(len(statement)) || TooDeep(statement) {
 		return false
 	}
-	_, parsed := parseCommand(statement, false)
-	return parsed
+	// The Bash grammar only: what it rejects the POSIX grammar rejects too,
+	// but for the aggregate redirects actionfacts normalizes itself.
+	_, err := containParse(nil, func() (*syntax.File, error) {
+		return syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(Reader(statement), "")
+	})
+	return err == nil
 }
 
 // tokenPiece is a byte range of the text after the error, ending after the

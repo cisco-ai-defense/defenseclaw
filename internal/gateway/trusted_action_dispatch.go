@@ -723,9 +723,6 @@ func dispatchTrustedActionWith(
 						// A nested shell body the walk cannot resolve: what it
 						// runs is unknown (rel-1-0-10:GAP-0535).
 						findings = withSimpleCommandFindings(findings, trustedActionUnresolvedBodyFindings(request.EnforcementCapable))
-						if unreadPartMayWriteProtected(request, generation, wholeCommand) {
-							findings = withSimpleCommandFindings(findings, trustedActionParseFailureFindings(request.EnforcementCapable))
-						}
 						continue
 					}
 					if simple.EvaluationFailure == actionfacts.EvaluationFailureSyntaxCap {
@@ -740,10 +737,8 @@ func dispatchTrustedActionWith(
 						// are judged as the simple commands around this one,
 						// and the part that was not read is unknown
 						// (rel-1-0-10:GAP-0526).
-						findings = withSimpleCommandFindings(findings, trustedActionSyntaxUnreadFindings(request.EnforcementCapable))
-						if unreadPartMayWriteProtected(request, generation, syntaxUnreadText(wholeCommand)) {
-							findings = withSimpleCommandFindings(findings, trustedActionParseFailureFindings(request.EnforcementCapable))
-						}
+						findings = withSimpleCommandFindings(findings, trustedActionSyntaxUnreadFindings(request.EnforcementCapable,
+							unreadPartMayWriteProtected(request, generation, syntaxUnreadText(wholeCommand))))
 						continue
 					}
 					if simple.EvaluationFailure != "limit" {
@@ -9817,31 +9812,38 @@ func trustedActionParseFailureFindings(enforcementCapable bool) []RuleFinding {
 // the statements that parse were judged, the rest was not read.
 const syntaxUnreadTitle = "Part of this command has a shell syntax error and could not be read, so that part was not checked"
 
-// trustedActionSyntaxUnreadFindings is the unknown-tier finding of a command
-// read only in part because of a syntax error
-// (actionfacts.EvaluationFailureSyntax), recorded by unreadPartFindings. A
-// block proven on a statement that was read stays a block
-// (rel-1-0-10:GAP-0526).
-func trustedActionSyntaxUnreadFindings(enforcementCapable bool) []RuleFinding {
-	return unreadPartFindings(syntaxUnreadTitle, enforcementCapable)
+// trustedActionSyntaxUnreadFindings is the record of a command read only in
+// part because of a syntax error (actionfacts.EvaluationFailureSyntax):
+// detection-only (unreadPartFindings), or an alert when alert is set
+// (unreadPartMayWriteProtected). A block proven on a statement that was read
+// stays a block (rel-1-0-10:GAP-0526).
+func trustedActionSyntaxUnreadFindings(enforcementCapable, alert bool) []RuleFinding {
+	findings := unreadPartFindings(syntaxUnreadTitle, enforcementCapable)
+	if alert && enforcementCapable {
+		for index := range findings {
+			findings[index].enforcement = findingEnforcementAlertOnly
+		}
+	}
+	return findings
 }
 
 // unreadPartMayWriteProtected is the parser-differential check of the
 // strict pack and of a managed install: the shell parser here rejects text
-// that a shell may still run, so the raw text of the part that was not read
-// (unread) is scanned with what already exists, the protected-file and
-// DefenseClaw state names (hookpaths.BoundCallMayNameProtected,
-// hookpaths.MayNameState) and the pack's tool-call pattern rules of the
-// action categories (ruleActionCategory). A hit takes the unknown tier of
-// the pack (ACTION-PARSE-FAILURE enforcing: a block in strict, an alert in
-// a managed install with the default pack, as the bound rule has it); no hit
-// leaves the detection-only record. Default and permissive outside managed
-// keep the record only (lead decision 2026-11-14, rel-1-0-10:GAP-0526).
+// that a shell may still run, so the raw text of the syntax-error remainder
+// that was not read (unread) is scanned with what already exists, the
+// DefenseClaw state names (hookpaths.MayNameState) and the pack's tool-call
+// pattern rules of the action categories (ruleActionCategory). A hit turns
+// the record into an alert; it never blocks. Measured on the owner traces
+// (s7-gate syn-rel vs syn-head3, agent-transcripts-sample strict): a
+// blocking check would add 150 false blocks of 56,443 calls, over the 0.1%
+// bar, so 1.0.10 ships it alert-only (lead decision 2026-11-14,
+// rel-1-0-10:GAP-0526). Default and permissive outside managed keep the
+// detection-only record.
 func unreadPartMayWriteProtected(request trustedActionRequest, generation *compiledRulePackCategories, unread string) bool {
 	if !request.StrictPolicy && !request.ManagedInstall || strings.TrimSpace(unread) == "" {
 		return false
 	}
-	if hookpaths.MayNameState(unread) || hookpaths.BoundCallMayNameProtected(unread, request.Input.CWD, request.Input.ActiveHome) {
+	if hookpaths.MayNameState(unread) {
 		return true
 	}
 	options := ruleScanOptions{includeToolCallOnly: true, contentScope: ruleContentScopeAll}
@@ -9923,12 +9925,19 @@ func unreadPartFindings(title string, enforcementCapable bool) []RuleFinding {
 // whose text, or whose -c option word, is not known before it runs.
 const unresolvedBodyTitle = "This command runs a shell body that could not be read before it runs, so the body was not checked"
 
-// trustedActionUnresolvedBodyFindings is the unknown-tier finding of a
-// command with a nested shell body the walk cannot resolve
-// (actionfacts.EvaluationFailureUnresolvedBody), recorded by
-// unreadPartFindings (rel-1-0-10:GAP-0535).
+// trustedActionUnresolvedBodyFindings is the finding of a command with a
+// nested shell body the walk cannot resolve
+// (actionfacts.EvaluationFailureUnresolvedBody): the unknown tier as an
+// alert in every pack, never a block (lead decision 2026-11-14,
+// rel-1-0-10:GAP-0535).
 func trustedActionUnresolvedBodyFindings(enforcementCapable bool) []RuleFinding {
-	return unreadPartFindings(unresolvedBodyTitle, enforcementCapable)
+	findings := unreadPartFindings(unresolvedBodyTitle, enforcementCapable)
+	if enforcementCapable {
+		for index := range findings {
+			findings[index].enforcement = findingEnforcementAlertOnly
+		}
+	}
+	return findings
 }
 
 // shellReadingBound is the reading bound a command is past
