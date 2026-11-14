@@ -1276,7 +1276,7 @@ func projectTrustedActionChainSteps(
 
 	externalEgress := externalDataBearingUpload(facts)
 	uploadDigest, uploadIdentityExact := exactExternalUploadPathDigest(facts)
-	egressDetection := externalEgress || hasAnyFinding(
+	egressDetection := externalEgress || senderReaderEgress(facts) || hasAnyFinding(
 		"CMD-WGET-POST",
 		"CMD-CURL-UPLOAD",
 		"exfil.secret_read_and_egress_oneliner",
@@ -2339,6 +2339,31 @@ func systemDiscoveryRoot(value string) bool {
 	default:
 		return false
 	}
+}
+
+// senderReaderEgress reports a sender the shared sender reader
+// (actionfacts.ReadSenders) finds beyond the upload facts
+// externalDataBearingUpload reads, or one whose destination it cannot read:
+// a remote copy (rsync, sftp), a program a find -exec or an xargs runs, a
+// sender in a shell part the projection did not read, an upload to a host
+// the shell builds (GAP-0597, GAP-0598, GAP-0599). It sends to an external
+// host, or to a destination that is not read (never "no sender"). It detects
+// the egress step only: an enforcement proof needs the exact upload.
+func senderReaderEgress(facts actionfacts.Facts) bool {
+	for _, sender := range actionfacts.ReadSenders(facts).Senders {
+		if sender.DestinationUnknown {
+			return true
+		}
+		if sender.Origin == actionfacts.SenderProjected {
+			continue // externalDataBearingUpload reads it
+		}
+		for _, network := range sender.Network {
+			if isExternalNetwork(network) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func externalDataBearingUpload(facts actionfacts.Facts) bool {
