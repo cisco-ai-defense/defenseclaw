@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -24,6 +25,7 @@ func TestDefenseClawServiceNamesFollowTheInstallers(t *testing.T) {
 	var seen int
 	for _, dir := range []string{
 		"packaging/systemd", "packaging/systemd/user", "packaging/launchd", "packaging/launchd-standalone",
+		"packaging/launchd-standalone/agents",
 	} {
 		entries, err := os.ReadDir(filepath.Join(root, dir))
 		if err != nil {
@@ -76,47 +78,132 @@ func TestDefenseClawServiceNamesFollowTheInstallers(t *testing.T) {
 	}
 }
 
-// TestDefenseClawStopVerbsFollowTheCLI walks the registered CLI commands: a
-// stop, disable, uninstall or teardown subcommand in the Python CLI or the
-// gateway must be recognised as a control (GAP-0596). A new one fails here
-// until it is.
-func TestDefenseClawStopVerbsFollowTheCLI(t *testing.T) {
-	root := filepath.Join("..", "..")
-	skipWithoutRepo(t, root)
-	click := regexp.MustCompile(`\.command\(\s*"(stop|disable|uninstall|teardown|remove-all|shutdown|kill)"`)
-	cobra := regexp.MustCompile(`Use:\s+"(stop|disable|uninstall|teardown|remove-all|shutdown|kill)\b`)
-	seen := map[string]bool{}
-	scan := func(dir, ext string, re *regexp.Regexp) {
+// registeredCLICommands walks the Python CLI and the gateway CLI and returns
+// every command and group name they register (click .command/.group with a
+// name or a bare decorator over def NAME, cobra Use), with the files each
+// `disable` is registered in.
+func registeredCLICommands(t *testing.T, root string) (names map[string]bool, disableFiles map[string]bool) {
+	t.Helper()
+	named := regexp.MustCompile(`\.(?:command|group)\(\s*(?:name\s*=\s*)?"([a-z][a-z0-9_-]*)"`)
+	bare := regexp.MustCompile(`(?m)^@[\w.]+\.(?:command|group)\(\)\s*\n(?:@[^\n]*\n)*(?:async\s+)?def\s+(\w+)\(`)
+	cobra := regexp.MustCompile(`Use:\s+"([a-z][a-z0-9-]*)`)
+	names, disableFiles = map[string]bool{}, map[string]bool{}
+	scan := func(dir, ext string, patterns ...*regexp.Regexp) {
 		_ = filepath.WalkDir(filepath.Join(root, dir), func(path string, entry os.DirEntry, err error) error {
-			if err != nil || entry.IsDir() || !strings.HasSuffix(path, ext) || strings.HasSuffix(path, "_test.go") {
+			if err != nil || entry.IsDir() || !strings.HasSuffix(path, ext) || strings.HasSuffix(path, "_test.go") ||
+				strings.Contains(path, "/tui/") || strings.Contains(path, "/tests/") {
 				return nil
 			}
 			data, readErr := os.ReadFile(path)
 			if readErr != nil {
 				return nil
 			}
-			for _, match := range re.FindAllStringSubmatch(string(data), -1) {
-				seen[match[1]] = true
+			for _, pattern := range patterns {
+				for _, match := range pattern.FindAllStringSubmatch(string(data), -1) {
+					name := strings.ReplaceAll(match[1], "_", "-")
+					if pattern == bare {
+						for _, suffix := range []string{"-command", "-cmd", "-group", "-grp"} {
+							name = strings.TrimSuffix(name, suffix)
+						}
+					}
+					names[name] = true
+					if name == "disable" {
+						disableFiles[filepath.Base(path)] = true
+					}
+				}
 			}
 			return nil
 		})
 	}
-	scan("cli/defenseclaw", ".py", click)
+	scan("cli/defenseclaw", ".py", named, bare)
 	scan("internal/cli", ".go", cobra)
-	if len(seen) == 0 {
-		t.Fatal("no stop-class subcommands found; the CLI layout moved")
+	return names, disableFiles
+}
+
+// TestDefenseClawStopVerbsFollowTheCLI walks the registered CLI commands. A
+// stop, disable, uninstall or teardown subcommand must be recognised as a
+// control (GAP-0596), and a command name the rules have not classified is a
+// new verb a developer must classify (GAP-0705: a new `halt` fails here until
+// it is a stop verb, a read verb or recorded as neutral in
+// testdata/defenseclaw_cli_commands.txt, the reviewed set of every other
+// registered name). Set DEFENSECLAW_WRITE_CLI_SNAPSHOT=1 to rewrite the file.
+func TestDefenseClawStopVerbsFollowTheCLI(t *testing.T) {
+	root := filepath.Join("..", "..")
+	skipWithoutRepo(t, root)
+	names, disableFiles := registeredCLICommands(t, root)
+	if len(names) < 50 {
+		t.Fatalf("only %d command names found; the CLI layout moved", len(names))
 	}
-	for verb := range seen {
-		args := []string{"guardrail", verb}
-		if verb == "disable" || verb == "stop" || verb == "uninstall" || verb == "teardown" || verb == "remove-all" || verb == "kill" || verb == "shutdown" {
-			if _, decided := judgeDefenseClawCLI(args, "defenseclaw", false); !decided {
-				t.Errorf("registered subcommand %q is not decided by the control rules", verb)
+	// Every registered stop-class verb is decided and not read-only.
+	for _, verb := range []string{"stop", "disable", "uninstall", "teardown", "remove-all", "kill", "shutdown"} {
+		if !names[verb] {
+			continue
+		}
+		kind, decided := judgeDefenseClawCLI([]string{"guardrail", verb}, "defenseclaw", false)
+		if !decided || kind == "" {
+			t.Errorf("registered subcommand %q is not treated as a control (kind %q, decided %v)", verb, kind, decided)
+		}
+	}
+	// Every disable that turns a guardrail part off is registered in the
+	// guardrail command file; a disable registered anywhere else (skill,
+	// plugin, webhook, observability, discovery, routing, signatures) must
+	// stay outside the guardrail group, or be classified here.
+	for file := range disableFiles {
+		switch file {
+		case "cmd_guardrail.py":
+		case "cmd_agent.py", "cmd_plugin.py", "cmd_skill.py", "cmd_mcp.py", "cmd_routing.py", "cmd_setup_galileo.py",
+			"cmd_setup_observability.py", "cmd_setup_webhook.py", "cmd_setup.py":
+			if kind, _ := judgeDefenseClawCLI([]string{"skill", "disable", "x"}, "defenseclaw", false); kind != "" {
+				t.Errorf("a disable outside the guardrail group is judged %q", kind)
 			}
-			kind, _ := judgeDefenseClawCLI(args, "defenseclaw", false)
-			if kind == "" {
-				t.Errorf("registered subcommand %q is treated as read-only", verb)
+		default:
+			t.Errorf("a disable subcommand is registered in %s, a file this drift test has not classified: guardrail-group disables belong in defenseClawGuardGroups, others in the list above", file)
+		}
+	}
+	known := map[string]bool{}
+	for verb := range defenseClawStopVerbs {
+		known[verb] = true
+	}
+	for verb := range defenseClawReadVerbs {
+		known[verb] = true
+	}
+	for verb := range defenseClawRelaxVerbs {
+		known[verb] = true
+	}
+	for group := range defenseClawGuardGroups {
+		known[group] = true
+	}
+	known["disable"] = true
+	snapshot := filepath.Join("testdata", "defenseclaw_cli_commands.txt")
+	if os.Getenv("DEFENSECLAW_WRITE_CLI_SNAPSHOT") == "1" {
+		var neutral []string
+		for name := range names {
+			if !known[name] {
+				neutral = append(neutral, name)
 			}
 		}
+		sort.Strings(neutral)
+		if err := os.WriteFile(snapshot, []byte(strings.Join(neutral, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	data, err := os.ReadFile(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range strings.Fields(string(data)) {
+		known[name] = true
+	}
+	var unclassified []string
+	for name := range names {
+		if !known[name] {
+			unclassified = append(unclassified, name)
+		}
+	}
+	sort.Strings(unclassified)
+	if len(unclassified) > 0 {
+		t.Errorf("registered command names the control rules have not classified (add a stop verb to defenseClawStopVerbs, a read verb to defenseClawReadVerbs, or the name to testdata/defenseclaw_cli_commands.txt after review): %v", unclassified)
 	}
 }
 

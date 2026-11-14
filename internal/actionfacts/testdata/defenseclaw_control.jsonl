@@ -371,3 +371,18 @@
 {"id": "g596r2-k274", "dialect": "", "command": "defenseclaw.exe guardrail disable", "want": "disable"}
 {"id": "g596r2-k275", "dialect": "", "command": "kill 12345", "want": ""}
 {"id": "g596r2-k276", "dialect": "", "command": "systemctl stop $UNIT", "want": ""}
+{"id": "g596r2-y01", "dialect": "", "command": "defenseclaw migrate --check", "want": ""}
+{"id": "g596r2-y02", "dialect": "", "command": "defenseclaw migrate --dry-run", "want": ""}
+{"id": "g596r2-y03", "dialect": "", "command": "defenseclaw uninstall --dry-run", "want": ""}
+{"id": "g596r2-y04", "dialect": "powershell", "command": "Stop-ScheduledTask -TaskName DefenseClaw-Final4-AuditTail", "want": ""}
+{"id": "g596r2-y05", "dialect": "cmd", "command": "schtasks /Delete /TN DefenseClaw-UpgWinOtel-Refix-Smoke /F", "want": ""}
+{"id": "g596r2-y06", "dialect": "powershell", "command": "Stop-Service DefenseClawHookGuardian -Force", "want": "stop"}
+{"id": "g596r2-y07", "dialect": "cmd", "command": "schtasks /End /TN DefenseClawGateway", "want": "stop"}
+{"id": "g596r2-y08", "dialect": "", "command": "pkill -f 'pytest.*defenseclaw'", "want": ""}
+{"id": "g596r2-y09", "dialect": "", "command": "pkill -f 'defenseclaw-gateway --foreground'", "want": "stop"}
+{"id": "g596r2-y10", "dialect": "", "command": "defenseclaw skill disable foo", "want": ""}
+{"id": "g596r2-y11", "dialect": "", "command": "defenseclaw setup observability --disable", "want": ""}
+{"id": "g596r2-y12", "dialect": "", "command": "defenseclaw guardrail protection disable secrets", "want": "disable"}
+{"id": "g596r2-y13", "dialect": "", "command": "defenseclaw setup guardrail --mode observe", "want": "disable"}
+{"id": "g596r2-y14", "dialect": "", "command": "defenseclaw-gateway hook-outage-mode open", "want": "disable"}
+{"id": "g596r2-y15", "dialect": "", "command": "defenseclaw setup guardrail --fail-mode=open", "want": "disable"}
