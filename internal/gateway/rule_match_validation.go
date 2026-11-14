@@ -1363,6 +1363,18 @@ func obviousCredentialPlaceholder(candidate string) bool {
 	return repeatedShortCredentialUnit(compact)
 }
 
+// secretAlnumCount counts the letters and digits of s; = + / padding carries no secret.
+func secretAlnumCount(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			n++
+		}
+	}
+	return n
+}
+
 // awsDocumentedSecretKey is the example secret access key of the AWS documentation.
 const awsDocumentedSecretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
@@ -1381,9 +1393,9 @@ func knownPublicCredentialExample(ruleID, candidate string) bool {
 		}
 		rest, ok := strings.CutPrefix(strings.ReplaceAll(candidate, "/", ""), strings.ReplaceAll(awsDocumentedSecretKey, "/", ""))
 		// What follows is the debris of the escaped newlines after the value
-		// (letters n, r, t) and of a rule line under it (= + /): too little
-		// to hold a secret.
-		return ok && (len(rest) <= 12 || strings.Trim(rest, "nrt=+") == "")
+		// (the letters n, r, t), the rule line under it (= and +) and a word of
+		// the next line: too few letters and digits to hold another secret.
+		return ok && secretAlnumCount(rest) <= 12
 	default:
 		return false
 	}

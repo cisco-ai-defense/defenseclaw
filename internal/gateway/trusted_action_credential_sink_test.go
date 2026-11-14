@@ -132,7 +132,7 @@ func TestAWSDocumentedExampleSecretIsNotAFinding(t *testing.T) {
 	}
 	// The documented value followed by the debris of escaped newlines and a
 	// rule line under it (what shell normalization leaves) is still the example.
-	if acceptedCredentialMatch("SEC-AWS-SECRET", "aws_secret_access_key = "+example+"nnn"+strings.Repeat("=", 79)) {
+	if acceptedCredentialMatch("SEC-AWS-SECRET", "aws_secret_access_key = "+example+"nnn"+strings.Repeat("=", 79)+"nnSummary") {
 		t.Error("the documented example followed by newline debris was accepted")
 	}
 	if !acceptedCredentialMatch("SEC-AWS-SECRET", "aws_secret_access_key = "+runtimeDetectorSignature("q9Zr4Vx2", "Lm7Kp3Wd8Yt5Bn1Cs6Gh0Jf2Qa4Eu9Rv3Xi8")) {
