@@ -512,7 +512,7 @@ func dispatchTrustedAction(
 			// (GAP-0382); the finding is the same one.
 			return withOverBudgetStateMutation(parent, request, facts,
 				withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
-					posixParseTruncation(request.Input, facts), request))
+					posixParseTruncation(request, facts), request))
 		}
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
@@ -591,7 +591,7 @@ func dispatchTrustedAction(
 	// A POSIX shell call the analysis stopped reading at a byte bound (one word
 	// past the string bound ends it with no command) is truncated: judged at
 	// the unknown tier of the pack, never a clean allow (rel-1-0-10:GAP-0382).
-	if set := posixParseTruncation(request.Input, facts); set.Any() {
+	if set := posixParseTruncation(request, facts); set.Any() {
 		defer func() {
 			findings = withBoundedTruncation(findings, set, request)
 		}()

@@ -31,8 +31,12 @@ import (
 
 // posixParseTruncation is the cap of the byte bound the POSIX analysis of a
 // shell call hit, empty when it read the call to the end, stopped at another
-// bound, or the call is not a POSIX shell call.
-func posixParseTruncation(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
+// bound, the call is not a POSIX shell call, or a call over the text bound only
+// by the white space or comments that pad it, whose bounded twin
+// (overLimitCommandBoundedTwinRequest) is read in full and judged as the
+// unpadded command (GAP-0934).
+func posixParseTruncation(request trustedActionRequest, facts actionfacts.Facts) bounded.CapSet {
+	input := request.Input
 	if facts.Parse.Status != actionfacts.StatusLimitExceeded ||
 		!slices.Contains(facts.Parse.Issues, actionfacts.IssueInputLimit) ||
 		!trustedBashExecutionTool(input.Tool) {
@@ -48,6 +52,9 @@ func posixParseTruncation(input actionfacts.Input, facts actionfacts.Facts) boun
 	}
 	command, known := trustedBashCommandInput(input)
 	if !known || !actionfacts.ShellInputPastByteBound(command, len(input.Args)) {
+		return bounded.CapSet{}
+	}
+	if _, twinRead := overLimitCommandBoundedTwinRequest(request, facts); twinRead {
 		return bounded.CapSet{}
 	}
 	return bounded.Of(bounded.Bytes)

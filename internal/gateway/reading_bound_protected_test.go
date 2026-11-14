@@ -169,7 +169,10 @@ func TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget(t *testing.T) {
 		row  readingBoundRow
 		cell readingBoundCell
 	}{
-		{readingBoundRow{"ordinary under the bound", "Bash", readingBoundNest(3, "rm -rf ~/project/output"+comment), guardrailActionAllow}, perUserDefault},
+		// GAP-0382: the 9,000-byte comment is one word past the string bound of
+		// the analysis (4 KiB), whose commands it never read: the call is
+		// TRUNCATED (an alert in the default tier), no longer allowed.
+		{readingBoundRow{"ordinary under the bound", "Bash", readingBoundNest(3, "rm -rf ~/project/output"+comment), guardrailActionAlert}, perUserDefault},
 		{readingBoundRow{"known protected value under the bound", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(3, "rm -rf \"$protected\""+comment), guardrailActionAlert}, managedDefault},
 	} {
 		if got := trustedActionCommandBound(actionfacts.Input{Tool: "Bash", Command: row.row.command}); got != shellReadingNestedProof {

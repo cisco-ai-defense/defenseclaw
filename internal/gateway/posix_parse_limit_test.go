@@ -34,6 +34,9 @@ func TestPosixInputBytesAreTruncatedInEveryTier(t *testing.T) {
 		{"heredoc-call-over-64k", "cat <<EOF\n" + word(70000) + "\nEOF\n", true},
 		{"nested-sh-c-word-over", "sh -c 'echo " + word(4200) + "'", true},
 		{"word-over-256k", "echo " + word(262144+5), true},
+		// A call over the text bound only by the white space that pads it is read
+		// in full through its bounded twin and judged as the unpadded command.
+		{"whitespace-padded-call-over-64k", "echo ok" + strings.Repeat(" ", 70000), false},
 		{"word-over-before-seen-write", "echo " + word(4097) + "; " + boundedShellSeen, true},
 	}
 	env := boundedLaneEnv(t)

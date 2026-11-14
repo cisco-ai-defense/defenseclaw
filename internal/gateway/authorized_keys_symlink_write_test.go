@@ -705,7 +705,11 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 			}{
 				{prefix + "echo marker >> " + link, true},
 				{chain(200, "") + " && L=" + link + " && echo marker >> \"$L\"", true},
-				{prefix + "echo marker > " + filepath.Join(external, "notes.txt"), false},
+				// GAP-0382: the 65 KiB word is past the bounds of the analysis and
+				// its trailing command was never read: the call is TRUNCATED
+				// (a block in the strict pack this test runs in), no longer a
+				// clean allow.
+				{prefix + "echo marker > " + filepath.Join(external, "notes.txt"), true},
 			} {
 				if err := os.Symlink(keys, link); err != nil && !os.IsExist(err) {
 					t.Fatal(err)
