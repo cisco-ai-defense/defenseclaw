@@ -2303,12 +2303,16 @@ func uploadCallDerivesCredentialFile(facts actionfacts.Facts, uploads map[int64]
 // cannot change the directory the next command runs in: external programs
 // the chain reads or sends with, and the shell builtins that only print or
 // test. A cd, pushd, popd, source, `.`, eval, trap, alias, a function call or
-// any program not named here is not proven (GAP-0418).
+// any program not named here is not proven (GAP-0418). tar is not named: -C,
+// a bundled -cC, --directory, --dir= and bsdtar --cd move its members. awk is
+// named only because the reader records an awk read solely for a plain print
+// program with no options: a gawk -f, -i, -l or @load script can chdir()
+// before awk opens its operand, so keep that restriction.
 var directoryKeepingPrograms = map[string]struct{}{
 	"cat": {}, "head": {}, "tail": {}, "less": {}, "more": {}, "grep": {}, "egrep": {}, "fgrep": {},
 	"rg": {}, "uniq": {}, "tr": {}, "wc": {}, "base64": {}, "openssl": {}, "sed": {}, "awk": {},
 	"cp": {}, "mv": {}, "ln": {}, "rm": {}, "mkdir": {}, "touch": {}, "tee": {}, "dd": {}, "install": {},
-	"tar": {}, "zip": {}, "unzip": {}, "gzip": {}, "gunzip": {}, "bzip2": {}, "xz": {},
+	"zip": {}, "unzip": {}, "gzip": {}, "gunzip": {}, "bzip2": {}, "xz": {},
 	"rsync": {}, "scp": {}, "curl": {}, "wget": {}, "jq": {}, "yq": {}, "find": {}, "ls": {}, "stat": {}, "file": {},
 	"echo": {}, "printf": {}, "true": {}, "false": {}, ":": {}, "test": {}, "[": {}, "sleep": {}, "date": {},
 	"pwd": {}, "whoami": {}, "id": {}, "uname": {}, "hostname": {},
@@ -2317,13 +2321,13 @@ var directoryKeepingPrograms = map[string]struct{}{
 // callProvenToKeepDirectory reports a call proven not to change the
 // directory its commands run in: a complete parse in which every command is a
 // known program that cannot change it (the reader table, an upload or copy
-// tool, a printing builtin) and none may (callMayChangeDirectory). Anything
+// tool, a printing builtin). Anything
 // else (a function or alias the call defines, `.`, `source`, `eval`, `trap`,
 // an unknown program that may be a function of the agent's shell, a call the
 // parser cannot finish) is not proven: a relative operand in it is unnamed and
 // the chain joins on the marker (GAP-0418).
 func callProvenToKeepDirectory(facts actionfacts.Facts) bool {
-	if facts.Parse.Status != actionfacts.StatusComplete || callMayChangeDirectory(facts) {
+	if facts.Parse.Status != actionfacts.StatusComplete {
 		return false
 	}
 	for _, command := range facts.Commands {
@@ -2334,35 +2338,6 @@ func callProvenToKeepDirectory(facts actionfacts.Facts) bool {
 		return false
 	}
 	return true
-}
-
-// callMayChangeDirectory reports a call in which a command may change the
-// directory the later commands run in: cd, pushd, popd, or tar -C. An env -C
-// or sudo -D is not listed: the wrapper unwrap refuses it, so no read or
-// upload sits under it and naming the other operands of the call unnamed
-// would only add false joins (PROVEN-or-UNCERTAIN: no read is recorded). A
-// relative operand in such a call is
-// not the file the path fact names: the fact keeps the call's starting
-// directory (GAP-0409).
-func callMayChangeDirectory(facts actionfacts.Facts) bool {
-	for _, command := range facts.Commands {
-		switch command.Program {
-		case "cd", "pushd", "popd", "chdir", "set-location", "push-location", "sl":
-			return true
-		case "tar", "bsdtar":
-			// -C or --directory (a traditional bundle such as cf names it
-			// with a C): the members are relative to that directory.
-			for index, argument := range command.Argv[1:] {
-				if argument == "-C" || argument == "--directory" ||
-					strings.HasPrefix(argument, "--directory=") ||
-					len(argument) > 2 && strings.HasPrefix(argument, "-C") ||
-					index == 0 && !strings.HasPrefix(argument, "-") && strings.ContainsRune(argument, 'C') {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 // secretReadPathIdentity is exactPathIdentity, except that a relative
