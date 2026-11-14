@@ -109,14 +109,21 @@ text (invisible separators removed, look-alike letters mapped), as the hook path
 does, so a directive with a zero-width character inside a word is still found.
 
 Text the user typed is the user own instruction, not an injection. A
-trust-exploit finding on it is capped at HIGH: the `/llm` prompt and the
-turn-start hook event of a connector (`UserPromptSubmit` and its spellings, such
-as `beforeSubmitPrompt`). That is an alert in the default and permissive packs,
-which block at CRITICAL, and still a block in strict, which blocks from MEDIUM. The
-cap follows the surface, not the rule: the same words in a tool result, a model
-response, a prompt expansion or a model request keep their CRITICAL severity. A
-client that puts text from other people in the user turn (a chat channel, for
-example) gets the same cap on that text.
+trust-exploit finding on it is capped at HIGH: the user messages of the current
+turn of an `/llm` request, and the turn-start hook event of a connector
+(`UserPromptSubmit` and its spellings, such as `beforeSubmitPrompt`). That is an
+alert in the default and permissive packs, which block at CRITICAL, and still a
+block in strict, which blocks from MEDIUM. The cap follows the surface, not the
+rule: the same words in a tool result, a model response, a prompt expansion or a
+model request keep their CRITICAL severity. On `/llm` only the current user turn
+is typed. System and developer messages, the `system`, `instructions` and
+`systemInstruction` fields, earlier turns, tool results (also the ones a user
+message carries in Anthropic and Bedrock requests) and the context and metadata
+OpenClaw adds keep CRITICAL. A client that puts text from other people in the
+user turn (a chat channel, for example) gets the same cap on that text. So does a
+prompt run from a script: the agent cannot tell it from one you typed, so
+`claude -p` or `codex exec` fed a file or an issue body, or a CI job that does
+the same, gets the cap on that text.
 
 With `guardrail.detection_strategy: regex_judge` and an opted-in judge, a prompt
 that has only half of one of these shapes (a label directive such as `TODO:` as
