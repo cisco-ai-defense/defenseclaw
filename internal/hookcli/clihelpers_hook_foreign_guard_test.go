@@ -11,16 +11,12 @@
 package hookcli
 
 import (
-	"bytes"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
 const foreignGuardHookBinary = "/opt/defenseclaw/bin/defenseclaw-hook"
@@ -110,20 +106,4 @@ func (f *foreignGuardFixture) write(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func (f *foreignGuardFixture) run(t *testing.T, managed bool) (hookexec.Options, string, string) {
-	t.Helper()
-	payload := `{"hook_event_name":"preToolUse","cwd":"` + filepath.Join(f.project, "src") + `","tool_name":"Shell"}`
-	var stderr bytes.Buffer
-	opts := hookexec.Options{Connector: "cursor", ManagedEnterprise: managed, Stdin: strings.NewReader(payload), Stderr: &stderr}
-	ApplyEnterpriseForeignHookGuard(&opts)
-	replayed, err := io.ReadAll(opts.Stdin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(replayed) != payload {
-		t.Fatalf("hookexec must receive the identical payload, got %q", replayed)
-	}
-	return opts, stderr.String(), payload
 }

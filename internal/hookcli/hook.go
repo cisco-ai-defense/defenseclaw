@@ -460,7 +460,7 @@ const CursorHookInputMaxBytes int64 = 1 << 20
 
 func OpenCursorHookInputFile(hookDir, path string) (*os.File, error) {
 	if !filepath.IsAbs(path) {
-		return nil, fmt.Errorf("Cursor hook input path must be absolute")
+		return nil, fmt.Errorf("Cursor hook input path must be absolute") //nolint:staticcheck // Preserve the product name in this hook diagnostic.
 	}
 	cleanDir, err := filepath.Abs(hookDir)
 	if err != nil {
@@ -471,11 +471,11 @@ func OpenCursorHookInputFile(hookDir, path string) (*os.File, error) {
 		return nil, fmt.Errorf("resolve Cursor hook input: %w", err)
 	}
 	if !pathidentity.Same(filepath.Dir(cleanPath), cleanDir) {
-		return nil, fmt.Errorf("Cursor hook input must be inside the DefenseClaw hooks directory")
+		return nil, fmt.Errorf("Cursor hook input must be inside the DefenseClaw hooks directory") //nolint:staticcheck // Preserve the product name in this hook diagnostic.
 	}
 	base := filepath.Base(cleanPath)
 	if !strings.HasPrefix(base, ".cursor-input-") || !strings.HasSuffix(base, ".json") {
-		return nil, fmt.Errorf("Cursor hook input filename is not DefenseClaw-managed")
+		return nil, fmt.Errorf("Cursor hook input filename is not DefenseClaw-managed") //nolint:staticcheck // Preserve the product name in this hook diagnostic.
 	}
 	info, err := os.Lstat(cleanPath)
 	if err != nil {
