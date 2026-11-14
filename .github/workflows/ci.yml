@@ -165,7 +165,12 @@ jobs:
         # shard 15, which ran 662 s into the 11m -timeout. Refreshed from 7
         # runs of rel/1.0.10 and #1456 (the Substrate tests included), the 40
         # shards plan 377-379 s each (3.8 hours, slowest run of each test).
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
+        # 2026-11-14: rel batch 10 brought
+        # TestACPPermissionAfterABlockedReportIsNeverBelowTheBlock (667 s under
+        # -race on #1456 push 14, split into one test per pack); weighed, the
+        # 40 shards would plan 447 s, over the 440 s that keeps 1.5x headroom
+        # under the 720 s cap. 42 shards plan at most 426 s.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -181,7 +186,7 @@ jobs:
       - name: Run gateway race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 40
+          GO_TEST_SHARDS: 42
         run: |
           set -euo pipefail
           plan=(python3 scripts/go_test_shards.py
@@ -634,9 +639,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 40 gateway + 4 audit + 19 remaining-package shards, plus the
+          # 42 gateway + 4 audit + 19 remaining-package shards, plus the
           # frozen-gateway job.
-          test "${#coverage_parts[@]}" -eq 64
+          test "${#coverage_parts[@]}" -eq 66
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"

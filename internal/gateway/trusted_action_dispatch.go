@@ -38,6 +38,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -238,6 +239,10 @@ type trustedActionRequest struct {
 	// DefenseClaw state: a LoginGuess reading of a simple command keeps only
 	// that proof (loginGuessProvedFinding), so no other rule needs to run.
 	stateProofOnly bool
+	// sendDestination marks the routing values of a message call, where its
+	// text is sent (ToolInspectRequest.sendDestination): the call is a send
+	// whatever the tool is named (trustedActionSendsMessage).
+	sendDestination bool
 	// overBudgetOmission, when set, is told that the authorized-keys proof
 	// found only an operand that the client's bounded map left out because
 	// it was full (hookpaths.BudgetKey, GAP-0146).
@@ -281,6 +286,10 @@ type trustedActionRequest struct {
 	// as its readable statements (windowsReadingTwinRequests), never as another
 	// shell.
 	windowsDialectReadings bool
+	// windowsPowerShellReading is the PowerShell reading the hook's dialect
+	// selection made of a call it placed in no dialect; the readings above
+	// reuse it instead of parsing the call again. nil: none.
+	windowsPowerShellReading *windowsHintedReading
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
 	// generation is the rule generation the call is judged with; nil: the
@@ -546,6 +555,26 @@ func dispatchTrustedAction(
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
+		if cut := trustedReadingCut(request.Input, facts); cut.Any() {
+			// The reading of the call stopped at a cap of its own under the
+			// statement budget: the call is TRUNCATED (the one bound rule),
+			// never judged below the unknown tier of its pack, and what was
+			// read still decides (trustedReadingCut).
+			defer func() { findings = withBoundedTruncation(findings, cut, request) }()
+			if facts.Parse.Dialect == actionfacts.DialectPowerShell && !request.readingTwin {
+				// The statements of the call are also read in runs that fit
+				// under the cap, so a block proven on a run keeps its own
+				// verdict (actionfacts.PowerShellCappedRuns).
+				for _, run := range actionfacts.PowerShellCappedRuns(request.Input, facts) {
+					twin := windowsReadingTwin(request)
+					twin.Input = run
+					twin.LegacyText = run.Command
+					defer func() {
+						findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+					}()
+				}
+			}
+		}
 	}
 	// A ~<active user> tilde-prefix names the active home from the password
 	// database (GAP-2378), and under a Windows home an MSYS drive mount
@@ -612,10 +641,25 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
-	for _, twin := range windowsReadingTwinRequests(request, facts) {
+	// Credential material that reaches a sender whose destination is not read
+	// in full (interpreter code that names a credentials file and a network
+	// capability, a credential-named environment variable piped into an
+	// upload) is the unknown tier of the one bound rule: the profile decides,
+	// an alert in the default and permissive packs, a block in strict
+	// (GAP-0595).
+	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
+		defer func() {
+			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
+		}()
+	}
+	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
+	for _, twin := range windowsTwins {
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
+	}
+	if windowsTwinCut.Any() {
+		defer func() { findings = withBoundedTruncation(findings, windowsTwinCut, request) }()
 	}
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
 	// that view when the action already names a possible active hook mutation;
@@ -1126,6 +1170,10 @@ func dispatchTrustedActionWith(
 				finding.enforcement = findingEnforcementDetectionOnly
 			}
 			if request.EnforcementCapable && candidate.owner.alertOnly {
+				finding.enforcement = findingEnforcementAlertOnly
+			}
+			if candidate.owner.strictEnforced && !request.StrictPolicy &&
+				finding.enforcement == findingEnforcementAllowed {
 				finding.enforcement = findingEnforcementAlertOnly
 			}
 			finding = finding.withTrustedActionProof(
@@ -6993,7 +7041,10 @@ func finalizeTrustedActionFindings(
 	findings []RuleFinding,
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(generation, facts, findings, request.CopilotSharedLocalFile && request.Input.Tool == "read_file")
+	findings = applyTrustedActionContextDisposition(generation, facts, findings, trustedActionDispositionScope{
+		protectedLocalFileRead: request.CopilotSharedLocalFile && request.Input.Tool == "read_file",
+		sendDestination:        request.sendDestination,
+	})
 	if !request.StrictPolicy {
 		findings = trustedActionOrdinaryCredentialCopyFindings(facts, findings)
 	}
@@ -9419,6 +9470,53 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 	return bashReadingRequest(request, command, rewritten), true
 }
 
+// trustedReadingCut is the cap at which the reading of a shell call stopped
+// under the statement budget, the one point every dialect's limit_exceeded
+// reaches (the one bound rule): such a call is TRUNCATED.
+//   - The input bound of a shell command line (actionfacts.MaxCommandBytes),
+//     in every dialect, cap=bytes (a native write or read tool past the
+//     bound keeps its own bounded readings, over_limit_write_targets.go):
+//     a Windows-hook command padded past 64 KiB
+//     was read in no dialect and was a clean allow in every pack, with no
+//     limit finding (rel-1-0-10:GAP-0611). Its bounded twin (comments and
+//     padding removed, overLimitCommandBoundedTwinRequest) still proves
+//     what the text holds.
+//   - The command cap of a CMD or PowerShell reading, cap=items: a CMD
+//     reading capped at 127 to 257 statements had no limit finding and was
+//     allowed in strict (rel-1-0-10:GAP-0426), and so was a PowerShell one:
+//     one `$o = & git rev-parse HEAD` statement is two commands, so about 64
+//     statements fill the cap, and a registry write beside 100 such lines was
+//     found but allowed in every pack (rel-1-0-10:GAP-0589). The statements
+//     of a capped PowerShell reading are read again in runs under the cap
+//     (actionfacts.PowerShellCappedRuns).
+//
+// A POSIX reading is not truncated by its command cap: its per-statement
+// split (SimpleCommands) reads every statement up to the statement budget
+// (ShellStatementsOverBudget), and each is judged.
+func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
+		return bounded.CapSet{}
+	}
+	if command, known := trustedBashCommandInput(input); known && len(command) > actionfacts.MaxCommandBytes &&
+		trustedShellCommandTool(input.Tool) {
+		return bounded.Of(bounded.Bytes)
+	}
+	if facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell {
+		return bounded.Of(bounded.Items)
+	}
+	return bounded.CapSet{}
+}
+
+// trustedShellCommandTool reports a tool whose input is a shell command
+// line: a POSIX, PowerShell or CMD execution tool.
+func trustedShellCommandTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "cmd", "cmd.exe":
+		return true
+	}
+	return trustedBashExecutionTool(tool) || trustedPowerShellExecutionTool(tool)
+}
+
 // trustedStatementBudgetExceeded reports whether a shell call whose
 // analysis is limit-exceeded has more statements than one action evaluates.
 // A POSIX reading, and a call of no known dialect that a POSIX shell runs
@@ -9715,6 +9813,28 @@ func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bo
 		}
 	}
 	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
+}
+
+// withCredentialSenderFinding adds the unknown-tier verdict of a call that
+// hands credential material to a sender whose destination is not read in
+// full. It is the evaluation-limit finding the profile decides, with the
+// reason of the call as its evidence and its own title.
+func withCredentialSenderFinding(
+	findings []RuleFinding,
+	reason actionfacts.CredentialSenderReason,
+	enforcementCapable bool,
+) []RuleFinding {
+	for _, finding := range findings {
+		if finding.RuleID == "ACTION-COMPOUND-LIMIT" {
+			return findings
+		}
+	}
+	added := trustedActionLimitFindings(enforcementCapable)
+	for index := range added {
+		added[index].Title = "Credential material reaches a sender whose destination is not read"
+		added[index].Evidence = string(reason)
+	}
+	return append(findings, added...)
 }
 
 // withOmittedOperandLimitFinding adds the over-limit verdict for a named

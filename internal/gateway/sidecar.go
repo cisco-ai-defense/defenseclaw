@@ -1175,6 +1175,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 	}
 	router := newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	router.SetAuditLogger(s.logger)
 	s.modelRouter = router
 	activeEngineRouter.Store(router)
 

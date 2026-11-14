@@ -121,7 +121,7 @@ func (a *APIServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": true, "by": by, "scope": scope,
 		"from": from.UTC().Format(time.RFC3339), "to": now.UTC().Format(time.RFC3339),
-		"rows": rows,
+		"rows": nonNilSlice(rows),
 	})
 }
 

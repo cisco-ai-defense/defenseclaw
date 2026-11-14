@@ -91,6 +91,10 @@ func newBedrockEventStreamText() *bedrockEventStreamText {
 // Broken reports a stream the decoder could not frame.
 func (s *bedrockEventStreamText) Broken() bool { return s.broken }
 
+// Pending is the bytes of the message not yet complete: their text is not
+// read yet.
+func (s *bedrockEventStreamText) Pending() int { return len(s.buf) }
+
 // Model is the model the stream named (Anthropic message_start), if any.
 func (s *bedrockEventStreamText) Model() string { return s.model }
 

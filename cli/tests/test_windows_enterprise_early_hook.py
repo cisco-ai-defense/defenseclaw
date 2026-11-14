@@ -147,7 +147,12 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     # Review M3: standalone checks that read against the digest the
     # deployment records and records that digest, never the copy's own;
     # Secure Client keeps the earlier two-read comparison.
-    assert "$preimageSHA256 = Copy-DefenseClawRecordedHookPreimage -Layout $Layout -Destination $preimage" in publish_body
+    assert (
+        "$preimageSHA256 = Copy-DefenseClawRecordedHookPreimage `\n"
+        "            -Layout $Layout `\n"
+        "            -Destination $preimage `\n"
+        "            -ReplacementSource $Source"
+    ) in publish_body
     assert "$Intent['early_hook_preimage_sha256'] = $preimageSHA256" in publish_body
     assert "copiedHash.ToLowerInvariant()" not in publish_body
     secure_client = publish_body[publish_body.index("    else {\n        Microsoft.PowerShell.Management\\Copy-Item"):]
@@ -157,7 +162,12 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     recorded = _function_body(module, "Copy-DefenseClawRecordedHookPreimage")
     assert "Get-DefenseClawRecordedHookSHA256 -Layout $Layout" in recorded
     assert "[IO.Path]::Combine([string]$Layout.GuardianDirectory, 'payload', 'defenseclaw-hook.exe')" in recorded
-    assert recorded.index("$live -ceq $expected") < recorded.index("$guardianDigest -ceq $expected") < recorded.index("throw (\"refusing to replace")
+    assert (
+        recorded.index("$live -ceq $expected")
+        < recorded.index("$guardianDigest -ceq $expected")
+        < recorded.index("$replacementDigest -cmatch")
+        < recorded.index("throw (\"refusing to replace")
+    )
     # The check runs before the intent, the directory and any service change.
     transaction = _function_body(module, "New-DefenseClawTransaction")
     preflight = transaction.index("Assert-DefenseClawHookPreimageAvailable")
@@ -238,6 +248,10 @@ function Assert-DefenseClawDescendant { param([string]$Path, [string]$Root, [str
 function Write-DefenseClawLifecyclePhase {
     param([string]$Stage)
     $script:events.Add('phase:' + $Stage)
+}
+function Write-DefenseClawResilienceEvent {
+    param([string]$Marker, [hashtable]$Fields)
+    $script:events.Add('resilience:' + $Marker)
 }
 if ($Case -like 'drain*') {
     # The replaced release's hook process 4242 ends after two looks (drain),
@@ -477,14 +491,31 @@ try {
             Restore-DefenseClawEarlyHook -Layout $layout -Intent $intent -TransactionDirectory $transaction
             $result.restored = Get-Content -LiteralPath $hook -Raw
         }
-        { $_ -in 'drifted-refused', 'preflight-refused' } {
+        'drifted-rederived' {
+            # GAP-0601: neither the installed hook nor a guardian copy has the
+            # recorded digest (a deferred recovery left the replacement hook
+            # over the restored release's record): this Setup's own hook is
+            # the rollback copy, and the run goes on.
+            Set-Content -LiteralPath $hook -Value 'user-bytes' -NoNewline
+            $result.preimage = Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive
+            $result.preimage_bytes = Get-Content -LiteralPath $result.preimage -Raw
+            $result.intent_sha256 = $intent['early_hook_preimage_sha256']
+            $result.replacement = ([string]$newSource.sha256).ToLowerInvariant()
+            $result.hook = Get-Content -LiteralPath $hook -Raw
+            $result.rederived = [string]$script:DefenseClawHookRollbackCopyRederived
+            Restore-DefenseClawEarlyHook -Layout $layout -Intent $intent -TransactionDirectory $transaction
+            $result.restored = Get-Content -LiteralPath $hook -Raw
+        }
+        { $_ -in 'drifted-refused', 'preflight-rederived' } {
             Set-Content -LiteralPath $hook -Value 'user-bytes' -NoNewline
             try {
-                if ($Case -eq 'preflight-refused') {
+                if ($Case -eq 'preflight-rederived') {
                     Assert-DefenseClawHookPreimageAvailable -Layout $layout -Source $newSource -PriorDeploymentActive
                 }
                 else {
-                    [void](Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+                    # Without a replacement source nothing can stand in for
+                    # the recorded hook.
+                    [void](Copy-DefenseClawRecordedHookPreimage -Layout $layout -Destination (Join-Path $transaction 'early-hook.bak'))
                 }
             }
             finally {
@@ -707,15 +738,35 @@ def test_a_hook_that_is_not_the_recorded_one_is_never_the_rollback_copy(tmp_path
     assert result["restored"] == "hook-1.0.2", result
 
 
-@pytest.mark.parametrize("case", ["drifted-refused", "preflight-refused"])
-def test_a_drifted_hook_without_a_matching_guardian_copy_stops_the_run_first(tmp_path: Path, case: str) -> None:
-    result = _run(tmp_path, case)
+def test_a_drifted_hook_without_a_matching_guardian_copy_takes_the_setup_hook_as_rollback_copy(tmp_path: Path) -> None:
+    """GAP-0601: the unverifiable bytes are never the rollback copy, and the
+    run is not refused either: every Setup action refused on such a host,
+    with every service stopped. The rollback copy is this Setup's own hook,
+    the run says so, and a rollback puts that hook back."""
+    result = _run(tmp_path, "drifted-rederived")
+    assert result["threw"] == "", result
+    assert result["preimage_bytes"] == "hook-1.0.4", result
+    assert result["intent_sha256"] == result["replacement"], result
+    assert result["hook"] == "hook-1.0.4", result
+    assert result["restored"] == "hook-1.0.4", result
+    assert "GAP-0601" in result["rederived"] and "user-bytes" not in result["rederived"], result
+    assert "resilience:defenseclaw_repair" in result["events"], result
+
+
+def test_the_preflight_accepts_a_drifted_hook_when_a_replacement_exists(tmp_path: Path) -> None:
+    result = _run(tmp_path, "preflight-rederived")
+    assert result["threw"] == "", result
+    assert result["hook"] == "user-bytes", result
+    assert result["preimage_left"] is False, result
+    assert not any(e.startswith("publish:") for e in result["events"]), result
+
+
+def test_a_drifted_hook_without_a_replacement_still_refuses(tmp_path: Path) -> None:
+    result = _run(tmp_path, "drifted-refused")
     assert result["threw"].startswith("refusing to replace the installed hook: "), result
     assert "Nothing was stopped or changed" in result["threw"], result
     assert result["hook"] == "user-bytes", result
     assert result["preimage_left"] is False, result
-    assert "early_hook_preimage" not in result["intent_keys"], result
-    assert not any(e.startswith("publish:") for e in result["events"]), result
 
 
 def test_recovery_republishes_closed_hook_until_restored_gateway_is_ready(tmp_path: Path) -> None:

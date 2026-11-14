@@ -2877,6 +2877,13 @@ func loadFileSource(configFile string, raw []byte, publishProvenance, enforceMan
 	if err != nil {
 		return nil, err
 	}
+	if publishProvenance {
+		// The strict loader (LoadFromFile) runs no schema pass; the gateway's does
+		// and refuses a lane without a value, so refuse it here the same way.
+		if err := checkCascadeLanesSource(document.Plain); err != nil {
+			return nil, err
+		}
+	}
 	candidate, err := loadConfigSourceChecked(configFile, raw, publishProvenance, enforceManagedTrust, checkPolicyInputs)
 	if err != nil {
 		return nil, err
@@ -3407,7 +3414,7 @@ func loadConfigSourceCheckedWithLayout(
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "routing_invalid")
 		}
-		return nil, fmt.Errorf("config: routing: %w", err)
+		return nil, fmt.Errorf("config: %w", &SettingError{Path: "routing", cause: err})
 	}
 	if err := cfg.validateRoutingAdminRules(); err != nil {
 		if ReportConfigLoadError != nil {

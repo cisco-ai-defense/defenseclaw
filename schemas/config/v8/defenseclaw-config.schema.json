@@ -1660,6 +1660,15 @@
         "shadow"
       ]
     },
+    "cascadeLiveLane": {
+      "type": "string",
+      "description": "A cascade lane switch that ships live: on, shadow or off. Only on is live; shadow and off add nothing, so the verdicts are those of a build without the lane.",
+      "enum": [
+        "on",
+        "shadow",
+        "off"
+      ]
+    },
     "cascadeLanes": {
       "type": "object",
       "maxProperties": 64,
@@ -1675,6 +1684,11 @@
         "secret_flow": {
           "$ref": "#/$defs/cascadeLane",
           "default": "shadow"
+        },
+        "nonshell": {
+          "$ref": "#/$defs/cascadeLiveLane",
+          "default": "on",
+          "description": "The MCP and app tool lane (tool-call effects and the table rules on shell and native file-tool calls). on (default) judges them; shadow and off compute nothing and add nothing, so the verdicts are those of a build without the lane. Any other value is refused at load. Top level only (process-wide)."
         }
       },
       "additionalProperties": {
