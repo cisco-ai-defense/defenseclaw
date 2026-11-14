@@ -70,16 +70,9 @@ var (
 	}
 )
 
-// RefusesEgress reports a chain the callout refuses when its egress
-// action is block: a secret read, or a secret-manager read, followed by
-// external egress. The gateway's hook answers the same set for a verified
-// actor (gateway.SetSubstrateChainEgressAction).
-func RefusesEgress(chainID string) bool {
-	return egressDenyChains[chainID]
-}
-
 // RefusesEgressJoin reports whether a detected chain is refused when the
-// egress action is block: a chain RefusesEgress names whose result bit is
+// egress action is block: a secret read, or a secret-manager read, followed
+// by external egress (egressDenyChains), whose result bit is
 // clear in fileUnknownJoinMask (guardrail.ToolChainMatches.FileUnknownJoinMask).
 // A chain that joined only through the file-unknown marker (the read named
 // no one file) alerts instead. The callout (egressMemo.verdict) and the

@@ -232,6 +232,9 @@ func (m *egressMemo) verdict(now time.Time, action string) (EgressVerdict, bool)
 		if v.Rule == "" || refuse && !v.Deny {
 			v.Rule = d.ID
 			v.Reason = "Earlier in this actor's work it read a secret; DefenseClaw blocks sending data off the cluster after that."
+			if !refuse {
+				v.Reason = "Earlier in this actor's work it read a secret; DefenseClaw alerts on sending data off the cluster after that."
+			}
 			v.Deny = refuse
 		}
 	}

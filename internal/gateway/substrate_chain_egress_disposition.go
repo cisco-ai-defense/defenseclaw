@@ -14,7 +14,7 @@ import (
 
 // The chain egress disposition of Agent Substrate actors (owner decision
 // 2026-11-13): actors are unattended, so a verified actor's hook call that
-// completes a chain the callout refuses (chainstate.RefusesEgress: a secret
+// completes a chain the callout refuses (chainstate.RefusesEgressJoin: a secret
 // read, or a secret-manager read, then external egress) is refused in every
 // tier, the open source default pack as well as strict and managed. The one
 // setting is the config key substrate.chain_egress_action: block (the
@@ -24,7 +24,7 @@ import (
 // OpenShell hooks keep the pack's disposition: an alert in the default pack.
 //
 // Only a resolved chain refuses: one with a first step whose read names an
-// exact file (or carries no file identity, like the home-path rules). A
+// exact file, or carries no file identity at all. A
 // chain that joined only through the file-unknown marker (a read of several
 // files, a read in a call that also writes, a relative path in a call not
 // proven to keep its directory) alerts, on the hook and at the callout
