@@ -73,8 +73,14 @@ type Program struct {
 	// scan does not read.
 	Directive bool
 	// Malformed reports a string or regular expression literal with no end
-	// awk accepts, so the program does not run as this scan reads it.
+	// awk accepts, so the program does not run as this scan reads it. Every
+	// awk refuses such a program at its syntax check and runs nothing; the
+	// scan may still disagree with an awk about where a literal ends, so the
+	// program counts as a command it cannot read when its text holds a word
+	// or a pipe that starts one (Commands).
 	Malformed bool
+	// channelText: the text holds system, getline, a pipe or an @ directive.
+	channelText bool
 }
 
 // RunsCommand reports a program with a command channel, a directive that
@@ -90,7 +96,7 @@ func (p Program) Commands() (commands []string, dynamic bool) {
 		commands = append(commands, c.Commands...)
 		dynamic = dynamic || c.Dynamic
 	}
-	return commands, dynamic || p.Directive || p.Malformed
+	return commands, dynamic || p.Directive || p.Malformed && p.channelText
 }
 
 type tokenKind uint8
@@ -111,6 +117,7 @@ type token struct {
 // Parse scans the program text for its command channels.
 func Parse(code string) Program {
 	var p Program
+	p.channelText = strings.ContainsAny(code, "|@") || strings.Contains(code, "system") || strings.Contains(code, "getline")
 	tokens := tokenize(code, &p)
 	match := matchParens(tokens)
 	for i, t := range tokens {

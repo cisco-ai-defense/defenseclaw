@@ -77,13 +77,32 @@ func TestParseChannels(t *testing.T) {
 
 func TestParseUnreadableProgramsAreDynamic(t *testing.T) {
 	for name, program := range map[string]string{
-		"open string":    `BEGIN{print "x}`,
-		"open regex":     `/a`,
-		"gawk directive": `@include "x.awk"`,
+		"open string with a call": `BEGIN{system("x}`,
+		"open regex with a pipe":  `/a | getline`,
+		"gawk directive":          `@include "x.awk"`,
 	} {
 		p := Parse(program)
 		if _, dynamic := p.Commands(); !dynamic || !p.RunsCommand() {
 			t.Errorf("%s: %+v is read as a program with no command", name, p)
+		}
+	}
+}
+
+// Every awk refuses a program whose literal has no end, and runs nothing; with
+// no word or pipe in its text that starts a command it is not an unknown
+// command (an unquoted regex word in a shell line is one), though the older
+// readers still count it as a command effect.
+func TestParseMalformedProgramWithNoChannelTextIsNotDynamic(t *testing.T) {
+	for name, program := range map[string]string{
+		"open regex":  `/Prompt`,
+		"open string": `BEGIN{print "x}`,
+	} {
+		p := Parse(program)
+		if _, dynamic := p.Commands(); dynamic {
+			t.Errorf("%s: read as an unknown command", name)
+		}
+		if !p.RunsCommand() {
+			t.Errorf("%s: RunsCommand dropped the malformed program", name)
 		}
 	}
 }
