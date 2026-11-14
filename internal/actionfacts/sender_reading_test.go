@@ -11,6 +11,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
+// A package that imports bounded panics where a misuse is made in its tests
+// (guardrail/bounded TestAdopters checks this).
+func init() { bounded.PanicOnMisuse(true) }
+
 // senderRow is one call for the shared sender reader: a bash command, or a
 // tool and its JSON args. want is "" for no sender, else the origin of the
 // one sender the reader must find.
