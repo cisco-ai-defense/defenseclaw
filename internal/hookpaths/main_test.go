@@ -21,10 +21,16 @@ func TestMain(m *testing.M) {
 	// No test reads the host's shell startup or system profiles (GAP-0293).
 	testenv.ClearShellStartup()
 	UseSystemShellProfilesForTests(nil, "")
+	restoreHome, err := testenv.IsolateProcessHome()
+	if err != nil {
+		panic(err)
+	}
 	if runtime.GOOS != "windows" {
 		if dir, err := filepath.EvalSymlinks(os.TempDir()); err == nil {
 			_ = os.Setenv("TMPDIR", dir)
 		}
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	restoreHome()
+	os.Exit(code)
 }
