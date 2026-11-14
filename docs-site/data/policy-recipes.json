@@ -789,6 +789,58 @@
       ]
     },
     {
+      "id": "RECIPE-tamper.defenseclaw_control_disable",
+      "title": "Stop or disable DefenseClaw",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "tamper.defenseclaw_control_disable",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Stop or disable DefenseClaw",
+        "severity": "CRITICAL",
+        "confidence": 0.98,
+        "tags": [
+          "cognitive-tampering",
+          "tampering",
+          "security-state"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering",
+        "tampering",
+        "security-state"
+      ]
+    },
+    {
+      "id": "RECIPE-tamper.defenseclaw_control_unproven",
+      "title": "Change or stop DefenseClaw (unproven)",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "tamper.defenseclaw_control_unproven",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Change or stop DefenseClaw (unproven)",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "cognitive-tampering",
+          "tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering",
+        "tampering"
+      ]
+    },
+    {
       "id": "RECIPE-CMD-REVSHELL-POWERSHELL-TCP",
       "title": "PowerShell TCP command-execution loop",
       "kind": "rule:command",
