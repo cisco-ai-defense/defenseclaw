@@ -74,7 +74,7 @@ func windowsStandaloneRuntimeOnlyConnector(name string) bool {
 // enterprise management refuses outright, with the reason shown to the
 // administrator.
 var windowsEnterpriseRefusedConnectors = map[string]string{
-	"openclaw":  "OpenClaw requires the guardrail proxy, which the Windows enterprise profile does not host",
+	"openclaw":  connector.OpenClawManagedWindowsRefusal,
 	"zeptoclaw": "ZeptoClaw requires the guardrail proxy, which the Windows enterprise profile does not host",
 }
 
