@@ -31,12 +31,17 @@ func projectCredentialFileUploads(facts Facts) []CredentialFileUploadFact {
 			continue
 		}
 		var sources []string
+		broad := false
 		switch command.Program {
 		case "curl":
 			for _, source := range StaticCurlDirectUploadFileSources(command) {
 				sources = append(sources, source.Path)
 			}
 		case "scp", "rsync", "wget":
+			// curl's file uploads are judged by CMD-CURL-UPLOAD as well; the
+			// other programs have no such rule, so every credentials-file
+			// shape counts here (a project .env, as for curl).
+			broad = true
 			// The read paths of a proven upload are the files it sends:
 			// the local operands of scp and rsync, the --post-file or
 			// --body-file of wget (GAP-0595).
@@ -44,6 +49,9 @@ func projectCredentialFileUploads(facts Facts) []CredentialFileUploadFact {
 		}
 		for _, source := range sources {
 			class := credentialFileUploadClass(source)
+			if class == "" && broad {
+				class = credentialFileBroadClass(source)
+			}
 			if class == "" {
 				continue
 			}
@@ -86,6 +94,24 @@ func uploadedReadPaths(facts Facts, command CommandFact) []string {
 		paths = append(paths, value)
 	}
 	return paths
+}
+
+// credentialFileBroadClass is the strong class for a file of any
+// credentials-file shape (templates and public keys excluded). A relative
+// name is judged by its shape, rooted at /: the hook path often has no
+// working directory.
+func credentialFileBroadClass(value string) string {
+	if value == "" || len(value) > 4096 || strings.ContainsRune(value, 0) ||
+		hasUnresolvedPathSyntax(value) {
+		return ""
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = path.Join("/", value)
+	}
+	if _, ok := MatchCredentialFileShape(value); ok {
+		return CredentialFileUploadStrong
+	}
+	return ""
 }
 
 func credentialFileUploadClass(value string) string {
