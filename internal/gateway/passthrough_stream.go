@@ -522,11 +522,9 @@ func (p *GuardrailProxy) streamPassthroughReply(w http.ResponseWriter, r *http.R
 						// rune or a JSON escape split by the read waits in line
 						// for the next read, so the checked text is always the
 						// text of the bytes sent (GAP-0430).
-						end := len(line)
+						end := textSafeCut(line)
 						if i >= 0 {
 							end = i + 1
-						} else {
-							end = textSafeCut(line)
 						}
 						if end > 0 {
 							s.push(laneTexts(0, jsonEscapesRead(string(line[:end]))), append([]byte(nil), line[:end]...))
