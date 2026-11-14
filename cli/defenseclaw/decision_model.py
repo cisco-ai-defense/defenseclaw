@@ -384,6 +384,9 @@ def summary_rows(cfg: Config) -> list[tuple[str, str]]:
         ("decision_model.block_threshold", f"{dm.effective_block_threshold():.2f}"),
         ("decision_model.block_risk_score", f"{dm.effective_block_risk_score():.2f}"),
         ("decision_model.escalate_rule_flagged", "true" if dm.effective_escalate_rule_flagged() else "false"),
+        ("decision_model.history_turns", str(dm.effective_history_turns()) + (" (off)" if dm.effective_history_turns() == 0 else "")),
+        ("decision_model.history_tool_results", "true" if dm.history_tool_results else "false"),
+        ("decision_model.flow_guard", "true" if dm.effective_flow_guard() else "false"),
         (
             "decision_model.on_confident_block",
             "escalate" if dm.effective_on_confident_block() == "escalate" else "decide (retired: acts as escalate)",
