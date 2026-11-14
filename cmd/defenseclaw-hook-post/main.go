@@ -441,16 +441,19 @@ func runUserHookGuardAt(self string, args []string, input io.Reader, output, err
 	// defenseclaw-hook-user (internal/hookuser), with the registered home and
 	// address, so the guard leg is one process and decides even when the
 	// hook-user binary is missing or broken.
-	return runNativeUserHook(self, args[6], registeredAPIAddr(args), input, output, errOutput)
-}
-
-// registeredAPIAddr is the --api-addr value of a checked guard command line,
-// "" when it names none.
-func registeredAPIAddr(args []string) string {
-	if len(args) == 9 {
-		return args[8]
+	home, addr, ok := registeredNativeArgs(args[2:])
+	if !ok {
+		fmt.Fprintln(errOutput, "DefenseClaw hook registration is invalid")
+		return 2
 	}
-	return ""
+	code := runNativeUserHook(self, home, addr, input, output, errOutput)
+	if code != 0 && code != 2 {
+		// As the 1.0.9 guard read hook-user's exit: Claude Code takes any
+		// other status as a non-blocking error and runs the tool.
+		fmt.Fprintln(errOutput, "DefenseClaw hook could not start")
+		return 2
+	}
+	return code
 }
 
 func userGuardExecutableMatches(self, registered string) bool {

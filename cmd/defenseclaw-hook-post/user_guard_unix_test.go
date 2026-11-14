@@ -284,6 +284,12 @@ func TestB2GuardKeepsItsIdentityChecks(t *testing.T) {
 			return args
 		}},
 		{"extra argument", a.self, func() []string { return append(a.args(g.addr()), "--x") }},
+		{"non-loopback address", a.self, func() []string { return a.args("192.0.2.1:18970") }},
+		{"home with a newline", a.self, func() []string {
+			args := a.args(g.addr())
+			args[6] = filepath.Join(a.account, "x\n", ".defenseclaw")
+			return args
+		}},
 		{"address flag misnamed", a.self, func() []string {
 			args := a.args(g.addr())
 			args[7] = "--api"

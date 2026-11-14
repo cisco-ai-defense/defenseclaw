@@ -52,7 +52,7 @@ func main() {
 		if err != nil {
 			os.Exit(2)
 		}
-		os.Exit(runFallbackGuardAt(self, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, hookexec.ProcessStartTime()))
+		hookuser.ExitStoppingLooks(runFallbackGuardAt(self, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, hookexec.ProcessStartTime()))
 	}
 	home, addr, ok := hookuser.RegisteredArgs(os.Args[1:])
 	if !ok {

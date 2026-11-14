@@ -156,11 +156,14 @@ type answerWatchdog struct {
 	// started moments ago and had answered no call before it (GAP-0295).
 	restart      *perUserRestartAnswer
 	restartProof func() restartProofResult
-	// restartRender gives restart once, when the deadline finds the call
-	// unanswered and its restart-window proof holds (restartAnswerNow): it
-	// reads the account outage tier, which starts a gateway process, so a
-	// call the gateway answers never reads it (rel-1-0-10 GAP-0268).
-	restartRender func() *perUserRestartAnswer
+	// restartChoice is the restart answer of a proven connection in both
+	// outage tiers; the deadline picks one by the tier read (restartAnswerNow).
+	// Reading the tier starts a gateway process, so a call the gateway answers
+	// in time never reads it (rel-1-0-10 GAP-0268).
+	restartChoice *restartChoice
+	// tier is the call's one read of the account outage tier (tierRead),
+	// shared by the restart and the ordinary answer.
+	tier *tierRead
 	// failureLog is the call's hook-failure log, opened
 	// answerWatchdogLogPrepareLead before the deadline (watch).
 	failureLog     *preparedFailureLog
@@ -331,9 +334,83 @@ func (w *answerWatchdog) ordinaryOwedLocked() bool {
 		!w.failureClosed && !w.failureLogged && !w.answeredStatus && sameWatchdogAnswer(w.fallback, w.noDecision)
 }
 
+// tierRead is the one read of the account outage tier of a call: mode once
+// done is closed.
+type tierRead struct {
+	done chan struct{}
+	mode string
+}
+
+// startTierRead starts the call's tier read with read, once; the read that
+// started first is the one every caller waits on. w.mu is not held.
+func (w *answerWatchdog) startTierRead(read func() string) *tierRead {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.tier == nil && read != nil {
+		t := &tierRead{done: make(chan struct{})}
+		w.tier = t
+		go func() {
+			t.mode = read()
+			close(t.done)
+		}()
+	}
+	return w.tier
+}
+
+// tierBy is the call's tier as read by until; false when the read is not
+// done by then. One budget, measured from the deadline, covers every caller
+// (P2-2 of the S8 b2 review: two waits in a row held the answer 500 ms).
+func (w *answerWatchdog) tierBy(read func() string, until time.Time) (string, bool) {
+	t := w.startTierRead(read)
+	if t == nil {
+		return "", false
+	}
+	select {
+	case <-t.done:
+		return t.mode, true
+	default:
+	}
+	timer := time.NewTimer(time.Until(until))
+	defer timer.Stop()
+	select {
+	case <-t.done:
+		return t.mode, true
+	case <-timer.C:
+		return "", false
+	}
+}
+
+// tierReaderLocked is the tier reader of an answer the deadline may give:
+// the restart answer's, else the ordinary answer's; nil when no answer
+// prepared so far depends on the tier. w.mu is held.
+func (w *answerWatchdog) tierReaderLocked() func() string {
+	if w.restartChoice != nil && w.restartChoice.tier != nil {
+		return w.restartChoice.tier
+	}
+	if w.ordinary != nil {
+		return w.ordinary.tier
+	}
+	return nil
+}
+
+// startOwedTierRead starts the tier read of a call still unanswered whose
+// prepared answer depends on the tier: at the prepare lead (a second before
+// the deadline), so the read is usually done when the deadline comes, and
+// again at the deadline for an answer prepared after the lead. A call the
+// gateway answered never starts it (GAP-0268).
+func (w *answerWatchdog) startOwedTierRead() {
+	w.mu.Lock()
+	read := w.tierReaderLocked()
+	owed := !w.fired && !w.finished && !w.answeredInTime.Load() && !w.answeredStatus
+	w.mu.Unlock()
+	if owed && read != nil {
+		w.startTierRead(read)
+	}
+}
+
 // useOrdinaryAtDeadline gives the ordinary open answer when the account
-// tier, read now within lateOrdinaryTierWait, is open.
-func (w *answerWatchdog) useOrdinaryAtDeadline() {
+// tier, read by until (one budget from the deadline), is open.
+func (w *answerWatchdog) useOrdinaryAtDeadline(until time.Time) {
 	w.mu.Lock()
 	ordinary := w.ordinary
 	owed := ordinary != nil && ordinary.tier != nil && w.ordinaryOwedLocked()
@@ -341,16 +418,7 @@ func (w *answerWatchdog) useOrdinaryAtDeadline() {
 	if !owed {
 		return
 	}
-	tier := make(chan string, 1)
-	go func() { tier <- ordinary.tier() }()
-	timer := time.NewTimer(lateOrdinaryTierWait)
-	defer timer.Stop()
-	select {
-	case mode := <-tier:
-		if normalizeFailMode(mode) != "open" {
-			return
-		}
-	case <-timer.C:
+	if mode, ok := w.tierBy(ordinary.tier, until); !ok || normalizeFailMode(mode) != "open" {
 		return
 	}
 	w.mu.Lock()
@@ -809,14 +877,22 @@ func renderPerUserRestartAnswer(opts Options, sp spec, failMode, reason string) 
 	return answer
 }
 
-// deadlineRestartAnswer renders the restart answer now for each outage tier
-// and returns the one of the tier read on its first call (once). Reading the
-// tier starts a gateway process (hook-user outageMode), so it is read only
-// when the deadline finds the call unanswered (GAP-0268); the answers are
-// those renderPerUserRestartAnswer gives with the tier read then. When the
-// tier cannot change the answer (strict availability, the install window, no
-// tier reader) nothing is read, as in perUserOutageMode.
-func deadlineRestartAnswer(opts Options, sp spec, failMode, reason string) func() *perUserRestartAnswer {
+// restartChoice is the restart answer of a proven connection rendered in each
+// outage tier; tier reads the account tier, nil when the tier cannot change
+// the answer.
+type restartChoice struct {
+	open, closed *perUserRestartAnswer
+	tier         func() string
+}
+
+// deadlineRestartAnswer renders the restart answer now for each outage tier,
+// without reading the tier. Reading it starts a gateway process (hook-user
+// outageMode), so it is read only for a call still unanswered
+// (startOwedTierRead, GAP-0268); the answers are those
+// renderPerUserRestartAnswer gives with the tier read then. When the tier
+// cannot change the answer (strict availability, the install window, no tier
+// reader) nothing is read, as in perUserOutageMode.
+func deadlineRestartAnswer(opts Options, sp spec, failMode, reason string) *restartChoice {
 	tier := opts.OutageFailModeNow
 	inTier := func(mode string) *perUserRestartAnswer {
 		fixed := opts
@@ -830,15 +906,10 @@ func deadlineRestartAnswer(opts Options, sp spec, failMode, reason string) func(
 	go func() { openDone <- inTier("open") }()
 	closed := inTier("closed")
 	open := <-openDone
-	return sync.OnceValue(func() *perUserRestartAnswer {
-		if tier == nil || open.mode == closed.mode {
-			return closed
-		}
-		if normalizeFailMode(tier()) == "open" {
-			return open
-		}
-		return closed
-	})
+	if open.mode == closed.mode {
+		tier = nil
+	}
+	return &restartChoice{open: open, closed: closed, tier: tier}
 }
 
 // useRestartAnswerLocked makes answer the watchdog's answer. w.mu is held.
@@ -865,7 +936,7 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 	proof := perUserRestartWindowProof
 	w.mu.Lock()
 	w.restartProof = func() restartProofResult { return proof(home, check) }
-	prepared := w.restart != nil || w.restartRender != nil
+	prepared := w.restart != nil || w.restartChoice != nil
 	w.mu.Unlock()
 	fresh := perUserGatewayRecentlyStarted(home)
 	if !fresh && opts.lateOrdinary == nil {
@@ -885,7 +956,7 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 		// The answer is rendered beside the late-call scan, so it is ready
 		// when the scan ends; the tier is read at the deadline only
 		// (restartAnswerNow, GAP-0268).
-		rendered := make(chan func() *perUserRestartAnswer, 1)
+		rendered := make(chan *restartChoice, 1)
 		go func() { rendered <- deadlineRestartAnswer(opts, sp, failMode, reason) }()
 		if !fresh {
 			// A gateway that has been up for a while and took the call may
@@ -901,10 +972,10 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 			w.restartProof = func() restartProofResult { return restartProofResult{ok: true} }
 			w.mu.Unlock()
 		}
-		render := <-rendered
+		choice := <-rendered
 		w.mu.Lock()
-		if w.restart == nil && w.restartRender == nil {
-			w.restartRender = render
+		if w.restart == nil && w.restartChoice == nil {
+			w.restartChoice = choice
 		}
 		w.mu.Unlock()
 	}()
@@ -928,7 +999,7 @@ var restartProofWait = 250 * time.Millisecond
 // still be the restart outage: an outage answer is ready, and the gateway
 // sent no status or progress and the call logged no failure. w.mu is held.
 func (w *answerWatchdog) restartWindowCandidateLocked() func() restartProofResult {
-	if w.secureClient || (w.restart == nil && w.restartRender == nil) || w.restartProof == nil || w.answeredStatus || w.progressSeen ||
+	if w.secureClient || (w.restart == nil && w.restartChoice == nil) || w.restartProof == nil || w.answeredStatus || w.progressSeen ||
 		w.failureClosed || w.claimedAnswer || w.failureLogged || w.fired {
 		return nil
 	}
@@ -939,7 +1010,7 @@ func (w *answerWatchdog) restartWindowSkipReasonLocked() string {
 	switch {
 	case w.restartProof == nil:
 		return "no_verified_connection"
-	case w.restart == nil && w.restartRender == nil:
+	case w.restart == nil && w.restartChoice == nil:
 		return "outage_mode_not_ready"
 	case w.answeredStatus || w.progressSeen:
 		return "answer_started"
@@ -963,13 +1034,14 @@ func (w *answerWatchdog) restartWindowProven() (mode, reason string, ok bool) {
 		w.failureLog.setRestartReason(skipReason)
 		return "", "", false
 	}
-	w.prefetchRestartAnswer()
+	until := time.Now().Add(lateOrdinaryTierWait)
+	w.startOwedTierRead()
 	result := provenWithin(proof, restartProofWait)
 	if !result.ok {
 		w.failureLog.setRestartReason(result.reason)
 		return "", "", false
 	}
-	answer := w.restartAnswerNow()
+	answer := w.restartAnswerNow(until)
 	if answer == nil {
 		w.failureLog.setRestartReason("outage_mode_not_ready")
 		return "", "", false
@@ -983,38 +1055,27 @@ func (w *answerWatchdog) restartWindowProven() (mode, reason string, ok bool) {
 	return answer.mode, answer.answer.reason, true
 }
 
-// prefetchRestartAnswer starts the deadline render of the restart answer
-// beside its proof, so the tier read and the proof share one wait. w.mu is
-// not held.
-func (w *answerWatchdog) prefetchRestartAnswer() {
-	w.mu.Lock()
-	render := w.restartRender
-	w.mu.Unlock()
-	if render != nil {
-		go render()
-	}
-}
-
 // restartAnswerNow is the restart answer of an unanswered call: the one
 // prepared when its outage was seen, or the answer of a proven connection in
-// the tier read now within lateOrdinaryTierWait. A read that takes longer is
-// none, and the call keeps its closed answer, as for the ordinary late call
-// (useOrdinaryAtDeadline). w.mu is not held.
-func (w *answerWatchdog) restartAnswerNow() *perUserRestartAnswer {
+// the tier read by until. A read not done by then is none, and the call keeps
+// its closed answer, as for the ordinary late call (useOrdinaryAtDeadline).
+// w.mu is not held.
+func (w *answerWatchdog) restartAnswerNow(until time.Time) *perUserRestartAnswer {
 	w.mu.Lock()
-	answer, render := w.restart, w.restartRender
+	answer, choice := w.restart, w.restartChoice
 	w.mu.Unlock()
-	if answer != nil || render == nil {
+	if answer != nil || choice == nil {
 		return answer
 	}
-	rendered := make(chan *perUserRestartAnswer, 1)
-	go func() { rendered <- render() }()
-	timer := time.NewTimer(lateOrdinaryTierWait)
-	defer timer.Stop()
-	select {
-	case answer = <-rendered:
-	case <-timer.C:
-		return nil
+	answer = choice.closed
+	if choice.tier != nil {
+		mode, ok := w.tierBy(choice.tier, until)
+		if !ok {
+			return nil
+		}
+		if normalizeFailMode(mode) == "open" {
+			answer = choice.open
+		}
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -1133,6 +1194,9 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		lead = min(w.prepareLead, remaining-100*time.Millisecond)
 	}
 	prepare := time.AfterFunc(time.Until(deadline.Add(-lead)), func() {
+		// A call still unanswered now reads its tier now, so the read is
+		// usually done when the deadline comes (S8 b2 review P2-2).
+		w.startOwedTierRead()
 		w.failureLog.prepare(w.failureLogHome)
 	})
 	if !w.waiter.wait(deadline) {
@@ -1140,6 +1204,10 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		w.failureLog.close()
 		return
 	}
+	// One budget from the deadline for the tier read, whichever answer
+	// waits on it (restart, then ordinary).
+	until := time.Now().Add(lateOrdinaryTierWait)
+	w.startOwedTierRead()
 	w.mu.Lock()
 	proof := w.restartWindowCandidateLocked()
 	skipReason := w.restartWindowSkipReasonLocked()
@@ -1148,13 +1216,10 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	// whose connection a gateway that only just started holds, with no
 	// answer from it yet, is in that gateway's restart window: it gets the
 	// outage answer, not the closed no-decision one (GAP-0295).
-	if proof != nil {
-		w.prefetchRestartAnswer()
-	}
 	if proof == nil {
 		w.failureLog.setRestartReason(skipReason)
 	} else if result := provenWithin(proof, restartProofWait); result.ok {
-		if answer := w.restartAnswerNow(); answer == nil {
+		if answer := w.restartAnswerNow(until); answer == nil {
 			w.failureLog.setRestartReason("outage_mode_not_ready")
 		} else {
 			w.mu.Lock()
@@ -1169,7 +1234,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	} else {
 		w.failureLog.setRestartReason(result.reason)
 	}
-	w.useOrdinaryAtDeadline()
+	w.useOrdinaryAtDeadline(until)
 	w.mu.Lock()
 	installCheck := w.installCheck
 	w.mu.Unlock()

@@ -26,3 +26,9 @@ func runNativeUserHook(self, home, addr string, input io.Reader, output, errOutp
 }
 
 func stopNativeHookLooks() { hookuser.StopOutageLooks() }
+
+// registeredNativeArgs checks the native hook's part of a guard command line
+// as defenseclaw-hook-user does (a loopback --api-addr, a clean home).
+func registeredNativeArgs(args []string) (home, addr string, ok bool) {
+	return hookuser.RegisteredArgs(args)
+}

@@ -134,9 +134,12 @@ func runLegacyScript(home string, stdin io.Reader, stdout, stderr io.Writer) int
 	cmd := exec.Command(filepath.Join(home, "hooks", "claude-code-hook.sh"))
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	if err := cmd.Run(); err != nil {
-		if exit, ok := err.(*exec.ExitError); ok {
+		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() >= 0 {
 			return exit.ExitCode()
 		}
+		// Killed by a signal (ExitCode -1, exit 255 to the agent) or never
+		// started: a block, never the non-blocking error Claude Code reads
+		// in any status other than 0 and 2.
 		return 2
 	}
 	return 0

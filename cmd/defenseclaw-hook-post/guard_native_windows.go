@@ -19,3 +19,11 @@ func runNativeUserHook(_, _, _ string, _ io.Reader, _, errOutput io.Writer) int 
 }
 
 func stopNativeHookLooks() {}
+
+// registeredNativeArgs: no native hook on Windows; its guard cannot start.
+func registeredNativeArgs(args []string) (home, addr string, ok bool) {
+	if len(args) < 5 {
+		return "", "", false
+	}
+	return args[4], "", true
+}
