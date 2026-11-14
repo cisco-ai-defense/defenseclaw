@@ -186,6 +186,11 @@ func TestHookJudgeSkipsProvenReadOnly(t *testing.T) {
 			}
 		})
 	}
+	// A call cut at a bound (the ACP guard's kept state) proves nothing
+	// about what was cut: the same read is judged.
+	if hookJudgeSkipsProvenReadOnly(withJudgeInputCut(ctx), "Bash", `{"command":"ls -la /var/log"}`, nil) {
+		t.Fatal("a cut call skipped the judge as a proven read")
+	}
 }
 
 // packetSectionTags counts the nonce-carrying tags of the effect packet's

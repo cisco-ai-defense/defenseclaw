@@ -645,7 +645,13 @@ func (a *APIServer) inspectACPFrameAction(
 			// refused. The report of a tool the agent already ran is then
 			// capped below: an alert that would have blocked, as for a hook
 			// event outside a connector's block events.
-			judged = a.inspectAgentHookToolCall(ctx, agentHookRequest{
+			// A frame cut at a bound is judged in full: the judge's
+			// proven-read skip reads only what was kept.
+			callCtx := ctx
+			if trunc.Any() {
+				callCtx = withJudgeInputCut(ctx)
+			}
+			judged = a.inspectAgentHookToolCall(callCtx, agentHookRequest{
 				ConnectorName: connectorName,
 				HookEventName: req.Method,
 				SessionID:     session,
