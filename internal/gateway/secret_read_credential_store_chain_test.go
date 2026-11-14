@@ -27,8 +27,19 @@ import (
 // home, a project and a work directory.
 var credentialStoreRoots = []string{"/home/agent", "/work/f5proj", "/srv/data"}
 
+// namedCredentialStores are the two files GAP-0550 names, kept as explicit
+// rows next to the table walk (a row removed from the table fails here).
+var namedCredentialStores = []string{".vault-token", ".azure/accessTokens.json"}
+
+// credentialStoreProbes is every row of the table plus the named files.
+func credentialStoreProbes() []string {
+	probes := append(actionfacts.CredentialFileShapeProbePaths(), namedCredentialStores...)
+	slices.Sort(probes)
+	return slices.Compact(probes)
+}
+
 func TestEveryCredentialTableRowStartsSecretReadChainGAP0550(t *testing.T) {
-	probes := actionfacts.CredentialFileShapeProbePaths()
+	probes := credentialStoreProbes()
 	if len(probes) == 0 {
 		t.Fatal("the credentials-file table has no probe paths")
 	}
@@ -147,7 +158,7 @@ func TestEveryCredentialTableRowThenEgressOnTheHookPathGAP0550(t *testing.T) {
 			if slices.Contains(home.RuleIDs, guardrail.ToolChainSecretReadThenEgress) != wantChain {
 				t.Fatalf("home control: chain on egress want %t: %+v", wantChain, home)
 			}
-			for index, probe := range actionfacts.CredentialFileShapeProbePaths() {
+			for index, probe := range credentialStoreProbes() {
 				for _, root := range credentialStoreRoots[:2] {
 					file := path.Join(root, probe)
 					for _, tool := range []string{"Bash", "Read"} {
