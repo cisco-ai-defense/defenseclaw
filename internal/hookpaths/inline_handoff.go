@@ -47,7 +47,16 @@ func inlineHandedWordsAs(words []*syntax.Word, home string) (handed []*syntax.Wo
 	if handoff.From < 0 {
 		return nil, false, 0, false
 	}
-	return words[handoff.From:], handoff.Fed, handoff.Access, true
+	handed = words[handoff.From:]
+	if handoff.CodeUnseen {
+		// Code read from stdin and a variable the words do not bind
+		// (python3 - "$out" <<EOF): the word names no path of its own.
+		handed = slices.DeleteFunc(slices.Clone(handed), func(word *syntax.Word) bool {
+			_, fixed := StaticWord(word, home)
+			return !fixed
+		})
+	}
+	return handed, handoff.Fed, handoff.Access, true
 }
 
 // InlineHandedPath is one word a call hands to inline code.

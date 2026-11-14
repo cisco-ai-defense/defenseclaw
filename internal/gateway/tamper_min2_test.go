@@ -359,7 +359,7 @@ func TestTMin2HandOffSpellings(t *testing.T) {
 		for label, command := range map[string]string{
 			// Owner-trace shapes (w448, 71): a script on stdin handed variables,
 			// in a call that runs a hook script of the home and names the config.
-			"stdin script variables": "OUT=$(mktemp); python3 - \"$OUT\" <<'PY'\nimport sys\nprint(sys.argv[1])\nPY\ncat " + target.path + " > /dev/null",
+			"stdin script variables": "OUT=$(mktemp); python3 - \"$OUT\" <<'PY'\nimport sys\nprint(sys.argv[1])\nPY\ncat " + target.path + " | wc -l",
 			"stdin script two vars":  "a=$(cat " + target.path + "); python3 - \"$a\" \"$b\" <<'PY'\nimport sys\nPY",
 			"script file":            `python3 /tmp/s.py ` + target.path,
 			"module":                 `python3 -m json.tool ` + target.path,
