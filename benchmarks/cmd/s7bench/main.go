@@ -33,6 +33,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
+// judgeCacheTag is set at build time (-ldflags "-X main.judgeCacheTag=r1") for fresh benchmark rounds of an unchanged
+// judge prompt: the judge model goes to the spend proxy as gemma-4-31b#r1, a separate response-cache namespace, and the
+// proxy sends the plain model name upstream. Bench build only; the gateway never sees a tag outside this harness.
+var judgeCacheTag string
+
 type event struct {
 	ToolName string          `json:"tool_name"`
 	Args     json.RawMessage `json:"args"`
@@ -340,7 +345,11 @@ func main() {
 		}
 		cfg.Guardrail.Judge.MaxParallel = *judgeParallel
 		cfg.Guardrail.Judge.MaxParallelExplicit = true
-		cfg.Guardrail.Judge.LLM = config.LLMConfig{Model: "openai/" + *judgeModel, Provider: "openai", BaseURL: *judgeURL, APIKey: "s7-local-proxy"}
+		model := *judgeModel
+		if judgeCacheTag != "" {
+			model += "#" + judgeCacheTag
+		}
+		cfg.Guardrail.Judge.LLM = config.LLMConfig{Model: "openai/" + model, Provider: "openai", BaseURL: *judgeURL, APIKey: "s7-local-proxy"}
 	}
 	if *dmURL != "" {
 		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: *dmURL, Timeout: *dmTimeout}
