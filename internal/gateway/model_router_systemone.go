@@ -36,6 +36,7 @@ const (
 type systemOneClassifier struct {
 	model    string
 	endpoint string
+	protocol string
 	apiKey   string
 	timeout  time.Duration
 	client   *http.Client
@@ -55,8 +56,11 @@ func newSystemOneClassifier(cfg *config.Config, dotenv string) *systemOneClassif
 	s := cfg.Routing.SystemOne
 	endpoint, model := "", ""
 	key := ""
+	protocol := config.DecisionModelProtocolSystemOne
 	if s.EffectiveUseDecisionModel() {
 		endpoint, model = strings.TrimSpace(cfg.DecisionModel.BaseURL), strings.TrimSpace(cfg.DecisionModel.Model)
+		// The shared endpoint speaks the decision model's protocol.
+		protocol = cfg.DecisionModel.EffectiveProtocol()
 		key = cfg.ResolvedDecisionModelKey()
 		if key == "" && !cfg.StandaloneEnterprise() {
 			key = ResolveAPIKey(cfg.DecisionModel.EffectiveAPIKeyEnv(), dotenv)
@@ -75,7 +79,7 @@ func newSystemOneClassifier(cfg *config.Config, dotenv string) *systemOneClassif
 	timeout := time.Duration(s.EffectiveTimeoutMs()) * time.Millisecond
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	return &systemOneClassifier{
-		model: model, endpoint: endpoint, apiKey: key, timeout: timeout, now: time.Now,
+		model: model, endpoint: endpoint, protocol: protocol, apiKey: key, timeout: timeout, now: time.Now,
 		client: &http.Client{
 			Transport: transport, Timeout: timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -120,13 +124,11 @@ func (c *systemOneClassifier) Classify(ctx context.Context, in engine.ClassifyIn
 	for _, cat := range in.Categories {
 		criteria[cat] = "The request is " + strings.ReplaceAll(cat, "_", " ") + " work."
 	}
-	body, err := json.Marshal(map[string]any{
-		"model": c.model,
-		"state": map[string]any{"user_request": in.Text, "connector": in.Connector, "api_family": in.APIFamily, "has_tools": in.HasTools},
-		"questions": map[string]any{"route_category": map[string]any{
+	body, err := decisionWireBody(c.protocol, c.model,
+		map[string]any{"user_request": in.Text, "connector": in.Connector, "api_family": in.APIFamily, "has_tools": in.HasTools},
+		map[string]any{"route_category": map[string]any{
 			"type": "choice", "instructions": systemOneRoutePolicy, "criteria": criteria,
-		}},
-	})
+		}})
 	if err != nil {
 		return none, classifierErr(engine.FailureConfig, err)
 	}
@@ -137,9 +139,7 @@ func (c *systemOneClassifier) Classify(ctx context.Context, in engine.ClassifyIn
 		return none, classifierErr(engine.FailureConfig, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
+	setDecisionWireAuth(req, c.protocol, c.apiKey)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		c.record(true)
@@ -150,6 +150,15 @@ func (c *systemOneClassifier) Classify(ctx context.Context, in engine.ClassifyIn
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDecisionModelResponseBytes+1))
+	if err == nil && resp.StatusCode != http.StatusOK {
+		var refusal decisionRefusalError
+		if herr := decisionHTTPError(c.protocol, resp.StatusCode, raw); errors.As(herr, &refusal) {
+			// A safety refusal is a healthy answer the content chose
+			// (GAP-0343): no category, but no breaker failure either.
+			c.record(false)
+			return none, classifierErr(engine.FailureUpstreamStatus, herr)
+		}
+	}
 	if err != nil || resp.StatusCode != http.StatusOK {
 		c.record(true)
 		return none, classifierErr(engine.FailureUpstreamStatus, fmt.Errorf("systemone returned HTTP %d", resp.StatusCode))

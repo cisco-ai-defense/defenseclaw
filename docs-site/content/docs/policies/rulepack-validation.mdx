@@ -22,10 +22,10 @@ On a managed computer, `defenseclaw` runs only the commands in [Managed command 
 
    ```text
    Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/default"
-     rules: 246/250 enabled across 7 files
+     rules: 251/255 enabled across 7 files
      components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
-     digest: 97109d1123497a78c531fa609c4155121ef15b5e904f9da911e79d91afbb6c28
-     files digest: acdbe46f1c2488f4c61a79122fea5593211aba16b8741c76cd9d34013cb70747 (the guardrail.custom_packs pin)
+     digest: a1ef2635298aee67a4d310970bb37bb53ca07d9c1dcb543d2bef51f024dd6a01
+     files digest: e0fecf5d7ec44bd6f21417d484dd3d5fb8bbdac644feef8a7c33b44d27de0e5c (the guardrail.custom_packs pin)
    ```
 
    `judges=4` counts the compiled-in exfil judge and the three judge files. The full digest includes compiled defaults and can change between builds even when the files digest stays the same. Use your own run's `files digest` to pin a custom pack. You can pass a pack name instead of a path.
@@ -37,7 +37,7 @@ On a managed computer, `defenseclaw` runs only the commands in [Managed command 
    ```
 
    ```json
-   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"97109d11…","enabled_rule_count":246,"files_digest":"acdbe46f…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":250,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
+   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"a1ef2635…","enabled_rule_count":251,"files_digest":"e0fecf5d…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":255,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
    ```
 
 3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`. The reason names the file, or the folder when a whole copy of another pack sits inside this one (for example `default/judge/injection.yaml` names `default`), and says to move it out or remove it:

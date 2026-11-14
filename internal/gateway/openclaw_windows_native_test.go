@@ -47,6 +47,18 @@ func TestOpenClawNativeModeTopologyFollowsTheHookMode(t *testing.T) {
 			if tokens.connectorToken != wantConnector {
 				t.Fatalf("connector token = %q, want %q", tokens.connectorToken, wantConnector)
 			}
+			mode := connectorModeFor("openclaw", "action")
+			wantMode, wantSurface := "observability", "agent_lifecycle_hooks"
+			if tc.proxy {
+				wantMode, wantSurface = "guardrail", "llm_proxy_and_plugin_hooks"
+			}
+			if mode["mode"] != wantMode || mode["proxy_intercept"] != tc.proxy || mode["enforcement_surface"] != wantSurface {
+				t.Fatalf("connectorModeFor(openclaw) = %v, want mode %s, proxy_intercept %v, surface %s", mode, wantMode, tc.proxy, wantSurface)
+			}
+			managedCfg := &config.Config{DeploymentMode: string(config.DeploymentModeManagedEnterprise)}
+			if got := lifecycleManagerForConnector(managedCfg, conn); got != "gateway" {
+				t.Fatalf("managed lifecycle manager = %q, want gateway (the hook guardian never takes OpenClaw)", got)
+			}
 		})
 	}
 }
