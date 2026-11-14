@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -167,6 +168,9 @@ func TestGAP0526BlockedCommandWithSyntaxErrorStillBlocks(t *testing.T) {
 			hook := gap0437Server(t, p, "claudecode", "action")
 			codex := gap0437Server(t, p, "codex", "action")
 			inspect := gap0437Server(t, p, "openclaw", "action")
+			// A loaded -race box can pass the product scan window on these
+			// many calls; the verdict, not the window, is under test.
+			inspect.inspectToolScanTimeout = time.Minute
 			acpEnv := gap0526ACPEnv(t, p)
 			cwd := t.TempDir()
 			routes := map[string]func(id, command string) map[string]any{
