@@ -10,6 +10,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
+// The tests run with the bound misuse checks on, as every adopter's do.
+func init() { bounded.PanicOnMisuse(true) }
+
 // rel-1-0-10:GAP-0657: the access of the code a hand-off reaches.
 func TestInlineCodeAccess(t *testing.T) {
 	for _, tc := range []struct {

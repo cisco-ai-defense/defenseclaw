@@ -849,13 +849,20 @@ func registrationFindActionTargets(args []*syntax.Word, values actionValues, cwd
 				// changes it) may change it: the same screens the state reader
 				// applies (actionfacts.FindEmbeddedCommandMayChange,
 				// rel-1-0-10:GAP-0501, GAP-0660).
-				argv := []string{"find", action}
+				var childWords []string
 				for _, word := range words {
 					text, fixed := StaticWord(word, home)
 					if !fixed {
 						text = "$"
 					}
-					argv = append(argv, text)
+					childWords = append(childWords, text)
+				}
+				// Only the programs a find child may not be a reader of: the
+				// wrapper (env, nice, timeout, sudo) is looked through.
+				child, _, _ := actionfacts.InlineChild(childWords)
+				argv := append([]string{"find", action}, child...)
+				if len(child) == 0 || !slices.Contains([]string{"rg", "file", "less", "sort", "chmod", "chown", "chgrp", "touch"}, programBase(child[0])) {
+					continue
 				}
 				if actionfacts.FindEmbeddedCommandMayChange(append(argv, ";")) {
 					targets = append(targets, file)

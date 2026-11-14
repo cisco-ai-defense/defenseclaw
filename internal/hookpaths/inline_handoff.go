@@ -253,8 +253,9 @@ func (r *inlineReading) abs(word string) string {
 // handed word code splits at the =), when the value can be one path.
 func inlineAssignedPath(word string) (string, bool) {
 	name, value, ok := strings.Cut(word, "=")
-	if !ok || name == "" || value == "" || strings.ContainsAny(name, "/~.-:") || !actionfacts.InlineHandedWordIsPath(value) {
-		return "", false
+	if !ok || name == "" || value == "" || strings.ContainsAny(name, "/~.-:") || !actionfacts.InlineHandedWordIsPath(value) ||
+		!strings.ContainsAny(value, "/~") {
+		return "", false // a value with no slash or tilde (A=1, mode=r) names no path
 	}
 	for _, letter := range name {
 		if letter != '_' && (letter < 'a' || letter > 'z') && (letter < 'A' || letter > 'Z') && (letter < '0' || letter > '9') {
