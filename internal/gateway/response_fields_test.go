@@ -479,3 +479,153 @@ func TestPassthroughRealDetectorsReadThinkingAndToolInput(t *testing.T) {
 		})
 	}
 }
+
+// TestReviewResponseFieldRows: the field rows of the s7-respfrev review
+// (TestZZQrf1Fields, F01-F20 and T01-T11). Each streamed or body row
+// carries the marker in one field; the completion checks must read it and
+// the client must not get it. GAP-0519: Bedrock InvokeModel replies of
+// every family. GAP-0520: a Gemini stream sent as a JSON array. GAP-0521:
+// the legacy function_call and Responses custom tool input. GAP-0523: chat
+// audio transcripts and Gemini executable code.
+func TestReviewResponseFieldRows(t *testing.T) {
+	M := jsonText(respFieldMarker)
+	cases := []struct {
+		passthroughFieldCase
+		// skip names the gap of a field that stays unread; readOnly a row
+		// whose read is checked but whose bytes reach the client on this
+		// branch (GAP-0524: the last NDJSON line with no newline is read
+		// after the stream is released; s7/stream-tail reads it in the loop).
+		skip     string
+		readOnly bool
+	}{
+		{passthroughFieldCase: passthroughFieldCase{"F01 bedrock/stream/invoke_nova_text", "bedrock", "/model/m/invoke-with-response-stream", ctEvents, eventStreamBody(t,
+			"chunk", invokeChunk(`{"contentBlockDelta":{"delta":{"text":`+M+`},"contentBlockIndex":0}}`))}},
+		{passthroughFieldCase: passthroughFieldCase{"F02 bedrock/stream/invoke_mistral_outputs", "bedrock", "/model/m/invoke-with-response-stream", ctEvents, eventStreamBody(t,
+			"chunk", invokeChunk(`{"outputs":[{"text":`+M+`,"stop_reason":null}]}`))}},
+		{passthroughFieldCase: passthroughFieldCase{"F03 bedrock/stream/invoke_cohere_text", "bedrock", "/model/m/invoke-with-response-stream", ctEvents, eventStreamBody(t,
+			"chunk", invokeChunk(`{"text":`+M+`,"is_finished":false}`))}},
+		{passthroughFieldCase: passthroughFieldCase{"F04 bedrock/stream/invoke_chatshape", "bedrock", "/model/m/invoke-with-response-stream", ctEvents, eventStreamBody(t,
+			"chunk", invokeChunk(`{"choices":[{"index":0,"delta":{"content":`+M+`}}]}`))}},
+		{passthroughFieldCase: passthroughFieldCase{"F05 bedrock/body/invoke_chatshape", "bedrock", "/model/m/invoke", ctJSON,
+			`{"choices":[{"index":0,"message":{"role":"assistant","content":` + M + `}}]}`}},
+		{passthroughFieldCase: passthroughFieldCase{"F06 bedrock/body/invoke_mistral_outputs", "bedrock", "/model/m/invoke", ctJSON,
+			`{"outputs":[{"text":` + M + `}]}`}},
+		{passthroughFieldCase: passthroughFieldCase{"F07 chatshape/stream/legacy_function_call", "openai", "/v1/completions", ctSSE, sseBody(
+			`{"choices":[{"index":0,"delta":{"function_call":{"name":"run","arguments":` + M + `}}}]}`)}},
+		{passthroughFieldCase: passthroughFieldCase{"F08 chatshape/stream/audio_transcript", "openai", "/v1/completions", ctSSE, sseBody(
+			`{"choices":[{"index":0,"delta":{"audio":{"transcript":` + M + `}}}]}`)}},
+		{passthroughFieldCase: passthroughFieldCase{"F09 chatshape/body/audio_transcript", "openai", "/v1/completions", ctJSON,
+			`{"choices":[{"index":0,"message":{"content":null,"audio":{"id":"a1","transcript":` + M + `}}}]}`}},
+		{passthroughFieldCase: passthroughFieldCase{"F10 gemini/body/executable_code", "gemini", "/v1beta/models/gemini-x:generateContent", ctJSON,
+			`{"candidates":[{"content":{"parts":[{"executableCode":{"language":"PYTHON","code":` + M + `}}]}}]}`}},
+		{passthroughFieldCase: passthroughFieldCase{"F11 gemini/stream/executable_code", "gemini", "/v1beta/models/gemini-x:streamGenerateContent", ctSSE, sseBody(
+			`{"candidates":[{"content":{"parts":[{"executableCode":{"language":"PYTHON","code":` + M + `}}]}}]}`)}},
+		{passthroughFieldCase: passthroughFieldCase{"F12 chatshape/stream/reasoning_details", "openai", "/v1/completions", ctSSE, sseBody(
+			`{"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":` + M + `}]}}]}`)},
+			skip: "GAP-0525 (P4): OpenRouter reasoning_details repeats delta.reasoning, which is read"},
+		{passthroughFieldCase: passthroughFieldCase{"F13 responses/stream/audio_transcript", "openai", "/v1/responses", ctSSE, sseBody(
+			`{"type":"response.audio.transcript.delta","delta":` + M + `}`)}},
+		{passthroughFieldCase: passthroughFieldCase{"F14 responses/stream/custom_tool_input", "openai", "/v1/responses", ctSSE, sseBody(
+			`{"type":"response.custom_tool_call_input.delta","output_index":1,"delta":` + M + `}`)}},
+		{passthroughFieldCase: passthroughFieldCase{"F15 ollama/stream/tool_calls", "ollama", "/api/chat", ctNDJSON, ndjsonBody(
+			`{"model":"llama3","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"run","arguments":{"command":`+M+`}}}]},"done":false}`,
+			`{"model":"llama3","message":{"role":"assistant","content":""},"done":true}`)}},
+		{passthroughFieldCase: passthroughFieldCase{"F16 chatshape/stream/crlf_nospace", "openai", "/v1/completions", ctSSE,
+			"data:{\"choices\":[{\"index\":0,\"delta\":{\"content\":" + M + "}}]}\r\n\r\n"}},
+		{passthroughFieldCase: passthroughFieldCase{"F17 ollama/stream/no_trailing_newline", "ollama", "/api/chat", ctNDJSON,
+			`{"model":"llama3","message":{"role":"assistant","content":` + M + `},"done":true}`}, readOnly: true},
+		{passthroughFieldCase: passthroughFieldCase{"F18 chatshape/body/reasoning_object", "openai", "/v1/completions", ctJSON,
+			`{"choices":[{"index":0,"message":{"content":"ok","reasoning":{"text":` + M + `}}}]}`},
+			skip: "GAP-0525 (P4): reasoning is read as a string; no provider sends it as an object with text"},
+		{passthroughFieldCase: passthroughFieldCase{"F19 anthropic/stream/server_tool_input", "anthropic", "/v1/messages", ctSSE, sseBody(
+			`{"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"s1","name":"web_search","input":{}}}`,
+			`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":`+jsonText(`{"query":"`+respFieldMarker+`"}`)+`}}`)}},
+		{passthroughFieldCase: passthroughFieldCase{"F20 gemini/stream/json_array_body", "gemini", "/v1beta/models/gemini-x:streamGenerateContent", ctJSON,
+			`[{"candidates":[{"content":{"parts":[{"text":"ok "}]}}]},{"candidates":[{"content":{"parts":[{"text":` + M + `}]}}]}]`}},
+	}
+	for _, c := range cases {
+		t.Run(strings.Fields(c.name)[0], func(t *testing.T) {
+			if c.skip != "" {
+				t.Skipf("unread: %s", c.skip)
+			}
+			saw, out := runPassthroughFieldCase(t, c.passthroughFieldCase)
+			if !saw {
+				t.Errorf("%s: the completion checks never read the field", c.name)
+			}
+			if !c.readOnly && (strings.Contains(out, respFieldMarker) || (c.contentType == ctEvents && out == c.body)) {
+				t.Errorf("%s: the field reached the client (%d bytes)", c.name, len(out))
+			}
+		})
+	}
+
+	args := jsonText(`{"command":"` + respFieldMarker + `"}`)
+	bodies := []struct{ id, provider, body, skip string }{
+		{"T01 anthropic/tool_use", "anthropic", `{"content":[{"type":"tool_use","id":"t","name":"run","input":{"command":` + M + `}}]}`, ""},
+		{"T02 bedrock/invoke_anthropic_tool_use", "bedrock", `{"type":"message","content":[{"type":"tool_use","id":"t","name":"run","input":{"command":` + M + `}}]}`, ""},
+		{"T03 bedrock/converse_tool_use", "bedrock", `{"output":{"message":{"content":[{"toolUse":{"toolUseId":"t","name":"run","input":{"command":` + M + `}}}]}}}`, ""},
+		{"T04 chat/choice1_tool_calls", "openai", `{"choices":[{"index":0,"message":{"content":"ok"}},{"index":1,"message":{"tool_calls":[{"id":"c","type":"function","function":{"name":"run","arguments":` + args + `}}]}}]}`, ""},
+		{"T05 chat/legacy_function_call", "openai", `{"choices":[{"index":0,"message":{"content":null,"function_call":{"name":"run","arguments":` + args + `}}}]}`, ""},
+		{"T06 responses/function_call", "openai", `{"output":[{"type":"function_call","call_id":"c","name":"run","arguments":` + args + `}]}`, ""},
+		{"T07 responses/custom_tool_call_input", "openai", `{"output":[{"type":"custom_tool_call","call_id":"c","name":"apply_patch","input":` + M + `}]}`, ""},
+		{"T08 responses/mcp_call_arguments", "openai", `{"output":[{"type":"mcp_call","id":"m","name":"run","server_label":"s","arguments":` + args + `}]}`,
+			"GAP-0525 (P4): an mcp_call runs on the provider's side"},
+		{"T09 gemini/function_call", "gemini", `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"run","args":{"command":` + M + `}}}]}}]}`, ""},
+		{"T10 ollama/tool_calls", "ollama", `{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"run","arguments":{"command":` + M + `}}}]}}`, ""},
+		{"T11 bedrock/invoke_chatshape_tool_calls", "bedrock", `{"choices":[{"index":0,"message":{"tool_calls":[{"id":"c","type":"function","function":{"name":"run","arguments":` + args + `}}]}}]}`, ""},
+		{"T12 bedrock/invoke_cohere_tool_calls", "bedrock", `{"text":"","tool_calls":[{"name":"run","parameters":{"command":` + M + `}}]}`, ""},
+		{"T13 gemini/json_array_function_call", "gemini", `[{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]},{"candidates":[{"content":{"parts":[{"functionCall":{"name":"run","args":{"command":` + M + `}}}]}}]}]`, ""},
+	}
+	for _, b := range bodies {
+		t.Run(strings.Fields(b.id)[0], func(t *testing.T) {
+			if b.skip != "" {
+				t.Skipf("unread: %s", b.skip)
+			}
+			calls := extractPassthroughToolCalls([]byte(b.body), b.provider)
+			text := extractPassthroughResponseContent([]byte(b.body), b.provider)
+			if !strings.Contains(string(calls), respFieldMarker) && !strings.Contains(text, respFieldMarker) {
+				t.Errorf("%s: never read (tool calls %s, text %q)", b.id, calls, text)
+			}
+			if len(calls) > 0 {
+				var parsed []struct {
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				}
+				if err := json.Unmarshal(calls, &parsed); err != nil || len(parsed) == 0 || parsed[0].Function.Name == "" {
+					t.Errorf("%s: not in the inspectToolCalls shape: %s", b.id, calls)
+				}
+			}
+		})
+	}
+}
+
+// TestRawForwardReadsLegacyFunctionCall (GAP-0521): the raw forward path
+// checks a legacy function_call as a tool call, in the body and in the
+// stream, where the arguments arrive in pieces.
+func TestRawForwardReadsLegacyFunctionCall(t *testing.T) {
+	half1, half2 := jsonText(`{"command":"`+respFieldMarker[:9]), jsonText(respFieldMarker[9:]+`"}`)
+	body := `{"choices":[{"index":0,"message":{"role":"assistant","content":null,"function_call":{"name":"run","arguments":` +
+		jsonText(`{"command":"`+respFieldMarker+`"}`) + `}},"finish_reason":"function_call"}]}`
+	if got := string(extractRawForwardToolCalls([]byte(body), false)); !strings.Contains(got, respFieldMarker) {
+		t.Errorf("body: %s", got)
+	}
+	stream := sseBody(
+		`{"choices":[{"index":0,"delta":{"function_call":{"name":"run","arguments":`+half1+`}}}]}`,
+		`{"choices":[{"index":0,"delta":{"function_call":{"arguments":`+half2+`}},"finish_reason":"function_call"}]}`, "[DONE]")
+	got := extractRawForwardToolCalls([]byte(stream), true)
+	var calls []struct {
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(got, &calls); err != nil || len(calls) != 1 || calls[0].Function.Name != "run" ||
+		calls[0].Function.Arguments != `{"command":"`+respFieldMarker+`"}` {
+		t.Errorf("stream: %s", got)
+	}
+	_, deltas, finish := parseRawForwardSSEPayload(`{"choices":[{"index":0,"delta":{"function_call":{"arguments":"x"}},"finish_reason":"function_call"}]}`)
+	if len(deltas) != 1 || len(finish) != 1 {
+		t.Errorf("payload: deltas %d finish %v", len(deltas), finish)
+	}
+}

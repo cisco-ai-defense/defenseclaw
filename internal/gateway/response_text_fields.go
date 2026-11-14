@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
@@ -36,6 +37,10 @@ const (
 	responseFieldReasoning
 	responseFieldRefusal
 	responseFieldToolInput
+	// The spoken answer of an audio reply and code the model wrote for a
+	// code-execution tool (GAP-0523).
+	responseFieldTranscript
+	responseFieldCode
 )
 
 // responseLane names one run of model text: a choice (or candidate), a
@@ -175,6 +180,43 @@ type chatShapeMessage struct {
 			Arguments json.RawMessage `json:"arguments"`
 		} `json:"function"`
 	} `json:"tool_calls"`
+	FunctionCall *legacyFunctionCall `json:"function_call"`
+	Audio        *struct {
+		Transcript string `json:"transcript"`
+	} `json:"audio"`
+}
+
+// legacyFunctionCall is the chat function_call that came before tool_calls
+// (one call per choice). Servers still send it, and its arguments are tool
+// input like a tool call's (GAP-0521).
+type legacyFunctionCall struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+// legacyFunctionCallIndex keeps the legacy call apart from the tool_calls
+// of the same choice.
+const legacyFunctionCallIndex = -1
+
+// toolCalls is the legacy call in the tool_calls shape, so the tool-call
+// checks read it as they read any call. nil when there is none.
+func (f *legacyFunctionCall) toolCalls() json.RawMessage {
+	if f == nil || f.Name == "" && len(f.Arguments) == 0 {
+		return nil
+	}
+	type fn struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	b, err := json.Marshal([]struct {
+		Index    int    `json:"index"`
+		Type     string `json:"type"`
+		Function fn     `json:"function"`
+	}{{Index: legacyFunctionCallIndex, Type: "function", Function: fn{Name: f.Name, Arguments: jsonArgsText(f.Arguments)}}})
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 type chatShapeChoice struct {
@@ -230,9 +272,33 @@ func chatMessagePieces(choice int, m *chatShapeMessage, withTools bool) []respon
 	if s := respJSONString(m.Reasoning); s != "" {
 		out = append(out, reasoningPiece(choice, s))
 	}
+	if m.Audio != nil && m.Audio.Transcript != "" {
+		out = append(out, responsePiece{lane: responseLane{choice: choice, field: responseFieldTranscript}, text: m.Audio.Transcript})
+	}
 	if withTools {
 		for _, tc := range m.ToolCalls {
 			out = append(out, toolInputPiece(choice, tc.Index, jsonArgsText(tc.Function.Arguments)))
+		}
+		if m.FunctionCall != nil {
+			out = append(out, toolInputPiece(choice, legacyFunctionCallIndex, jsonArgsText(m.FunctionCall.Arguments)))
+		}
+	}
+	return out
+}
+
+// chatLegacyToolCalls is the legacy function_call of every choice, in the
+// tool_calls shape, per choice: for the paths that check tool calls on
+// their own (GAP-0521).
+func chatLegacyToolCalls(choices []chatShapeChoice) []rawForwardToolCallDelta {
+	var out []rawForwardToolCallDelta
+	for _, c := range choices {
+		for _, m := range []*chatShapeMessage{c.Delta, c.Message} {
+			if m == nil {
+				continue
+			}
+			if tc := m.FunctionCall.toolCalls(); tc != nil {
+				out = append(out, rawForwardToolCallDelta{choiceIndex: c.Index, toolCalls: tc})
+			}
 		}
 	}
 	return out
@@ -413,9 +479,36 @@ func (d *bedrockStreamDelta) pieces() []responsePiece {
 	}
 }
 
+// jsonArrayElements is the elements of a body that is a JSON array. A
+// Gemini streamGenerateContent reply without alt=sse is one: a JSON array
+// of GenerateContentResponse chunks sent as application/json (GAP-0520).
+func jsonArrayElements(body []byte) ([]json.RawMessage, bool) {
+	b := bytes.TrimSpace(body)
+	if len(b) == 0 || b[0] != '[' {
+		return nil, false
+	}
+	var elems []json.RawMessage
+	if json.Unmarshal(b, &elems) != nil {
+		return nil, false
+	}
+	return elems, true
+}
+
 // geminiPieces reads every candidate: answer parts, thought parts, and with
-// withTools the functionCall arguments.
+// withTools the functionCall arguments. A JSON array body is read chunk by
+// chunk, as the SSE stream is read event by event.
 func geminiPieces(body []byte, withTools bool) []responsePiece {
+	if elems, ok := jsonArrayElements(body); ok {
+		var out []responsePiece
+		for _, e := range elems {
+			out = append(out, geminiResponsePieces(e, withTools)...)
+		}
+		return out
+	}
+	return geminiResponsePieces(body, withTools)
+}
+
+func geminiResponsePieces(body []byte, withTools bool) []responsePiece {
 	var resp struct {
 		Candidates []struct {
 			Index   *int `json:"index"`
@@ -426,6 +519,9 @@ func geminiPieces(body []byte, withTools bool) []responsePiece {
 					FunctionCall *struct {
 						Args json.RawMessage `json:"args"`
 					} `json:"functionCall"`
+					ExecutableCode *struct {
+						Code string `json:"code"`
+					} `json:"executableCode"`
 				} `json:"parts"`
 			} `json:"content"`
 		} `json:"candidates"`
@@ -447,6 +543,11 @@ func geminiPieces(body []byte, withTools bool) []responsePiece {
 			}
 			if withTools && p.FunctionCall != nil {
 				out = append(out, toolInputPiece(choice, pi, jsonArgsText(p.FunctionCall.Args)))
+			}
+			if p.ExecutableCode != nil && p.ExecutableCode.Code != "" {
+				// Code execution has no tool-call check: its code is read as
+				// model text on every path.
+				out = append(out, responsePiece{lane: responseLane{choice: choice, field: responseFieldCode, part: pi}, text: p.ExecutableCode.Code})
 			}
 		}
 	}

@@ -2044,11 +2044,19 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 				Summary []struct {
 					Text string `json:"text"`
 				} `json:"summary"`
+				Input json.RawMessage `json:"input"`
 			} `json:"output"`
 		}
 		if json.Unmarshal(body, &respAPI) == nil && len(respAPI.Output) > 0 {
 			var r responseText
 			for i, o := range respAPI.Output {
+				if o.Type == "custom_tool_call" {
+					// Free-form tool input (a patch, a script): model text,
+					// as the stream reads response.custom_tool_call_input
+					// deltas (GAP-0521).
+					r.Add(toolInputPiece(0, i, respJSONString(o.Input)))
+					continue
+				}
 				if o.Type == "reasoning" {
 					for _, s := range o.Summary {
 						r.Add(responsePiece{lane: responseLane{field: responseFieldReasoning, part: i}, text: s.Text})
@@ -2166,10 +2174,17 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 				} `json:"content"`
 			} `json:"candidates"`
 		}
-		if json.Unmarshal(body, &resp) == nil {
-			for _, c := range resp.Candidates {
-				for _, p := range c.Content.Parts {
-					addCall(p.FunctionCall.Name, p.FunctionCall.Args)
+		chunks, isArray := jsonArrayElements(body)
+		if !isArray {
+			chunks = []json.RawMessage{body}
+		}
+		for _, chunk := range chunks {
+			resp.Candidates = nil
+			if json.Unmarshal(chunk, &resp) == nil {
+				for _, c := range resp.Candidates {
+					for _, p := range c.Content.Parts {
+						addCall(p.FunctionCall.Name, p.FunctionCall.Args)
+					}
 				}
 			}
 		}
@@ -2209,9 +2224,10 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 			}
 		}
 		if len(calls) == 0 {
-			// InvokeModel for Claude answers with Anthropic tool_use blocks
-			// (GAP-0098).
-			if raw := extractPassthroughToolCalls(body, "anthropic"); raw != nil {
+			// InvokeModel answers in the model family's shape: Anthropic
+			// tool_use blocks for Claude (GAP-0098), the chat shape and
+			// Cohere tool_calls for others (GAP-0519).
+			if raw := bedrockInvokeToolCalls(body); raw != nil {
 				return raw
 			}
 		}
@@ -2241,6 +2257,8 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 							Arguments string `json:"arguments"`
 						} `json:"function"`
 					} `json:"tool_calls"`
+					// The legacy function_call (GAP-0521).
+					FunctionCall *legacyFunctionCall `json:"function_call"`
 				} `json:"message"`
 			} `json:"choices"`
 		}
@@ -2248,6 +2266,9 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 			for _, c := range respCC.Choices {
 				for _, tc := range c.Message.ToolCalls {
 					addCall(tc.Function.Name, tc.Function.Arguments)
+				}
+				if fc := c.Message.FunctionCall; fc != nil {
+					addCall(fc.Name, jsonArgsText(fc.Arguments))
 				}
 			}
 		}
@@ -6173,7 +6194,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 				frameHasToolCalls = true
 			}
 			for _, finishReason := range finishReasons {
-				if finishReason == "tool_calls" {
+				if finishReason == "tool_calls" || finishReason == "function_call" {
 					frameToolCallFinish = true
 				}
 				streamFinishReasons = append(streamFinishReasons, finishReason)
@@ -6508,6 +6529,14 @@ func extractRawForwardToolCalls(respBody []byte, stream bool) json.RawMessage {
 				out = mergeToolCallChunks(out, ch.Message.ToolCalls)
 			}
 		}
+		var legacy struct {
+			Choices []chatShapeChoice `json:"choices"`
+		}
+		if json.Unmarshal(respBody, &legacy) == nil {
+			for _, d := range chatLegacyToolCalls(legacy.Choices) {
+				out = mergeToolCallChunks(out, d.toolCalls)
+			}
+		}
 		return out
 	}
 
@@ -6570,7 +6599,7 @@ func parseRawForwardSSEPayload(payload string) ([]responsePiece, []rawForwardToo
 	_ = json.Unmarshal([]byte(payload), &text)
 	pieces := chatChoicesPieces(text.Choices, false)
 
-	toolCallDeltas := make([]rawForwardToolCallDelta, 0, len(chunk.Choices))
+	toolCallDeltas := chatLegacyToolCalls(text.Choices)
 	finishReasons := make([]string, 0, len(chunk.Choices))
 	for _, ch := range chunk.Choices {
 		if ch.Delta != nil && len(ch.Delta.ToolCalls) > 0 {

@@ -234,7 +234,7 @@ func acceptedRuleMatchAt(ruleID, text, match string, start, end int) bool {
 func ruleMatchValidator(ruleID string) func(text, match string, start, end int) bool {
 	switch ruleID {
 	case passwordAssignRuleID:
-		return func(_, match string, _, _ int) bool { return acceptedPasswordAssignment(match) }
+		return func(text, match string, start, _ int) bool { return acceptedPasswordAssignment(text, match, start) }
 	case bareBearerRuleID:
 		return func(text, match string, start, _ int) bool { return acceptedBareBearer(text, match, start) }
 	case "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN":

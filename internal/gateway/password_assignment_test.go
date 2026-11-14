@@ -91,6 +91,17 @@ func TestPasswordAssignmentRule(t *testing.T) {
 		`password_min_length: 12345678`,
 		`password: Ab1`, // too short
 	}
+	// GAP-0522 recall guards: values that look like the benign shapes
+	// below but hold a password are still reported.
+	report = append(report,
+		`password: "`+pw("Pass", "word2024!")+`"`,  // the key word inside one word
+		`password = "my-`+pw("Wq7", "mz2")+`"`,     // a slug with digits
+		`"password": "@`+pw("dm1n", "Pass")+`"`,    // a sigil and a word with a digit
+		`password = "`+pw("Secret", "|2024x")+`"`,  // a pipe, not a rule list
+		`password: "^`+pw("Wq7mz", "2Lp")+`"`,      // a caret, not a regex
+		`"password": "**`+pw("Wq7m", "z2Lp")+`**"`, // stars around a password
+		`"pwd": "`+pw("Wq7m", "/z2Lp!")+`"`,        // a slash, not a path
+	)
 	for _, in := range report {
 		if !hasRule(ScanAllRules(in, "write_file"), passwordAssignRuleID) {
 			t.Errorf("not reported: %q", in)
@@ -99,6 +110,80 @@ func TestPasswordAssignmentRule(t *testing.T) {
 	for _, in := range ignore {
 		if hasRule(ScanAllRules(in, "write_file"), passwordAssignRuleID) {
 			t.Errorf("reported: %q", in)
+		}
+	}
+}
+
+// benignPasswordRows are the reviewer's benign probe rows (TestZZQrf2Benign,
+// s7-respfrev) with the completion verdict rel a75abaec78 gave them. rel
+// is the floor (GAP-0522): the pack rules report none of them on any
+// surface, and the completion and prompt checks decide each row as rel
+// did (rel's LP-SECRET list still alerts where it did).
+var benignPasswordRows = []struct{ id, in, rel string }{
+	{"B01", `'password' => 'required|string|min:8|confirmed',`, "allow"},
+	{"B02", `password: 'required|min:8'`, "alert"},
+	{"B03", `UPDATE users SET password = :password WHERE id = :id`, "alert"},
+	{"B04", `"password": "{password}"`, "allow"},
+	{"B05", `password="{db_password}"`, "alert"},
+	{"B06", `"password": "[REDACTED]"`, "allow"},
+	{"B07", `password=[REDACTED]`, "alert"},
+	{"B08", `"password": "your-password-here"`, "allow"},
+	{"B09", `DB_PASSWORD=your_db_password_here`, "allow"},
+	{"B10", `password: your-password`, "alert"},
+	{"B11", `/etc/passwd:root:x:0:0:root:/root:/bin/bash`, "alert"},
+	{"B12", `pwd: "packages/core"`, "alert"},
+	{"B13", `"password": "#{ENV[DB_PASS]}"`, "allow"},
+	{"B14", `password = @Password`, "alert"},
+	{"B16", `"password": "^(?=.*[A-Z])(?=.*[0-9]).{8,}$"`, "allow"},
+	{"B17", `Password: must contain 8+ chars`, "allow"},
+	{"B21", `"password": "Enter your password"`, "allow"},
+	{"B23", `"password": "string"`, "allow"},
+	{"B25", `"password": "env:DB_PASSWORD"`, "allow"},
+	{"B27", `password=**redacted**`, "alert"},
+	{"B29", `"password": "%(db_password)s"`, "allow"},
+	{"B30", `"password": "$(DB_PASSWORD)"`, "allow"},
+	{"B31", `password: <%= ENV.fetch("DB_PASSWORD") %>`, "allow"},
+	{"B32", `{"token_type":"Bearer","expires_in":3600}`, "allow"},
+	{"B33", `WWW-Authenticate: Bearer realm="api", error="invalid_token"`, "allow"},
+	{"B35", `Bearer sk-proj-xxxxxxxxxxxxxxxxxxxxxxxx`, "allow"},
+	{"B37", `Bearer YOUR_ACCESS_TOKEN_GOES_HERE_1`, "alert"},
+	{"B39", `password_confirmation: 'required|same:password'`, "allow"},
+	{"B40", `"passwordPolicy": "min8-upper1-digit1"`, "allow"},
+	{"B41", `PASSWORD_MIN_LENGTH=12 PASSWORD_REQUIRE_DIGIT=true`, "allow"},
+	{"B42", `pwd=src/components/forms`, "alert"},
+	{"B43", `$ echo PWD=packages/web-app`, "alert"},
+	{"B44", `password: "Must be 8+ characters, 1 digit"`, "allow"},
+	{"B45", `"pwd": "C:/Users/dev/proj"`, "allow"},
+	{"B46", `password: ENC(AbC123xYz==)`, "alert"},
+	{"B47", `password = request.form["password"]`, "alert"},
+	{"B48", `password = req.body.password;`, "alert"},
+	{"B49", `password: z.string().min(8)`, "alert"},
+	{"B50", `"password": "********"`, "allow"},
+	{"B51", `"password": "<PASSWORD>"`, "allow"},
+	{"B52", `password: "{{ vault_db_password }}"`, "allow"},
+	{"B53", `"password": "${{ secrets.DB_PASSWORD }}"`, "allow"},
+	{"B54", `$table->string('password', 255);`, "allow"},
+	{"B55", `'password' => Hash::make($request->password),`, "allow"},
+	{"B56", `'password' => bcrypt('secret'),`, "allow"},
+}
+
+// TestPasswordBenignRowsKeepTheRelFloor (GAP-0522): no benign row is
+// reported by SEC-PASSWORD-ASSIGN or SEC-BEARER-BARE, so no surface alerts
+// on a row rel allows.
+func TestPasswordBenignRowsKeepTheRelFloor(t *testing.T) {
+	insp := NewGuardrailInspector("local", nil, nil)
+	for _, row := range benignPasswordRows {
+		for _, tool := range []string{"write_file", "send_message"} {
+			findings := ScanAllRules(row.in, tool)
+			if hasRule(findings, passwordAssignRuleID) || hasRule(findings, bareBearerRuleID) {
+				t.Errorf("%s %s: reported by the pack: %q", row.id, tool, row.in)
+			}
+		}
+		for _, direction := range []string{"completion", "prompt"} {
+			v := insp.Inspect(context.Background(), direction, row.in, nil, "m", "action")
+			if v.Action != row.rel {
+				t.Errorf("%s %s: %s/%s, rel %s: %q %v", row.id, direction, v.Action, v.Severity, row.rel, row.in, v.Findings)
+			}
 		}
 	}
 }
@@ -137,9 +222,14 @@ func TestBareBearerRule(t *testing.T) {
 // check find both shapes, as the tool-call scan above does.
 func TestPasswordAndBearerOnEverySurface(t *testing.T) {
 	insp := NewGuardrailInspector("local", nil, nil)
+	v8 := pw("Wq7m", "z2Lp")
 	for _, in := range []string{
 		`DB_PASSWORD=` + pw("Wq7m", "z2Lp9"),
 		`Use Bearer ` + pw("q7Vx2M9p", "4Rk8T3n6", "W1y5Za0B") + ` here`,
+		// GAP-0522: quoted keys, which only the pack rule reads.
+		`"password": "` + v8 + `"`,
+		`'password' => '` + v8 + `!',`,
+		`"password": "svc.` + pw("Login", "99") + `"`,
 	} {
 		for _, direction := range []string{"completion", "prompt"} {
 			v := insp.Inspect(context.Background(), direction, in, nil, "m", "action")
