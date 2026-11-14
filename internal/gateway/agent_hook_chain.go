@@ -675,8 +675,19 @@ func (a *APIServer) applyAgentHookToolChains(
 			rootRepository, rootResult, rootAdded, denyEligible, latency)
 	}
 
+	// A pre-tool proposal the gateway blocked keeps only its secret-read step
+	// pending: a blocked call that never runs never promotes it, but one the
+	// agent runs anyway (its exact success outcome arrives) is a completed
+	// credentials read, and the egress after it is judged as the chain. The
+	// strict tier blocks some credential-store reads outright (the tool-shape
+	// path rules), and without this the read left no chain behind.
+	pendingProjection := predecessorProjection
+	preparePending := resp.Action != guardrailActionBlock
+	if !preparePending {
+		pendingProjection, preparePending = blockedSecretReadPredecessor(predecessorProjection)
+	}
 	if structuredAction &&
-		resp.Action != guardrailActionBlock &&
+		preparePending &&
 		invocationDigest != "" &&
 		lifecycle.IsPreProposalEvent(req.HookEventName) {
 		prepareInput := audit.ToolChainPreparePendingInput{
@@ -685,11 +696,13 @@ func (a *APIServer) applyAgentHookToolChains(
 			PreSemanticEventID:   audit.SemanticEventID(req.SemanticEventID),
 			PreInputFingerprint:  inputFingerprint,
 			RulesetFingerprint:   rulesetFingerprint,
-			Projection:           predecessorProjection,
-			SQLValueSource:       pendingSQLValueSource(req.toolChain),
-			ReturnedCredentialSource: actionfacts.ExactReturnedCredentialSource(
+			Projection:           pendingProjection,
+		}
+		if resp.Action != guardrailActionBlock {
+			prepareInput.SQLValueSource = pendingSQLValueSource(req.toolChain)
+			prepareInput.ReturnedCredentialSource = actionfacts.ExactReturnedCredentialSource(
 				req.toolChain.facts,
-			),
+			)
 		}
 		if rootRepository != nil {
 			// Additive: a root-scope persistence failure changes nothing here.
@@ -702,6 +715,26 @@ func (a *APIServer) applyAgentHookToolChains(
 		}
 	}
 	return resp, finalization
+}
+
+// blockedSecretReadPredecessor is the secret-read step of a blocked pre-tool
+// proposal, with its own join digests and nothing else, or false when the
+// proposal has no secret-read step.
+func blockedSecretReadPredecessor(
+	projection guardrail.ToolChainProjection,
+) (guardrail.ToolChainProjection, bool) {
+	out := guardrail.ToolChainProjection{ParseStatus: projection.ParseStatus}
+	bit, ok := guardrail.ToolChainStepMask(guardrail.ToolChainSecretReadThenEgress, 1)
+	index, indexed := guardrail.ToolChainIndexByID(guardrail.ToolChainSecretReadThenEgress)
+	if !ok || !indexed || projection.DetectionStepMask&bit == 0 {
+		return out, false
+	}
+	out.DetectionStepMask = bit
+	out.EnforcementStepMask = projection.EnforcementStepMask & bit
+	out.EnforcementJoinDigests[index] = projection.EnforcementJoinDigests[index]
+	out.EnforcementOutputJoinDigests[index] = projection.EnforcementOutputJoinDigests[index]
+	out.ValueJoinDigests[index] = projection.ValueJoinDigests[index]
+	return out, true
 }
 
 // toolChainProjectionForPolicyPosture keeps useful but proximity-only chain
