@@ -292,7 +292,7 @@ func TestResprevRemovedProxyShapesStillFound(t *testing.T) {
 		"aws secret":          "aws_secret_access_key=" + val(11, 40),
 		"removed test 1":      "api_key=q7V2m9X4k8P6r3T1w5Y0n8C4",
 		"removed test 2":      "Bearer eyJhbGciOiJIUzI1NiJ9.q7V2m9X4k8P6r3T1w5Y0.n8C4x6Z2",
-		"removed test 3":      "token​=​ A7b9C2d4E6f8G1h3J5k7L9m2N4p6Q8r1",
+		"removed test 3":      "token\u200b=\u200b A7b9C2d4E6f8G1h3J5k7L9m2N4p6Q8r1",
 	}
 	api := &APIServer{scannerCfg: &config.Config{}}
 	insp := NewGuardrailInspector("local", nil, nil)
