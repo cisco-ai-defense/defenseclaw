@@ -168,6 +168,11 @@ var srd2Round2Chain = func() map[string]bool {
 		"RS2", "RS2a", "RS3", "F6b", "F6c", "B1", "B2",
 		"M1", "M2", "M3", "M4",
 		"U1", "U5", "U11", "U13", "U17",
+		// Part B (GAP-0418): these upload calls are conditional lists the
+		// parser does not finish, so they are not proven to keep their
+		// directory and the relative file they upload is unnamed: they join
+		// by the unproven-call rule (alert only), not by GAP-0479.
+		"N4", "N17", "N21", "N22",
 	} {
 		want[id] = true
 	}
