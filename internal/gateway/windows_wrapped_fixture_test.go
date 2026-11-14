@@ -47,6 +47,19 @@ var windowsWrappedKnownLimit = map[string]string{
 	"windows-uac-eventvwr-autoelevation-hijack": "whole-script owner: an extra statement is not the registry-write-then-launch pair",
 }
 
+// windowsEquivalentRules are rules that name the same action in another
+// spelling: a wrapped call is detected by the rule of the shell that runs its
+// text (netcat for a call block, the cmd rmdir rule for cmd /c), which is the
+// same detection as the bare fixture's rule.
+var windowsEquivalentRules = map[string][]string{
+	"CMD-REVSHELL-BASH": {"CMD-REVSHELL-NC"},
+	"CMD-RM-RF":         {"CMD-WIN-RMDIR-SQ", "CMD-WIN-REMOVE-ITEM-RF"},
+}
+
+func windowsRuleOrEquivalent(found, want string) bool {
+	return found == want || slices.Contains(windowsEquivalentRules[want], found)
+}
+
 // windowsWrappedTools are the tool labels a PowerShell script reaches the hook
 // under on Windows: Claude Code's PowerShell tool, and the shell tools of
 // connectors whose label does not name the shell.
@@ -90,7 +103,7 @@ func TestWindowsStatementWrappersKeepTheFixtureVerdict(t *testing.T) {
 						func(f RuleFinding) bool {
 							// The strict pack reports the pipe form of a cradle as
 							// curl-to-shell when the statement list is partial.
-							return f.RuleID == rule || rule == "CMD-WIN-IWR-IEX" && f.RuleID == "CMD-PIPE-CURL"
+							return windowsRuleOrEquivalent(f.RuleID, rule) || rule == "CMD-WIN-IWR-IEX" && f.RuleID == "CMD-PIPE-CURL"
 						})
 				}
 				if !fires("PowerShell", test.Command) {
@@ -117,7 +130,10 @@ func TestWindowsStatementWrappersKeepTheFixtureVerdict(t *testing.T) {
 					unique[id[strings.Index(id, "/")+1:]] = true
 				}
 				t.Logf("%s: %s hides %d (tool, fixture) pairs over %d fixtures: %v", pack, wrapper.name, len(missed[wrapper.name]), len(unique), missed[wrapper.name])
-				if wrapper.name != "call-block" {
+				if wrapper.name == "trailer" {
+					// A trailing statement under a non-PowerShell tool label still
+					// hides the native-program fixtures (git first); logged above,
+					// open in GAP-0348's residual.
 					continue
 				}
 				if len(missed[wrapper.name]) != 0 {
@@ -145,7 +161,7 @@ func TestWindowsCmdLauncherKeepsTheCmdFixtureVerdict(t *testing.T) {
 					Input:      actionfacts.Input{Tool: "Bash", Args: args, CWD: `C:\work`, ActiveHome: `C:\Users\alice`, DialectHint: hint},
 					LegacyText: string(args), Connector: "windows-cmd-launcher", EnforcementCapable: true,
 				})
-				return slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == rule })
+				return slices.ContainsFunc(findings, func(f RuleFinding) bool { return windowsRuleOrEquivalent(f.RuleID, rule) })
 			}
 			bare := 0
 			for _, test := range cases {

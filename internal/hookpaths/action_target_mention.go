@@ -3052,7 +3052,10 @@ func actionPowerShellListOnlyBody(body, home string) bool {
 			}
 			listOnly = static && actionPowerShellListOnly[strings.ToLower(program)]
 			for _, arg := range node.Args[1:] {
-				if option, known := StaticWord(arg, home); !known || actionPowerShellKeepsObjects(option) {
+				// An unquoted glob word is not static to the POSIX reading but is
+				// a listing to PowerShell; only a parameter that keeps the
+				// objects is refused.
+				if option, known := StaticWord(arg, home); known && actionPowerShellKeepsObjects(option) {
 					listOnly = false
 				}
 			}
@@ -3063,13 +3066,46 @@ func actionPowerShellListOnlyBody(body, home string) bool {
 	return listOnly && calls > 0
 }
 
+// actionPowerShellReadsContent are the list-only commands that print file
+// content, not names or properties.
+var actionPowerShellReadsContent = map[string]bool{"get-content": true, "gc": true}
+
+// powerShellListOnlyWords is the text of a PowerShell script of plain words:
+// letters, digits, path characters, wildcards, pipes, statement ends and
+// quotes. No variable, sub-expression, script block, escape, redirect or call
+// operator.
+var powerShellListOnlyWords = lazyregexp.New(`^[A-Za-z0-9_./~:*?,|; \t'"\\-]+$`)
+
 // PowerShellListOnlyBody reports a PowerShell script whose every command only
 // lists names or properties (Get-ChildItem, Test-Path, Select-Object ...) and
 // whose text holds no other syntax: it proves no write to any path it names. A
 // second reading of such a script adds nothing the call as written lacks
 // (rel-1-0-10:GAP-0364).
-func PowerShellListOnlyBody(body, home string) bool {
-	return actionPowerShellListOnlyBody(body, home)
+func PowerShellListOnlyBody(body, _ string) bool {
+	// The script is read as PowerShell words (statements split at ; and |). A
+	// command that reads file content (Get-Content and its aliases) is not a
+	// listing: what it prints can be a credential.
+	if !powerShellListOnlyWords.MatchString(body) {
+		return false
+	}
+	statements := 0
+	for _, statement := range strings.FieldsFunc(body, func(r rune) bool { return r == ';' || r == '|' }) {
+		words := strings.Fields(statement)
+		if len(words) == 0 {
+			continue
+		}
+		command := strings.ToLower(strings.Trim(words[0], `'"`))
+		if !actionPowerShellListOnly[command] || actionPowerShellReadsContent[command] {
+			return false
+		}
+		for _, word := range words[1:] {
+			if actionPowerShellKeepsObjects(word) {
+				return false
+			}
+		}
+		statements++
+	}
+	return statements > 0
 }
 
 // actionWindowsLaunchText is the text a list-only PowerShell launch may hold
