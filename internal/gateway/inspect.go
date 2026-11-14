@@ -1966,7 +1966,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		defer func() {
 			// A decision-model floor is not a judge verdict: it never
 			// replaces the closed-mode refusal (review round 3, P3-2).
-			if out == nil || out.decisionFloorOnly {
+			if out == nil || out.decisionFloorOnly || out.decisionAbstain {
 				fmt.Fprintf(os.Stderr, "[inspect] hook judge gave no verdict on an escalated CRITICAL finding connector=%s direction=%s; hook_fail_mode closed: refusing\n",
 					connector, strategyDirection)
 				out = escalatedJudgeFailClosedVerdict()

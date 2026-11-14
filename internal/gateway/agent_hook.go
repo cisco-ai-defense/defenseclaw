@@ -826,7 +826,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if shouldResetToolJudgeSession(req) {
 			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
 			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ResetToolJudgeSession(sessionKey)
+				judge.ResetToolJudgeSession(judgeSessionKeyFor(ctx, req.SessionID))
 			}
 			a.resetUserDownloadRequests(sessionKey)
 		}
@@ -3654,6 +3654,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			a.observeUserDownloadRequest(ctx, req.Content)
 		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
+		if isToolJudgeIntentEvent(req.HookEventName) {
+			a.forgetBlockedPrompt(ctx, req.Content, verdict)
+		}
 	case isResultLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a

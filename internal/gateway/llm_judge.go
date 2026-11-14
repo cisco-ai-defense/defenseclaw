@@ -2125,7 +2125,7 @@ func asciiLowerPreservingBytes(value string) string {
 
 func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args string) string {
 	current := boundToolJudgeArguments(args)
-	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
+	sessionID := judgeSessionKey(ctx)
 	if j == nil || sessionID == "" {
 		return current
 	}
@@ -2141,8 +2141,8 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	entry := j.toolContext[sessionID]
 	prior := append([]toolJudgeContextEvent(nil), entry.events...)
 	entry.events = append(entry.events, toolJudgeContextEvent{
-		toolName: sanitizeToolName(toolName),
-		args:     toolJudgeArgumentExcerpt(args, maxToolJudgePriorArgumentBytes),
+		toolName: strings.Clone(sanitizeToolName(toolName)),
+		args:     strings.Clone(toolJudgeArgumentExcerpt(args, maxToolJudgePriorArgumentBytes)),
 	})
 	if len(entry.events) > maxToolJudgePriorEvents {
 		entry.events = append([]toolJudgeContextEvent(nil), entry.events[len(entry.events)-maxToolJudgePriorEvents:]...)
@@ -2210,7 +2210,7 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 	if j == nil {
 		return
 	}
-	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
+	sessionID := judgeSessionKey(ctx)
 	content = strings.TrimSpace(content)
 	if sessionID == "" || content == "" {
 		return
@@ -2225,12 +2225,33 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 		j.pruneToolJudgeContextLocked(now)
 	}
 	j.toolContext[sessionID] = toolJudgeSessionContext{
-		userIntent: toolJudgeUserIntentExcerpt(content),
+		userIntent: strings.Clone(toolJudgeUserIntentExcerpt(content)),
 		lastSeen:   now,
 	}
 	// The decision model's history keeps the prompt as a turn and is not
 	// cleared by it.
 	j.recordDecisionHistory(ctx, decisionHistoryEvent{kind: 'u', text: content})
+}
+
+// judgeSessionKey is the key of the judge's per-session state (the 7-call
+// context and the decision model's history): the verified caller (the
+// kernel-verified hook peer, or the account a per-user credential is bound
+// to) plus the session's state key, so another account that sends the same
+// session id can neither read, write nor reset it (GAP-0460). On a per-user
+// gateway, which has no verified caller, it is the state key as before.
+func judgeSessionKey(ctx context.Context) string {
+	return judgeSessionKeyFor(ctx, SessionIDFromContext(ctx))
+}
+
+func judgeSessionKeyFor(ctx context.Context, sessionID string) string {
+	key := sandboxSessionStateKey(ctx, sessionID)
+	if key == "" {
+		return ""
+	}
+	if caller, ok := verifiedAuditCaller(ctx); ok && caller.ID != "" {
+		return "caller\x00" + caller.ID + "\x00" + key
+	}
+	return key
 }
 
 // ResetToolJudgeSession drops bounded in-memory context when a connector
@@ -2243,9 +2264,11 @@ func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
 	j.toolContextMu.Lock()
 	delete(j.toolContext, sessionID)
 	j.toolContextMu.Unlock()
-	j.historyMu.Lock()
-	delete(j.history, sessionID)
-	j.historyMu.Unlock()
+	if j.decision != nil {
+		j.historyMu.Lock()
+		delete(j.history, sessionID)
+		j.historyMu.Unlock()
+	}
 }
 
 // RunToolJudge runs injection detection on tool call arguments.
