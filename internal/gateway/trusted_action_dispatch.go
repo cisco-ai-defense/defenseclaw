@@ -288,6 +288,9 @@ type trustedActionRequest struct {
 	windowsPowerShellReading *windowsHintedReading
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
+	// launcherDepth is the number of shell launchers whose body this request
+	// reads (launcherBodyTwinRequest), bounded by maxLauncherBodyDepth.
+	launcherDepth int
 	// generation is the rule generation the call is judged with; nil: the
 	// request profile's (snapshotRulePackGenerationFor). A caller that
 	// combines several dispatches of one request judges each with each
@@ -539,7 +542,17 @@ func dispatchTrustedAction(
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
-		if cut := trustedReadingCut(request.Input, facts); cut.Any() {
+		launcherTwin, launcherRead := launcherBodyTwinRequest(request, facts)
+		if launcherRead {
+			// The script of an argv shell launcher (powershell.exe -Command,
+			// cmd /c) is judged as the string command the same script is
+			// (rel-1-0-10:GAP-0711, GAP-0712): its findings count, the
+			// TRUNCATED floor of its own cap among them.
+			defer func() {
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcherTwin))
+			}()
+		}
+		if cut := trustedReadingCutRead(request.Input, facts, launcherRead); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
 			// statement budget: the call is TRUNCATED (the one bound rule),
 			// never judged below the unknown tier of its pack, and what was
@@ -9460,8 +9473,21 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 // split (SimpleCommands) reads every statement up to the statement budget
 // (ShellStatementsOverBudget), and each is judged.
 func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
+	return trustedReadingCutRead(input, facts, false)
+}
+
+// trustedReadingCutRead is trustedReadingCut for a call whose argv launcher
+// body is read on its own (launcherBodyTwinRequest) when bodyRead is set: its
+// word over the argv bounds is then not a cut of the reading, and the body's
+// own cuts are the ones that count.
+func trustedReadingCutRead(input actionfacts.Input, facts actionfacts.Facts, bodyRead bool) bounded.CapSet {
 	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 		return bounded.CapSet{}
+	}
+	if !bodyRead {
+		if cut := trustedArgvReadingCut(input, facts); cut.Any() {
+			return cut
+		}
 	}
 	if command, known := trustedBashCommandInput(input); known && len(command) > actionfacts.MaxCommandBytes &&
 		trustedShellCommandTool(input.Tool) {
