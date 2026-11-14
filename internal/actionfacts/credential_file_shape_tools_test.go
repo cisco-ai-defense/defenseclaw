@@ -25,7 +25,7 @@ func TestMatchCredentialFileShapeDeveloperToolLogins(t *testing.T) {
 			[]string{"/home/alice/.claude-work/.claude.json"}},
 		{"Codex CLI", "/home/alice/.codex/auth.json", CredentialFileCloudCLI, ".codex/auth.json",
 			[]string{"/home/alice/.codex/config.toml", "/home/alice/project/auth.json", "/home/alice/.codex/auth.json.sample"}},
-		{"Gemini CLI", "/home/alice/.gemini/oauth_creds.json", CredentialFileCloudCLI, ".gemini/oauth_creds.json",
+		{"Google gemini login", "/home/alice/.gemini/oauth_creds.json", CredentialFileCloudCLI, ".gemini/oauth_creds.json",
 			[]string{"/home/alice/.gemini/settings.json", "/home/alice/.gemini/google_accounts.json", "/home/alice/oauth_creds.json"}},
 		{"Copilot CLI", "/home/alice/.copilot/config.json", CredentialFileCloudCLI, ".copilot/config.json",
 			[]string{"/home/alice/.copilot/settings.json", "/home/alice/project/config.json"}},

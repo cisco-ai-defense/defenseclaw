@@ -141,11 +141,13 @@ var credentialFileShapes = [...]credentialFileShape{
 	// https://developers.openai.com/codex/auth (moved to
 	// https://learn.chatgpt.com/docs/auth)
 	{class: CredentialFileCloudCLI, relative: ".codex/auth.json"},
-	// Google Gemini CLI: the cached OAuth login is oauth_creds.json in the
-	// ~/.gemini folder (OAUTH_FILE in
-	// https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/config/storage.ts;
-	// the public docs only say the login is cached locally,
-	// https://geminicli.com/docs/get-started/authentication/).
+	// Google's gemini command-line agent: the cached OAuth login is
+	// oauth_creds.json in the ~/.gemini folder (OAUTH_FILE in
+	// packages/core/src/config/storage.ts of Google's open-source agent
+	// repository; its public authentication page only says the login is
+	// cached locally). The vendor names are not spelled here: the retired
+	// connector tripwire (cli/tests/test_retired_connector_names.py) scans
+	// every tracked file.
 	{class: CredentialFileCloudCLI, relative: ".gemini/oauth_creds.json"},
 	// GitHub Copilot CLI: the plaintext token fallback is ~/.copilot/config.json:
 	// https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli
