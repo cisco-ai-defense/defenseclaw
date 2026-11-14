@@ -1620,3 +1620,55 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [integrity, kernel, procfs, mount, bounded-grammar]
+  # Staged-file, literal-credential and inline-code effects (rel-1-0-10 S7 shell recall). Each rule is selected by
+  # the code-owned effect proof in internal/actionfacts (semantic owner and exact-fallback contract); all are alert-only.
+  - id: exec.escaped_binary_write
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-exec-escaped-binary-write^'
+    title: "Binary bytes written to a file through shell escapes"
+    severity: HIGH
+    confidence: 0.9
+    tags: [execution, staging, obfuscation]
+  - id: account.literal_password_change_via_stdin
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-account-literal-password-change-via-stdin^'
+    title: "Account password set from literal stdin"
+    severity: HIGH
+    confidence: 0.9
+    tags: [persistence, account, credential]
+  - id: exec.download_then_run_fetched_file
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-exec-download-then-run-fetched-file^'
+    title: "File fetched from a bare IP address and then run"
+    severity: HIGH
+    confidence: 0.9
+    tags: [execution, download-exec]
+  - id: source_control.clone_then_run_or_adhoc_push
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-source-control-clone-then-run-or-adhoc-push^'
+    title: "Git clone whose files are then run, or push to an ad-hoc remote"
+    severity: MEDIUM
+    confidence: 0.8
+    tags: [execution, source-control, exfiltration]
+  - id: exec.inline_code_network_and_exec
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-exec-inline-code-network-and-exec^'
+    title: "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL"
+    severity: HIGH
+    confidence: 0.85
+    tags: [execution, network, opaque-code]

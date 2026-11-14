@@ -104,6 +104,11 @@ func TestNetExecWindowsDefenderMultiControlIsDialectIndependent(t *testing.T) {
 		{"pipx path", "/home/fixture/.local/bin/nxc ", true},
 		{"windows path", `C:\Tools\nxc.exe `, false},
 		{"call operator path", `& 'C:\Tools\nxc.exe' `, false},
+		{"unquoted call operator", "& nxc.exe ", false},
+		{"unquoted call operator path", `& C:\Tools\nxc.exe `, false},
+		{"call operator without a space", "&nxc.exe ", false},
+		{"dot-sourced path", `. C:\Tools\nxc.exe `, false},
+		{"cme alias", "cme.exe ", false},
 	}
 	for _, spelling := range spellings {
 		command := spelling.prefix + rest
