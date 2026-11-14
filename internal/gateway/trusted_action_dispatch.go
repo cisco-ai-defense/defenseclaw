@@ -239,6 +239,11 @@ type trustedActionRequest struct {
 	patchHostView   bool
 	record          func(actionfacts.Facts, []RuleFinding)
 	recordTelemetry func(trustedActionTelemetry)
+	// recordEffectShadow receives the answer of the live shadow run of the
+	// effect lane (guardrail.cascade.lanes.effects=shadow). Only the hook route sets it;
+	// the dispatch takes it once, at the outermost call, and clears it so a
+	// twin or child request never runs the lane again.
+	recordEffectShadow func(EffectShadowResult)
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
 	// stateProofOnly limits the judgment to the rule that proves a write to
@@ -391,8 +396,51 @@ func dispatchTrustedAction(
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
+	defer recoverTrustedActionFault(request, &findings)
+	if trustedActionFaultHook != nil {
+		trustedActionFaultHook(request)
+	}
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
+	// Effect-model rule lane (S7). Compute once at the outermost dispatch.
+	// In ON the verdict participates; in shadow/off nothing is appended, so
+	// the live answer is unchanged. The benchmark measures shadow through
+	// EvaluateDeterministicAction, not here.
+	if octx, outermost := markOutermostEffectDispatch(parent); outermost {
+		parent = octx
+		switch mode := effectsRulesModeFor(); mode {
+		case effectRulesOn:
+			effectRequest := request
+			defer func() {
+				findings = append(findings, effectShadowFindings(computeEffectShadow(effectRequest, mode, effectsRulesTierFor()), mode)...)
+			}()
+		case effectRulesShadow:
+			// Shadow: compute and record beside today's rules, off the hook's
+			// path and verdict-neutral (effect_shadow_live.go, GAP-0256).
+			scheduleEffectShadow(request, mode, effectsRulesTierFor(), request.recordEffectShadow)
+		}
+		request.recordEffectShadow = nil
+		// Secret flow tracking (S7). It keeps a bounded per-session state and
+		// alerts (default) or blocks (strict/managed) when a labeled secret
+		// reaches an external sink. Shadow records the hit and never changes the
+		// answer; the lane runs at most once per call.
+		fctx := parent
+		freq := request
+		defer func() {
+			findings = append(findings, runSecretFlowShadow(fctx, freq)...)
+		}()
+	}
+	if _, ok := managedHookPeerFromContext(parent); ok {
+		request.ProtectedHomeHook = true
+	}
+	// A call the shell parser failed on (the hook client's evidence, or the
+	// same reading here) blocks in every pack, with its own reason, before
+	// any bound or reader decides (rel-1-0-10:GAP-0486). The readers still
+	// run: a finding of theirs stays on the verdict.
+	shellReason := trustedCallShellParseReason(request)
+	if shellReason == hookpaths.UnprovenParserFault {
+		defer func() { findings = withParserFaultFinding(findings, request.EnforcementCapable) }()
+	}
 	if ManagedEnterpriseActive() {
 		return nil
 	}
@@ -411,9 +459,6 @@ func dispatchTrustedAction(
 			findings = shareBodyUnreadFindings(parent, findings, request.EnforcementCapable, budget, linkBound)
 		}
 	}()
-	if _, ok := managedHookPeerFromContext(parent); ok {
-		request.ProtectedHomeHook = true
-	}
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
@@ -453,7 +498,7 @@ func dispatchTrustedAction(
 		// finding.
 		return trustedActionLimitFindings(request.EnforcementCapable)
 	}
-	if request.EnforcementCapable && trustedCallShellParseBound(request) {
+	if request.EnforcementCapable && shellReason == "shell-parse-bound" {
 		return trustedActionLimitFindings(true)
 	}
 	if bound == shellReadingNestedProof {
@@ -10039,17 +10084,24 @@ func trustedActionCommandBound(input actionfacts.Input) shellReadingBound {
 	return shellReadingWithinBounds
 }
 
-// trustedCallShellParseBound reports a call whose reading ends at the
-// recovered-parse proof bound. The hook client evidence tells it; a call
-// without that evidence on a gateway that reads the home (per-user: no hook
-// client sends it) is read here with the client reader, so both take the
-// same evaluation-limit path (rel-1-0-6:GAP-0534).
-func trustedCallShellParseBound(request trustedActionRequest) bool {
+// trustedCallShellParseReason is the recovered-parse reading of a call:
+// "shell-parse-bound" (the proof bound, the evaluation-limit path),
+// hookpaths.UnprovenParserFault (the parser failed on the text), or "". The
+// hook client evidence tells it; a call without that evidence on a gateway
+// that reads the home (per-user: no hook client sends it) is read here with
+// the client reader, so both decide the same (rel-1-0-6:GAP-0534).
+func trustedCallShellParseReason(request trustedActionRequest) string {
 	if reason := request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]; reason != "" || request.ProtectedHomeHook {
-		return reason == "shell-parse-bound"
+		if reason == "shell-parse-bound" || reason == hookpaths.UnprovenParserFault {
+			return reason
+		}
+		return ""
 	}
 	command, ok := trustedBashCommandInput(request.Input)
-	return ok && hookpaths.ShellParseBound(request.Connector, request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome)
+	if !ok {
+		return ""
+	}
+	return hookpaths.ShellParseReason(request.Connector, request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome)
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {

@@ -67,6 +67,36 @@ def _require_indexed_text_match(
         )
 
 
+# A legacy.audit.* compatibility row (the connector-hook row of a hook
+# decision) keeps no payload_json since 1.0.10 (S8 R4, #1384): its body is the
+# canonical record body and, as before, its structured_json column. That column
+# holds the whole body, or the body's structured_json text, or nothing when the
+# body has no structured_json. Every other row keeps payload_json.
+_COMPATIBILITY_PREFIX = "legacy.audit."
+
+
+def _require_indexed_body(indexed: object, body: dict[str, object], *, rowid: object, field: str) -> None:
+    if not isinstance(indexed, str):
+        raise ValueError(f"audit row {rowid} indexed {field} is not text")
+    try:
+        payload = json.loads(indexed)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"audit row {rowid} indexed {field} is invalid") from exc
+    if not isinstance(payload, dict) or not _same_json_type_and_value(payload, body):
+        raise ValueError(f"audit row {rowid} indexed {field} disagrees with canonical body")
+
+
+def _require_compatibility_body(structured: object, body: dict[str, object], *, rowid: object) -> None:
+    nested = body.get("structured_json")
+    if structured is None:
+        if nested is not None:
+            raise ValueError(f"audit row {rowid} indexed structured_json is missing")
+        return
+    if isinstance(nested, str) and structured == nested:
+        return
+    _require_indexed_body(structured, body, rowid=rowid, field="structured_json")
+
+
 def _query_rows(database: Path) -> list[tuple[object, ...]]:
     if not database.is_file():
         raise ValueError(f"canonical audit database is missing: {database}")
@@ -81,7 +111,8 @@ def _query_rows(database: Path) -> list[tuple[object, ...]]:
             cursor = connection.execute(
                 """SELECT rowid, id, bucket, event_name, source, signal, connector,
                           request_id, session_id, turn_id, record_schema_version,
-                          payload_json, projected_record_json, projection_hash
+                          structured_json, payload_json, projected_record_json,
+                          projection_hash
                      FROM audit_events ORDER BY rowid"""
             )
             candidate_rows: list[tuple[object, ...]] = []
@@ -128,6 +159,7 @@ def _validated_record(row: tuple[object, ...]) -> str:
         session_id,
         turn_id,
         record_schema_version,
+        structured_raw,
         payload_raw,
         raw,
         projection_hash,
@@ -154,14 +186,10 @@ def _validated_record(row: tuple[object, ...]) -> str:
     body = record.get("body")
     if not isinstance(body, dict):
         raise ValueError(f"audit row {rowid} canonical body is not an object")
-    if not isinstance(payload_raw, str):
-        raise ValueError(f"audit row {rowid} indexed payload_json is not text")
-    try:
-        payload = json.loads(payload_raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"audit row {rowid} indexed payload_json is invalid") from exc
-    if not isinstance(payload, dict) or not _same_json_type_and_value(payload, body):
-        raise ValueError(f"audit row {rowid} indexed payload disagrees with canonical body")
+    if payload_raw is None and isinstance(event_name, str) and event_name.startswith(_COMPATIBILITY_PREFIX):
+        _require_compatibility_body(structured_raw, body, rowid=rowid)
+    else:
+        _require_indexed_body(payload_raw, body, rowid=rowid, field="payload_json")
     comparisons = (
         ("record_id", record.get("record_id"), record_id),
         ("bucket", record.get("bucket"), bucket),

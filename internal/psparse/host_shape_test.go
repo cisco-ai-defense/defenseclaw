@@ -425,6 +425,9 @@ func refCmd(c *Command) (text string, ok bool) {
 			if len(rest) == 0 {
 				return "", false
 			}
+			if len(rest) == 1 && rest[0].static && !rest[0].colon && refQuotedCmd(words[:i], rest[0].text) {
+				return rest[0].text, true
+			}
 			parts := make([]string, len(rest))
 			for k, r := range rest {
 				// one native argv word the caller passes through unquoted: no
@@ -442,6 +445,31 @@ func refCmd(c *Command) (text string, ok bool) {
 		}
 	}
 	return "", false
+}
+
+// refQuotedCmd restates the quoted cmd-run condition: one payload word with
+// spaces, no quote, no other whitespace, no trailing backslash, and either a
+// cmd special character in it or /s among the options.
+func refQuotedCmd(opts []refWord, w string) bool {
+	if !strings.Contains(w, " ") || strings.ContainsAny(w, "\"'") || strings.HasSuffix(w, "\\") {
+		return false
+	}
+	for _, r := range w {
+		if unicode.IsSpace(r) && r != ' ' {
+			return false
+		}
+	}
+	for _, sp := range []string{"&", "<", ">", "(", ")", "@", "^", "|"} {
+		if strings.Contains(w, sp) {
+			return true
+		}
+	}
+	for _, o := range opts {
+		if strings.ToLower(o.text) == "/s" {
+			return true
+		}
+	}
+	return false
 }
 
 // checkStaticImpliesShape asserts the property for every host nested script of
@@ -497,7 +525,7 @@ var (
 	genWithVal = [][]string{{"-ep", "Bypass"}, {"-ExecutionPolicy", "Bypass"}, {"-w", "hidden"}, {"-WindowStyle", "Hidden"}, {"-Version", "2"}, {"-wd", "/tmp"}, {"-WorkingDirectory", "/tmp"}, {"-if", "text"}, {"-of", "xml"}, {"-File", "x.ps1"}, {"-foo", "bar"}, {"-ep", ""}, {"-ep", " Bypass"}, {"-ep"}, {"-ep", "/c"}, {"-ep", "bypass"}, {"-ep", "Unrestricted"}, {"-if", "bogus"}, {"-of", "bogus"}, {"-of", "Text"}, {"-w", "bogus"}, {"-exec", "RemoteSigned"}}
 	genCmdSw   = []string{"-c", "-Command", "-command", "-C", "-comm", "-co", "/c", "--command", "\u2013c", "\u2014c", "-cwa", "-c:"}
 	genEncSw   = []string{"-e", "-ec", "-enc", "-EncodedCommand", "-en", "-encodedc", "/e", "-e:", "-ea"}
-	genPayload = []string{"Get-Date", `Remove-Item C:\x`, "Write-Output 'a b'", `Write-Output "x"`, "-", "--%", "", " ", `a\ b\`, "$x", "x;y", "Write-Output a", "-nop", "1e3", "0x10", "1kb", "C:\\Program Files\\x", "say \"hi\"", "ver", "dir"}
+	genPayload = []string{"Get-Date", `Remove-Item C:\x`, "Write-Output 'a b'", `Write-Output "x"`, "-", "--%", "", " ", `a\ b\`, "$x", "x;y", "Write-Output a", "-nop", "1e3", "0x10", "1kb", "C:\\Program Files\\x", "say \"hi\"", "ver", "dir", "echo a & echo b", "echo k>>f g", "echo a b", "dir C:\\x y\\"}
 	genB64     = []string{r6enc("Write-Output a"), r6enc("Remove-Item C:\\x"), r6enc(""), "abc", " " + r6enc("x"), r6enc("x") + " ", "@@@@", r6enc("Write-Output a")[:8]}
 	genCmdOpts = []string{"/q", "/d", "/s", "/a", "/u", "/x", "/y", "/e:on", "/V:OFF", "/f:on", "/z", "foo", " /q", "/c"}
 	genCmdSw2  = []string{"/c", "/C", "/k", "/K", "/r", "/crd", "/d/c", " /c", "/c "}

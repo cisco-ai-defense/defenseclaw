@@ -26,7 +26,8 @@ import (
 //
 //	ps-command  [host-option]* (-c|-command) word+
 //	ps-encoded  [host-option]* (-e|-ec|-enc|-encodedcommand) base64
-//	cmd-run     [cmd-option]*  (/c|/k|/r) word+
+//	cmd-run     [cmd-option]*  (/c|/k|/r) word+   (each word one plain argv word)
+//	cmd-run-q   [cmd-option]*  (/c|/k|/r) "payload with spaces"  (see cmdQuotedPayload)
 //
 // where every word is a whole static word (never padded, empty, colon-glued or
 // part of a --% tail) and the option spellings come from the fixed lists below.
@@ -212,6 +213,9 @@ func matchCmdShape(c *Command, words []hostWord) (idx int, reason string) {
 			if len(rest) == 0 {
 				return 0, ReasonCmdArgv
 			}
+			if len(rest) == 1 && rest[0].static && !rest[0].colon && cmdQuotedPayload(words[:i], rest[0].text) {
+				return i, ""
+			}
 			for _, r := range rest {
 				if !r.static || r.colon {
 					return 0, ReasonNonLiteral
@@ -227,6 +231,38 @@ func matchCmdShape(c *Command, words []hostWord) (idx int, reason string) {
 		}
 	}
 	return 0, ReasonCmdArgv // no run switch
+}
+
+// cmdQuotedPayload reports whether a single payload word that holds spaces is
+// the quoted cmd-run shape `cmd /c "<payload>"`. The PowerShell caller (Windows
+// PowerShell 5.1 and pwsh 7 alike, confirmed on dc-win2: WQ01, WQ02, WQ04, WQ05)
+// hands cmd.exe `/c "<payload>"`, and cmd then strips the outer quotes except in
+// one case: no /s switch, exactly two quotes, no special character (& < > ( ) @ ^
+// |) between them, and the text between them names an executable file. That last
+// condition depends on the file system, so the payload is Static only when the
+// exception provably cannot apply: the payload holds a special character, or
+// /s is among the options (which always strips). Then cmd runs the payload text
+// exactly. The payload must also hold no quote character (the caller would
+// escape it), no whitespace other than the plain space, and must not end in a
+// backslash (5.1 does not double it before the closing quote).
+func cmdQuotedPayload(opts []hostWord, w string) bool {
+	if w == "" || !strings.Contains(w, " ") || strings.ContainsAny(w, "\"'") || strings.HasSuffix(w, `\`) {
+		return false
+	}
+	for _, r := range w {
+		if r != ' ' && unicode.IsSpace(r) {
+			return false
+		}
+	}
+	if strings.ContainsAny(w, "&<>()@^|") {
+		return true
+	}
+	for _, o := range opts {
+		if strings.EqualFold(o.text, "/s") {
+			return true
+		}
+	}
+	return false
 }
 
 // cmdHostNested is the only producer of nested scripts for a cmd host call: the

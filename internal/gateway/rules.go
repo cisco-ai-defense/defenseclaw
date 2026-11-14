@@ -104,6 +104,13 @@ type RuleFinding struct {
 	// value-free; a reading joined as a fragment of the call drops its limit
 	// finding but carries these caps to the call (rel-1-0-10:GAP-0477).
 	boundedCaps bounded.CapSet
+	// evaluationFault marks the finding of a call the evaluation failed on:
+	// the shell parser failed on its text (shellparse.ErrParserFault) or a
+	// reader panicked (recoverTrustedActionFault). Nothing proves what the
+	// call does, so it blocks in every pack; on the hook routes observe mode
+	// enforces it too, as the failed-check answer of the hook recovery did
+	// (rel-1-0-10:GAP-0486). Private and value-free.
+	evaluationFault bool
 }
 
 type findingEnforcement uint8
@@ -114,6 +121,19 @@ const (
 	findingDispositionUnspecified findingDisposition = iota
 	findingDispositionAudit
 	findingDispositionAdvisory
+	// findingDispositionEffectKnown and findingDispositionEffectUnknown are the
+	// effect-model rule-lane dispositions. Known marks a known effect on a
+	// protected target or a known attack tool; Unknown marks an unknown effect
+	// touching a protected set. They let the benchmark and S8 tell an effect
+	// verdict from today's, and S8 map the unknown tier to ask later, without
+	// changing the public finding schema.
+	findingDispositionEffectKnown
+	findingDispositionEffectUnknown
+	// findingDispositionFlowSecretEgress marks a Secret flow tracking hit: a
+	// labeled secret reached an external sink. S8 maps it to a native ask
+	// where a connector supports one; until then default alerts and
+	// strict/managed block.
+	findingDispositionFlowSecretEgress
 )
 
 const (

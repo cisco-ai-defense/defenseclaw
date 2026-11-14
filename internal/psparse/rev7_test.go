@@ -4,7 +4,10 @@
 
 package psparse
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // rev7Case is one delta-review-7 probe (ids from PSPARSE-DELTA-REVIEW7.md,
 // probes in jobs/s7-pwsh-review7/probes/). Expected results are the same under
@@ -110,6 +113,109 @@ func TestRev7Cases(t *testing.T) {
 			if n.Kind != c.kind || n.Static != c.static || (c.static && n.Text != c.text) || (!c.static && n.Reason != c.reason) {
 				t.Errorf("%s d=%d %q:\n got  kind=%s static=%v text=%q reason=%q\n want kind=%s static=%v text=%q reason=%q",
 					c.id, d, c.src, n.Kind, n.Static, n.Text, n.Reason, c.kind, c.static, c.text, c.reason)
+			}
+		}
+	}
+}
+
+// rev12Case is a review-10 probe whose result depends on the dialect: Windows
+// PowerShell 5.1 drops an empty native argument (GAP-0208), pwsh 7 passes it.
+var rev12Cases = []struct {
+	id        string
+	src       string
+	pwsh7Text string // Static text under DialectPwsh7
+}{
+	{"WP03", `powershell -c Write-Output '' x`, "Write-Output  x"},
+	{"WP10", `powershell -c "Write-Output 'a" '' "b'"`, "Write-Output 'a  b'"},
+	{"WP11", `powershell -nop -c Write-Output '' '' x`, "Write-Output   x"},
+	{"WP12", `pwsh -c "Write-Output 'a" '' "b'"`, "Write-Output 'a  b'"},
+	{"WP13", `powershell -c "Write-Output 'a" "" "b'"`, "Write-Output 'a  b'"},
+	{"g22-1377", `pwsh.exe -command '' -nop`, " -nop"},
+	{"g21-953", `& 'powershell.exe' '-Command' 'b' '' 'Write-Output a'`, "b  Write-Output a"},
+}
+
+func TestRev12EmptyWordLegacy(t *testing.T) {
+	for _, c := range rev12Cases {
+		for _, d := range []Dialect{DialectUnknown, DialectWindowsPS51} {
+			ns, ok := firstHostNested(c.src, d)
+			if !ok || ns.Static || ns.Reason != ReasonLegacyQuoting {
+				t.Errorf("%s d=%d %q: got %+v; want NotStatic ps_legacy_quoting", c.id, d, c.src, ns)
+			}
+		}
+		ns, ok := firstHostNested(c.src, DialectPwsh7)
+		if !ok || !ns.Static || ns.Text != c.pwsh7Text {
+			t.Errorf("%s d=0 %q: got %+v; want Static %q", c.id, c.src, ns, c.pwsh7Text)
+		}
+	}
+}
+
+// cmdWindowsData is the command line a Windows PowerShell 5.1 and a pwsh 7 caller
+// really handed cmd.exe on dc-win2 (review 10, shim logging GetCommandLineW),
+// after the shim path. cmdEffective applies cmd's documented quote rule to it.
+var cmdWindowsData = []struct {
+	id     string
+	src    string
+	cl     string // recorded command line after the program name
+	static bool   // expected from psparse
+}{
+	{"WQ01", `cmd /c "echo a & echo b"`, `/c "echo a & echo b"`, true},
+	{"WQ04", `cmd /c "echo a>nul"`, `/c "echo a>nul"`, true},
+	{"WQ05", `cmd /s /c "echo a b"`, `/s /c "echo a b"`, true},
+	{"WQ02", `cmd /c 'echo a b'`, `/c "echo a b"`, false}, // the executable-file exception may apply
+	{"WQ03", `cmd /c "ver"`, `/c ver`, true},
+	{"WQ06", `cmd /d /c "cd"`, `/d /c cd`, true},
+	{"WC18", `cmd /c echo a 'b c'`, `/c echo a "b c"`, false},
+	{"rv7-B87", `cmd /c "cd /d C:\Users\u\.ssh & echo k>>authorized_keys"`, `/c "cd /d C:\Users\u\.ssh & echo k>>authorized_keys"`, true},
+	{"rv8-X13", `cmd /c "echo k>> C:\Users\u\.ssh\authorized_keys"`, `/c "echo k>> C:\Users\u\.ssh\authorized_keys"`, true},
+}
+
+// cmdEffective returns what cmd.exe runs for a recorded command line, and
+// whether the executable-file exception to quote stripping can still apply
+// (decided by the file system, so psparse must not be Static then).
+func cmdEffective(cl string) (line string, exceptionPossible bool) {
+	sSwitch := false
+	rest := cl
+	for {
+		rest = strings.TrimLeft(rest, " ")
+		tok := rest
+		if i := strings.IndexByte(rest, ' '); i >= 0 {
+			tok = rest[:i]
+		}
+		l := strings.ToLower(tok)
+		if l == "/c" || l == "/k" || l == "/r" {
+			rest = strings.TrimLeft(rest[len(tok):], " ")
+			break
+		}
+		if l == "/s" {
+			sSwitch = true
+		}
+		if tok == "" {
+			return "", false
+		}
+		rest = rest[len(tok):]
+	}
+	if !strings.HasPrefix(rest, `"`) {
+		return rest, false
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(rest, `"`), `"`)
+	exception := !sSwitch && strings.Count(rest, `"`) == 2 && !strings.ContainsAny(inner, "&<>()@^|") && strings.Contains(inner, " ")
+	return inner, exception
+}
+
+func TestCmdQuotedPayloadWindowsData(t *testing.T) {
+	for _, c := range cmdWindowsData {
+		eff, exc := cmdEffective(c.cl)
+		for _, d := range []Dialect{DialectUnknown, DialectWindowsPS51, DialectPwsh7} {
+			ns, ok := firstHostNested(c.src, d)
+			if !ok {
+				t.Errorf("%s d=%d: no nested script", c.id, d)
+				continue
+			}
+			if ns.Static != c.static {
+				t.Errorf("%s d=%d %q: static=%v want %v (reason %q)", c.id, d, c.src, ns.Static, c.static, ns.Reason)
+			}
+			if ns.Static && (ns.Text != eff || exc) {
+				t.Errorf("%s d=%d %q: Static text %q, cmd runs %q (exception possible %v)", c.id, d, c.src, ns.Text, eff, exc)
 			}
 		}
 	}
