@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -170,7 +171,7 @@ func init() {
 	// print names the account and the fix too, not a raw SID and mask
 	// (GAP-0925).
 	managed.DescribeTrustAdvisoryReason = func(reason string) string {
-		if _, standalone := managedHostWindowsStandalone(); !standalone {
+		if _, standalone := hookcli.ManagedHostWindowsStandalone(); !standalone {
 			return reason
 		}
 		return windowsEnterpriseNamePrincipals(reason)
@@ -179,7 +180,7 @@ func init() {
 		if err == nil {
 			return nil
 		}
-		if _, standalone := managedHostWindowsStandalone(); !standalone {
+		if _, standalone := hookcli.ManagedHostWindowsStandalone(); !standalone {
 			return err
 		}
 		if text := windowsEnterpriseNamePrincipals(err.Error()); text != err.Error() {

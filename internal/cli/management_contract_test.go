@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -34,12 +35,12 @@ import (
 // checked the same way in internal/enterpriseunix.
 
 // runExit is the exit status a command run ends with: 0 for success, else
-// the code its failure asked for (commandExitCode only labels failures).
+// the code its failure asked for (cliusage.ExitCode only labels failures).
 func runExit(err error) int {
 	if err == nil {
 		return 0
 	}
-	return commandExitCode(err)
+	return cliusage.ExitCode(err)
 }
 
 // requireExit checks the process exit code and, when the document carries

@@ -15,10 +15,12 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 
 	"gopkg.in/yaml.v3"
 
@@ -92,7 +94,7 @@ func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 		return ok
 	}
 	in.cfg, in.configErr = loadWindowsEnterpriseStandaloneConfig("")
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		in.manifestErr = err
 		return in

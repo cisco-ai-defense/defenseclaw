@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -1713,7 +1714,7 @@ var enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} {
 // DefenseClaw entries of connector machine policy are in place. Replaced
 // in tests.
 var enterpriseHookStandaloneMachinePolicyCovered = func(connectorName string) (bool, error) {
-	opts, ok := standaloneMachinePolicyOptions(runtime.GOOS)
+	opts, ok := hookcli.StandaloneMachinePolicyOptions(runtime.GOOS)
 	if !ok {
 		return false, errors.New("no standalone layout for this platform")
 	}

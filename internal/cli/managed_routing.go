@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 )
 
@@ -41,7 +42,7 @@ func newManagedRoutingCmd() *cobra.Command {
 		if command, ok := launcherAuditedWriter(words); ok {
 			reportManagedCommandRefusal(command, "")
 		}
-		return withExitCode(managedDeviceAnswer("this computer's DefenseClaw is managed by your organization: model routing, its rules and "+
+		return cliusage.WithExitCode(managedDeviceAnswer("this computer's DefenseClaw is managed by your organization: model routing, its rules and "+
 			"budgets are set by your administrator. You can read your own routing with "+managedRoutingReads+". Nothing was changed."), 3)
 	}
 	read := func(path string) func(*cobra.Command, []string) error {

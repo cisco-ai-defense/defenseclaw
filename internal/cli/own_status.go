@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -56,7 +57,7 @@ type ownStatusRow struct {
 func showOwnStatus(cmd *cobra.Command, asJSON bool) error {
 	out := cmd.OutOrStdout()
 	fail := func(err error) error {
-		failure := withExitCode(err, enterprisestatus.UnixExitFailure)
+		failure := cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 		if asJSON {
 			writeOwnStatusJSON(out, map[string]any{"deployment_mode": "managed_enterprise", "managed_by": "your organization", "error": err.Error()})
 			silenceJSONReportedError(cmd, true, failure)

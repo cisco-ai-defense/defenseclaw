@@ -24,7 +24,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -34,18 +36,7 @@ func init() {
 	// (secureClientHost), not a process or config profile alone (main-sync
 	// review finding 5). Every binary that renders or runs hooks links this
 	// package.
-	connector.SecureClientDeploymentVerified = func() bool { return secureClientHost() }
-}
-
-// managedHostDescriptorPath is where a standalone managed deployment
-// publishes its runtime descriptor on this OS ("" where the check does not
-// apply). A seam for tests.
-var managedHostDescriptorPath = func() string {
-	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
-	if err != nil {
-		return ""
-	}
-	return layout.DescriptorPath
+	connector.SecureClientDeploymentVerified = func() bool { return hookcli.SecureClientHost() }
 }
 
 // refusePerUserGatewayOnManagedHost keeps a per-user gateway from running
@@ -57,7 +48,7 @@ func refusePerUserGatewayOnManagedHost() error {
 	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
 		return nil
 	}
-	if where, present := managedHostWindowsStandalone(); present {
+	if where, present := hookcli.ManagedHostWindowsStandalone(); present {
 		// Name the restart route too, as the Unix refusal does: the managed
 		// gateway is a service the installed CLI's repair restarts
 		// (GAP-0718). Setup is not installed on a managed computer, so the
@@ -82,7 +73,7 @@ func refusePerUserGatewayOnManagedHost() error {
 // rotate-token` printed `unknown command "setup" ... Did you mean this? stop`.
 // Other hosts, Secure Client included, get no such command.
 func addManagedWindowsSetupAnswer(root *cobra.Command) {
-	where, present := managedHostWindowsStandalone()
+	where, present := hookcli.ManagedHostWindowsStandalone()
 	if !present {
 		return
 	}
@@ -105,21 +96,21 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	// `tui` was a bare unknown command with the generic usage (rel-1-0-3
 	// GAP-0328): the TUI is part of the per-user CLI.
 	addManagedWindowsAnswer(root, "tui", func([]string) error {
-		return withExitCode(managedWindowsTUIAnswer(where), 3)
+		return cliusage.WithExitCode(managedWindowsTUIAnswer(where), 3)
 	})
 	for _, verb := range []string{"set", "unset"} {
 		verb := verb
 		addManagedWindowsAnswer(configCmd, verb, func([]string) error {
-			return withExitCode(managedWindowsConfigWriterRefusal("config "+verb), 3)
+			return cliusage.WithExitCode(managedWindowsConfigWriterRefusal("config "+verb), 3)
 		})
 	}
 	// The guardrail writers were an unknown command here, so a refused
 	// `guardrail disable` left no audit row (GAP-2639).
 	addManagedWindowsAnswer(root, "guardrail", func(args []string) error {
 		if command, ok := launcherAuditedWriter(append([]string{"guardrail"}, args...)); ok {
-			return withExitCode(managedWindowsConfigWriterRefusal(command), 3)
+			return cliusage.WithExitCode(managedWindowsConfigWriterRefusal(command), 3)
 		}
-		return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: the guardrail is set in the admin config (MDM or management plane). %s",
+		return cliusage.WithExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: the guardrail is set in the admin config (MDM or management plane). %s",
 			windowsManagedStandardUserViewAnswer("The admission policy and guardrail thresholds", "policy", "show"))), 3)
 	})
 	for _, kind := range []string{"skill", "mcp", "plugin", "tool"} {
@@ -137,16 +128,16 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 				if kind == "mcp" {
 					what, target, where, scanner = "an MCP server", "<url>", "", "MCP"
 				}
-				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: an administrator scans %s from an elevated PowerShell prompt with %s%s, "+
+				return cliusage.WithExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: an administrator scans %s from an elevated PowerShell prompt with %s%s, "+
 					"which runs the gateway's %s scanner", what, managedWindowsCommand("scan", kind, target), where, scanner)), 3)
 			}
 			// The refusal named no next step (GAP-0523): the compiled
 			// admission policy is the administrator's view of these rules.
 			next := windowsManagedStandardUserViewAnswer("The admission policy", "policy", "show")
 			if len(args) == 0 || (args[0] != "block" && args[0] != "allow" && args[0] != "unblock") {
-				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane). %s", kind, next)), 3)
+				return cliusage.WithExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane). %s", kind, next)), 3)
 			}
-			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it. %s", kind, kind, args[0], next)), 3)
+			return cliusage.WithExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it. %s", kind, kind, args[0], next)), 3)
 		})
 	}
 	// Every other per-user command gets the managed answer too (GAP-0795).
@@ -380,7 +371,7 @@ func applyManagedHostHelp(root *cobra.Command) bool {
 		return false
 	}
 	admin, adminLead := "", "An administrator checks the deployment with:"
-	where, present := managedHostWindowsStandalone()
+	where, present := hookcli.ManagedHostWindowsStandalone()
 	if present {
 		admin = managedWindowsCommandLine("enterprise", "windows", "status", "--profile", "standalone")
 		adminLead = "An administrator checks it from an elevated PowerShell prompt with:"
@@ -506,7 +497,7 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 			command = name
 		}
 	}
-	where, present := managedHostWindowsStandalone()
+	where, present := hookcli.ManagedHostWindowsStandalone()
 	if !present {
 		// GAP-1317: a standard user on a managed Linux or macOS host has no
 		// per-user config either; give the answer start gives.
@@ -580,7 +571,7 @@ func managedWindowsSetupRefusal(where string, args []string) error {
 }
 
 func managedHostUnixRecord(warn io.Writer) (string, bool) {
-	path := managedHostDescriptorPath()
+	path := hookcli.ManagedHostDescriptorPath()
 	if path == "" {
 		return "", false
 	}
@@ -588,7 +579,7 @@ func managedHostUnixRecord(warn io.Writer) (string, bool) {
 	if err != nil || !info.Mode().IsRegular() {
 		return "", false
 	}
-	if err := managedHostRecordTrusted(path); err != nil {
+	if err := hookcli.ManagedHostRecordTrusted(path); err != nil {
 		if warn != nil {
 			fmt.Fprintf(warn, "[defenseclaw] ignoring an untrusted managed runtime descriptor: %v\n", err)
 		}
@@ -764,102 +755,6 @@ func managedHostPlatform() string {
 // `defenseclaw-gateway` in a hint fails with "command not found".
 func managedHostGatewayCommand() string {
 	return managed.StandaloneGatewayPath(runtime.GOOS)
-}
-
-// managedRecordTrusted reports whether a managed-deployment record at path
-// can only have been written by an administrator. validateFile checks the
-// record and its ancestors; validateDir checks a directory that admits no
-// writer other than an administrator and whose ancestors cannot be replaced.
-//
-// A standard user cannot inspect an administrator-only record, or the
-// administrator-only directory holding it. For that caller the nearest
-// ancestor strictly below stop that it can inspect decides: when that
-// directory admits only administrator writers, everything below it was
-// created by an administrator. Any other trust failure (a user-owned file,
-// a user-writable directory, a reparse point) or reaching stop without such a
-// directory means the record could have been planted, so it is untrusted.
-func managedRecordTrusted(path, stop string, validateFile, validateDir func(string) error) error {
-	err := validateFile(path)
-	if err == nil || !errors.Is(err, fs.ErrPermission) {
-		return err
-	}
-	stop = filepath.Clean(stop)
-	for dir := filepath.Dir(filepath.Clean(path)); pathStrictlyWithin(dir, stop); dir = filepath.Dir(dir) {
-		dirErr := validateDir(dir)
-		if dirErr == nil {
-			return nil
-		}
-		if !errors.Is(dirErr, fs.ErrPermission) {
-			return dirErr
-		}
-		if filepath.Dir(dir) == dir {
-			break
-		}
-	}
-	return fmt.Errorf("%s cannot be inspected and no administrator-only directory below %s holds it: %w", path, stop, err)
-}
-
-// managedStandaloneRecordCounts decides whether a recorded Windows
-// standalone deployment disables the per-user gateway, and names what proves
-// it. The record counts when recordTrusted shows that an administrator wrote
-// it. A standard user usually cannot show that. It cannot read the security
-// settings of the administrator-only product directory under %ProgramData%.
-// The vendor directory above that one often keeps the ProgramData
-// create-child grant for Users, so the ancestor walk ends at a directory a
-// user could have written. For that caller the gateway service decides
-// instead. Only an administrator can register a service, so a gateway service
-// that runs the standalone gateway executable proves the deployment is real.
-// standaloneService describes that service or says why there is none. A
-// planted record on a host without the service still counts for nothing.
-func managedStandaloneRecordCounts(record string, recordTrusted func(string) error, standaloneService func() (string, error)) (string, error) {
-	recordErr := recordTrusted(record)
-	if recordErr == nil {
-		return record, nil
-	}
-	service, serviceErr := standaloneService()
-	if serviceErr == nil {
-		return service, nil
-	}
-	return "", fmt.Errorf("%w; no administrator-registered standalone gateway service confirms it: %v", recordErr, serviceErr)
-}
-
-// standaloneGatewayServiceImageMatches checks that a service's registered
-// image path launches exactly gatewayPath. The lifecycle registers the
-// standalone gateway as its quoted executable path. The Secure Client profile
-// uses the same service name with its own executable, so the path is what
-// tells the two apart.
-func standaloneGatewayServiceImageMatches(imagePath, gatewayPath string) error {
-	executable := serviceImageExecutable(imagePath)
-	if executable == "" || gatewayPath == "" || !strings.EqualFold(executable, gatewayPath) {
-		return fmt.Errorf("service image %q does not run %s", imagePath, gatewayPath)
-	}
-	return nil
-}
-
-// serviceImageExecutable returns the executable of a service image path: the
-// quoted first token, or the text before the first blank when it is unquoted.
-func serviceImageExecutable(imagePath string) string {
-	image := strings.TrimSpace(imagePath)
-	if strings.HasPrefix(image, `"`) {
-		end := strings.IndexByte(image[1:], '"')
-		if end < 0 {
-			return ""
-		}
-		return image[1 : 1+end]
-	}
-	if index := strings.IndexAny(image, " \t"); index >= 0 {
-		return image[:index]
-	}
-	return image
-}
-
-// pathStrictlyWithin reports whether dir lies below root (not root itself).
-func pathStrictlyWithin(dir, root string) bool {
-	rel, err := filepath.Rel(root, dir)
-	if err != nil || rel == "." || filepath.IsAbs(rel) {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // managedStandaloneAdminDeployment returns this OS's unix standalone layout

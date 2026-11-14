@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // GAP-0982 and its class: a native hook command that failed before Run (an
@@ -100,14 +103,14 @@ func TestHookPreRunFailureAnswersWithTheConnectorsNativeBlock(t *testing.T) {
 						args = append(args, "--hook-contract", "codex-hooks-v4")
 					}
 					args = append(args, failure.args...)
-					previousArgs, previousIO := hookRawArgs, hookFailureIO
+					previousArgs, previousIO := hookcli.HookRawArgs, hookcli.HookFailureIO
 					var stdout, stderr bytes.Buffer
-					hookRawArgs = func() []string { return args }
-					hookFailureIO = func() (io.Reader, io.Writer, io.Writer) {
+					hookcli.HookRawArgs = func() []string { return args }
+					hookcli.HookFailureIO = func() (io.Reader, io.Writer, io.Writer) {
 						return strings.NewReader(f.payload), &stdout, &stderr
 					}
-					t.Cleanup(func() { hookRawArgs, hookFailureIO = previousArgs, previousIO })
-					cmd := newHookCmd()
+					t.Cleanup(func() { hookcli.HookRawArgs, hookcli.HookFailureIO = previousArgs, previousIO })
+					cmd := hookcli.NewHookCmd()
 					cmd.SetArgs(args)
 					cmd.SetOut(io.Discard)
 					cmd.SetErr(io.Discard)
@@ -117,7 +120,7 @@ func TestHookPreRunFailureAnswersWithTheConnectorsNativeBlock(t *testing.T) {
 					if err == nil {
 						t.Fatalf("hook %v succeeded, want a usage failure", args)
 					}
-					code := commandExitCode(err)
+					code := cliusage.ExitCode(err)
 					if got := f.blocks(code, stdout.String()); got != mode.want {
 						t.Fatalf("hook %v: exit %d stdout %q stderr %q: blocks=%v, want %v", args, code, stdout.String(), stderr.String(), got, mode.want)
 					}

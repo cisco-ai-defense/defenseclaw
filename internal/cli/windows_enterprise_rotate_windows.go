@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -49,7 +50,7 @@ func newWindowsRotateCredentialsCommand() *cobra.Command {
 					return cmd.Help()
 				}
 			}
-			return withExitCode(errWindowsCredentialRotationUnavailable, enterprisestatus.WindowsExitInvalidArgs)
+			return cliusage.WithExitCode(errWindowsCredentialRotationUnavailable, enterprisestatus.WindowsExitInvalidArgs)
 		},
 	}
 }

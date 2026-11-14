@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/spf13/cobra"
 )
 
@@ -25,15 +26,15 @@ func TestCommandExitCode(t *testing.T) {
 		want int
 	}{
 		"plain failure":   {err: cause, want: 1},
-		"labelled":        {err: withExitCode(cause, 1603), want: 1603},
-		"labelled deeper": {err: fmt.Errorf("context: %w", withExitCode(cause, 1603)), want: 1603},
+		"labelled":        {err: cliusage.WithExitCode(cause, 1603), want: 1603},
+		"labelled deeper": {err: fmt.Errorf("context: %w", cliusage.WithExitCode(cause, 1603)), want: 1603},
 		// The first code wins: an outer default must not overwrite the code an
 		// inner failure deliberately chose.
-		"already labelled": {err: withExitCode(withExitCode(cause, 3010), 1603), want: 3010},
+		"already labelled": {err: cliusage.WithExitCode(cliusage.WithExitCode(cause, 3010), 1603), want: 3010},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := commandExitCode(test.err); got != test.want {
-				t.Fatalf("commandExitCode = %d, want %d", got, test.want)
+			if got := cliusage.ExitCode(test.err); got != test.want {
+				t.Fatalf("cliusage.ExitCode = %d, want %d", got, test.want)
 			}
 			if !errors.Is(test.err, cause) {
 				t.Fatal("labelling a failure must preserve its cause")
@@ -43,11 +44,11 @@ func TestCommandExitCode(t *testing.T) {
 }
 
 func TestWithExitCodeKeepsSuccessUnlabelled(t *testing.T) {
-	if err := withExitCode(nil, 1603); err != nil {
+	if err := cliusage.WithExitCode(nil, 1603); err != nil {
 		t.Fatalf("withExitCode(nil) = %v, want nil", err)
 	}
-	if got := commandExitCode(nil); got != 1 {
-		t.Fatalf("commandExitCode(nil) = %d, want the generic failure result", got)
+	if got := cliusage.ExitCode(nil); got != 1 {
+		t.Fatalf("cliusage.ExitCode(nil) = %d, want the generic failure result", got)
 	}
 }
 
@@ -63,8 +64,8 @@ func TestUnknownFlagIsAUsageError(t *testing.T) {
 		t.Fatal("status accepted --bogus")
 	}
 	got := cmd.FlagErrorFunc()(cmd, parseErr)
-	if commandExitCode(got) != 2 {
-		t.Fatalf("exit = %d, want 2", commandExitCode(got))
+	if cliusage.ExitCode(got) != 2 {
+		t.Fatalf("exit = %d, want 2", cliusage.ExitCode(got))
 	}
 	if !strings.Contains(got.Error(), "Usage: ") || !strings.Contains(got.Error(), "status --help") {
 		t.Fatalf("missing usage/help pointer: %v", got)
@@ -87,16 +88,16 @@ func TestDelegatedUsageErrorNamesTheTypedCommand(t *testing.T) {
 	if parseErr == nil {
 		t.Fatal("audit export accepted --bogus")
 	}
-	t.Setenv(delegatedFromEnv, "defenseclaw")
+	t.Setenv(cliusage.DelegatedFromEnv, "defenseclaw")
 	got := cmd.FlagErrorFunc()(cmd, parseErr)
-	if commandExitCode(got) != 2 || !errors.Is(got, parseErr) {
-		t.Fatalf("exit = %d, err = %v", commandExitCode(got), got)
+	if cliusage.ExitCode(got) != 2 || !errors.Is(got, parseErr) {
+		t.Fatalf("exit = %d, err = %v", cliusage.ExitCode(got), got)
 	}
 	if strings.Contains(got.Error(), "defenseclaw-gateway") ||
 		!strings.Contains(got.Error(), "Try 'defenseclaw audit export --help'") {
 		t.Fatalf("usage must name defenseclaw audit export: %v", got)
 	}
-	t.Setenv(delegatedFromEnv, "")
+	t.Setenv(cliusage.DelegatedFromEnv, "")
 	if got := cmd.FlagErrorFunc()(cmd, parseErr); !strings.Contains(got.Error(), "defenseclaw-gateway audit export --help") {
 		t.Fatalf("direct run must name the gateway: %v", got)
 	}
@@ -113,8 +114,8 @@ func TestStrayArgumentsAreUsageErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := cmd.ValidateArgs([]string{"bogus"})
-		if commandExitCode(got) != 2 || !strings.Contains(fmt.Sprint(got), "Usage: ") {
-			t.Fatalf("%v bogus: rc %d, %v", path, commandExitCode(got), got)
+		if cliusage.ExitCode(got) != 2 || !strings.Contains(fmt.Sprint(got), "Usage: ") {
+			t.Fatalf("%v bogus: rc %d, %v", path, cliusage.ExitCode(got), got)
 		}
 		if err := cmd.ValidateArgs(nil); err != nil {
 			t.Fatalf("%v without arguments: %v", path, err)

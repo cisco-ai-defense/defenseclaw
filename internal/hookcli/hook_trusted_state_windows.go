@@ -1,0 +1,783 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package hookcli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+)
+
+const (
+	NativeHookLauncherName  = "defenseclaw-hook.exe"
+	NativeHookGatewayName   = "defenseclaw-gateway.exe"
+	PowerShellHookStateName = "defenseclaw-hook-state.json"
+	nativeHookStateMaxBytes = 64 << 10
+	hermesDirectStateName   = "hermes-direct-native-state.json"
+)
+
+// hookExecutableOverride is a test seam for an immutable packaged layout.
+var (
+	HookExecutableOverride           string
+	NativeHookRuntimeReader          = hookruntime.ReadTrustedForExecutable
+	NativeDelegatedHookRuntimeReader = hookruntime.ReadTrustedDelegatedForExecutable
+	enterpriseManagedRuntimeResolver = enterprisehooks.ResolveWindowsManagedHookRuntime
+	standaloneEnterpriseHookCheck    = standaloneEnterpriseHookExecutable
+	windowsStandaloneHooksHeldClosed = enterprisehooks.WindowsStandaloneHooksHeldClosed
+)
+
+// standaloneEnterpriseHookExecutable reports whether executable is the
+// administrator-owned hook binary of a standalone enterprise deployment
+// under the protected Program Files registration, or a run-scoped
+// certification root: the transition image <root>\bin\defenseclaw-hook.exe
+// or a launch image <root>\bin\hooks\<16 hex>\defenseclaw-hook.exe
+// (GAP-0751). An agent session that read its hook command before an upgrade
+// starts the older launch image; it is the same managed hook and must never
+// fall back to the per-user runtime. Only administrators can place a file
+// under either path.
+func standaloneEnterpriseHookExecutable(executable string) bool {
+	executable = strings.TrimSpace(executable)
+	if executable == "" || !filepath.IsAbs(executable) {
+		return false
+	}
+	image, ok := winpath.ParseEnterpriseHookImagePath(filepath.Clean(executable))
+	if !ok || !strings.EqualFold(image.Name, NativeHookLauncherName) {
+		return false
+	}
+	bin := image.Bin
+	roots, err := WindowsManagedLayout.Roots(winpath.EnterpriseProfileStandalone)
+	if err != nil {
+		return false
+	}
+	return winpath.ValidateEnterpriseInstallRoot(roots, filepath.Dir(bin)) == nil
+}
+
+// implicitEnterpriseManagedHook reports whether this hook process must use
+// the administrator-managed runtime even without --enterprise-managed. The
+// standalone profile registers its administrator-owned binary in per-user
+// agent configuration that the user can edit; dropping the flag there must
+// never select the unmanaged runtime, whose fail mode and gateway a user
+// can influence.
+func implicitEnterpriseManagedHook() bool {
+	return standaloneEnterpriseHookCheck(nativeHookExecutable())
+}
+
+var NativeHookRuntimeSnapshot struct {
+	sync.Mutex
+	prepared   bool
+	executable string
+	state      hookruntime.State
+	recognized bool
+	err        error
+}
+
+var nativeEnterpriseHookRuntimeSnapshot struct {
+	sync.Mutex
+	prepared           bool
+	executable         string
+	connector          string
+	home               string
+	policyActive       bool
+	registered         bool
+	gatewayAddr        string
+	gatewayServiceName string
+	scopedToken        string
+	generationID       string
+	failMode           string
+	err                error
+}
+
+// preparedNativeHookRuntime returns the exact process-local admission result
+// already established by NativeHookRuntimeNoop. The stable/full-hook identity
+// and executable path must match; callers that do not enter through the native
+// launcher receive prepared=false and must perform their own trusted read.
+func preparedNativeHookRuntime(executable string) (hookruntime.State, bool, error, bool) {
+	NativeHookRuntimeSnapshot.Lock()
+	defer NativeHookRuntimeSnapshot.Unlock()
+	if !NativeHookRuntimeSnapshot.prepared ||
+		!SameWindowsHookPath(NativeHookRuntimeSnapshot.executable, executable) {
+		return hookruntime.State{}, false, nil, false
+	}
+	return NativeHookRuntimeSnapshot.state,
+		NativeHookRuntimeSnapshot.recognized,
+		NativeHookRuntimeSnapshot.err,
+		true
+}
+
+func nativeHookExecutable() string {
+	if HookExecutableOverride != "" {
+		return HookExecutableOverride
+	}
+	executable, _ := os.Executable()
+	return executable
+}
+
+// NativeHookRuntimeNoop reports whether this process is the canonical stable
+// per-user Windows launcher while its installer-owned state is disabled or
+// unsafe. That launcher must exit before Cobra or hook fail-mode environment
+// is evaluated, so a long-running normal-mode agent cannot turn an uninstalled
+// cached command into a strict-availability block. Managed-enterprise policy
+// invokes an administrator-owned Program Files binary instead; enterprise
+// uninstall removes that policy before retiring the binary and requires
+// already-running clients to reload.
+func NativeHookRuntimeNoop() bool {
+	// defenseclaw-hook.exe calls this first, before any managed check runs.
+	// From here on managed diagnostics go to the durable record only: the
+	// agent shows hook stderr, and Claude Code makes it the block message.
+	hookexec.InstallManagedHookDiagnosticSinks()
+	if len(os.Args) > 1 && os.Args[1] == "hook" &&
+		(hookArgsContainEnterpriseManaged(os.Args[1:]) || implicitEnterpriseManagedHook()) {
+		// A managed hook call resolves its runtime in the hook command, after
+		// it armed the answer watchdog (prepareEnterpriseManagedHookRuntime
+		// there). The resolution reads machine policy, the account's runtime
+		// generation and their ACLs; resolved here, before the watchdog, a
+		// host that a Claude attestation repair saturated held registered
+		// calls 5.2 to 5.8 s, past the five seconds the agent waits
+		// (rel-1-0-4 GAP-0872). Every outcome of the deferred resolution is
+		// the same: an absent runtime ends the call with no answer, any other
+		// failure closes it. The per-user stable runtime reads below (the
+		// LocalAppData known folder, the runtime folder's ACLs) answer
+		// nothing for a managed call either, so they are not run before its
+		// watchdog: a Setup /repair that held them kept a managed call 5.2 s
+		// (rel-1-0-3 GAP-0159). The snapshot stays unprepared, so a later
+		// reader does its own trusted read: the gateway recovery readers,
+		// and the uninstall tombstone check, which reads it only when the
+		// machine policy is absent and the account unregistered.
+		return false
+	}
+	state, recognized, err := prepareNativeHookRuntimeSnapshot(nativeHookExecutable())
+	if !recognized {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	if !state.Active() || !filepath.IsAbs(state.DataRoot) || !windowsHookPathHasNoReparsePoints(state.DataRoot) {
+		return true
+	}
+	return false
+}
+
+// prepareNativeHookRuntimeSnapshot runs the per-user stable runtime admission
+// read (the delegated proof, then the full executable read) for executable and
+// records it as this process's snapshot.
+func prepareNativeHookRuntimeSnapshot(executable string) (hookruntime.State, bool, error) {
+	state, recognized, err := NativeDelegatedHookRuntimeReader(executable)
+	if !recognized {
+		state, recognized, err = NativeHookRuntimeReader(executable)
+	}
+	NativeHookRuntimeSnapshot.Lock()
+	NativeHookRuntimeSnapshot.prepared = true
+	NativeHookRuntimeSnapshot.executable = executable
+	NativeHookRuntimeSnapshot.state = state
+	NativeHookRuntimeSnapshot.recognized = recognized
+	NativeHookRuntimeSnapshot.err = err
+	NativeHookRuntimeSnapshot.Unlock()
+	return state, recognized, err
+}
+
+// NativeConnectorHookNoop applies connector-scoped disabled state after the
+// global installer runtime has been trusted. Hermes keeps shell-hook callbacks
+// in memory until its CLI/gateway process restarts; this exact-command marker
+// makes only the cached direct Hermes invocation a no-op after teardown.
+// Missing, malformed, reparse-point, or mismatched state does not silently
+// disable a hook.
+func NativeConnectorHookNoop(args []string) bool {
+	if len(args) != 3 || args[0] != "hook" || args[1] != "--connector" || args[2] != "hermes" {
+		return false
+	}
+	if implicitEnterpriseManagedHook() {
+		// The tombstone lives in target-writable per-user state. A managed
+		// hook never lets the user disable it; after revocation the SID is
+		// unregistered and its hook fails closed instead.
+		return false
+	}
+	home, trusted := trustedNativeHookHome()
+	if !trusted || !filepath.IsAbs(strings.TrimSpace(home)) {
+		return false
+	}
+	path := filepath.Join(home, "hooks", hermesDirectStateName)
+	if !windowsHookPathHasNoReparsePoints(path) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > nativeHookStateMaxBytes {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var state struct {
+		SchemaVersion  int    `json:"schema_version"`
+		Connector      string `json:"connector"`
+		Status         string `json:"status"`
+		Command        string `json:"command"`
+		ReloadRequired bool   `json:"reload_required"`
+	}
+	if json.Unmarshal(data, &state) != nil || state.SchemaVersion != 1 ||
+		state.Connector != "hermes" || state.Status != "disabled_pending_reload" ||
+		!state.ReloadRequired {
+		return false
+	}
+	executable := strings.TrimSpace(nativeHookExecutable())
+	if executable == "" || strings.ContainsAny(executable, "\"\x00\r\n") || !filepath.IsAbs(executable) {
+		return false
+	}
+	expected := `"` + strings.ReplaceAll(executable, `\`, "/") + `" hook --connector hermes`
+	return state.Command == expected
+}
+
+func hookArgsContainEnterpriseManaged(args []string) bool {
+	for _, arg := range args {
+		if arg == "--enterprise-managed" || arg == "--enterprise-managed=true" {
+			return true
+		}
+	}
+	return false
+}
+
+// prepareEnterpriseManagedHookRuntime caches the authenticated Windows
+// generation. Its true result is the native launcher tombstone.
+func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
+	// Cobra passes the raw flag value ("ClaudeCode" for --connector
+	// ClaudeCode). Without normalization here the snapshot cache would key
+	// on a case that enterpriseManagedHookRuntimeConnection's lowercase
+	// comparison never matches, so events would silently fail closed to
+	// 127.0.0.1:1 with no recorded reason.
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	executable := nativeHookExecutable()
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		SameWindowsHookPath(nativeEnterpriseHookRuntimeSnapshot.executable, executable) &&
+		nativeEnterpriseHookRuntimeSnapshot.connector == connectorName {
+		policyActive := nativeEnterpriseHookRuntimeSnapshot.policyActive
+		registered := nativeEnterpriseHookRuntimeSnapshot.registered
+		err := nativeEnterpriseHookRuntimeSnapshot.err
+		nativeEnterpriseHookRuntimeSnapshot.Unlock()
+		return enterpriseManagedRuntimeAbsenceNoop(
+			executable,
+			connectorName,
+			policyActive,
+			registered,
+			err,
+		)
+	}
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+
+	runtime, err := enterpriseManagedRuntimeResolver(executable, connectorName)
+	if err == nil && runtime.Registered {
+		if !validEnterpriseManagedRuntimeGenerationID(runtime.GenerationID) {
+			err = fmt.Errorf(
+				"enterprise hooks: connector %s authenticated runtime generation is invalid",
+				connectorName,
+			)
+		} else if strings.TrimSpace(runtime.ScopedToken) == "" {
+			err = fmt.Errorf(
+				"enterprise hooks: connector %s authenticated runtime token is empty",
+				connectorName,
+			)
+		}
+		if err == nil && standaloneEnterpriseHookCheck(executable) {
+			// The machine-wide closure is published and read back before a
+			// failed hot-config undo may stop the gateway. Even a valid open
+			// generation cannot decide a call while that undo is unproven.
+			held, holdErr := windowsStandaloneHooksHeldClosed()
+			if holdErr != nil {
+				err = fmt.Errorf("enterprise hooks: read standalone hook closure: %w", holdErr)
+			} else if held {
+				err = enterprisehooks.ErrWindowsStandaloneHooksClosed
+			}
+		}
+	}
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	nativeEnterpriseHookRuntimeSnapshot.prepared = true
+	nativeEnterpriseHookRuntimeSnapshot.executable = executable
+	nativeEnterpriseHookRuntimeSnapshot.connector = connectorName
+	nativeEnterpriseHookRuntimeSnapshot.home = runtime.DataDir
+	nativeEnterpriseHookRuntimeSnapshot.policyActive = runtime.PolicyActive
+	nativeEnterpriseHookRuntimeSnapshot.registered = runtime.Registered
+	nativeEnterpriseHookRuntimeSnapshot.gatewayAddr = runtime.GatewayAddr
+	nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = runtime.GatewayServiceName
+	nativeEnterpriseHookRuntimeSnapshot.scopedToken = runtime.ScopedToken
+	nativeEnterpriseHookRuntimeSnapshot.generationID = runtime.GenerationID
+	nativeEnterpriseHookRuntimeSnapshot.failMode = runtime.FailMode
+	nativeEnterpriseHookRuntimeSnapshot.err = err
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	return enterpriseManagedRuntimeAbsenceNoop(
+		executable,
+		connectorName,
+		runtime.PolicyActive,
+		runtime.Registered,
+		err,
+	)
+}
+
+func validEnterpriseManagedRuntimeGenerationID(generationID string) bool {
+	if len(generationID) != 32 {
+		return false
+	}
+	for _, char := range generationID {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// Only authenticated immutable generation policy may relax managed delivery.
+// An absent or invalid snapshot remains closed, independently of CLI/env flags.
+func enterpriseManagedHookRuntimeFailMode() string {
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		nativeEnterpriseHookRuntimeSnapshot.err == nil &&
+		nativeEnterpriseHookRuntimeSnapshot.registered &&
+		validEnterpriseManagedRuntimeGenerationID(nativeEnterpriseHookRuntimeSnapshot.generationID) &&
+		nativeEnterpriseHookRuntimeSnapshot.failMode == "open" {
+		return "open"
+	}
+	return "closed"
+}
+
+// windowsConnectorRemovedFromRoster reports whether a hook call for name is
+// the call of an agent still running after the administrator removed the
+// connector from the roster. The hook runs as the user and cannot read the
+// administrator-only removed-connectors record, so it reads the guardian's
+// off-roster marker from the machine hook runtime directory (user-readable,
+// administrator-owned, the directory of the undo closure). A seam for tests.
+var windowsConnectorRemovedFromRoster = func(executable, name string) bool {
+	if !enterprisehooks.WindowsConnectorOffRosterConnector(name) || !standaloneEnterpriseHookCheck(executable) {
+		return false
+	}
+	if held, err := windowsStandaloneHooksHeldClosed(); held || err != nil {
+		return false
+	}
+	off, err := WindowsConnectorOffRosterRead(name)
+	return err == nil && off
+}
+
+// windowsConnectorOffRosterRead is replaceable in tests.
+var WindowsConnectorOffRosterRead = enterprisehooks.WindowsConnectorOffRoster
+
+// windowsExcludedAccountNoop reports whether a hook call is the call of an
+// account the current machine policy excludes from enrollment
+// (exclude_users). That account is not governed, so it holds no row in the
+// protected target set, and the resolver answers "absent from the protected
+// target set", the answer of an account whose enrollment is still pending. It
+// is allowed without a verdict, as an account the policy does not cover is,
+// only when the resolver failed for that reason alone, the hook is the
+// standalone one, the hot-config undo closure is neither held nor unreadable,
+// and the running gateway service answers, on its own-status pipe, that its
+// current configuration excludes the account that connected. The hook cannot
+// read that configuration, and no file it can read grants the pass: a gateway
+// that is down, an answer that is slow or unreadable, and any other state
+// keep the refusal, which still tells a new account to wait for its
+// enrollment (GAP-0979).
+func windowsExcludedAccountNoop(executable string, resolveErr error) bool {
+	if !errors.Is(resolveErr, enterprisehooks.ErrWindowsManagedSIDUnregistered) || !standaloneEnterpriseHookCheck(executable) {
+		return false
+	}
+	if held, err := windowsStandaloneHooksHeldClosed(); held || err != nil {
+		return false
+	}
+	excluded, err := windowsCurrentAccountExcluded()
+	return err == nil && excluded
+}
+
+// windowsCurrentAccountExcluded asks the gateway service whether the machine
+// policy excludes the account that runs this process; it is replaceable in
+// tests.
+var windowsCurrentAccountExcluded = func() (bool, error) {
+	return refusalpipe.AccountExcluded(context.Background())
+}
+
+func enterpriseManagedRuntimeAbsenceNoop(
+	executable string,
+	connectorName string,
+	policyActive bool,
+	registered bool,
+	resolveErr error,
+) bool {
+	if managedRuntimeAbsentWithTrustedTombstone(
+		executable,
+		policyActive,
+		registered,
+		resolveErr,
+	) {
+		return true
+	}
+	if windowsExcludedAccountNoop(executable, resolveErr) {
+		return true
+	}
+	if resolveErr != nil || policyActive || registered {
+		return false
+	}
+	// On the standalone profile a hook call a running agent still makes for
+	// Claude Code or Codex from its cached settings is allowed, with no
+	// gateway contact and no token read, as the Cursor tombstone adapter allows
+	// it, only when the administrator took the connector off the roster
+	// (GAP-0916): the connector's machine policy is gone and the guardian has
+	// published the connector as off the roster, and the hot-config undo
+	// closure is neither held nor unreadable. Anything else, a failed undo, a
+	// lifecycle window, a connector still on the roster, falls through to the
+	// refusal below. Secure Client and a process that is not the standalone
+	// hook are unchanged.
+	if windowsConnectorRemovedFromRoster(executable, connectorName) {
+		return true
+	}
+	// An absent machine target is a trusted no-op only for the stable per-user
+	// launcher after its installer-owned state has become an inactive
+	// tombstone. Any other cached/retained enterprise runtime is de-enrolled;
+	// classify it before buildHookOptions can consult target-owned sidecars or
+	// attempt a gateway peer connection.
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		SameWindowsHookPath(
+			nativeEnterpriseHookRuntimeSnapshot.executable,
+			executable,
+		) &&
+		nativeEnterpriseHookRuntimeSnapshot.connector == connectorName &&
+		nativeEnterpriseHookRuntimeSnapshot.err == nil {
+		nativeEnterpriseHookRuntimeSnapshot.err = fmt.Errorf(
+			"%w: connector %s is absent from the protected target set",
+			enterprisehooks.ErrWindowsManagedSIDUnregistered,
+			connectorName,
+		)
+	}
+	return false
+}
+
+// managedRuntimeAbsentWithTrustedTombstone reports the trusted no-op of a
+// recognized stable per-user launcher that a long-running agent still calls
+// with cached managed arguments after its uninstall tombstone. A managed call
+// leaves main without the per-user read (rel-1-0-3 GAP-0159), so when the
+// snapshot is unprepared the read happens here, on the absent-policy,
+// unregistered branch only, after the hook armed its answer watchdog.
+func managedRuntimeAbsentWithTrustedTombstone(
+	executable string,
+	policyActive bool,
+	registered bool,
+	resolveErr error,
+) bool {
+	if resolveErr != nil || policyActive || registered {
+		return false
+	}
+	NativeHookRuntimeSnapshot.Lock()
+	prepared := NativeHookRuntimeSnapshot.prepared
+	state := NativeHookRuntimeSnapshot.state
+	recognized := NativeHookRuntimeSnapshot.recognized
+	err := NativeHookRuntimeSnapshot.err
+	NativeHookRuntimeSnapshot.Unlock()
+	if !prepared {
+		state, recognized, err = prepareNativeHookRuntimeSnapshot(executable)
+	}
+	return recognized && err == nil && !state.Active()
+}
+
+func enterpriseManagedHookRuntimeForceClosed() bool {
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	prepared := nativeEnterpriseHookRuntimeSnapshot.prepared
+	err := nativeEnterpriseHookRuntimeSnapshot.err
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	return prepared && err != nil
+}
+
+func enterpriseManagedHookRuntimeFailureReason() string {
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	prepared := nativeEnterpriseHookRuntimeSnapshot.prepared
+	err := nativeEnterpriseHookRuntimeSnapshot.err
+	home := nativeEnterpriseHookRuntimeSnapshot.home
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if !prepared || err == nil {
+		return ""
+	}
+	// A registered account with no runtime selected for it is pending, not
+	// drifted (GAP-1026): the guardian publishes a runtime only in the
+	// account's own connected session, and revokes the selection when its
+	// protected record is gone. The resolver tags that missing selection as
+	// drift when no integrity finding backs it, so an account that had been
+	// enrolled was told DefenseClaw "is not set up correctly" and to contact
+	// its administrator, while it only waits for a connected session. A
+	// standalone account is refused either way; Secure Client keeps its class,
+	// whose fail mode differs (a pending account follows the profile's open
+	// default, a drifted one the mode its authenticated generation names).
+	if errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending) &&
+		enterprisehooks.WindowsManagedRuntimeFailureClassOf(err) == enterprisehooks.WindowsManagedRuntimeFailureDrift &&
+		standaloneEnterpriseHookCheck(nativeHookExecutable()) {
+		return enterprisehooks.WindowsManagedEnrollmentPendingReason
+	}
+	switch enterprisehooks.WindowsManagedRuntimeFailureClassOf(err) {
+	case enterprisehooks.WindowsManagedRuntimeFailureUnregistered:
+		return enterprisehooks.WindowsManagedSIDUnregisteredReason
+	case enterprisehooks.WindowsManagedRuntimeFailureDrift:
+		return enterprisehooks.WindowsManagedRuntimeDriftReason
+	}
+	if errors.Is(err, enterprisehooks.ErrWindowsStandaloneHooksClosed) {
+		return enterprisehooks.ErrWindowsStandaloneHooksClosed.Error()
+	}
+	// A registered account with no runtime has not signed in since it was
+	// enrolled. The machine-side runtime selector says so, not the
+	// account's own files, so every managed profile reports it.
+	if errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending) {
+		return enterprisehooks.WindowsManagedEnrollmentPendingReason
+	}
+	// The account's DefenseClaw folder (renamed, moved or deleted) is gone:
+	// the documented code, not "state invalid" (GAP-0759). The standalone
+	// guardian recreates it in the account's session. Only a folder that is
+	// really absent counts, but whatever step failed on its absence: live, the
+	// failure did not always unwrap to a missing file, and the user read only
+	// "not set up correctly". A folder that is there stays state_invalid.
+	if standaloneEnterpriseHookCheck(nativeHookExecutable()) && windowsManagedRuntimeHomeAbsent(home) {
+		return "enterprise_managed_runtime_home_missing"
+	}
+	return "enterprise_managed_runtime_state_invalid"
+}
+
+// enterpriseManagedHookRuntimeDriftFailMode is the fail mode of a drifted
+// managed runtime: the configured mode the resolver recovered from
+// authenticated state, or closed when it could not establish one. Only a
+// Secure Client hook uses it (secureClientRuntimeFailureDelivery).
+func enterpriseManagedHookRuntimeDriftFailMode() string {
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		enterprisehooks.WindowsManagedRuntimeFailureClassOf(nativeEnterpriseHookRuntimeSnapshot.err) ==
+			enterprisehooks.WindowsManagedRuntimeFailureDrift &&
+		nativeEnterpriseHookRuntimeSnapshot.failMode == "open" {
+		return "open"
+	}
+	return "closed"
+}
+
+// windowsManagedRuntimeHomeAbsent reports whether the account's DefenseClaw
+// data folder the protected policy names does not exist.
+func windowsManagedRuntimeHomeAbsent(home string) bool {
+	if strings.TrimSpace(home) == "" {
+		return false
+	}
+	_, err := os.Lstat(home)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// enterpriseManagedHookRuntimeConnection returns endpoint identity and the
+// connector-scoped token from one already-authenticated immutable generation.
+// The returned token pointer is the explicit hookexec snapshot-mode marker;
+// callers must never reconstruct it from the mutable legacy token path.
+func enterpriseManagedHookRuntimeConnection(
+	connectorName string,
+) (gatewayAddr, gatewayServiceName string, scopedToken *string, ok bool) {
+	// Normalize identically to prepareEnterpriseManagedHookRuntime so the
+	// snapshot cache lookup matches regardless of the caller's casing.
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	valid := nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		nativeEnterpriseHookRuntimeSnapshot.err == nil &&
+		nativeEnterpriseHookRuntimeSnapshot.registered &&
+		nativeEnterpriseHookRuntimeSnapshot.connector == connectorName &&
+		validEnterpriseManagedRuntimeGenerationID(
+			nativeEnterpriseHookRuntimeSnapshot.generationID,
+		) &&
+		strings.TrimSpace(nativeEnterpriseHookRuntimeSnapshot.scopedToken) != ""
+	if !valid {
+		return nativeEnterpriseHookRuntimeSnapshot.gatewayAddr,
+			nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName,
+			nil,
+			false
+	}
+	token := nativeEnterpriseHookRuntimeSnapshot.scopedToken
+	return nativeEnterpriseHookRuntimeSnapshot.gatewayAddr,
+		nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName,
+		&token,
+		true
+}
+
+type NativeHookInstallState struct {
+	SchemaVersion int    `json:"schema_version"`
+	InstallKind   string `json:"install_kind"`
+	InstallScope  string `json:"install_scope"`
+	InstallRoot   string `json:"install_root"`
+	CommandDir    string `json:"command_dir"`
+	DataRoot      string `json:"data_root"`
+}
+
+// trustedNativeHookHome resolves the installer-owned data root without using
+// process environment inherited from an agent or project. It returns false for
+// source builds and legacy layouts so their existing developer behavior is
+// preserved.
+func trustedNativeHookHome() (string, bool) {
+	executable := nativeHookExecutable()
+	if strings.TrimSpace(executable) == "" {
+		return "", false
+	}
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	enterprisePrepared := nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		SameWindowsHookPath(nativeEnterpriseHookRuntimeSnapshot.executable, executable)
+	enterpriseHome := nativeEnterpriseHookRuntimeSnapshot.home
+	enterpriseErr := nativeEnterpriseHookRuntimeSnapshot.err
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if enterprisePrepared {
+		if enterpriseErr != nil {
+			return "", true
+		}
+		if !filepath.IsAbs(strings.TrimSpace(enterpriseHome)) {
+			// filepath.Clean("") is ".". Preserve an empty/invalid managed home
+			// as unavailable so the fail-closed path never reads project-relative
+			// hook state.
+			return "", true
+		}
+		return filepath.Clean(enterpriseHome), true
+	}
+	NativeHookRuntimeSnapshot.Lock()
+	prepared := NativeHookRuntimeSnapshot.prepared && SameWindowsHookPath(NativeHookRuntimeSnapshot.executable, executable)
+	preparedState := NativeHookRuntimeSnapshot.state
+	preparedRecognized := NativeHookRuntimeSnapshot.recognized
+	preparedErr := NativeHookRuntimeSnapshot.err
+	NativeHookRuntimeSnapshot.Unlock()
+	if prepared && preparedRecognized {
+		if preparedErr == nil && preparedState.Active() && filepath.IsAbs(preparedState.DataRoot) &&
+			windowsHookPathHasNoReparsePoints(preparedState.DataRoot) {
+			return filepath.Clean(preparedState.DataRoot), true
+		}
+		// main exits before Cobra for every recognized non-active/unsafe state.
+		// Returning a trusted empty value here keeps direct callers fail-closed
+		// without performing a second state read across the uninstall boundary.
+		return "", true
+	}
+	if state, recognized, stateErr := NativeHookRuntimeReader(executable); recognized {
+		if stateErr == nil && state.Active() && filepath.IsAbs(state.DataRoot) &&
+			windowsHookPathHasNoReparsePoints(state.DataRoot) {
+			return filepath.Clean(state.DataRoot), true
+		}
+		// The canonical stable launcher never falls back to project environment,
+		// even while publishing or after uninstall. main exits it as a no-op; the
+		// fallback only keeps direct unit callers deterministic.
+		if profile, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_Profile); err == nil {
+			return filepath.Join(profile, config.DefaultDataDirName), true
+		}
+		return "", true
+	}
+	base := filepath.Base(executable)
+	if !strings.EqualFold(base, NativeHookLauncherName) && !strings.EqualFold(base, NativeHookGatewayName) {
+		return "", false
+	}
+	// Once the canonical native launcher is identified, never fall back to
+	// DEFENSECLAW_HOME. If its installer state is unavailable, the Windows
+	// profile known-folder remains independent of project-supplied environment.
+	fallbackHome := ""
+	if profile, knownFolderErr := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_Profile); knownFolderErr == nil {
+		fallbackHome = filepath.Join(profile, config.DefaultDataDirName)
+	}
+
+	executable, err := filepath.Abs(executable)
+	if err != nil || !windowsHookPathHasNoReparsePoints(executable) {
+		return fallbackHome, true
+	}
+	commandDir := filepath.Dir(executable)
+	installRoot := filepath.Dir(commandDir)
+	statePath := filepath.Join(installRoot, "installer", "install-state.json")
+	state, ok := readNativeHookInstallState(statePath)
+	if !ok {
+		// The standalone PowerShell installer predates the native setup EXE and
+		// publishes binaries directly under ~/.local/bin. Its adjacent protected
+		// state binds a custom DEFENSECLAW_HOME without trusting project env.
+		statePath = filepath.Join(commandDir, PowerShellHookStateName)
+		state, ok = readNativeHookInstallState(statePath)
+	}
+	if !ok {
+		return fallbackHome, true
+	}
+	validNative := state.InstallKind == "native-windows-exe" && state.InstallScope == "user" &&
+		SameWindowsHookPath(state.InstallRoot, installRoot)
+	validPowerShell := state.InstallKind == "powershell-windows" && state.InstallScope == "user" &&
+		SameWindowsHookPath(state.InstallRoot, commandDir)
+	if (!validNative && !validPowerShell) || !SameWindowsHookPath(state.CommandDir, commandDir) ||
+		!filepath.IsAbs(state.DataRoot) || !windowsHookPathHasNoReparsePoints(state.DataRoot) {
+		return fallbackHome, true
+	}
+	return filepath.Clean(state.DataRoot), true
+}
+
+func readNativeHookInstallState(statePath string) (NativeHookInstallState, bool) {
+	if !windowsHookPathHasNoReparsePoints(statePath) {
+		return NativeHookInstallState{}, false
+	}
+	info, err := os.Lstat(statePath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > nativeHookStateMaxBytes {
+		return NativeHookInstallState{}, false
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return NativeHookInstallState{}, false
+	}
+	var state NativeHookInstallState
+	if json.Unmarshal(data, &state) != nil || state.SchemaVersion != 1 {
+		return NativeHookInstallState{}, false
+	}
+	return state, true
+}
+
+func SameWindowsHookPath(left, right string) bool {
+	return pathidentity.Same(left, right)
+}
+
+func windowsHookPathHasNoReparsePoints(path string) bool {
+	cursor, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	for {
+		ptr, err := winpath.UTF16Ptr(cursor)
+		if err != nil {
+			return false
+		}
+		attributes, err := windows.GetFileAttributes(ptr)
+		if err != nil {
+			if err != windows.ERROR_FILE_NOT_FOUND && err != windows.ERROR_PATH_NOT_FOUND {
+				return false
+			}
+		} else if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return false
+		}
+		parent := filepath.Dir(cursor)
+		if parent == cursor {
+			return true
+		}
+		cursor = parent
+	}
+}
+
+// enterpriseManagedHookRuntimeEnrolledPending reports whether reason is the
+// enrollment-pending refusal of an account the guardian enrolled for this
+// connector before (GAP-1026): a standalone hook only. A never-enrolled
+// account is refused with the enrollment wait text, and Secure Client keeps
+// its texts.
+func enterpriseManagedHookRuntimeEnrolledPending(reason string) bool {
+	if reason != enterprisehooks.WindowsManagedEnrollmentPendingReason || !standaloneEnterpriseHookCheck(nativeHookExecutable()) {
+		return false
+	}
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	home, connector := nativeEnterpriseHookRuntimeSnapshot.home, nativeEnterpriseHookRuntimeSnapshot.connector
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	return EnterpriseConnectorEnrolledBefore(home, connector)
+}

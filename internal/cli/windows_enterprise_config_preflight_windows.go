@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -259,7 +260,7 @@ func windowsEnterpriseRulePackPrivacyProblems(cfg *config.Config) []string {
 	grant := managed.RulePackServiceReadGrant(os.Getenv(managed.WindowsServiceAccountEnv))
 	// The packs the product ships are the same on every computer and public.
 	var shipped string
-	if layout, err := windowsManagedLayout.standalone(); err == nil {
+	if layout, err := hookcli.WindowsManagedLayout.Standalone(); err == nil {
 		shipped = strings.ToLower(filepath.Clean(layout.InstallRoot))
 	}
 	dirs := cfg.ReferencedRulePackDirs()
@@ -325,7 +326,7 @@ func addWindowsEnterpriseInstalledConfigWarnings(result *enterprisestatus.Result
 // transaction an interrupted run left: its recovery restores the deployment
 // as it was before, config and rule packs included. Tests replace it.
 var windowsEnterpriseStandaloneTransactionPending = func() bool {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.MetadataPath) == "" {
 		return false
 	}
@@ -360,7 +361,7 @@ var windowsEnterpriseStandaloneRecoveryPending = func(opts *windowsEnterpriseLif
 // trusted roots, which name the production scope and the lifecycle folder.
 // Tests replace it.
 var windowsEnterpriseStandaloneRecoveryRoots = func() (winpath.EnterpriseRoots, error) {
-	return windowsManagedLayout.roots(managed.ProfileStandalone)
+	return hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 }
 
 // The service names install-enterprise.ps1 takes when the CLI passes none

@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
@@ -65,7 +66,7 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 	}
 	env, err := newUnixLifecycleEnv(runtime.GOOS)
 	if err != nil {
-		return withExitCode(err, enterprisestatus.UnixExitFailure)
+		return cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait

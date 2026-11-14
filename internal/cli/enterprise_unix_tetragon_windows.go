@@ -15,11 +15,12 @@ package cli
 import (
 	"errors"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/spf13/cobra"
 )
 
 // The Linux tetragon group exists on Windows builds so help stays identical
 // everywhere; it refuses to run.
 func runUnixTetragon(_ *cobra.Command, _ string, _ *unixTetragonOptions) error {
-	return withExitCode(errors.New("`enterprise linux tetragon` reads Linux hosts; Windows has no Tetragon"), 1639)
+	return cliusage.WithExitCode(errors.New("`enterprise linux tetragon` reads Linux hosts; Windows has no Tetragon"), 1639)
 }

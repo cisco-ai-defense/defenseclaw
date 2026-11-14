@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/spf13/cobra"
 
@@ -161,7 +162,7 @@ func TestWindowsAnchorPreflightRefusalRecordsOneChangeEvent(t *testing.T) {
 	opts := &windowsEnterpriseLifecycleOptions{trustAnchors: "anchors.json", configPath: "config.yaml",
 		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
 	done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts)
-	if !done || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+	if !done || cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
 		t.Fatalf("incompatible arguments: done=%v, err=%v, output=%s", done, err, out)
 	}
 	assertOneRefusedAnchorInstall(t, spool, "bundle_required")
@@ -216,7 +217,7 @@ func TestWindowsChangeSyntaxRefusalsAreAudited(t *testing.T) {
 			cmd.SetIn(input)
 			cmd.SetOut(&bytes.Buffer{})
 			cmd.SetErr(&bytes.Buffer{})
-			if err := cmd.Execute(); commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+			if err := cmd.Execute(); cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
 				t.Fatalf("syntax error = %v", err)
 			}
 			if input.Len() != len("credential-value-marker\n") {
@@ -261,7 +262,7 @@ func TestWindowsChangeSyntaxRefusalsAreAudited(t *testing.T) {
 		cmd.SetArgs(args)
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetErr(&bytes.Buffer{})
-		if err := cmd.Execute(); commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+		if err := cmd.Execute(); cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
 			t.Fatalf("%s syntax error = %v", mode, err)
 		}
 	}
@@ -284,8 +285,8 @@ func TestWindowsSecretRefusalIsAuditedOnlyOnAnInstalledDeployment(t *testing.T) 
 		windowsSecretDeploymentInstalled = func() (bool, error) { return installed, nil }
 		before := len(windowsChangeEvents(t, spool))
 		_, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "../escape", fromStdin: true}, "x")
-		if commandExitCode(err) != windowsSecretExitInvalid {
-			t.Fatalf("installed=%v: an unsafe name = %v (exit %d), want 1639", installed, err, commandExitCode(err))
+		if cliusage.ExitCode(err) != windowsSecretExitInvalid {
+			t.Fatalf("installed=%v: an unsafe name = %v (exit %d), want 1639", installed, err, cliusage.ExitCode(err))
 		}
 		events := windowsChangeEvents(t, spool)
 		want := 0
@@ -332,8 +333,8 @@ func TestWindowsSecretRefusalIsAuditedOnlyOnAnInstalledDeployment(t *testing.T) 
 		windowsEnterpriseRecordValidator = func(string) error { return tc.untrusted }
 		before := len(windowsChangeEvents(t, spool))
 		_, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "../escape", fromStdin: true}, "x")
-		if commandExitCode(err) != windowsSecretExitInvalid {
-			t.Fatalf("%s: an unsafe name = %v (exit %d), want 1639", tc.name, err, commandExitCode(err))
+		if cliusage.ExitCode(err) != windowsSecretExitInvalid {
+			t.Fatalf("%s: an unsafe name = %v (exit %d), want 1639", tc.name, err, cliusage.ExitCode(err))
 		}
 		events := windowsChangeEvents(t, spool)
 		want := 0
@@ -397,7 +398,7 @@ func TestWindowsAnchorArgumentConflictRecordsOnlyElevatedInstalledStandaloneRefu
 			opts := &windowsEnterpriseLifecycleOptions{trustAnchors: "delivered-anchors.json", configPath: "delivered-config.yaml",
 				profile: tc.profile, installedBeforeRun: tc.installed, jsonOutput: true}
 			done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts)
-			if !done || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+			if !done || cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
 				t.Fatalf("conflict accepted: done=%v err=%v", done, err)
 			}
 			if events := windowsChangeEvents(t, spool); len(events) != tc.want {
@@ -494,8 +495,8 @@ func TestWindowsAnchorsLockRefusalRecordsOneChangeEvent(t *testing.T) {
 		jsonOutput: true, installedBeforeRun: true}
 	done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
 	cleanupPreparedWindowsBundle(t, opts)
-	if !done || commandExitCode(err) != enterprisestatus.WindowsExitBusy {
-		t.Fatalf("held lock: done=%v exit=%d out=%s", done, commandExitCode(err), out)
+	if !done || cliusage.ExitCode(err) != enterprisestatus.WindowsExitBusy {
+		t.Fatalf("held lock: done=%v exit=%d out=%s", done, cliusage.ExitCode(err), out)
 	}
 	ids := enterprisestatus.ListChangeEventIDs(spool)
 	if len(ids) != 1 {
@@ -648,7 +649,7 @@ func TestWindowsLifecycleRefusesBundleFlagsOnOtherChangeActions(t *testing.T) {
 				command.SetErr(io.Discard)
 				command.SetArgs(append([]string{"--profile", "standalone", "--json"}, tc.flags...))
 				err := command.ExecuteContext(context.Background())
-				if got := commandExitCode(err); got != enterprisestatus.WindowsExitInvalidArgs {
+				if got := cliusage.ExitCode(err); got != enterprisestatus.WindowsExitInvalidArgs {
 					t.Fatalf("exit %d, want %d (%v)\n%s", got, enterprisestatus.WindowsExitInvalidArgs, err, stdout.String())
 				}
 				var result enterprisestatus.Result
@@ -1103,7 +1104,7 @@ func TestWindowsAnchorsWithTheModeShorthandRecordOneRefusal(t *testing.T) {
 	opts := &windowsEnterpriseLifecycleOptions{trustAnchors: "anchors.json", mode: "action", connector: "codex",
 		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
 	done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts)
-	if !done || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(out.String(), "bundle_required") {
+	if !done || cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(out.String(), "bundle_required") {
 		t.Fatalf("anchors with --mode: done=%v, err=%v, output=%s", done, err, out)
 	}
 	assertOneRefusedAnchorInstall(t, spool, "bundle_required")

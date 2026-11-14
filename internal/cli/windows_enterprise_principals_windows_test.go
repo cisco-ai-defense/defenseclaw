@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -39,20 +40,20 @@ func TestWindowsEnterpriseNamePrincipals(t *testing.T) {
 // print names the account, the mask in words and the icacls fix on a
 // standalone install; elsewhere it is left as it was.
 func TestWindowsStandaloneTrustAdvisoryNamesTheAccountAndTheFix(t *testing.T) {
-	originalName, originalStandalone := windowsPrincipalName, managedHostWindowsStandalone
-	t.Cleanup(func() { windowsPrincipalName, managedHostWindowsStandalone = originalName, originalStandalone })
+	originalName, originalStandalone := windowsPrincipalName, hookcli.ManagedHostWindowsStandalone
+	t.Cleanup(func() { windowsPrincipalName, hookcli.ManagedHostWindowsStandalone = originalName, originalStandalone })
 	windowsPrincipalName = func(sid string) string {
 		return map[string]string{"S-1-5-32-545": `BUILTIN\Users`}[sid]
 	}
 	raw := `C:\ProgramData\Cisco\DefenseClaw\etc: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x1301bf`
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + hookcli.WindowsEnterpriseMarkerKey, true }
 	got := managed.DescribeTrustAdvisoryReason(raw)
 	for _, want := range []string{`BUILTIN\Users (S-1-5-32-545) has write access (modify (0x1301bf))`, `Fix: icacls "C:\ProgramData\Cisco\DefenseClaw\etc" /remove:g *S-1-5-32-545`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("advisory reason %q lacks %q", got, want)
 		}
 	}
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	if got := managed.DescribeTrustAdvisoryReason(raw); got != raw {
 		t.Errorf("non-standalone advisory reason was rewritten: %q", got)
 	}

@@ -30,6 +30,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -639,7 +640,7 @@ func runConnectorReconcileEvery(cmd *cobra.Command, dataDir string) error {
 	if len(causes) == 0 {
 		return nil
 	}
-	return withExitCode(fmt.Errorf("not every connector is on its current hook: %s", strings.Join(causes, "; ")),
+	return cliusage.WithExitCode(fmt.Errorf("not every connector is on its current hook: %s", strings.Join(causes, "; ")),
 		gatewayStartAdmissionRefusedExitCode)
 }
 

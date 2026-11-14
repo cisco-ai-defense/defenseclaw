@@ -20,6 +20,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -33,7 +34,7 @@ import (
 // Seams for tests.
 var (
 	windowsEnterpriseHookRuntimeDir = func() (string, error) {
-		layout, err := windowsManagedLayout.standalone()
+		layout, err := hookcli.WindowsManagedLayout.Standalone()
 		return layout.HookRuntimeDir, err
 	}
 	windowsEnterpriseInspectPublicDir = enterprisepolicy.InspectWindowsPublicDir
