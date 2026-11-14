@@ -1,4 +1,5 @@
-// Review probes (s7-resprev2, round 2 of s7/response). Not committed.
+// Regression tests from the s7-resprev2 review, round 2 of s7/response (c94bb7ce2e):
+// they failed there and pass with the round 3 fixes (GAP-0428..0431).
 // Secrets come from the existing fixtures; output prints counts only.
 
 package gateway
