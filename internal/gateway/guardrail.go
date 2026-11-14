@@ -2694,20 +2694,31 @@ func promptSideInstructionText(messages []ChatMessage) string {
 // OpenClaw 2026.9 appends a synthetic context message after the prompt, so the
 // last message alone would leave the prompt itself unscanned (GAP-0190).
 func currentTurnUserText(messages []ChatMessage) string {
-	var turn []string
+	turn := currentTurnUserMessages(messages)
+	texts := make([]string, len(turn))
+	for i, msg := range turn {
+		texts[i] = msg.Content
+	}
+	return strings.Join(texts, "\n")
+}
+
+// currentTurnUserMessages is the non-blank user messages after the last
+// assistant or tool message, oldest first (currentTurnUserText).
+func currentTurnUserMessages(messages []ChatMessage) []ChatMessage {
+	var turn []ChatMessage
 	for i := len(messages) - 1; i >= 0; i-- {
 		role := messages[i].Role
 		if role == "assistant" || role == "tool" {
 			break
 		}
 		if role == "user" && strings.TrimSpace(messages[i].Content) != "" {
-			turn = append(turn, messages[i].Content)
+			turn = append(turn, messages[i])
 		}
 	}
 	for i, j := 0, len(turn)-1; i < j; i, j = i+1, j-1 {
 		turn[i], turn[j] = turn[j], turn[i]
 	}
-	return strings.Join(turn, "\n")
+	return turn
 }
 
 // promptTurnText is the user text the proxy inspects before a call: the user

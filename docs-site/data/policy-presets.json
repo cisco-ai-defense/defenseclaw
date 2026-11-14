@@ -3309,7 +3309,7 @@
               "rules": [
                 {
                   "id": "TRUST-AUTHORITY",
-                  "pattern": "(?i)(?:i am|i'm)\\s+(?:your|the)\\s+(?:creator|developer|admin|owner|operator)\\b[\\s\\S]{0,120}(?:\\b(?:ignore|override|disregard|bypass|disable|reveal|expose|forget|obey|comply)\\b|do\\s+as\\s+i\\s+say|no\\s+(?:content\\s+policy\\s+)?restrictions?)",
+                  "pattern": "(?i)(?:i\\s+am|i'm)\\s+(?:your|the)\\s+(?:creator|developer|admin|owner|operator)\\b[\\s\\S]{0,120}(?:\\b(?:ignore|override|disregard|bypass|disable|reveal|expose|forget|obey|comply)\\b|do\\s+as\\s+i\\s+say|no\\s+(?:content\\s+policy\\s+)?restrictions?)",
                   "title": "Authority claim in tool args",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -7388,7 +7388,7 @@
               "rules": [
                 {
                   "id": "TRUST-AUTHORITY",
-                  "pattern": "(?i)(?:i am|i'm)\\s+(?:your|the)\\s+(?:creator|developer|admin|owner|operator)\\b[\\s\\S]{0,120}(?:\\b(?:ignore|override|disregard|bypass|disable|reveal|expose|forget|obey|comply)\\b|do\\s+as\\s+i\\s+say|no\\s+(?:content\\s+policy\\s+)?restrictions?)",
+                  "pattern": "(?i)(?:i\\s+am|i'm)\\s+(?:your|the)\\s+(?:creator|developer|admin|owner|operator)\\b[\\s\\S]{0,120}(?:\\b(?:ignore|override|disregard|bypass|disable|reveal|expose|forget|obey|comply)\\b|do\\s+as\\s+i\\s+say|no\\s+(?:content\\s+policy\\s+)?restrictions?)",
                   "title": "Authority claim in tool args",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -11179,7 +11179,7 @@
               "rules": [
                 {
                   "id": "TRUST-AUTHORITY",
-                  "pattern": "(?i)(?:i am|i'm)\\s+(?:your|the)\\s+(?:creator|developer|admin|owner|operator)\\b[\\s\\S]{0,120}(?:\\b(?:ignore|override|disregard|bypass|disable|reveal|expose|forget|obey|comply)\\b|do\\s+as\\s+i\\s+say|no\\s+(?:content\\s+policy\\s+)?restrictions?)",
+                  "pattern": "(?i)(?:i\\s+am|i'm)\\s+(?:your|the)\\s+(?:creator|developer|admin|owner|operator)\\b[\\s\\S]{0,120}(?:\\b(?:ignore|override|disregard|bypass|disable|reveal|expose|forget|obey|comply)\\b|do\\s+as\\s+i\\s+say|no\\s+(?:content\\s+policy\\s+)?restrictions?)",
                   "title": "Authority claim in tool args",
                   "severity": "HIGH",
                   "confidence": 0.85,

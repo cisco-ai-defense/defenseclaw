@@ -1596,19 +1596,18 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	}
 	generation := snapshotRulePackGenerationFor(ctx, req.Connector)
 	ruleFindings := messageRuleFindings(generation, content, folded, req.contentScope, !ManagedEnterpriseActive())
-	// A prompt whose content is a JSON block array is also read as the model
-	// reads its text parts, with no separator (GAP-0465).
-	if isPromptDirection(req.Direction) {
-		if joined := jsonContentPartsJoinedText(content); joined != "" {
-			joinedFolded := ""
-			if foldTrust {
-				if view := trustPatternText(joined); view != joined {
-					joinedFolded = view
-				}
+	// A prompt whose content is a JSON block array, and a tool result with
+	// content block arrays in it, are also read as the model reads their text
+	// parts, with no separator (GAP-0465, GAP-0528).
+	if joined := messagePartsJoinedText(req.Direction, content); joined != "" {
+		joinedFolded := ""
+		if foldTrust {
+			if view := trustPatternText(joined); view != joined {
+				joinedFolded = view
 			}
-			ruleFindings = unionRuleFindings(ruleFindings,
-				messageRuleFindings(generation, joined, joinedFolded, req.contentScope, !ManagedEnterpriseActive()))
 		}
+		ruleFindings = unionRuleFindings(ruleFindings,
+			messageRuleFindings(generation, joined, joinedFolded, req.contentScope, !ManagedEnterpriseActive()))
 	}
 
 	var verdict *ToolInspectVerdict
