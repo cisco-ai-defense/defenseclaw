@@ -1,0 +1,96 @@
+version: 1
+category: active-directory-protection
+rules:
+  # Kerberos service-ticket (Kerberoasting) and AS-REP roasting requests.
+  # The built-in default pack ships this rule at HIGH (it also covers
+  # credentialed NetExec there), so default alerts and strict blocks (a per-mode ASK is a separate change owned by stream S8,
+  # rel-1-0-10:GAP-0017). This opt-in pack raises it to CRITICAL so a managed
+  # Windows domain blocks the request in every profile. The code-owned
+  # prerequisite (ExactDirectoryCredentialTicketRequest) gates it. Blocking the
+  # request trades the credential.returned_kerberos_tgs detection for
+  # prevention: a blocked request returns no ticket to observe.
+  - id: credential.directory_ticket_request
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['impacket-getuserspns', 'getuserspns.py',
+      'impacket-getnpusers', 'getnpusers.py'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
+    pattern: '(?i)\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\.py)\b'
+    title: "Kerberos ticket request for offline cracking"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [credential, active-directory, kerberos, protected-domain, bounded-grammar]
+
+  # Export of the full Active Directory database (NTDS.dit) through ntdsutil
+  # Install-From-Media. Built-in default ships this at HIGH (alert); the pack
+  # raises it to CRITICAL. Reuses the code-owned ExactWindowsNTDSIFMDump owner.
+  - id: credential.windows_ntds_ifm_dump
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program in ['ntdsutil', 'ntdsutil.exe'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations)
+    pattern: '(?i)\bntdsutil(?:\.exe)?\s+"?(?:ac i|activate instance) ntds"?\s+"?ifm"?\s+"?create full [A-Z]:\\[^"\r\n]+"?\s+q\s+q(?:\s|$)'
+    title: "Export the full Active Directory database (NTDS IFM)"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [credential, active-directory, windows, protected-domain, credential-dumping]
+
+  # Credential use against a domain service through NetExec / CrackMapExec
+  # (rel-1-0-10:GAP-0014): a password, NT/LM hash, Kerberos key or ccache, a
+  # username, or an empty (anonymous) credential, under POSIX shells, PowerShell
+  # or cmd. The code-owned classifier completes this argv
+  # (ExactNetExecDomainServiceAuth) and marks a credential-read operation, so the
+  # match is enforcement-eligible. Without this pack the built-in HIGH
+  # credential.directory_ticket_request rule covers the same calls (default
+  # alerts, strict blocks). The NTDS dump form is owned by the built-in
+  # credential.directory_credential_acquisition rule, so it is excluded here.
+  - id: credential.directory_service_credential_use
+    tool_call_only: true
+    # owner-gated: directoryServiceCredentialUsePrerequisite decides; the CEL is
+    # the shared cheap NetExec candidate filter.
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['nxc', 'netexec', 'crackmapexec'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
+    pattern: 'a^'
+    title: "Use a credential against a domain service: password, hash, key, ticket or empty (NetExec)"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [credential, active-directory, netexec, protected-domain, bounded-grammar]
+
+  # Bulk directory collection for attack-path mapping: a NetExec LDAP run with
+  # a BloodHound or mass-enumeration module. Shares the completed NetExec argv.
+  - id: recon.directory_bulk_collection
+    tool_call_only: true
+    # owner-gated: directoryBulkCollectionPrerequisite requires the ldap protocol
+    # and a BloodHound or mass-enumeration option; the CEL is the shared cheap
+    # NetExec candidate filter (kept identical to stay within the cost limit).
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['nxc', 'netexec', 'crackmapexec'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
+    pattern: 'a^'
+    title: "Bulk Active Directory collection for attack-path mapping (NetExec LDAP)"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [recon, active-directory, bloodhound, netexec, protected-domain, bounded-grammar]
+
+  # Password spraying: a NetExec run whose credential set is a wordlist file
+  # (user or password list), against one or many domain hosts. Shares the
+  # completed NetExec argv and its credential-read operation.
+  - id: credential.directory_password_spray
+    tool_call_only: true
+    # owner-gated: directoryPasswordSprayPrerequisite requires a wordlist file as
+    # the username or password operand; the CEL is the shared cheap NetExec
+    # candidate filter.
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['nxc', 'netexec', 'crackmapexec'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
+    pattern: 'a^'
+    title: "Password spraying against domain services (NetExec wordlist)"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [credential, active-directory, password-spray, netexec, protected-domain, bounded-grammar]

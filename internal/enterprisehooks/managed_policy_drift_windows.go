@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // RestoreWindowsClaudeManagedPolicyDrift puts DefenseClaw's own Claude Code
@@ -133,7 +134,11 @@ func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 // hook, so the restore never renders a drop-in that runs another binary for
 // every Claude Code user. The record is trusted only through its descriptor;
 // the target install and verify already require the same executable
-// (GAP-0633). Secure Client keeps the record as it is.
+// (GAP-0633). Secure Client keeps the record as it is. A record that names
+// an older hook image of this install (the transition image, or the launch
+// image an upgrade replaced) is this install's own (GAP-0751): the restore
+// puts back the drop-in that record authenticates, and the next reconcile
+// rewrites it for the current image.
 func requireWindowsClaudeRecordedHookExecutable(record windowsClaudeManagedPolicyState) error {
 	if !windowsManagedPolicySelfHealRefusesContentDrift() {
 		return nil
@@ -142,7 +147,8 @@ func requireWindowsClaudeRecordedHookExecutable(record windowsClaudeManagedPolic
 	if err != nil {
 		return err
 	}
-	if !sameWindowsEnterprisePath(record.HookExecutable, hookExecutable) {
+	if !sameWindowsEnterprisePath(record.HookExecutable, hookExecutable) &&
+		!winpath.SameEnterpriseHookImageFamily(record.HookExecutable, hookExecutable) {
 		return fmt.Errorf("enterprise hooks: the Claude Code managed policy ownership record names hook executable %s, "+
 			"not this install's %s, so the changed drop-in is left as it is; run `%s`. %s", record.HookExecutable, hookExecutable,
 			managed.WindowsSetupCommand("/ensure"), managed.WindowsSetupSource)

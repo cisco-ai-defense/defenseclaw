@@ -83,6 +83,7 @@ NEWER_CONFIG_KEYS = (
     ("guardrail.internal_domains", (1, 0, 6)),
     ("guardrail.chains", (1, 0, 6)),
     ("connectors", (1, 0, 6)),
+    ("connectors.openclaw", (1, 0, 10)),
 )
 # Where a downgrade keeps the keys it set aside, in the data folder:
 # {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.

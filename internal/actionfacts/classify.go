@@ -289,7 +289,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		command.Effect = EffectExecute
 	}
 	if command.Program == "" {
-		command.Program = commandProgram(command.Executable)
+		command.Program = commandProgramForDialect(command.Executable, command.Dialect)
 	}
 	parserClassified := len(command.Operations) > 0
 	program := command.Program
@@ -749,6 +749,14 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "nxc", "netexec", "crackmapexec", "john", "john.exe":
 		if _, ok := exactDirectoryCredentialCommand(*command); ok {
 			addOperation(command, OperationCredentialRead)
+		} else if ExactNetExecDomainServiceAuth(*command) {
+			// A complete, statically credentialed NetExec/CrackMapExec
+			// domain-service invocation (rel-1-0-10:GAP-0014). Keeping the
+			// parse authoritative lets the built-in HIGH
+			// credential.directory_ticket_request rule alert (default) or
+			// block (strict), and the opt-in active-directory-protection pack
+			// block it at CRITICAL.
+			addOperation(command, OperationCredentialRead)
 		} else {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
@@ -951,6 +959,9 @@ func commandProgram(executable string) string {
 }
 
 func commandProgramForDialect(executable string, dialect Dialect) string {
+	if family, ok := netExecProgramFamily(executable); ok {
+		return family
+	}
 	if program, ok := windowsScriptProgram(executable, dialect); ok {
 		return program
 	}

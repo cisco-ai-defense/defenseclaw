@@ -694,6 +694,8 @@ class OverviewPanelModel:
         # Set by the app when no config.yaml was loaded (GAP-1163).
         self.not_configured = False
         self.active_policy: object | None = None
+        # One line from the Routing panel's status ("" when routing is off).
+        self.routing_tile = ""
         self.health: HealthSnapshot | None = None
         # Availability of the sidecar management endpoint is deliberately
         # tracked separately from ``health.gateway``.  That payload field is
@@ -866,6 +868,11 @@ class OverviewPanelModel:
         """
 
         self.active_policy = policy
+
+    def set_routing_tile(self, text: str) -> None:
+        """Install the routing line (routing_state.overview_tile); "" hides it."""
+
+        self.routing_tile = text
 
     def set_runtime_overview(self, runtime: RuntimeOverview | None) -> None:
         """Install the latest Runtime-plane summary used by Overview."""
@@ -1142,6 +1149,8 @@ class OverviewPanelModel:
                     f"{runtime.connections} connections, no findings above the reporting floor"
                 )
             notices.append(OverviewNotice("info", message))
+        if self.routing_tile:
+            notices.append(OverviewNotice("info", self.routing_tile + " - press M for Routing"))
         if idle_notice is not None:
             notices.append(idle_notice)
 

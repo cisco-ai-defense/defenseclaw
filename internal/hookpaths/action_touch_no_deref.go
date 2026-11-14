@@ -34,12 +34,16 @@ func NoDereferenceTouchSafe(command, cwd, home string) bool {
 
 // noDereferenceTouchStatus reads the entries touch changes. A regular file
 // is checked by identity; -h changes a symbolic link's entry instead.
+//
+// A shell startup that can change what the statement runs only withholds the
+// safe proof. The entries the command names are still read, so a protected
+// file reached through another name (a hard link) is reported whatever the
+// account's environment holds. Before GAP-0293, any exported bash function
+// (RHEL's which, a host profile's helpers) dropped the protected reading
+// too, and the quoted hard link reached the protected file.
 func noDereferenceTouchStatus(command, cwd, home string) (safe, protectedTarget bool) {
 	if !strings.Contains(command, "touch") ||
 		!strings.Contains(command, "-h") && !strings.Contains(command, "--no-dereference") {
-		return false, false
-	}
-	if actionClientLoopCopySourceStartupUnknown() {
 		return false, false
 	}
 	operands, ok := noDereferenceTouchOperands(command, cwd, home, true)
@@ -75,7 +79,40 @@ func noDereferenceTouchStatus(command, cwd, home string) (safe, protectedTarget 
 			protectedTarget = true
 		}
 	}
-	return !unknown && !protectedTarget, protectedTarget
+	return !unknown && !protectedTarget && !noDereferenceTouchStartupUnknown(), protectedTarget
+}
+
+// noDereferenceTouchStartupUnknown reports a shell startup that can change
+// what the touch statement runs: a startup file (BASH_ENV, ENV), or an
+// exported function that bash calls instead of touch or gtouch (bash accepts
+// slashes in a function name, so /usr/bin/touch can be one) or for a missing
+// program (command_not_found_handle). The statement calls no other function,
+// so an exported function of another name leaves the proof intact. An export
+// spelled neither name%% (bash 4.3+) nor name() (older patched bash) is
+// unknown.
+func noDereferenceTouchStartupUnknown() bool {
+	if os.Getenv("BASH_ENV") != "" || os.Getenv("ENV") != "" {
+		return true
+	}
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		function, exported := strings.CutPrefix(name, "BASH_FUNC_")
+		if !exported {
+			continue
+		}
+		function, modern := strings.CutSuffix(function, "%%")
+		if !modern {
+			var patched bool
+			if function, patched = strings.CutSuffix(function, "()"); !patched {
+				return true
+			}
+		}
+		base := function[strings.LastIndexByte(function, '/')+1:]
+		if base == "touch" || base == "gtouch" || function == "command_not_found_handle" {
+			return true
+		}
+	}
+	return false
 }
 
 func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) ([]string, bool) {

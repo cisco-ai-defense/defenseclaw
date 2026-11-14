@@ -75,9 +75,13 @@ func FindHookToolInvocation(ctx context.Context, dbPath string, query HookToolIn
 	// the indexed bound is whole seconds, one second early; the exact bound
 	// is applied to the parsed time below.
 	lower := since.Add(-hookToolInvocationClockSkew - time.Second).Truncate(time.Second).Format("2006-01-02T15:04:05Z")
+	// A hook call inside an open write batch stores its tool call in its
+	// hook_decision row only and exports tool.invocation.requested
+	// (observability.WithExportOnlyInCall, #1384); older rows, and calls
+	// outside a batch, have the tool record. Either proves the call.
 	rows, err := db.QueryContext(ctx, `SELECT timestamp, connector, tool_id, projected_record_json
-		FROM audit_events WHERE event_name = ? AND timestamp >= ? ORDER BY timestamp LIMIT ?`,
-		observability.TelemetryEventToolInvocationRequested, lower, hookToolInvocationScanLimit)
+		FROM audit_events WHERE event_name IN (?, ?) AND timestamp >= ? ORDER BY timestamp LIMIT ?`,
+		observability.TelemetryEventToolInvocationRequested, hookDecisionEventName, lower, hookToolInvocationScanLimit)
 	if err != nil {
 		return evidence, fmt.Errorf("audit: read event history %s: %w", dbPath, err)
 	}
@@ -114,6 +118,10 @@ func FindHookToolInvocation(ctx context.Context, dbPath string, query HookToolIn
 	}
 	return evidence, nil
 }
+
+// hookDecisionEventName is the event name of the hook decision record
+// (log.compat.hook_decision).
+const hookDecisionEventName = "hook_decision"
 
 type hookToolInvocationRecord struct {
 	Connector   string `json:"connector"`

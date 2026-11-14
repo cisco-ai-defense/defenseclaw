@@ -750,7 +750,7 @@ func resolveWindowsManagedHooksLifecycleContext(stagedRetire bool) (
 		pendingPath:      filepath.Join(installState, "pending.json"),
 		deploymentPath:   filepath.Join(installState, "deployment.json"),
 		transactionsPath: transactionsPath,
-		gatewayPath:      filepath.Join(opts.ManagedDir, "defenseclaw-gateway.exe"),
+		gatewayPath:      filepath.Join(windowsCodexRequirementsBin(opts), "defenseclaw-gateway.exe"),
 		runtimePath:      runtimeDir,
 		targets:          targets,
 		claudeTargets:    claudeTargets,
@@ -2996,7 +2996,7 @@ func validateWindowsManagedHooksLifecycleJournal(
 		!validWindowsManagedHooksLifecycleTransactionID(journal.TransactionID) ||
 		journal.TransactionID != identity.TransactionID ||
 		journal.ManifestPath != identity.ManifestPath ||
-		journal.HookBinary != identity.HookBinary ||
+		!sameWindowsManagedHookImage(journal.HookBinary, identity.HookBinary) ||
 		journal.GatewayServiceName != identity.GatewayServiceName {
 		return errors.New("managed-hook lifecycle snapshot does not match the protected deployment")
 	}

@@ -99,28 +99,27 @@ class SetupAuditUsesTheRunningGatewayTokenTests(unittest.TestCase):
             click.Context(click.Command("openclaw")),
         ):
             self.app.logger = Logger.from_config(self.app.cfg)
-            cmd_setup._adopt_openclaw_gateway_token(self.app, restart=False)
-            self.assertEqual(self.app.cfg.gateway.resolved_token(), _OPENCLAW)
+            cmd_setup._adopt_openclaw_gateway_token(self.app)
+            # R-TOK: the OpenClaw token is saved as the OpenClaw credential only.
+            self.assertEqual(self.app.cfg.gateway.resolved_token(), _RUNNING)
             cmd_setup._log_setup_action(self.app, "setup-guardrail", "connector=openclaw", allow_offline=True)
 
-    def test_no_restart_openclaw_token_swap_audits_on_the_running_gateway(self) -> None:
+    def _dotenv(self) -> str:
+        with open(os.path.join(self.app.cfg.data_dir, ".env"), encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_no_restart_openclaw_token_save_audits_on_the_running_gateway(self) -> None:
         gateway = _Gateway(_RUNNING)
         self._adopt_and_audit(gateway)
         self.assertEqual(gateway.tokens, [_RUNNING])
         self.assertEqual(len(gateway.admitted), 1)
-        with open(os.path.join(self.app.cfg.data_dir, ".env"), encoding="utf-8") as handle:
-            self.assertIn(f"DEFENSECLAW_GATEWAY_TOKEN={_OPENCLAW}", handle.read())
+        self.assertIn(f"OPENCLAW_GATEWAY_TOKEN={_OPENCLAW}", self._dotenv())
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN=", self._dotenv())
 
-    def test_a_gateway_restarted_on_the_new_token_still_admits_the_event(self) -> None:
-        gateway = _Gateway(_OPENCLAW)
-        self._adopt_and_audit(gateway)
-        self.assertEqual(gateway.tokens, [_RUNNING, _OPENCLAW])
-        self.assertEqual(len(gateway.admitted), 1)
-
-    def test_a_stopped_gateway_gets_the_new_token_without_a_rejected_try(self) -> None:
-        gateway = _Gateway(_OPENCLAW)
+    def test_a_stopped_gateway_starts_on_the_unchanged_master(self) -> None:
+        gateway = _Gateway(_RUNNING)
         self._adopt_and_audit(gateway, alive=False)
-        self.assertEqual(gateway.tokens, [_OPENCLAW])
+        self.assertEqual(gateway.tokens, [_RUNNING])
 
     def test_setup_gateway_new_token_exits_zero_and_audits_with_the_running_token(self) -> None:
         gateway = _Gateway(_RUNNING)
@@ -140,7 +139,10 @@ class SetupAuditUsesTheRunningGatewayTokenTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("did not accept its setup audit event", result.output)
         self.assertEqual(gateway.tokens, [_RUNNING])
-        self.assertEqual(self.app.cfg.gateway.resolved_token(), "new-openclaw-token")
+        # --token is the OpenClaw gateway token (R-TOK); the master stays.
+        self.assertEqual(self.app.cfg.gateway.resolved_token(), _RUNNING)
+        self.assertEqual(self.app.cfg.gateway.token_env, "")
+        self.assertIn("OPENCLAW_GATEWAY_TOKEN=new-openclaw-token", self._dotenv())
 
 
 if __name__ == "__main__":

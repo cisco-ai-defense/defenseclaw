@@ -212,6 +212,8 @@ type enterpriseHookWorkerOptions struct {
 	HookCredentialIdentity             string `json:"hook_credential_identity,omitempty"`
 	ForeignHookGuardBinary             string `json:"foreign_hook_guard_binary,omitempty"`
 	ManagedHookBinary                  string `json:"managed_hook_binary,omitempty"`
+	// RouteOnly is the route-only rendering of the target (nil: none).
+	RouteOnly *connector.RouteOnlySetup `json:"route_only,omitempty"`
 	// ProductCredentials are the digests of the product credentials a
 	// remove_user_native_otlp target knows an exporter by; the credentials
 	// themselves never reach a process that runs as the user.
@@ -585,7 +587,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		// deadline. Give discovery its own deadline so the private-home
 		// walk can return an incomplete result while there is still time
 		// to write the response.
-		scanCtx, cancel := context.WithTimeout(ctx, workerTimeout(request)*3/4)
+		scanCtx, cancel := context.WithTimeout(ctx, enterpriseHookWorkerScanTimeout(workerTimeout(request)))
 		defer cancel()
 		return respond(enterpriseHookWorkerDiscoverWithin(scanCtx, request), 0)
 	case enterpriseHookWorkerOpForeignCleanup:
@@ -1518,6 +1520,7 @@ func (o enterpriseHookWorkerOptions) installOptions(registry *connector.Registry
 		HookCredentialIdentity:             o.HookCredentialIdentity,
 		ForeignHookGuardBinary:             o.ForeignHookGuardBinary,
 		ManagedHookBinary:                  o.ManagedHookBinary,
+		RouteOnly:                          o.RouteOnly,
 	}
 }
 
@@ -1546,6 +1549,7 @@ func enterpriseHookWorkerOptionsFrom(opts enterprisehooks.InstallOptions) enterp
 		HookCredentialIdentity:             opts.HookCredentialIdentity,
 		ForeignHookGuardBinary:             opts.ForeignHookGuardBinary,
 		ManagedHookBinary:                  opts.ManagedHookBinary,
+		RouteOnly:                          opts.RouteOnly,
 	}
 }
 
@@ -2075,6 +2079,12 @@ var errEnterpriseHookWorkerNoResult = errors.New("worker returned no result for 
 // enterpriseHookWorkerScanGrace is how long a discover worker waits, after
 // its scan deadline, for a scan that observes the deadline to return.
 var enterpriseHookWorkerScanGrace = 2 * time.Second
+
+// enterpriseHookWorkerScanTimeout is the scan deadline of a discover worker
+// whose limit is timeout: three quarters of it, so the worker can still answer
+// after a scan that did not return, within enterpriseHookWorkerScanGrace.
+// The test worker replaces it so that a blocked scan does not take seconds.
+var enterpriseHookWorkerScanTimeout = func(timeout time.Duration) time.Duration { return timeout * 3 / 4 }
 
 // enterpriseHookWorkerDiscovery is what one discover worker has found so far.
 type enterpriseHookWorkerDiscovery struct {
