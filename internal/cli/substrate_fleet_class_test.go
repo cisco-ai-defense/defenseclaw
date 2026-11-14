@@ -37,6 +37,9 @@ var observedMayBeZero = map[string]string{
 	"KeysNote":        "the keys URL was read",
 	"PoliciesNote":    "the access policies were read",
 	"ActorRoutesNote": "the actor listener's routes were read",
+	"SignInNote":      "the gateway's /info was read",
+	"SignInCause":     "the gateway's sign-in server check passed (no sign_in_server member)",
+	"SignInSince":     "the gateway's sign-in server check passed",
 }
 
 // TestEveryCheckedObservedMemberHasAProducer is the class test of GAP-0200

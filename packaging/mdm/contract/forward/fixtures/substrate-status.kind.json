@@ -73,6 +73,11 @@
       "message": "ok"
     },
     {
+      "id": "sign_in_server",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
       "id": "snapshot_bucket",
       "status": "pass",
       "message": "ok"

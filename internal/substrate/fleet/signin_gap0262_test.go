@@ -4,6 +4,7 @@
 package fleet
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -30,5 +31,14 @@ func TestCheckSignInServerReachGAP0262(t *testing.T) {
 	o.SignInRead, o.SignInNote = false, "no port-forward"
 	if c := CheckSignInServerReach(o); c.Status != Warn {
 		t.Errorf("unread %+v", c)
+	}
+}
+
+// GAP-0262: verify, status and doctor --install-file have a check for the
+// OIDC sign-in server (at 60f0f9a43b none did, so doctor --cluster said ok
+// while nobody could sign in).
+func TestTheChecksCoverTheSignInServerGAP0262(t *testing.T) {
+	if !slices.Contains(CheckIDs, "sign_in_server") {
+		t.Fatalf("no check covers the OIDC sign-in server: %v", CheckIDs)
 	}
 }
