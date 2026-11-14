@@ -1682,6 +1682,10 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// gets the fail-mode verdict instead of its computed allow, unless that
 	// allow was already delivered.
 	recordPanic()
+	// decisionInAudit: the hook_decision record is the call's row of record
+	// and was written in the audit section with the connector-hook record
+	// export only (#1384); AuditPersisted is then its commit.
+	decisionInAudit := false
 	if !replay {
 		var auditErr error
 		safeSection("audit", func() {
@@ -1701,12 +1705,46 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			// The rows the call queued commit with its audit row, and the
 			// verdict waits for that commit, as it waited for its row alone.
 			auditCtx, auditOutcome := audit.WithCallWriteOutcome(ctx)
-			auditErr = a.logConnectorHookAuditEnvelope(auditCtx, env)
+			connectorCtx := auditCtx
+			var decisionCtx context.Context
+			var decisionOutcome *audit.CallWriteOutcome
+			flushed := false
+			defer func() {
+				if !flushed && decisionInAudit {
+					// A panic between the queued row of record and its flush:
+					// the row and every export of the attempt are dropped, so
+					// the fail-mode verdict the call now gets is its only
+					// decision record (S8 R4 review P1).
+					audit.AbandonCallWrites(decisionCtx, errHookAuditSectionPanicked)
+					decisionInAudit = false
+				}
+			}()
+			if a.hookDecisionIsRowOfRecord(ctx, req, resp, env, panicked) {
+				connectorCtx, decisionCtx, decisionOutcome, decisionInAudit = a.writeHookDecisionRowOfRecord(auditCtx, req, resp, env)
+			}
+			hookStageForTest(ctx, "finalize_audit_row_of_record")
+			auditErr = a.logConnectorHookAuditEnvelope(connectorCtx, env)
+			if auditErr != nil && decisionInAudit {
+				// The connector-hook record failed beside the row of record:
+				// the call is unaudited as in 1.0.9, so its queued
+				// hook_decision row and export are dropped, and the decision
+				// is recorded below with the fail-mode verdict.
+				audit.AbandonCallWrites(decisionCtx, auditErr)
+				decisionInAudit = false
+			}
 			audit.FlushCallWrites(ctx)
+			flushed = true
 			if auditErr == nil {
 				auditErr = auditOutcome.Err()
 			}
+			if auditErr == nil && decisionInAudit {
+				// The verdict stands only when its row of record committed;
+				// its export and the connector-hook export follow the same
+				// outcome (ExportAfterCallCommit).
+				auditErr = decisionOutcome.Err()
+			}
 			result.AuditPersisted = auditErr == nil
+			result.DecisionSettled = decisionInAudit && result.AuditPersisted
 		})
 		// A call backed by a journaled occurrence (w3-g3-obs; only a
 		// receipt-capable delivery on a gateway that runs recovery has one)
@@ -1829,6 +1867,10 @@ func (a *APIServer) finalizeAgentHookAnswer(
 				fmt.Fprintf(os.Stderr, "[gateway] hook_decision record cannot be built connector=%s event=%s; the connector audit row keeps the decision\n",
 					connectorName, req.HookEventName)
 			}
+		} else if decisionInAudit {
+			// The record was written in the audit section; its metrics are
+			// counted here, as every decision's.
+			a.recordHookDecisionMetricsOfCall(ctx, req, resp, env, panicked)
 		}
 		// With no companion to persist, an enforced hook is
 		// notification-ready as soon as its audit row has landed.

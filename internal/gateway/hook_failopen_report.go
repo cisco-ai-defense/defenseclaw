@@ -133,6 +133,12 @@ type hookFailureLine struct {
 	// blocked is logged with the connector's fail mode open and outcome
 	// fail_closed: it did not run.
 	Outcome string `json:"outcome"`
+	// SemanticEventID, LogicalEventID and ConnectorInstanceID name the
+	// correlation event of a gateway line's call (1.0.10): the report row
+	// pairs with the call's hook_decision record. Empty in hook lines.
+	SemanticEventID     string `json:"semantic_event_id"`
+	LogicalEventID      string `json:"logical_event_id"`
+	ConnectorInstanceID string `json:"connector_instance_id"`
 }
 
 // ranUnchecked reports whether the logged call went ahead without a check.
@@ -445,7 +451,9 @@ func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time
 			break
 		}
 		env := audit.CorrelationEnvelope{Connector: call.entry.Connector,
-			SessionID: call.entry.SessionID, RequestID: call.entry.CallID}
+			SessionID: call.entry.SessionID, RequestID: call.entry.CallID,
+			SemanticEventID: call.entry.SemanticEventID, LogicalEventID: call.entry.LogicalEventID,
+			ConnectorInstanceID: call.entry.ConnectorInstanceID}
 		if call.blocked || hookFailureOwnsToolCall(call.entry) {
 			// A block, and the allow a hook gave a pre-execution event, are the
 			// record of that tool call: the row names its tool id, so the call

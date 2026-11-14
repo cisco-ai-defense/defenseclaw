@@ -129,14 +129,20 @@ const evaluationLimitRuleID = "ACTION-COMPOUND-LIMIT"
 // protected file, so it keeps its block.
 func withoutEnforcingEvaluationLimit(findings []RuleFinding) ([]RuleFinding, bool) {
 	isLimit := func(finding RuleFinding) bool {
-		id := canonicalTrustedRuleID(finding.RuleID)
-		return finding.contributesToEnforcement() && !finding.omittedOperand &&
-			(id == evaluationLimitRuleID || id == canonicalTrustedRuleID(parseFailureRuleID))
+		return finding.contributesToEnforcement() && profileMappedLimitFinding(finding)
 	}
 	if !slices.ContainsFunc(findings, isLimit) {
 		return findings, false
 	}
 	return slices.DeleteFunc(slices.Clone(findings), isLimit), true
+}
+
+// profileMappedLimitFinding reports the evaluation-limit or reader-failure
+// finding that proves no target (not the one that stands for an omitted
+// operand), which the profile maps by tier.
+func profileMappedLimitFinding(finding RuleFinding) bool {
+	id := canonicalTrustedRuleID(finding.RuleID)
+	return !finding.omittedOperand && (id == evaluationLimitRuleID || id == canonicalTrustedRuleID(parseFailureRuleID))
 }
 
 // guardrailActionForProfile maps findings to the action of the profile: the
