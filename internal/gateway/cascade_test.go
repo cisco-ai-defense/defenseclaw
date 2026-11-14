@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 var cascadeActions = []string{"allow", "log", "alert", "confirm", "block"}
@@ -330,6 +332,16 @@ decisions contains {"action": "allow", "id": "instruction-writes-ok", "reason": 
 }
 `
 
+// cascadePolicyTimeoutForHost is the policy.timeout_ms a test sets so a call
+// is judged by its policy and not by how busy the box is: the product's 5 ms
+// on an idle host, stretched by the host's slowdown (testenv.HostSlowdown) up
+// to the 50 ms the config allows. The product default stays 5 ms: a box at
+// load 80 under -race took longer than that to evaluate a one-rule module and
+// the call was judged unknown (rel-1-0-10:GAP-0620).
+func cascadePolicyTimeoutForHost() int {
+	return min(50, max(5, int(math.Ceil(5*testenv.HostSlowdown()))))
+}
+
 // The policy on the real hook path: it raises an unflagged call, it lowers
 // a flagged one only to policy.lowest, and the audit finding and reason
 // name the rule that set the action.
@@ -353,12 +365,15 @@ func TestCascadeHookPathPolicy(t *testing.T) {
 		t.Fatalf("baseline: %+v", got)
 	}
 	api := cascadeModuleConfig(t, "default", cascadeTestModule, "")
+	api.scannerCfg.Guardrail.Cascade.Policy.TimeoutMs = cascadePolicyTimeoutForHost()
 	lowered := run(api, write)
 	if lowered.Action != "alert" || !findingStringHasRuleID(lowered.Findings, "COG-CLAUDE-MD") ||
 		!strings.Contains(strings.Join(lowered.Findings, " "), "CASCADE-POLICY:instruction-writes-ok") {
 		t.Fatalf("lowered (policy.lowest alert): action=%s findings=%v reason=%q", lowered.Action, lowered.Findings, lowered.Reason)
 	}
-	raised := run(cascadeModuleConfig(t, "default", cascadeTestModule, ""), map[string]interface{}{"command": "ls"})
+	raisedAPI := cascadeModuleConfig(t, "default", cascadeTestModule, "")
+	raisedAPI.scannerCfg.Guardrail.Cascade.Policy.TimeoutMs = cascadePolicyTimeoutForHost()
+	raised := run(raisedAPI, map[string]interface{}{"command": "ls"})
 	if raised.Action != "block" || !strings.Contains(strings.Join(raised.Findings, " "), "CASCADE-POLICY:bash-blocked") {
 		t.Fatalf("raised: action=%s findings=%v reason=%q", raised.Action, raised.Findings, raised.Reason)
 	}
@@ -366,6 +381,7 @@ func TestCascadeHookPathPolicy(t *testing.T) {
 	// finding is a proven CRITICAL (the floor keeps it an alert).
 	allow := cascadeModuleConfig(t, "default", cascadeTestModule, "")
 	allow.scannerCfg.Guardrail.Cascade.Policy.Lowest = "allow"
+	allow.scannerCfg.Guardrail.Cascade.Policy.TimeoutMs = cascadePolicyTimeoutForHost()
 	if got := run(allow, write); got.Action != "allow" && got.Action != "alert" {
 		t.Fatalf("lowest allow: %s", got.Action)
 	}
