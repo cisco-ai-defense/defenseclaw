@@ -634,6 +634,9 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 			Confidence: res.risk,
 		}
 		emitDecisionModel(ctx, dm.model, toolName, args, res, floor)
+		// The hook sees the floor before the judge runs, so a judge that
+		// misses the hook answer window cannot drop it (GAP-0392).
+		decisionFloorSlotFrom(ctx).set(floor)
 		// The judge always runs (a decision-model block is never final) and
 		// can raise the verdict; the decision model's finding is the floor,
 		// and stands when the judge gives no verdict.
@@ -871,6 +874,51 @@ func judgeCompletionAction(kind, action string) string {
 func judgeInputHash(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// decisionFloorSlot carries a cascade-3 decision-model floor (a confident
+// block on its way to the judge) out of the judge goroutine, so the hook
+// can answer with it when the judge is late or fails (GAP-0392). A late
+// judge can only add to it; nothing removes it.
+type decisionFloorSlot struct {
+	mu    sync.Mutex
+	floor *ScanVerdict
+}
+
+type decisionFloorSlotKey struct{}
+
+func withDecisionFloorSlot(ctx context.Context, slot *decisionFloorSlot) context.Context {
+	return context.WithValue(ctx, decisionFloorSlotKey{}, slot)
+}
+
+// decisionFloorSlotFrom returns the slot of ctx, or nil (set and get are
+// nil-safe) when the call is not a hook-lane judge call.
+func decisionFloorSlotFrom(ctx context.Context) *decisionFloorSlot {
+	slot, _ := ctx.Value(decisionFloorSlotKey{}).(*decisionFloorSlot)
+	return slot
+}
+
+func (s *decisionFloorSlot) set(v *ScanVerdict) {
+	if s == nil || v == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := *v
+	s.floor = &c
+}
+
+func (s *decisionFloorSlot) get() *ScanVerdict {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.floor == nil {
+		return nil
+	}
+	c := *s.floor
+	return &c
 }
 
 type decisionRuleFloorKey struct{}
