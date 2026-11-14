@@ -23,10 +23,11 @@ const (
 	// sent with {"dropped":true}.
 	MaxTrackedToolCalls = 256
 	// MaxToolCallStateBytes bounds the state kept and sent for one call. A
-	// rawInput over it is cut to a prefix of its text values (so a command
-	// that was seen is still judged) and the state says {"truncated":true};
-	// locations past the bound are cut to the first ones that fit (at most
-	// MaxToolCallLocations); when nothing useful fits, rawInput is left out.
+	// state over it has its title and the text values of its rawInput cut to
+	// a prefix (so a command that was seen is still judged) and says
+	// {"truncated":true}; locations past the bound are cut to the first ones
+	// that fit (at most MaxToolCallLocations); when nothing useful fits,
+	// rawInput is left out, and then all but the kind and the marks.
 	MaxToolCallStateBytes = 64 << 10
 	// MaxToolCallLocations is how many locations of one call the gateway
 	// judges one by one: a frame that names more has the first ones judged
@@ -34,8 +35,9 @@ const (
 	// size keeps at most this many of its first locations.
 	MaxToolCallLocations = 64
 
-	maxToolCallInputText = 8 << 10
-	maxDroppedKeysKept   = 1024
+	maxToolCallInputText  = 8 << 10
+	maxToolCallSmallValue = 1 << 10
+	maxDroppedKeysKept    = 1024
 )
 
 // ToolCallTracker keeps the state of the tool calls of one guard. The zero
@@ -161,6 +163,9 @@ func (t *ToolCallTracker) Commit(msg Message, blocked bool) {
 	set(&state.Locations, "locations")
 	merged, err := json.Marshal(state)
 	if err == nil && len(merged) > MaxToolCallStateBytes {
+		// The title is cut as the input's text is: claude-code-acp titles a
+		// shell call with its command (ACP review round 5, GAP-0462).
+		state.Title = shrinkToolCallTitle(state.Title)
 		state.RawInput, state.Truncated = shrinkToolCallInput(state.RawInput), true
 		merged, err = json.Marshal(state)
 	}
@@ -179,7 +184,10 @@ func (t *ToolCallTracker) Commit(msg Message, blocked bool) {
 		merged, err = json.Marshal(state)
 	}
 	if err != nil || len(merged) > MaxToolCallStateBytes {
-		return
+		// Nothing useful fits. The call is still kept, cut: never the state
+		// before this frame, which the editor no longer shows, and never
+		// without the report's block mark (ACP review round 5, GAP-0462).
+		merged = minimalToolCallState(state.Kind, state.Flagged)
 	}
 	if evicted, evictedState, ok := t.calls.put(key, merged); ok {
 		if t.dropped == nil {
@@ -248,6 +256,56 @@ func firstToolCallLocations(raw json.RawMessage, room int) json.RawMessage {
 	return out
 }
 
+// minimalToolCallState is the state kept for a call when nothing useful fits
+// in the bound: its kind (when that is small), the truncated mark the gateway
+// reads as the bound rule's cap hit, and the report's block mark.
+func minimalToolCallState(kind json.RawMessage, flagged bool) json.RawMessage {
+	state := toolCallFields{Truncated: true, Flagged: flagged}
+	if len(kind) <= maxToolCallSmallValue {
+		state.Kind = kind
+	}
+	if out, err := json.Marshal(state); err == nil {
+		return out
+	}
+	state.Kind = nil
+	out, _ := json.Marshal(state) // only bools: it cannot fail
+	return out
+}
+
+// cutToolCallText keeps the prefix of text that fits in maxToolCallInputText
+// bytes, cut at the start of a rune (a command that was seen is still
+// judged). The cut is recorded in trunc.
+func cutToolCallText(trunc *bounded.Truncated, text string) string {
+	size := bounded.NewCounter(trunc, bounded.Bytes, maxToolCallInputText)
+	if size.TakeN(len(text)) {
+		return text
+	}
+	cut := maxToolCallInputText
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
+}
+
+// shrinkToolCallTitle cuts a title that is too large: a text title to its
+// prefix, any other value that is not small goes. The caller marks the state
+// truncated.
+func shrinkToolCallTitle(raw json.RawMessage) json.RawMessage {
+	var title string
+	if json.Unmarshal(raw, &title) != nil {
+		if len(raw) <= maxToolCallSmallValue {
+			return raw
+		}
+		return nil
+	}
+	var trunc bounded.Truncated
+	out, err := json.Marshal(cutToolCallText(&trunc, title))
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
 // shrinkToolCallInput keeps of a rawInput that is too large the prefix of each
 // of its text values (a command that was seen is still judged) and its small
 // values; nothing when it is not an object.
@@ -256,21 +314,15 @@ func shrinkToolCallInput(raw json.RawMessage) json.RawMessage {
 	if json.Unmarshal(raw, &input) != nil || input == nil {
 		return nil
 	}
+	var trunc bounded.Truncated
 	kept := make(map[string]json.RawMessage, len(input))
 	for name, value := range input {
 		var text string
 		if json.Unmarshal(value, &text) == nil {
-			if len(text) > maxToolCallInputText {
-				cut := maxToolCallInputText
-				for cut > 0 && !utf8.RuneStart(text[cut]) {
-					cut--
-				}
-				text = text[:cut]
-			}
-			if encoded, err := json.Marshal(text); err == nil {
+			if encoded, err := json.Marshal(cutToolCallText(&trunc, text)); err == nil {
 				kept[name] = encoded
 			}
-		} else if len(value) <= 1<<10 {
+		} else if len(value) <= maxToolCallSmallValue {
 			kept[name] = value
 		}
 	}

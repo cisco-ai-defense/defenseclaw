@@ -341,7 +341,10 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool, c
 	}
 	write := func(path string) map[string]string { return map[string]string{"file_path": path} }
 	// addEdits judges each path as a Write, the first one with the text the
-	// input writes (an Edit for a replacement).
+	// input writes (an Edit for a replacement). A new_str with no old_str is
+	// the text itself: Kiro's append, insert and create with a null file_text
+	// write it, and the hook judges it as the written content
+	// (connector.kiroRequiredWriteFileView; ACP review round 5, P4-1).
 	addEdits := func() {
 		first := len(calls)
 		addPaths("Write", func(path string) map[string]string {
@@ -350,6 +353,8 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool, c
 				return map[string]string{"file_path": path, "old_string": oldText, "new_string": newText}
 			case hasContent && path == paths[0]:
 				return map[string]string{"file_path": path, "content": content}
+			case hasNew && !hasOld && path == paths[0]:
+				return map[string]string{"file_path": path, "content": newText}
 			}
 			return write(path)
 		})
@@ -573,7 +578,9 @@ func acpInputTextOf(input map[string]json.RawMessage, keys ...string) (string, b
 
 func acpInputText(input map[string]json.RawMessage, key string) (string, bool) {
 	raw, ok := input[key]
-	if !ok {
+	if !ok || strings.TrimSpace(string(raw)) == "null" {
+		// A null text is not given: Kiro's create with a null file_text
+		// writes its new_str (connector.kiroWriteView).
 		return "", false
 	}
 	var value string
