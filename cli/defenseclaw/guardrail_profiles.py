@@ -87,6 +87,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "0dcc0d9a1cd54d73c8267c8950bb759806cd8e5a36b50b90d979ac39cc9eae18",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "b82abc998f4b917dbbc856bda3bb4f9211ce829b3ab86a6464a031b6953b680a",
+            # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
+            "ab20b275b3c44a0ade2cc47942dbe18d40a4cadb5626315ecb097b905f110f76",
         }
     ),
     "permissive": frozenset(
@@ -130,6 +132,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "976c0343636d8163f496e37746aa26c57f5495c906a5cd7142fda001d78bdeb0",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "969de899d5a8544152cd09ad05b1e67ac841a4da53c4bb1e992a3b55c796f7a1",
+            # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
+            "33c8403eee2442fcde01f22d118261ac3e8ded4d6652875d335ffaef70d823bc",
         }
     ),
     "strict": frozenset(
@@ -172,6 +176,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "437f688e218aef5d3c5b47eb1591330401fecc157964c742f7570781f885a9b3",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "f6ba060634b55b87887932700fbd73cd7d658f175f2bc83a75b057e45e8355aa",
+            # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
+            "5353b7ce79f3fc38085c93b43cae0075973d4f38f34a0ebd7bc11b065f870caa",
         }
     ),
 }
