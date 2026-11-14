@@ -15,7 +15,9 @@ import (
 
 // TestDefenseClawControlFiveTiers is GAP-0596: every row of the actionfacts
 // corpus (loaded by id, not retyped) through the tool-inspect route in the five
-// tiers. A proven stop or disable blocks in all five, managed included. An
+// tiers. A proven stop or disable (owner ruling 2026-11-14) is an alert in
+// the default and permissive packs of a per-user install and a block in the
+// strict pack and in every managed install. An
 // unproven DefenseClaw command is the unknown tier: an alert in default,
 // permissive and managed (default pack), a block in strict and managed-strict.
 // Read-only commands, restarts and the benign twins stay allowed.
@@ -54,8 +56,12 @@ func TestDefenseClawControlFiveTiers(t *testing.T) {
 			where := p.name + " " + r.ID
 			switch r.Want {
 			case "stop", "disable", "uninstall", "config":
-				if action != "block" || !strings.Contains(string(raw), "tamper.defenseclaw_control_disable") {
-					t.Errorf("%s: action %q, want block by tamper.defenseclaw_control_disable: %s", where, action, raw)
+				want := "block"
+				if p.pack != "strict" && !p.managed {
+					want = "alert"
+				}
+				if action != want || !strings.Contains(string(raw), "tamper.defenseclaw_control_disable") {
+					t.Errorf("%s: action %q, want %s by tamper.defenseclaw_control_disable: %s", where, action, want, raw)
 				}
 			case "unproven":
 				want := "alert"
@@ -76,7 +82,8 @@ func TestDefenseClawControlFiveTiers(t *testing.T) {
 
 // TestDefenseClawControlOnTheClaudeHookPath sends the headline rows through
 // the Claude Code PreToolUse route in the five packs: the proven stop or
-// disable is a block, a read-only command is allowed.
+// disable is an alert in the default and permissive packs and a block in the
+// strict pack and under a managed install, a read-only command is allowed.
 func TestDefenseClawControlOnTheClaudeHookPath(t *testing.T) {
 	file, err := os.Open("../actionfacts/testdata/defenseclaw_control.jsonl")
 	if err != nil {
@@ -102,6 +109,9 @@ func TestDefenseClawControlOnTheClaudeHookPath(t *testing.T) {
 		a := gap0437Server(t, p, "claudecode", "action")
 		gap0437Hook(t, a, t.TempDir(), p.name+"warm", "ls")
 		for id, action := range want {
+			if action == "block" && p.pack != "strict" && !p.managed {
+				action = "alert"
+			}
 			out := gap0437Hook(t, a, t.TempDir(), p.name+id, rows[id])
 			if got, _ := out["action"].(string); got != action {
 				raw, _ := json.Marshal(out)

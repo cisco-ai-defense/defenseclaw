@@ -21,8 +21,14 @@ import (
 // (actionfacts.DefenseClawControl), the tiers are the packs' severities.
 //
 //	tamper.defenseclaw_control_disable   CRITICAL: a proven stop, disable,
-//	    uninstall, reset, weaker mode or configuration change. A block in
-//	    every pack, managed or not, as a write to the state is.
+//	    uninstall, reset, weaker mode or configuration change. Owner ruling
+//	    (2026-11-14): an alert in the default and permissive packs of a
+//	    per-user install, a block in the strict pack and in every managed
+//	    install. On the owner's DefenseClaw development traces a block in the
+//	    default pack stopped 25 agent sessions that test DefenseClaw. The
+//	    pack data keeps the rule at CRITICAL; the per-user default and
+//	    permissive tiers build the finding alert-only (the same split as an
+//	    unresolved authorized-keys write, unprovenKeyWriteMayWarn).
 //	tamper.defenseclaw_control_unproven  HIGH: a DefenseClaw command or a
 //	    dynamic target the parse could not resolve. The unknown tier: an
 //	    alert in the default and permissive packs, a block in strict.
@@ -54,7 +60,11 @@ func defenseClawControlFindings(ctx context.Context, request trustedActionReques
 		return findings
 	}
 	out := append([]RuleFinding(nil), findings...)
-	add := func(ruleID, note string) {
+	// A proven self-disable is an alert where the user runs DefenseClaw
+	// themselves with the default or permissive pack, a block under the strict
+	// pack and in every managed install.
+	provenAlertOnly := !request.StrictPolicy && !request.ManagedInstall
+	add := func(ruleID, note string, alertOnly bool) {
 		if slices.ContainsFunc(out, func(finding RuleFinding) bool { return finding.RuleID == ruleID }) {
 			return
 		}
@@ -68,12 +78,15 @@ func defenseClawControlFindings(ctx context.Context, request trustedActionReques
 			enforcement: findingEnforcementAllowed,
 			proof:       newExactFallbackFindingProof(rule.ID, true, true, true, true),
 		})
+		if alertOnly {
+			out[len(out)-1].enforcement = findingEnforcementAlertOnly
+		}
 	}
 	for _, control := range controls {
 		if control.Proven {
-			add(defenseClawControlDisableRuleID, string(control.Kind))
+			add(defenseClawControlDisableRuleID, string(control.Kind), provenAlertOnly)
 		} else {
-			add(defenseClawControlUnprovenRuleID, string(control.Kind))
+			add(defenseClawControlUnprovenRuleID, string(control.Kind), false)
 		}
 	}
 	return out
