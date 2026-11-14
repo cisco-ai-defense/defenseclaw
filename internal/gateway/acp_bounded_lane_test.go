@@ -43,8 +43,9 @@ func init() {
 				}
 				return acpBoundedCall("locations", size, shape.seen, shape.seenAfter), true
 			},
-			seen:   func() boundedLaneCall { return acpBoundedCall("locations", 1, true, false) },
-			decide: boundedDecideACP, judge: boundedDecideACP,
+			seen:      func() boundedLaneCall { return acpBoundedCall("locations", 1, true, false) },
+			connector: "claudecode", // the connector the lane judges as (the ACP agent's)
+			decide:    boundedDecideACP, judge: boundedDecideACP,
 		},
 		boundedLaneCap{
 			// size is the number of other tool calls reported after the one the
@@ -56,8 +57,9 @@ func init() {
 				}
 				return acpBoundedCall("calls", size, shape.seen, false), true
 			},
-			seen:   func() boundedLaneCall { return acpBoundedCall("calls", 0, true, false) },
-			decide: boundedDecideACP, judge: boundedDecideACP,
+			seen:      func() boundedLaneCall { return acpBoundedCall("calls", 0, true, false) },
+			connector: "claudecode", // the connector the lane judges as (the ACP agent's)
+			decide:    boundedDecideACP, judge: boundedDecideACP,
 		},
 		boundedLaneCap{
 			// size is the length of the command, which the guard keeps up to its
@@ -69,8 +71,9 @@ func init() {
 				}
 				return acpBoundedCall("bytes", size, shape.seen, false), true
 			},
-			seen:   func() boundedLaneCall { return acpBoundedCall("bytes", 0, true, false) },
-			decide: boundedDecideACP, judge: boundedDecideACP,
+			seen:      func() boundedLaneCall { return acpBoundedCall("bytes", 0, true, false) },
+			connector: "claudecode", // the connector the lane judges as (the ACP agent's)
+			decide:    boundedDecideACP, judge: boundedDecideACP,
 		},
 	)
 }
