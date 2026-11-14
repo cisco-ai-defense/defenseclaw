@@ -94,8 +94,11 @@ func gap0264Verdict(t *testing.T, api *APIServer, ctx context.Context, cwd strin
 // counterpart) and maps a mount-mode one to the host, so a rule whose owner
 // places a path by the working directory lost the guest's project: a
 // .git/hooks/pre-commit write in the actor was allow/NONE while the laptop
-// raised persistence.git_hook_write MEDIUM. The other probes pin that the
-// home-anchored persistence and integrity rules already agree.
+// raised persistence.git_hook_write MEDIUM. Every owner that resolves a
+// relative operand lost it too (GAP-0282): echo x >> .bashrc from the home,
+// ../.bashrc or .claude/settings.json from the project, rm
+// .defenseclaw/audit.db. Each probe runs in the project, or in the home, on
+// the laptop and in the guest, and every verdict must be the laptop's.
 func TestGAP0264SandboxCopyModeParityWithLaptop(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway")
@@ -108,7 +111,7 @@ func TestGAP0264SandboxCopyModeParityWithLaptop(t *testing.T) {
 	}
 	home := filepath.Join(t.TempDir(), "home", "alice")
 	project := filepath.Join(home, "proj")
-	for _, dir := range []string{filepath.Join(project, ".git", "hooks"), filepath.Join(project, "src")} {
+	for _, dir := range []string{filepath.Join(project, ".git", "hooks"), filepath.Join(project, "src"), filepath.Join(home, ".ssh")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -174,14 +177,61 @@ func TestGAP0264SandboxCopyModeParityWithLaptop(t *testing.T) {
 		{"sample control", "Bash", map[string]any{"command": "echo x > .git/hooks/pre-commit.sample"}},
 		{"project control", "Write", map[string]any{"file_path": "{P}/src/out.txt", "content": "ok\n"}},
 	}
-	for _, probe := range probes {
+	// Relative operands from the project, reaching the home with "..", and
+	// from the home itself (GAP-0282, R8's probes and more).
+	fromProject := []gap0264Probe{
+		{"rc via .. from project", "Bash", map[string]any{"command": "echo x >> ../.bashrc"}},
+		{"rc via ./.. from project", "Bash", map[string]any{"command": "echo x >> ./../.zshrc"}},
+		{"profile after cd ..", "Bash", map[string]any{"command": "cd .. && echo x >> .profile"}},
+		{"rc cp via ..", "Bash", map[string]any{"command": "cp src/in ../.bashrc"}},
+		{"git hook via src/..", "Bash", map[string]any{"command": "echo x > src/../.git/hooks/pre-commit"}},
+		{"claude settings relative", "Bash", map[string]any{"command": "echo '{}' > .claude/settings.json"}},
+		{"crontab file relative", "Bash", map[string]any{"command": "printf '* * * * * sh /tmp/x\\n' > c.txt && crontab c.txt"}},
+		{"defenseclaw state via ..", "Bash", map[string]any{"command": "rm -rf ../.defenseclaw/audit.db"}},
+		{"ssh key read via ..", "Bash", map[string]any{"command": "cat ../.ssh/id_ed25519"}},
+		{"aws credentials read via ..", "Bash", map[string]any{"command": "cat ../.aws/credentials"}},
+		{"authorized_keys via ..", "Bash", map[string]any{"command": "echo ssh-ed25519 AAAAC3Nza x >> ../.ssh/authorized_keys"}},
+		{"relative project control", "Bash", map[string]any{"command": "echo ok > src/out.txt"}},
+	}
+	fromHome := []gap0264Probe{
+		{"rc relative from home", "Bash", map[string]any{"command": "echo x >> .bashrc"}},
+		{"profile relative from home", "Bash", map[string]any{"command": "printf 'x\\n' >> .profile"}},
+		{"zshrc tee from home", "Bash", map[string]any{"command": "echo x | tee -a .zshrc"}},
+		{"authorized_keys relative from home", "Bash", map[string]any{"command": "echo ssh-ed25519 AAAAC3Nza x >> .ssh/authorized_keys"}},
+		{"systemd unit relative from home", "Bash", map[string]any{"command": "mkdir -p .config/systemd/user && printf '[Service]\\nExecStart=/tmp/x\\n' > .config/systemd/user/x.service"}},
+		{"history rm relative from home", "Bash", map[string]any{"command": "rm .bash_history"}},
+		{"defenseclaw state relative from home", "Bash", map[string]any{"command": "rm -rf .defenseclaw/audit.db"}},
+		{"defenseclaw config relative from home", "Bash", map[string]any{"command": "echo x > .defenseclaw/config.yaml"}},
+		{"openclaw json relative from home", "Bash", map[string]any{"command": "echo '{}' > .openclaw/openclaw.json"}},
+		{"claude settings relative from home", "Bash", map[string]any{"command": "echo '{}' > .claude/settings.json"}},
+		{"ssh key read from home", "Bash", map[string]any{"command": "cat .ssh/id_ed25519"}},
+		{"aws credentials read from home", "Bash", map[string]any{"command": "cat .aws/credentials"}},
+		{"home control", "Bash", map[string]any{"command": "echo ok > notes.txt"}},
+	}
+	type row struct {
+		probe  gap0264Probe
+		inHome bool // the call runs in the home, else in the project
+	}
+	var rows []row
+	for _, probe := range append(probes, fromProject...) {
+		rows = append(rows, row{probe: probe})
+	}
+	for _, probe := range fromHome {
+		rows = append(rows, row{probe: probe, inHome: true})
+	}
+	for _, r := range rows {
+		probe := r.probe
 		t.Run(probe.name, func(t *testing.T) {
+			laptopCWD, actorCWD := project, gap0264ActorWorkdir
+			if r.inHome {
+				laptopCWD, actorCWD = home, sandboxauth.SandboxHome
+			}
 			laptopInput := gap0264Expand(probe.input, project, home).(map[string]any)
 			actorInput := gap0264Expand(probe.input, gap0264ActorWorkdir, sandboxauth.SandboxHome).(map[string]any)
-			laptopAction, laptopRules := gap0264Verdict(t, api, context.Background(), project, probe, laptopInput)
-			copyAction, copyRules := gap0264Verdict(t, api, actor(false), gap0264ActorWorkdir, probe, actorInput)
-			mountAction, mountRules := gap0264Verdict(t, api, actor(true), gap0264ActorWorkdir, probe, actorInput)
-			t.Logf("PARITY %-28s laptop=%s %v copy=%s %v mount=%s %v", probe.name,
+			laptopAction, laptopRules := gap0264Verdict(t, api, context.Background(), laptopCWD, probe, laptopInput)
+			copyAction, copyRules := gap0264Verdict(t, api, actor(false), actorCWD, probe, actorInput)
+			mountAction, mountRules := gap0264Verdict(t, api, actor(true), actorCWD, probe, actorInput)
+			t.Logf("PARITY %-38s laptop=%s %v copy=%s %v mount=%s %v", probe.name,
 				laptopAction, laptopRules, copyAction, copyRules, mountAction, mountRules)
 			if copyAction != laptopAction || !slices.Equal(copyRules, laptopRules) {
 				t.Errorf("copy-mode actor verdict %s %v, laptop verdict %s %v", copyAction, copyRules, laptopAction, laptopRules)
