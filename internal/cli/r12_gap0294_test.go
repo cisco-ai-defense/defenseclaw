@@ -44,10 +44,14 @@ func TestGAP0294ManagedDowngradeThroughConfigMap(t *testing.T) {
 	w := configwatch.New(path, boot, []byte("boot"))
 	oss := "config_version: 9\nsubstrate:\n  enabled: true\n  identity:\n    issuer: https://idp.ate-system.svc\n    audience: defenseclaw\n    token_lifetime_seconds: 300\n"
 	w.Fetch = func(context.Context) ([]byte, bool, error) { return []byte(oss), true, nil }
+	w.Load = func(string, []byte) (*config.Config, error) {
+		c := &config.Config{}
+		c.Substrate.Enabled = true
+		return c, nil // the edit drops deployment_mode managed_enterprise
+	}
 	ch := w.Refresh(context.Background())
-	if ch.Refused != nil {
-		t.Logf("strict loader refused the OSS edit: %v", ch.Refused)
-		return
+	if ch.Refused == nil || !strings.Contains(ch.Refused.Error(), "managed_downgrade") || ch.Changed {
+		t.Fatalf("a managed downgrade through the ConfigMap was not refused as managed_downgrade: %+v", ch)
 	}
 	cur, _ := w.Current()
 	t.Logf("in force deployment_mode=%q changed=%v restart-only=%v", cur.DeploymentMode, ch.Changed, substrateRestartOnly(boot, cur))
@@ -89,3 +93,28 @@ func TestGAP0297ControllerKeepsBootIdentityAndServices(t *testing.T) {
 type controllerfakeSink struct{ msgs string }
 
 func (s *controllerfakeSink) Emit(e controller.Event) { s.msgs += e.Message + "\n" }
+
+// TestGAP0306ControllerKeepsBootMCPAndProviderHosts: substrate.extproc
+// mcp_hosts and the llm_providers hosts change only with the callout and
+// the gateway (helm upgrade, restart), so the controller keeps the boot
+// ones; a live edit opens no egress the callout does not inspect.
+func TestGAP0306ControllerKeepsBootMCPAndProviderHosts(t *testing.T) {
+	boot := &config.Config{}
+	boot.Substrate.Enabled = true
+	boot.Substrate.Extproc.MCPHosts = []string{"mcp.boot.example"}
+	next := &config.Config{}
+	next.Substrate = boot.Substrate
+	next.Substrate.Extproc.MCPHosts = []string{"mcp.boot.example", "mcp.added.example"}
+	next.LLMProviders.Custom = append(next.LLMProviders.Custom, config.LLMCustomProvider{Domains: []string{"llm.added.example"}})
+	var sink controllerfakeSink
+	live := substrateControllerLiveFunc(boot, false, nil, &sink)
+	n := live(next)
+	for _, h := range append(append([]string{}, n.Settings.MCPHosts...), n.Settings.ProviderHosts...) {
+		if strings.Contains(h, "added.example") {
+			t.Fatalf("host %s from a live edit is rendered before the callout and gateway take it", h)
+		}
+	}
+	if !strings.Contains(sink.msgs, "substrate.extproc") || !strings.Contains(sink.msgs, "llm_providers") {
+		t.Fatalf("warning = %q", sink.msgs)
+	}
+}

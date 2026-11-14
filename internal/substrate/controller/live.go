@@ -34,8 +34,9 @@ import (
 // actor's policy again from it (GAP-0276).
 type Live struct {
 	// Digest is the config.yaml source it came from ("" when the
-	// controller has no ConfigSource).
+	// controller has no ConfigSource); Gen its configwatch generation.
 	Digest             string
+	Gen                uint64
 	Settings           render.Settings
 	Secrets            []render.Secret
 	LauncherAtespaces  map[string]bool
@@ -90,12 +91,15 @@ func (c *Controller) reloadConfig(ctx context.Context) {
 			Detail:  map[string]any{"config_digest": c.live().Digest}})
 	}
 	prev := c.live().Digest
-	if ch.Config == nil || ch.Digest == prev {
+	// Only a newer generation applies: a Change read before another caller
+	// applied a later one is stale, and putting it back would loosen the
+	// policy again (GAP-0305).
+	if ch.Config == nil || ch.Gen <= c.live().Gen || ch.Digest == prev {
 		return
 	}
 	old := c.live()
 	lv := c.o.Live(ch.Config)
-	lv.Digest = ch.Digest
+	lv.Digest, lv.Gen = ch.Digest, ch.Gen
 	c.cur.Store(&lv)
 	// Atespaces the old config managed and the new one does not: a scoped
 	// controller (no global viewer) lists them once more, so their actors

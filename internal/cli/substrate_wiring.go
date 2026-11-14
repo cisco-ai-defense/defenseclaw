@@ -178,9 +178,9 @@ func substrateTemplateSkills(ctl *controller.Controller) func(ctx context.Contex
 
 // substrateControllerLiveFunc builds controller.Live for each config.yaml in
 // force. The restart-only render inputs (substrate.identity: audience and
-// token lifetime; substrate.services) keep their boot values, as the
-// gateway keeps them, or actor calls are refused until a restart
-// (GAP-0297). In bundle mode the stage bundles keep the boot profiles.
+// token lifetime; substrate.services; substrate.extproc mcp_hosts and the
+// llm_providers hosts) keep their boot values, as the gateway and the
+// callout keep them (GAP-0297, GAP-0306). In bundle mode the stage bundles keep the boot profiles.
 func substrateControllerLiveFunc(boot *config.Config, idle bool, resolver controller.ProfileResolver, sink controller.Sink) func(*config.Config) controller.Live {
 	bootSettings := controller.SettingsFromConfig(boot)
 	return func(c *config.Config) controller.Live {
@@ -200,6 +200,10 @@ func substrateControllerLiveFunc(boot *config.Config, idle bool, resolver contro
 		}
 		lv.Settings.ActorService, lv.Settings.AdminService = bootSettings.ActorService, bootSettings.AdminService
 		lv.Settings.Audience, lv.Settings.TokenLifetimeSeconds = bootSettings.Audience, bootSettings.TokenLifetimeSeconds
+		// The callout reads substrate.extproc (mcp_hosts) and the gateway the
+		// LLM providers only at helm upgrade or restart: rendering their hosts
+		// live would open egress before the callout inspects it (GAP-0306).
+		lv.Settings.MCPHosts, lv.Settings.ProviderHosts = bootSettings.MCPHosts, bootSettings.ProviderHosts
 		return lv
 	}
 }
@@ -216,6 +220,12 @@ func substrateControllerRestartOnly(boot, cur *config.Config) []string {
 	}
 	if !reflect.DeepEqual(boot.Substrate.API, cur.Substrate.API) {
 		out = append(out, "substrate.api")
+	}
+	if !reflect.DeepEqual(boot.Substrate.Extproc, cur.Substrate.Extproc) {
+		out = append(out, "substrate.extproc (helm upgrade only: it renders the callout's ConfigMap)")
+	}
+	if !reflect.DeepEqual(boot.LLMProviders, cur.LLMProviders) {
+		out = append(out, "llm_providers")
 	}
 	return out
 }

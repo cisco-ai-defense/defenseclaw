@@ -72,6 +72,8 @@ type Watcher struct {
 	reading  bool
 	badHash  string
 	fetchErr string
+	// gen counts the sources put in force (0 = boot): Change.Gen.
+	gen uint64
 	// apiOK: the ConfigMap read has answered at least once. From then on
 	// a failed or empty read keeps the config in force and never falls
 	// back to the mounted file, which a managed subPath mount never
@@ -117,6 +119,10 @@ type Change struct {
 	Previous string
 	// Changed: a new source loaded and is now in force.
 	Changed bool
+	// Gen is the generation of Config: 0 for the boot config, one more for
+	// each source put in force. A caller holding a Change older than the
+	// one it applied must not apply it (GAP-0305).
+	Gen uint64
 	// Refused is set once per source that does not load; the last good
 	// config stays in force.
 	Refused error
@@ -138,7 +144,7 @@ func (w *Watcher) Refresh(ctx context.Context) Change {
 		interval = DefaultInterval
 	}
 	w.mu.Lock()
-	out := Change{Config: w.cur, Digest: w.digest}
+	out := Change{Config: w.cur, Digest: w.digest, Gen: w.gen}
 	t := now()
 	if w.reading || (!w.readAt.IsZero() && t.Sub(w.readAt) < interval) {
 		w.mu.Unlock()
@@ -175,7 +181,7 @@ func (w *Watcher) Refresh(ctx context.Context) Change {
 	if answered {
 		w.apiOK = true
 	}
-	out = Change{Config: w.cur, Digest: w.digest}
+	out = Change{Config: w.cur, Digest: w.digest, Gen: w.gen}
 	if warn != w.fetchErr {
 		w.fetchErr = warn
 		out.FetchWarning = warn
@@ -213,8 +219,9 @@ func (w *Watcher) Refresh(ctx context.Context) Change {
 	}
 	w.badHash = ""
 	out.Previous, out.Changed = w.digest, true
+	w.gen++
 	w.cur, w.digest = cfg, d
-	out.Config, out.Digest = cfg, d
+	out.Config, out.Digest, out.Gen = cfg, d, w.gen
 	return out
 }
 

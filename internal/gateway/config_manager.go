@@ -1503,6 +1503,15 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		m.recordLoadError(ctx, reason, nil)
 		return err
 	}
+	// A Substrate pod never takes a deployment_mode change live, in its own
+	// file reload either: the Substrate config watch refuses the whole edit,
+	// so this reload must not apply part of it (GAP-0307).
+	if oldCfg != nil && oldCfg.Substrate.Enabled {
+		if reason, err := config.LiveReloadRefusal(oldCfg, next); err != nil {
+			m.recordLoadError(ctx, reason, nil)
+			return err
+		}
+	}
 	// Once trust anchors are installed, a managed standalone gateway can
 	// serve a refused boot edit only after a verified signed bundle replaces
 	// it in memory. If no bundle verifies, startup stops before serving.
