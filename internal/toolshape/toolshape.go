@@ -959,8 +959,9 @@ func fileURIPath(s string) (string, int) {
 	// Only the spellings of a file URI: file:/x, file://host/x, file:C:/x. A
 	// value that merely starts with "file:" (a search pattern, "file: notes")
 	// is text.
-	if !(rest[0] == '/' || len(rest) >= 3 && rest[1] == ':' && (rest[2] == '/' || rest[2] == '\\') &&
-		(rest[0] >= 'a' && rest[0] <= 'z' || rest[0] >= 'A' && rest[0] <= 'Z')) {
+	driveForm := len(rest) >= 3 && rest[1] == ':' && (rest[2] == '/' || rest[2] == '\\') &&
+		(rest[0] >= 'a' && rest[0] <= 'z' || rest[0] >= 'A' && rest[0] <= 'Z')
+	if rest[0] != '/' && !driveForm {
 		return "", fileURINone
 	}
 	host := ""
