@@ -444,7 +444,10 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			if found {
 				break
 			}
-			if read.read {
+			if read.read && len(removedEntries) == 0 && len(replacedEntries) == 0 {
+				// No link was removed or replaced: the reader statement names
+				// the file to read it. Where one was, the rel-1-0-4:GAP-2590
+				// reading below decides (a read of the removed entry only).
 				continue
 			}
 			found = !actionReplacedEntryWord(read.word, read.vals, read.cwd, home, removedEntries)
