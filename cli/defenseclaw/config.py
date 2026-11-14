@@ -3458,6 +3458,16 @@ class GuardrailConfig:
         from defenseclaw.observability.v8_config import validate_judge_extra_body
 
         validate_judge_extra_body(self.judge.extra_body, "config.yaml")
+        scope = (self.judge.intent_scope or "").strip().lower()
+        if scope not in ("", "shadow", "off"):
+            # Same refusal as the gateway loader (JudgeConfig.ValidateIntentScope):
+            # the task-scope lane is shadow-only in 1.0.10.
+            if scope == "alert":
+                raise ValueError(
+                    "guardrail.judge.intent_scope: 'alert' is not available in 1.0.10: the task-scope lane "
+                    "is shadow-only (rel-1-0-10:GAP-0341, GAP-0372, GAP-0363); use shadow or off"
+                )
+            raise ValueError(f"guardrail.judge.intent_scope: unknown value {self.judge.intent_scope!r} (shadow or off)")
         _validate_guardrail_level("guardrail.block_at", self.block_at)
         _validate_guardrail_level("guardrail.alert_at", self.alert_at)
         seen: dict[str, str] = {}

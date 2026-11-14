@@ -273,3 +273,16 @@ class TestJudgeIntentScope(unittest.TestCase):
         self.assertEqual(gc.judge.intent_scope, "shadow")
         gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True}}, "/tmp/test")
         self.assertEqual(gc.judge.intent_scope, "")
+
+    def test_intent_scope_alert_is_refused_where_it_is_written(self):
+        import pytest
+
+        from defenseclaw.config import _merge_guardrail
+
+        for value in ("", "shadow", "off", "Shadow"):
+            gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True, "intent_scope": value}}, "/tmp/test")
+            gc.validate()
+        for value, text in (("alert", "shadow-only"), ("block", "unknown value")):
+            gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True, "intent_scope": value}}, "/tmp/test")
+            with pytest.raises(ValueError, match=text):
+                gc.validate()
