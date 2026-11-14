@@ -209,6 +209,23 @@ func secretAssignmentRejection(raw string) string {
 		strings.Contains(value, "//") || secretAssignmentDotted.MatchString(value) || secretAssignmentIdentifier(value) {
 		return "path-or-name"
 	}
+	// A value made of words joined by separators and a number
+	// (dr_secret_key_1700000000, summer-holiday-2026) is a name a person or a
+	// script composed, not a random secret: most of its letters sit in
+	// word-shaped runs of three letters or more. A generated token with
+	// separators (dd_api_7f8a9b0c1d2e) has random letter runs of one or two.
+	if strings.ContainsAny(value, "_-.") {
+		letters, wordLetters := 0, 0
+		for _, run := range strings.FieldsFunc(value, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+		}) {
+			letters += len(run)
+			wordLetters += secretAssignmentWordLettersMin(run, 3)
+		}
+		if letters > 0 && wordLetters*10 >= letters*7 {
+			return "name"
+		}
+	}
 	// A value built from short underscore- or dash-separated pieces
 	// (0nscience_count, max-retry-3) is a name or a phrase. A generated token
 	// with separators still carries one long random piece.
@@ -275,6 +292,10 @@ func secretAssignmentRejection(raw string) string {
 // long (xKqrTbnPzw) has mixed case or no vowels in one segment and does not
 // count.
 func secretAssignmentWordLetters(value string) int {
+	return secretAssignmentWordLettersMin(value, 4)
+}
+
+func secretAssignmentWordLettersMin(value string, minLen int) int {
 	total := 0
 	runStart := -1
 	flush := func(end int) {
@@ -294,7 +315,7 @@ func secretAssignmentWordLetters(value string) int {
 				boundary = upper && (prevLower || (prevUpper && nextLower))
 			}
 			if boundary {
-				if secretAssignmentWordShaped(run[segStart:i]) {
+				if secretAssignmentWordShaped(run[segStart:i], minLen) {
 					total += i - segStart
 				}
 				segStart = i
@@ -315,8 +336,8 @@ func secretAssignmentWordLetters(value string) int {
 	return total
 }
 
-func secretAssignmentWordShaped(segment string) bool {
-	if len(segment) < 4 {
+func secretAssignmentWordShaped(segment string, minLen int) bool {
+	if len(segment) < minLen {
 		return false
 	}
 	upper, lower := 0, 0

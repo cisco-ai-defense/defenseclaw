@@ -1379,8 +1379,11 @@ func knownPublicCredentialExample(ruleID, candidate string) bool {
 		if candidate == awsDocumentedSecretKey {
 			return true
 		}
-		rest, ok := strings.CutPrefix(candidate, strings.ReplaceAll(awsDocumentedSecretKey, "/", ""))
-		return ok && len(rest) <= 12
+		rest, ok := strings.CutPrefix(strings.ReplaceAll(candidate, "/", ""), strings.ReplaceAll(awsDocumentedSecretKey, "/", ""))
+		// What follows is the debris of the escaped newlines after the value
+		// (letters n, r, t) and of a rule line under it (= + /): too little
+		// to hold a secret.
+		return ok && (len(rest) <= 12 || strings.Trim(rest, "nrt=+") == "")
 	default:
 		return false
 	}

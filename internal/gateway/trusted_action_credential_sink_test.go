@@ -8,6 +8,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -129,6 +130,11 @@ func TestAWSDocumentedExampleSecretIsNotAFinding(t *testing.T) {
 			t.Errorf("documented AWS example accepted: %q", text)
 		}
 	}
+	// The documented value followed by the debris of escaped newlines and a
+	// rule line under it (what shell normalization leaves) is still the example.
+	if acceptedCredentialMatch("SEC-AWS-SECRET", "aws_secret_access_key = "+example+"nnn"+strings.Repeat("=", 79)) {
+		t.Error("the documented example followed by newline debris was accepted")
+	}
 	if !acceptedCredentialMatch("SEC-AWS-SECRET", "aws_secret_access_key = "+runtimeDetectorSignature("q9Zr4Vx2", "Lm7Kp3Wd8Yt5Bn1Cs6Gh0Jf2Qa4Eu9Rv3Xi8")) {
 		t.Error("a random 40-character secret was rejected")
 	}
@@ -137,6 +143,8 @@ func TestAWSDocumentedExampleSecretIsNotAFinding(t *testing.T) {
 		"aws_secret_access_key = " + runtimeDetectorSignature("q9Zr4Vx2Lm7Kp3Wd8Yt5Bn1Cs6Gh0Jf2Qa4", "EXAMPLEKEY"),
 		// The documented value, then a long run: another secret that starts with it.
 		"aws_secret_access_key = " + runtimeDetectorSignature("wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY", "q9Zr4Vx2Lm7Kp3Wd8Yt5Bn1"),
+		// The documented value, then escaped newlines and a rule line, then more text.
+		"aws_secret_access_key = " + runtimeDetectorSignature("wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY", "nnn=====", "q9Zr4Vx2Lm7Kp3Wd8Yt5Bn1Cs6Gh0"),
 		// The documented words in a different case or position.
 		"aws_secret_access_key = " + runtimeDetectorSignature("exampleKEY", "q9Zr4Vx2Lm7Kp3Wd8Yt5Bn1Cs6"),
 	} {
@@ -174,6 +182,10 @@ func TestSecretAssignmentRuleAcceptsOnlyRandomLookingValues(t *testing.T) {
 		{"keyword inside a longer word", "tokenizer: " + runtimeDetectorSignature("Kj7mNp2Qr9", "sVw4xYz6"), false},
 		{"placeholder word beside random characters", "password: " + runtimeDetectorSignature("Kj7mNp2Qr9", "sVw4xYz6fake"), true},
 		{"placeholder token beside a random token", "password: " + runtimeDetectorSignature("Kj7mNp2Qr9sVw4xYz6", "_mock"), true},
+		{"words and a number", "API_SECRET: " + runtimeDetectorSignature("dr_secret", "_key_", "1700000955"), false},
+		{"words and a number with dashes", "password: summer-holiday-" + runtimeDetectorSignature("20", "26x"), false},
+		{"random pieces with separators", "api_key: " + runtimeDetectorSignature("dd_api_", "7f8a9b0c1d2e", "3f4a5b6c7d8e"), true},
+		{"prefix and hex token", "VIP_TOKEN: " + runtimeDetectorSignature("TOKEN_", "6fd3a2b91c7e4058d2e1a9c7b3f60481"), true},
 		{"placeholder word", "password: changeme123456", false},
 		{"placeholder token between separators", "api_key: your_key_here_a1b2c3d4", false},
 		{"placeholder token as most of a token", "secret: examplekey1234", false},

@@ -106,6 +106,8 @@ func TestSecretRecallReviewCases(t *testing.T) {
 		// P3-3: a placeholder word next to random characters is not a placeholder.
 		{"S01", "Write", map[string]any{"file_path": "/work/app/.env", "content": "api_key: " + apiValue + "fake"}, credAlert},
 		{"S01b", "Write", map[string]any{"file_path": "/work/app/.env", "content": "api_key: " + apiValue + "_mock"}, credAlert},
+		{"S04", "Write", map[string]any{"file_path": "/work/app/config.json", "content": "{\"API_SECRET\": \"dr_secret_key_" + randomString(r, "0123456789", 10) + "\"}"}, credNone},
+		{"S05", "Write", map[string]any{"file_path": "/work/app/config.json", "content": "{\"API_SECRET\": \"" + randomString(r, "abcdef0123456789", 24) + "\"}"}, credAlert},
 		{"S02", "Write", map[string]any{"file_path": "/work/app/.env", "content": "api_key: your_api_key_here_1234"}, credNone},
 		{"S03", "Write", map[string]any{"file_path": "/work/app/.env", "content": "api_key: example_token_value_1"}, credNone},
 	} {
