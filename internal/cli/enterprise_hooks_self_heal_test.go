@@ -58,13 +58,17 @@ func TestEnterpriseHookManagedInstallLayout(t *testing.T) {
 	// A hook started from a launch folder (GAP-0751) repairs the install
 	// root of its bin (review 1 P3-5). Windows paths only.
 	if runtime.GOOS == "windows" {
-		launch := filepath.Join(install, "bin", "hooks", "0123456789abcdef", "defenseclaw-hook.exe")
-		layout, ok = enterpriseHookManagedInstallLayout(launch, dataDir, manifest, programFiles, programData)
-		if !ok || layout.InstallRoot != install {
+		// The launch image parser takes drive-qualified paths only, so this
+		// block names the install on C: (the cases above are drive-less).
+		driveFiles := `C:\Program Files`
+		driveInstall := filepath.Join(driveFiles, "Cisco", "Cisco Secure Client", "DefenseClaw")
+		launch := filepath.Join(driveInstall, "bin", "hooks", "0123456789abcdef", "defenseclaw-hook.exe")
+		layout, ok = enterpriseHookManagedInstallLayout(launch, dataDir, manifest, driveFiles, programData)
+		if !ok || layout.InstallRoot != driveInstall {
 			t.Fatalf("launch folder hook layout = %+v, %t", layout, ok)
 		}
-		other := filepath.Join(install, "bin", "other", "0123456789abcdef", "defenseclaw-hook.exe")
-		if layout, _ := enterpriseHookManagedInstallLayout(other, dataDir, manifest, programFiles, programData); layout.InstallRoot != "" {
+		other := filepath.Join(driveInstall, "bin", "other", "0123456789abcdef", "defenseclaw-hook.exe")
+		if layout, _ := enterpriseHookManagedInstallLayout(other, dataDir, manifest, driveFiles, programData); layout.InstallRoot != "" {
 			t.Fatalf("a hook outside bin and its launch folders got the install root %s", layout.InstallRoot)
 		}
 	}
