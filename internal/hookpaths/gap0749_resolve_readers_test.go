@@ -38,7 +38,6 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	var concrete actionConcreteOperands
 	actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concrete)
 	actionClientProvedSafeVariableTargetsForHook(command, cwd, home)
-	actionClientVariableWriteCandidate(command, home)
 	ActionCommandDecision(command, cwd, home)
 	actionClientProvedOverwrittenRedirect(command, cwd, home)
 	actionClientLoopCopyDestinationProtected(command, cwd, home)
@@ -103,9 +102,9 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		}
 	}
 	SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
-	actionClientShellWordSyntax(command)
 	ReplaceVerbShape(command, cwd, home)
 	replaceVerbSafe(command, cwd, home)
+	writersAllProvenSafe(command, cwd, home, nil)
 	actionGlobFacts(command, cwd, home)
 	LinkWalkFacts(command, cwd, home)
 }
@@ -120,12 +119,12 @@ var gap0749ResolveReaderCalls = []string{
 	"MayNameState", "NoDereferenceTouchShape", "QuotedDynamicCopyDestinations",
 	"SafeShellRedirectOccurrencesWithFacts", "ShellDirectoryWriteOperands", "ShellWriteOperands",
 	"StateNamingReading", "actionClientLoopCopyDestinationProtected", "actionClientProvedOverwrittenRedirect",
-	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
+	"actionClientProvedSafeVariableTargetsForHook",
 	"actionConcreteProtectedWriteOnWithOperands", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
 	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
-	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "ReplaceVerbShape", "actionClientShellWordSyntax", "replaceVerbSafe", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
+	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "ReplaceVerbShape", "replaceVerbSafe", "writersAllProvenSafe", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
 }
 
 // TestGAP0749ResolveReadersCoverResolve: the argv readers a bounded sweep

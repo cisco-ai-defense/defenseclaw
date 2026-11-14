@@ -5,15 +5,126 @@ package hookpaths
 
 import (
 	"path/filepath"
+	"slices"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// uncertainWriteVerbs are the programs whose operands UncertainWriteReason
-// reads: the write and metadata verbs of the GAP-0293 corpus.
-var uncertainWriteVerbs = map[string]bool{
-	"touch": true, "gtouch": true, "chmod": true, "chown": true, "chgrp": true, "cp": true, "mv": true,
-	"ln": true, "tee": true, "truncate": true, "install": true, "sed": true, "gsed": true, "dd": true, "rsync": true,
+// callPrograms are the programs of command by what the effects model reads of
+// them (actionfacts classify.go; this package keeps no list of verbs): writers
+// are those it reads as a write, an append, a permission or attribute change,
+// a copy, a move or a disk write; harmless are those whose every operation is
+// a read, a list or a search. A program in neither group is one the model does
+// not classify, and an unclassified program is not proven harmless: its
+// operands are read as a writer's (rel-1-0-10 GAP-0415).
+func callPrograms(command, cwd, home string) (writers, harmless map[string]bool) {
+	facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home})
+	writers, harmless = map[string]bool{}, map[string]bool{}
+	for _, fact := range facts.Commands {
+		writes, reads := false, len(fact.Operations) > 0
+		for _, operation := range fact.Operations {
+			switch operation {
+			case actionfacts.OperationWrite, actionfacts.OperationAppend, actionfacts.OperationPermissionChange,
+				actionfacts.OperationCopy, actionfacts.OperationMove, actionfacts.OperationDiskWrite:
+				writes = true
+			case actionfacts.OperationRead, actionfacts.OperationList, actionfacts.OperationSearch:
+			default:
+				reads = false
+			}
+		}
+		for _, name := range []string{programBase(fact.Program), programBase(fact.Executable)} {
+			switch {
+			case writes:
+				writers[name] = true
+			case reads:
+				harmless[name] = true
+			}
+		}
+	}
+	for name := range writers {
+		delete(harmless, name)
+	}
+	return writers, harmless
+}
+
+// nestedShellBodyDepth bounds how many bash -c bodies the operand walk reads
+// into.
+const nestedShellBodyDepth = 3
+
+// forEachWriteOperand walks every operand of a writer call (and every output
+// redirect) of command, bodies of a nested bash -c, sh -c and the like
+// included, through the one word resolver, and calls visit with each result.
+// It stops when visit returns true. Variable values come from the plain
+// assignments before the call, in order (actionUpdateValues).
+func forEachWriteOperand(command, cwd, home string, startup ShellStartup, visit func(resolvedWord) bool) bool {
+	if home == "" || !filepath.IsAbs(cwd) || actionWindowsHome(home) {
+		return false
+	}
+	return walkWriteOperands(command, cwd, home, startup, 0, visit)
+}
+
+func walkWriteOperands(command, cwd, home string, startup ShellStartup, depth int, visit func(resolvedWord) bool) bool {
+	file, parsed := parseShell(command)
+	if !parsed {
+		return false
+	}
+	options := shellGlobOptionsForCall(command, startup)
+	_, harmless := callPrograms(command, cwd, home)
+	values := actionValues{"HOME": home, "PWD": cwd}
+	stop := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if stop {
+			return false
+		}
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		values["PWD"] = cwd
+		actionUpdateValues(stmt, values, cwd, home)
+		for _, redirect := range stmt.Redirs {
+			if redirect.Word != nil && actionOutputRedirect(redirect.Op) &&
+				visit(resolveWriteWord(redirect.Word, values, cwd, options)) {
+				stop = true
+				return false
+			}
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 2 {
+			return true
+		}
+		program, fixed := staticProgramWord(call.Args[0], home)
+		if !fixed {
+			return true
+		}
+		name := programBase(program)
+		if depth < nestedShellBodyDepth && slices.Contains([]string{"bash", "sh", "dash", "zsh", "ksh"}, name) {
+			for i := 1; i+1 < len(call.Args); i++ {
+				if flag, fixed := StaticWord(call.Args[i], home); fixed && flag == "-c" {
+					if body, fixed := StaticWord(call.Args[i+1], home); fixed &&
+						walkWriteOperands(body, cwd, home, startup, depth+1, visit) {
+						stop = true
+						return false
+					}
+				}
+			}
+		}
+		if harmless[name] {
+			return true
+		}
+		for _, word := range call.Args[1:] {
+			if text, fixed := StaticWord(word, home); fixed && len(text) > 0 && text[0] == '-' {
+				continue // an option
+			}
+			if visit(resolveWriteWord(word, values, cwd, options)) {
+				stop = true
+				return false
+			}
+		}
+		return true
+	})
+	return stop
 }
 
 // UncertainWriteReason reports an operand of a write or metadata call that
@@ -28,56 +139,102 @@ var uncertainWriteVerbs = map[string]bool{
 // files alone, so the pack tier decides it (GAP-0350), never a plain allow.
 // startup is the agent's shell startup (nil: this process's own).
 func UncertainWriteReason(command, cwd, home string, startup *ShellStartup) string {
-	if home == "" || !filepath.IsAbs(cwd) || actionWindowsHome(home) {
-		return ""
-	}
-	file, parsed := parseShell(command)
-	if !parsed {
-		return ""
-	}
 	current := CurrentShellStartup()
 	if startup != nil {
 		current = *startup
 	}
-	options := shellGlobOptionsForCall(command, current)
-	values := actionValues{"HOME": home, "PWD": cwd}
 	reason := ""
-	check := func(word *syntax.Word) {
-		if reason != "" || word == nil {
-			return
-		}
-		reason = resolveWriteWord(word, values, cwd, options).uncertain
+	forEachWriteOperand(command, cwd, home, current, func(resolved resolvedWord) bool {
+		reason = resolved.uncertain
+		return reason != ""
+	})
+	return reason
+}
+
+// harmlessWriterOptions are the options of a writer call that take no value:
+// a call with any other option word is not read here.
+var harmlessWriterOptions = map[string]bool{
+	"-f": true, "-r": true, "-R": true, "-v": true, "-p": true, "-a": true, "-n": true, "-i": true, "-u": true,
+	"-l": true, "-s": true, "-T": true, "-P": true, "-H": true, "-L": true, "-d": true, "-x": true, "--": true,
+	"--force": true, "--recursive": true, "--verbose": true, "--preserve": true, "--archive": true,
+	"--no-clobber": true, "--interactive": true, "--update": true, "--link": true, "--symbolic-link": true,
+}
+
+// unsafeAssignmentNames are shell variables whose assignment changes how a
+// later word, program or path is read.
+var unsafeAssignmentNames = map[string]bool{
+	"HOME": true, "PWD": true, "OLDPWD": true, "PATH": true, "IFS": true, "CDPATH": true, "ENV": true,
+	"BASH_ENV": true, "SHELLOPTS": true, "BASHOPTS": true, "GLOBIGNORE": true, "PS4": true, "PROMPT_COMMAND": true,
+}
+
+// writersAllProvenSafe reports a call that is only plain assignments and
+// calls of writers the effects model knows (writerPrograms), whose operands
+// the one resolver settles to files that are none of the protected ones: such
+// a call cannot write a protected file, so a text mention of a protected name
+// in it (a variable assigned a link name and never used, a default that is
+// not taken) is no reason to carry a block to a managed gateway
+// (rel-1-0-10 GAP-0415; the pinned GAP-0934 binding rows). Anything else in
+// the call (cd, trap, a nested shell, a function, control flow, a redirect
+// other than an output, an option that takes a value, an unknown program)
+// leaves it unproven.
+func writersAllProvenSafe(command, cwd, home string, memo *TargetMemo) bool {
+	if home == "" || !filepath.IsAbs(cwd) || actionWindowsHome(home) {
+		return false
 	}
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if reason != "" {
+	file, parsed := parseShell(command)
+	if !parsed || len(file.Stmts) == 0 || len(file.Stmts) > 32 {
+		return false
+	}
+	writers, harmless := callPrograms(command, cwd, home)
+	options := shellGlobOptionsForCall(command, memo.shellStartup())
+	protected := memo.protectedFiles(home)
+	ssh := filepath.Join(home, ".ssh")
+	values := actionValues{"HOME": home, "PWD": cwd}
+	for _, stmt := range file.Stmts {
+		if stmt.Background || stmt.Negated || stmt.Coprocess || len(stmt.Redirs) != 0 {
 			return false
 		}
-		stmt, ok := node.(*syntax.Stmt)
-		if !ok {
-			return true
-		}
-		values["PWD"] = cwd
-		actionUpdateValues(stmt, values, cwd, home)
-		for _, redirect := range stmt.Redirs {
-			if actionOutputRedirect(redirect.Op) {
-				check(redirect.Word)
-			}
-		}
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
-		if !ok || len(call.Args) < 2 {
-			return true
+		if !ok {
+			return false
+		}
+		if len(call.Args) == 0 {
+			for _, assign := range call.Assigns {
+				if assign.Name == nil || assign.Value == nil || assign.Append || assign.Array != nil || assign.Index != nil ||
+					unsafeAssignmentNames[assign.Name.Value] || assign.Name.Value[0] == 'L' && len(assign.Name.Value) > 3 && assign.Name.Value[:3] == "LD_" {
+					return false
+				}
+			}
+			actionUpdateValues(stmt, values, cwd, home)
+			continue
+		}
+		if len(call.Assigns) != 0 {
+			return false
 		}
 		program, fixed := staticProgramWord(call.Args[0], home)
-		if !fixed || !uncertainWriteVerbs[programBase(program)] {
-			return true
+		if fixed && harmless[programBase(program)] {
+			continue // reads, lists or searches: no write to prove
+		}
+		if !fixed || !writers[programBase(program)] {
+			return false
 		}
 		for _, word := range call.Args[1:] {
 			if text, fixed := StaticWord(word, home); fixed && len(text) > 0 && text[0] == '-' {
-				continue // an option
+				if !harmlessWriterOptions[text] {
+					return false
+				}
+				continue
 			}
-			check(word)
+			resolved := resolveWriteWord(word, values, cwd, options)
+			if resolved.uncertain != "" || resolved.literal != "" {
+				return false
+			}
+			for _, candidate := range resolved.candidates {
+				if protectedReachPathWith(candidate, protected, ssh, memo) {
+					return false
+				}
+			}
 		}
-		return true
-	})
-	return reason
+	}
+	return true
 }

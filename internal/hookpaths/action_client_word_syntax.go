@@ -8,13 +8,6 @@ import (
 	"strings"
 )
 
-// actionClientShellWordSyntax is the cheap test for a command with a word
-// the shell expands into file names: a glob character, a backslash escape or
-// an ANSI-C string. Plain commands skip the client's second decision.
-func actionClientShellWordSyntax(command string) bool {
-	return strings.ContainsAny(command, "*?[\\") || strings.Contains(command, "$'")
-}
-
 // ReplaceVerbShape reports the bounded mv, install or sed -i statement the
 // replace-verb proof reads (rel-1-0-10 GAP-0293 review F7). It reads no
 // file: a managed gateway checks it against the client's safe key.

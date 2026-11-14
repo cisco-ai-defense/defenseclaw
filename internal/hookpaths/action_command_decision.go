@@ -79,6 +79,9 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	} else if safe {
 		return ""
 	}
+	if sedBackupReachesProtected(command, cwd, home, memo) {
+		return "protected-target"
+	}
 	if replaceVerbSafeIn(command, cwd, home, startup) {
 		return ""
 	}

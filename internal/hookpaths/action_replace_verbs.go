@@ -160,8 +160,12 @@ func replaceVerbOperandWords(program string, args []*syntax.Word, home string) (
 				switch {
 				case text == "--":
 					options = false
-				case text == "--in-place" || strings.HasPrefix(text, "--in-place="):
+				case text == "--in-place":
 					inPlace = true
+				case strings.HasPrefix(text, "--in-place"):
+					// --in-place=SUFFIX: the backup name is a write target
+					// the proof does not read (GAP-0414)
+					return nil, false
 				case text == "--follow-symlinks" || strings.HasPrefix(text, "--") && text != "--regexp-extended" && text != "--quiet" && text != "--silent" && text != "--separate" && text != "--null-data":
 					return nil, false
 				case text == "-e":
@@ -175,8 +179,12 @@ func replaceVerbOperandWords(program string, args []*syntax.Word, home string) (
 						return nil, false
 					}
 					haveScript = true
-				case strings.HasPrefix(text, "-i"):
+				case text == "-i":
 					inPlace = true
+				case strings.HasPrefix(text, "-i"):
+					// -iSUFFIX, and a cluster like -in whose suffix is the
+					// rest of the word: no proof (GAP-0414)
+					return nil, false
 				case strings.HasPrefix(text, "--"):
 				case strings.Trim(text[1:], "Ernsz") == "":
 				default:

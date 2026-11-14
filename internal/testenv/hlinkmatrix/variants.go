@@ -230,3 +230,19 @@ func Rev2ClassVariants(n Names) []Variant {
 	}
 	return out
 }
+
+// Writer is a metadata or content writer (case id HLR3-W-<id>-<row>) whose
+// prefix replaces the verb of a corpus row, for the managed-parity tests
+// (round 3 review, GAP-0415).
+type Writer struct{ ID, Prefix string }
+
+// Writers are the writers the reviewer swapped into the chmod rows.
+func Writers() []Writer {
+	return []Writer{
+		{"setfacl", "setfacl -m u:0:r "}, {"chattr", "chattr +A "}, {"setfattr", "setfattr -n user.k -v 1 "},
+		{"cp-attr", "cp --attributes-only a.txt "}, {"touch-r", "touch -r a.txt "},
+		{"chmod-ref", "chmod --reference=a.txt "}, {"chown-ref", "chown --reference=a.txt "}, {"chgrp", "chgrp 0 "},
+		{"sort-o", "sort a.txt -o "}, {"shred", "shred -n 1 "}, {"rsync", "rsync a.txt "}, {"ln-f", "ln -f a.txt "},
+		{"chmod", "chmod 600 "}, {"truncate", "truncate -s 0 "},
+	}
+}

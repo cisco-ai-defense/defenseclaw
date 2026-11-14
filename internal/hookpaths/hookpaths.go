@@ -2006,14 +2006,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					if protectedDecision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
 						protectedDecision = false
 					}
-					if !protectedDecision && !noDereferenceTouchSafe && (actionClientVariableWriteCandidate(command, home) || actionClientShellWordSyntax(command)) {
-						// A per-user gateway can resolve a variable or an expanded
-						// word through the user's links. Carry that positive
-						// decision to managed gateways, excluding a value the
-						// call proves dead (GAP-0326, GAP-0327).
+					if !protectedDecision && !noDereferenceTouchSafe {
+						// A per-user gateway reads the user's links itself; a
+						// managed gateway cannot. The client carries its own
+						// decision for EVERY call, not for a list of verbs or a
+						// syntax (rel-1-0-10 GAP-0415, GAP-0326, GAP-0327), minus
+						// a value the call proves dead and a call whose writers
+						// the one resolver proves safe (writersAllProvenSafe).
 						protectedDecision = ActionCommandDecision(command, cwd, home) != "" &&
 							!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
-							!actionClientProvedOverwrittenRedirect(command, cwd, home)
+							!actionClientProvedOverwrittenRedirect(command, cwd, home) &&
+							!writersAllProvenSafe(command, cwd, home, nil)
 					}
 					if !protectedDecision {
 						protectedDecision = actionClientLoopCopyDestinationProtected(command, cwd, home)
@@ -2028,12 +2031,6 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					replaceVerbSafe(command, cwd, home) {
 					noDereferenceTouchSafe = true
 				}
-				// A word the shell expands (a glob, a quoted or escaped glob
-				// character, an ANSI-C string) is read by the one word
-				// resolver in this client's own decision. A managed gateway
-				// cannot read the user's home, so the client carries that
-				// decision for every verb, not a fixed list (GAP-0326,
-				// GAP-0327: managed at least as strict as per-user).
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)

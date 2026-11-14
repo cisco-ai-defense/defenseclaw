@@ -111,6 +111,12 @@ type resolvedWord struct {
 	// caps are the caps the word hit (bounded.Paths past the candidate
 	// bound); a hit also sets uncertain to wordUncertainTruncated.
 	caps bounded.CapSet
+	// literal is the word as bash passes it when its pattern matches
+	// nothing (quotes removed, pattern characters as written), for a word
+	// that is uncertain only because the pattern form or a glob option is
+	// not modeled: the one candidate that is always possible, which the
+	// caller still checks by identity (GAP-0415). "" for any other word.
+	literal string
 }
 
 // resolveShellWord is the one reading of a write operand:
@@ -154,12 +160,10 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 		return resolvedWord{candidates: resolverCandidates([]string{literalText}, cwd, false)}
 	}
 	switch {
-	case opts.unmodeled():
-		return resolvedWord{uncertain: wordUncertainDynamic}
+	case opts.unmodeled(), !resolverPatternModeled(pattern) && !opts.noGlob:
+		return resolvedWord{uncertain: wordUncertainDynamic, literal: OperandPath(literalText, cwd)}
 	case opts.noGlob:
 		return resolvedWord{candidates: resolverCandidates([]string{literalText}, cwd, false)}
-	case !resolverPatternModeled(pattern):
-		return resolvedWord{uncertain: wordUncertainDynamic}
 	}
 	base := ""
 	if !filepath.IsAbs(pattern) {
@@ -211,6 +215,14 @@ func resolveWriteWord(word *syntax.Word, values actionValues, cwd string, opts s
 		return whole
 	}
 	if whole.uncertain != "" {
+		// The program receives the word as bash passes it when nothing
+		// matches, and writes the value after the equals sign: that value is
+		// the literal candidate (dd of=PATTERN), not the whole word.
+		if whole.literal != "" {
+			if fields, err := expand.Fields(resolverConfig(values, cwd), tail); err == nil && len(fields) == 1 {
+				whole.literal = OperandPath(fields[0], cwd)
+			}
+		}
 		return whole
 	}
 	fields, err := expand.Fields(resolverConfig(values, cwd), tail)
@@ -481,8 +493,16 @@ func resolverWordKnown(word *syntax.Word, values actionValues) bool {
 			known = false
 		case *syntax.ParamExp:
 			if part.Param == nil || part.Excl || part.Length || part.Width || part.IsSet ||
-				part.Slice != nil || part.Repl != nil || part.Exp != nil || part.Index != nil ||
+				part.Slice != nil || part.Repl != nil || part.Index != nil ||
 				part.NestedParam != nil || part.Flags != nil || len(part.Modifiers) != 0 {
+				known = false
+				break
+			}
+			// ${p:-word}, ${p-word}, ${p:+word}, ${p+word} of a parameter the
+			// caller knows are read by the shell expander; any other
+			// operator (assignment, error, trimming) is not.
+			if part.Exp != nil && part.Exp.Op != syntax.DefaultUnset && part.Exp.Op != syntax.DefaultUnsetOrNull &&
+				part.Exp.Op != syntax.AlternateUnset && part.Exp.Op != syntax.AlternateUnsetOrNull {
 				known = false
 				break
 			}

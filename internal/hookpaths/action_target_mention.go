@@ -277,6 +277,10 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						return true
 					}
 				}
+				// An unsettled pattern may pass its literal name: judged too.
+				if resolved.literal != "" && checkAs(resolved.literal, false, effectiveCWD, true) {
+					return true
+				}
 				if resolved.uncertain == "" {
 					return false
 				}
@@ -374,6 +378,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				if !stateOnly {
 					inert = append(inert, actionSSHDirectorySetupWords(call, values, effectiveCWD, home)...)
 				}
+				inert = append(inert, actionInertAwkPrograms(call, home)...)
 				judgedWords = append(judgedWords, inert...)
 				// A read-only call after a plain mv replaced a link reads the
 				// moved file under that name (rel-1-0-6:GAP-0217).
