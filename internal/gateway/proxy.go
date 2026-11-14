@@ -1578,7 +1578,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			// the client sends them back as history; the new history of a
 			// refused request is inspected again (GAP-0244).
 			// Only what the refusal is attributed to keeps it (GAP-0257).
-			blamed := p.refusedSegments(r.Context(), verdict, side.Segments, side.Turn, freshHistory, label, mode)
+			blamed := p.refusedSegments(r.Context(), verdict, side.Segments, side.Turn, label, mode)
 			p.history.record(historyCaller, historyScope, promptSegments(blamed, []string{msg}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
 			// Enqueue a notification BEFORE writing the block
 			// response so the next proxy call (this client's retry,
@@ -2860,7 +2860,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		if (verdict.Action == "block" && mode == "action") || auditClosed {
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
-			blamed := p.refusedSegments(r.Context(), verdict, chatSide.Segments, chatSide.Turn, freshHistory, req.Model, mode)
+			blamed := p.refusedSegments(r.Context(), verdict, chatSide.Segments, chatSide.Turn, req.Model, mode)
 			p.history.record(historyCaller, historyScope, promptSegments(blamed, []string{msg}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
 			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)

@@ -380,22 +380,24 @@ const historyBlameMax = 8
 //
 //   - A refusal that is not a guardrail block (an audit that failed closed)
 //     is attributed to nothing: the guardrail allowed the text.
-//   - A request with one inspected segment: that one.
-//   - Otherwise each current-turn segment (at most historyBlameMax) is
-//     inspected alone, and the ones the guardrail blocks alone are blamed.
-//     This runs only on a refusal.
-//   - When that blames none (the refusal came from the system text, the
-//     history or the segments together) or there are too many candidates,
-//     the refusal cannot be attributed and every current-scope segment is
-//     recorded refused, as before (fail safe).
-func (p *GuardrailProxy) refusedSegments(ctx context.Context, v *ScanVerdict, current, turn, fresh []string, label, mode string) []string {
+//   - One current-turn segment (the walker's Turn: not system or developer
+//     text, instructions or tool definitions): that one, with no further
+//     inspection. It is the only text of the request the client can send
+//     back as history, and a refusal keeps managed AI Defense at one call.
+//   - Two to historyBlameMax: each is inspected alone, once, and the ones
+//     the guardrail blocks alone are blamed. This runs only on a refusal
+//     with several current turns (one more AI Defense call each, managed).
+//   - None blamed, no current turn, or too many: the refusal cannot be
+//     attributed and every current-scope segment is recorded refused, as
+//     before (fail safe).
+func (p *GuardrailProxy) refusedSegments(ctx context.Context, v *ScanVerdict, current, turn []string, label, mode string) []string {
 	if v == nil || v.Action != "block" {
 		return nil
 	}
-	if inspected := uniqueSegments(promptSegments(current, fresh)); len(inspected) == 1 {
-		return inspected
-	}
 	cands := uniqueSegments(turn)
+	if len(cands) == 1 {
+		return cands
+	}
 	if len(cands) == 0 || len(cands) > historyBlameMax || p.inspector == nil {
 		return current
 	}
