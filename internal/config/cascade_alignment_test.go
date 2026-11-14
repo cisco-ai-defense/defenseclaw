@@ -23,6 +23,14 @@ func TestCascadeAlignmentLaneLoadsItsValues(t *testing.T) {
 			t.Fatalf("%s: resolved %q", v, got)
 		}
 	}
+	// Exact values: a different spelling never switches the lane on.
+	for _, v := range []string{"Alert", "BLOCK", "shadow "} {
+		c := &Config{}
+		c.Guardrail.Cascade.Lanes = map[string]string{CascadeLaneAlignment: v}
+		if err := c.ValidateCascade(false); err == nil {
+			t.Fatalf("lanes.alignment %q accepted", v)
+		}
+	}
 	cfg := loadCascadeDoc(t, "guardrail:\n  cascade:\n    lanes:\n      alignment: on\n")
 	if inv := cfg.Guardrail.Cascade.Invalid(); inv == nil || !strings.Contains(inv.Error, "off, shadow, alert, block") {
 		t.Fatalf("on accepted or unclear: %+v", inv)
