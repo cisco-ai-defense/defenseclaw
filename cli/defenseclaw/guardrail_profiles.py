@@ -46,11 +46,13 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "0678175caa680c77ffd723c5ffd7d581e5d6747c884e71b61aa3bfedba92e1b6",
             "19f3cf6086023cfc419756c4b30fe395820b008ba831653949b0c33f2daf76a4",
             "20a9adcda34d02c061e6f1c0073546fcc540f97ee604b55401ba0f9946ef4a70",
+            "3020dab533ece09ef7c07c1a877b3004f919e876677403fed18da6ef65a9bb25",
             "30833ca25490a295a65c778827394fa64a8d3f4aedc589648355aa55509b72d6",
             "37d8dc92222a208b8a769155b44040a2ebcd7bffebd7691461f28c079594407a",
             "3b60ff13444113a2d41cf9f4002794685267b61ec82ccf309fa6d6419fb3bdfd",
             "3eec0102c3fd29f3cb9205b0cb3750cbc2b88de821ed5d943081e5605d5fefad",
             "4dd01c0e72595849517354cbb4e7910d2b0116a62825e5c6578d2e0d5a99f0ef",
+            "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
             "55f5a0278318615f350752ff4f00d1ccd995cd52a46a9a7f0a32c5f783f7bb35",
             "5b9ca53ad605b53d1d1618b51e52c658140d42190e6f903abaaca604ae145c93",
             "60eca49dfa2a1f7578e40a288d93a0849755204602fe68044726b14db30d5d4d",
@@ -76,20 +78,21 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "ea81d7cea6c23a7de47e62379572f29704df1a24e0e5efe22e9b02a6f159af95",
             "eb35cfd63246ee6343faf4114ea9a6b62155f8faf6825f05a2bb9180444bb61d",
             "ef527c66677705936f1ee319b24a76f3401286a1362265251ae2a69dc4f6dd22",
+            "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
             "f24c07c3beea7d1b590347461d9d263db597aad5bd73f1a43b4a546f60df4ad0",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
-            "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
-            "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
         }
     ),
     "permissive": frozenset(
         {
             "06295d7fc02c0168fb93403a27f42b41127756d251a3d04c2c167db5dfca3f49",
             "09e49a34880ace6a9b29d613a8af16bd7f96063e7a6361897a77df475abd7859",
+            "0c01c692b0fb79d1ace852d4840d5866b61ddc4928604e8c2e3479215620b029",
             "10191910ef94b2f3bb78ec9c70092c4c2ad5fd96077ab9b251fdea1178132f9f",
             "25a73df95116e71d06b8043f82df3e79e4bf943cb2e2e72529448e5ef91c009b",
             "29ce292e52f2fac289d6567ec7994b1f17af98e3fd1c4a5e2084f8c8a97b5371",
+            "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
             "3ecdef60681cc5922962c48882de64b97f56605e22c6952bd49bb156ea445328",
             "45b3e39a75a57d6220b62c35bfa57ea3fcbd55ad0f8bdc97c20ac7523fc5a61a",
             "4fa0f0c4119e6aa67e8e4365d9b1f0b4b506749d5898c700d9d18ffbf98f9b2f",
@@ -101,6 +104,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "8487451e43767a1f0136da3a8b346e143ad9e33ec864f74c49381eff64155aec",
             "9006dc19c958f8b2fa5fe7aba6d54e2fb8454f634b3fc6b6abf777c15a9e6604",
             "a1291dd16dbd6350daa6b94425bcfa19e734d99e1962e38e64915573d64f27c2",
+            "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
             "a8c864dc71a7201897b4bfe5770187dedaae939ed51d8923ca6b2367b3501d79",
             "b0ade92e8990e321af88bc657a198b2ab49c06c420d66c0908cb5e8aa2e9b3f1",
             "b890f74b17262c155256632e92d5b7545c39c5a02ddbbde88f9421ee5a15e91b",
@@ -115,23 +119,24 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f8addded6944af03eaad33d26f34f700a7ceda919697ac3f76528331aa4d4a77",
             "fa8ca0ad415436e8b4f5d6043f36de782cfe27bfbfca83f27d2359b97914f5f7",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
-            "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
-            "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
         }
     ),
     "strict": frozenset(
         {
             "1031aaa480cd71c5544f54acd59b25086f63c545867e2dc33b94bb692c09b209",
             "2720dce36378e7ef8cf3e196af5ef6e0c40777be43cc168e6e8d3b6b57728ca4",
+            "33dce19de265de675a35948a75a652922b4e77d1c8023f4da46831995dfa490b",
             "3bff549d5860011cd63f0654455b6cc0d49e9493bd607284c12be6c764e10893",
             "409ec41d6070542d67370ab9fe469291263a097e69a44ff1b7fce4cea2edcc94",
             "4f9b68412f1cb102b54dad54a08c6e45d254e79984dccd84451cfdca62470e7f",
             "5b9b0f79c491c27b3feed63b90765091d37345621a95792ebcd34195abb097fd",
             "5ef5ff7ce9ff577fcf3a557b61b25b971be62d6ff1e45b8fd3b1771fac6a290b",
             "633786bfd3512fe1de7721c5c68beaff99245769c61df65b8720ea63729449bf",
+            "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
             "6e83a82ef15257b0d184e3418dba66625bd3f15736193582779dc7be07719021",
             "75e46a0c8a460f001bd3783909ffb781d3e46450cffc0361e4bb6f8601031b3e",
+            "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
             "9239bfef0d18ad54bbe55f955885d7a4391556f3d272223d347669f77f54b32b",
             "9308580254480e56c1b865592186226f3c83e72e01c65e6c6b4c8e414e4980ba",
             "9a718f87b06f75cfb1f4fa223fc6f3692ced3ecc17c10b5c8b96fff617d5da67",
@@ -151,9 +156,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "eabc629d3b25da4515c280ea0bb947686a891029dbf186328a947d7a6d91f7d0",
             "f5d6d19b78fe7d3897acb6a28a9fae08049fcda9745f944d5cdb45e573669bc5",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
-            "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
-            "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
         }
     ),
 }
