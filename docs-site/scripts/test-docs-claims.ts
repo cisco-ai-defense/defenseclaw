@@ -2691,7 +2691,7 @@ describe('saved installer protection matches the rule packs (GAP-1922)', () => {
 // GAP-2289: the setup guardrail connector list matches the CLI's choices per
 // OS: the proxy connectors are refused on native Windows (platform_support.py).
 describe('setup guardrail --connector choices match the CLI (GAP-2289)', () => {
-  it('lists the hook connectors everywhere and openclaw/zeptoclaw only on Linux and macOS', () => {
+  it('lists the hook connectors and openclaw everywhere and zeptoclaw only on Linux and macOS', () => {
     const setup = source('cli/defenseclaw/commands/cmd_setup.py');
     const fallback = setup.split('_CONNECTOR_NAMES_FALLBACK = [')[1]?.split(']')[0] ?? '';
     const names = [...fallback.matchAll(/"([a-z]+)"/g)].map((m) => m[1]).sort();
@@ -2699,14 +2699,15 @@ describe('setup guardrail --connector choices match the CLI (GAP-2289)', () => {
     const support = source('cli/defenseclaw/platform_support.py');
     const windows = support.split('WINDOWS_CONNECTOR_SUPPORT')[1] ?? '';
     const refused = [...windows.matchAll(/"([a-z]+)": ConnectorPlatformSupport\(\s*UNSUPPORTED,/g)].map((m) => m[1]).sort();
-    assert.deepEqual(refused, ['openclaw', 'zeptoclaw']);
+    // OpenClaw runs on native Windows in native hook mode (rel-1-0-10 S2).
+    assert.deepEqual(refused, ['zeptoclaw']);
     const hooks = names.filter((n) => !refused.includes(n));
     const text = page('guardrail/index.mdx');
     const row = text.split('**Which agent framework are you using?**')[1]?.split('| **Enable guardrail?**')[0] ?? '';
     const listed = row.split('; on Linux and macOS also')[0];
     assert.deepEqual([...listed.matchAll(/`([a-z]+)`/g)].map((m) => m[1]).filter((n) => n !== 'connector' && n !== 'agent').sort(), hooks.sort());
-    assert.ok(row.includes('on Linux and macOS also `openclaw` and `zeptoclaw`. Native Windows refuses those two'), 'connector row lost the per-OS split');
-    assert.ok(text.includes('amp or kiro; on Linux and macOS also openclaw or zeptoclaw (native Windows refuses those two: they need the guardrail proxy)'), 'flag table lost the per-OS split');
+    assert.ok(row.includes('on Linux and macOS also `zeptoclaw`. Native Windows runs OpenClaw 2026.8.35 or later in native hook mode, and refuses `zeptoclaw`'), 'connector row lost the per-OS split');
+    assert.ok(text.includes('amp, kiro or openclaw; on Linux and macOS also zeptoclaw (native Windows refuses it: it needs the guardrail proxy'), 'flag table lost the per-OS split');
     assert.ok(!text.includes('`kiro`, `openclaw`, `zeptoclaw`.'), 'old unqualified list is back');
   });
 });

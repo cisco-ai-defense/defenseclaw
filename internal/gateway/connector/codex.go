@@ -53,7 +53,6 @@ import (
 // Implements ComponentScanner, StopScanner.
 type CodexConnector struct {
 	gatewayToken string
-	masterKey    string
 
 	// Emit a single `[SECURITY]` warning per process the first time
 	// the loopback bypass is exercised while a gateway token is
@@ -328,7 +327,7 @@ func (c *CodexConnector) HookScriptNames(SetupOpts) []string {
 	return []string{"codex-hook.sh"}
 }
 func (c *CodexConnector) Description() string {
-	return "config.toml model_providers patch + versioned hook matrix (6-11 events, component scanning)"
+	return "config.toml hooks, otel and notify patch + versioned hook matrix (6-11 events, component scanning); optional route-only model_providers entry"
 }
 func (c *CodexConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
@@ -534,6 +533,16 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			false,
 		)
 	}
+	// Route-only provider entry from config.yaml (removed when not routed).
+	if err := c.ApplyRouteOnly(opts, opts.RouteOnly); err != nil {
+		return c.rollbackSetupAfterSnapshot(
+			opts,
+			runtimeSnapshot,
+			fmt.Errorf("codex route-only: %w", err),
+			false,
+			false,
+		)
+	}
 	if !opts.sandboxNativeOTLP {
 		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
 			return fmt.Errorf("revoke obsolete Codex native OTLP credential: %w", err)
@@ -572,6 +581,11 @@ func (c *CodexConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 }
 
 func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) error {
+	// The model provider goes back first: a dead route-only URL would break
+	// every Codex turn (DESIGN 7.4).
+	if err := c.ApplyRouteOnly(opts, nil); err != nil {
+		return fmt.Errorf("codex teardown: route-only: %w", err)
+	}
 	if err := c.restoreCodexConfig(opts); err != nil {
 		// Keep the scoped OTLP credential valid while config.toml may still
 		// reference it. Revoking first would strand a partially restored Codex
@@ -708,7 +722,7 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 // would 401 and no guardrail would ever execute.
 //
 // Non-loopback callers (bridge / remote deployments) are still gated
-// on X-DC-Auth or the master key. The gateway token exists to protect
+// on X-DC-Auth. The gateway token exists to protect
 // those paths, not to break the local-only native binary path.
 //
 // SECURITY: the loopback carve-out is routed through
@@ -726,13 +740,6 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	if c.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
-			return true
-		}
-	}
-
 	if IsLoopback(r) {
 		// No gateway token configured → preserve legacy local-only
 		// behavior (any loopback caller is trusted).
@@ -741,8 +748,7 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 		}
 		// Avarice F-1365: with a token configured, require proof
 		// that the loopback caller possesses either the gateway
-		// token (X-DC-Auth, handled above), the master key
-		// (Authorization Bearer master, handled above), or a known
+		// token (X-DC-Auth, handled above) or a known
 		// codex provider key. The native codex CLI authenticates
 		// via the last path because it already sends
 		// Authorization: Bearer <provider-key>.
@@ -762,7 +768,7 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 		c.loopbackWarn.Do(func() {
 			fmt.Fprintln(os.Stderr,
 				"[SECURITY] codex: rejecting loopback /c/codex/* request — "+
-					"no X-DC-Auth, no matching master key, and no recognized "+
+					"no X-DC-Auth and no recognized "+
 					"provider Authorization header. Set "+
 					"DEFENSECLAW_CODEX_LOOPBACK_TRUST=1 to opt back into "+
 					"the legacy loose behavior on a single-user host (F-1365).")
@@ -800,9 +806,8 @@ func (c *CodexConnector) matchesKnownProviderKey(r *http.Request) bool {
 	return false
 }
 
-func (c *CodexConnector) SetCredentials(gatewayToken, masterKey string) {
+func (c *CodexConnector) SetCredentials(gatewayToken string) {
 	c.gatewayToken = gatewayToken
-	c.masterKey = masterKey
 }
 
 func (c *CodexConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, error) {

@@ -68,8 +68,11 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		prerequisite:     actionfacts.ExactDirectoryCredentialCompromise,
 		suppressFallback: actionfacts.DirectoryCredentialAcquisitionSafeNegative,
 	},
+	// The non-dump half also owns credentialed NetExec / CrackMapExec domain
+	// service use at the same HIGH (rel-1-0-10:GAP-0014, folded here to keep the
+	// default catalog's semantic headroom; see directoryTicketRequestOrServiceUse).
 	"credential.directory_ticket_request": {
-		prerequisite:     actionfacts.ExactDirectoryCredentialTicketRequest,
+		prerequisite:     directoryTicketRequestOrServiceUse,
 		suppressFallback: actionfacts.DirectoryCredentialAcquisitionSafeNegative,
 	},
 	"credential.pkcs12_private_key_extract": {
@@ -2385,4 +2388,15 @@ func hasArgumentFold(argv []string, expected string) bool {
 		}
 	}
 	return false
+}
+
+// directoryTicketRequestOrServiceUse is the prerequisite of the built-in HIGH
+// credential.directory_ticket_request rule: a bare Kerberos ticket request, or a
+// complete credentialed NetExec / CrackMapExec domain-service call that is not
+// an NTDS dump (directoryServiceCredentialUsePrerequisite). Both are directory
+// credential use short of a dump or crack, so default alerts and strict blocks.
+// The rule's CEL program list keeps each half on its own programs.
+func directoryTicketRequestOrServiceUse(facts actionfacts.Facts) bool {
+	return actionfacts.ExactDirectoryCredentialTicketRequest(facts) ||
+		directoryServiceCredentialUsePrerequisite(facts)
 }

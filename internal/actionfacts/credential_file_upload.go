@@ -52,16 +52,11 @@ func credentialFileUploadClass(value string) string {
 	}
 	canonical := strings.ToLower(path.Clean(value))
 	base := path.Base(canonical)
+	if shape, ok := MatchCredentialFileShape(canonical); ok && shape.StrongUpload {
+		return CredentialFileUploadStrong
+	}
 	if base == "jenkins.cookies" || base == "sa.token" ||
-		canonical == "/var/run/secrets/kubernetes.io/serviceaccount/token" ||
-		strings.HasSuffix(canonical, "/.aws/credentials") ||
-		strings.HasSuffix(canonical, "/.git-credentials") ||
-		strings.HasSuffix(canonical, "/.netrc") ||
-		strings.HasSuffix(canonical, "/.npmrc") ||
-		strings.HasSuffix(canonical, "/.pypirc") ||
-		strings.HasSuffix(canonical, "/.kube/config") ||
-		strings.Contains(canonical, "/.ssh/") && strings.HasPrefix(base, "id_") &&
-			!strings.HasSuffix(base, ".pub") {
+		canonical == "/var/run/secrets/kubernetes.io/serviceaccount/token" {
 		return CredentialFileUploadStrong
 	}
 	if hiddenTemporaryCredentialStagingPath(canonical) &&

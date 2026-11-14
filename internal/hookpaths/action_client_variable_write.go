@@ -41,7 +41,10 @@ func actionClientVariableWriteCandidate(command, home string) bool {
 		switch programBase(program) {
 		case "install", "rsync":
 			found = len(call.Args) >= 3 && wordExpandsParameter(call.Args[len(call.Args)-1])
-		case "tee":
+		// touch changes the file each operand names, through a link too; a
+		// managed gateway behind ProtectHome has no fact for an operand the
+		// command assigns, so the client carries its own reading (GAP-0298).
+		case "tee", "touch", "gtouch":
 			for _, arg := range call.Args[1:] {
 				if wordExpandsParameter(arg) {
 					found = true

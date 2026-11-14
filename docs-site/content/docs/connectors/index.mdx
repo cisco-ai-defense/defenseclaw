@@ -52,7 +52,9 @@ What each OS supports, and what live tests verified. Switch to **Enterprise** fo
 
 <ConnectorOsMatrix />
 
-OpenClaw and ZeptoClaw need the guardrail proxy, which native Windows does not host.
+ZeptoClaw needs the guardrail proxy, which native Windows does not host. OpenClaw runs there in native hooks mode ([Hook modes](/docs/connectors/openclaw#hook-modes)).
+
+{/* pending: the Windows column of the matrix above follows platform_support.go; update with the Windows native branch */}
 
 ## OpenShell sandbox
 
@@ -76,7 +78,7 @@ Every connector implements one Go interface, defined in [`internal/gateway/conne
 | `VerifyClean` | After `Teardown`, and before another connector's `Setup` | Fail with a list of leftover hooks, env files, config patches or shims. |
 | `Authenticate` | On each request | Accept or refuse the caller. |
 | `Route` | On each proxied LLM request | Read the request signals the proxy needs. |
-| `SetCredentials` | At gateway boot | Give the connector the gateway token and master key. |
+| `SetCredentials` | At gateway boot | Give the connector the gateway token. |
 
 Two optional interfaces cover the rest. `HookEndpoint` lets a connector declare its hook route, for example `/api/v1/codex/hook`, which the gateway's API server registers when it starts. `NotifyEndpoint` does the same for an auxiliary notify bridge. Cursor and the other hook-only connectors share `hook_only.go`. Other connectors have a file of their own, such as `claudecode.go`, `codex.go` and `devin.go`.
 
@@ -93,7 +95,7 @@ Two optional interfaces cover the rest. `HookEndpoint` lets a connector declare 
 
 <Flow
   direction="TB"
-  caption="On every LLM request through the guardrail proxy. Authenticate accepts the gateway token (X-DC-Auth), the master key (Authorization: Bearer), or a loopback caller when no gateway token is set. Route reads the upstream, model, API key, stream flag and headers."
+  caption="On every LLM request through the guardrail proxy. Authenticate accepts the gateway token (X-DC-Auth) or a loopback caller when no gateway token is set. Route reads the upstream, model, API key, stream flag and headers."
 >
   <Node id="agent" kind="agent">{`Agent\nLLM request`}</Node>
   <Node id="auth" kind="connector">{`Check the caller\nAuthenticate`}</Node>
