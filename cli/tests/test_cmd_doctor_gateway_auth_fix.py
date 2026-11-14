@@ -765,7 +765,9 @@ def test_fix_gateway_token_generates_canonical_token_when_openclaw_has_none(tmp_
     assert "OPENCLAW_GATEWAY_TOKEN" not in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
-def test_fix_gateway_token_preserves_running_token_before_openclaw_resync(tmp_path):
+def test_fix_gateway_token_resyncs_the_openclaw_credential_without_touching_the_master(tmp_path):
+    # R-TOK: OPENCLAW_GATEWAY_TOKEN is only the OpenClaw credential, so the
+    # resync leaves the master as it is and a running gateway keeps working.
     from defenseclaw.logger import _running_gateway_token
 
     cfg = _cfg(str(tmp_path), token="running-token")
@@ -780,8 +782,11 @@ def test_fix_gateway_token_preserves_running_token_before_openclaw_resync(tmp_pa
         tag, _ = _fix_gateway_token(cfg, assume_yes=True)
 
     assert tag == "pass"
-    assert _running_gateway_token(str(tmp_path)) == "running-token"
-    assert "OPENCLAW_GATEWAY_TOKEN=new-token" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert not _running_gateway_token(str(tmp_path))
+    body = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "OPENCLAW_GATEWAY_TOKEN=new-token" in body
+    assert "DEFENSECLAW_GATEWAY_TOKEN" not in body
+    assert cfg.gateway.resolved_token() == "running-token"
 
 
 def test_fix_stale_pid_removes_malformed_file(tmp_path):

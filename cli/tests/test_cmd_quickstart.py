@@ -266,7 +266,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
 
     def test_windows_rejects_unsupported_connectors_before_first_run_writes(self):
         forbidden = AssertionError("unsupported connector reached first-run mutation")
-        for connector in ("openclaw", "zeptoclaw", ):
+        for connector in ("zeptoclaw",):
             with (
                 self.subTest(connector=connector),
                 patch("defenseclaw.platform_support.host_os", return_value="windows"),

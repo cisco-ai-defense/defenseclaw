@@ -5,10 +5,9 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 	"slices"
 
-	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -22,16 +21,13 @@ import (
 // below the bound, so a protected file or link named directly, or through a
 // value the gateway knows, is blocked in every profile, and so is a later
 // plain name that one read finds to be a link or a second name of a keys file.
-// The other plain names are left out and not resolved further. The policy
-// tier of the request decides that: the strict tier (and managed strict) keeps the
-// evaluation-limit block, and the default and permissive tiers allow the
-// call with an alert that names the bound, as for an unread share body
-// (shareBodyUnreadFindings).
-
-// operandBoundRuleID is the alert the default and permissive tiers raise for
-// a call over the operand bound. It is not the evaluation-limit rule, so a
-// strict request that met the alert in a twin dispatch still adds the block.
-const operandBoundRuleID = "ACTION-OPERAND-BOUND"
+// The other plain names are left out and not resolved further: the call is
+// truncated at the operand bound (bound rule, internal/guardrail/bounded,
+// cap items), so withBoundedTruncation adds the evaluation-limit finding with
+// the reason "bounded_truncated cap=items", which the profile maps to an alert
+// in the default and permissive packs and a block in the strict pack
+// (rel-1-0-10:GAP-0313; the former ACTION-OPERAND-BOUND alert mapped to allow
+// in the permissive pack).
 
 // operandBoundDispatch judges a shell call that a bound of the readers
 // applies to; handled is false when none does, or the call is not a shell
@@ -52,9 +48,9 @@ func operandBoundDispatch(parent context.Context, request trustedActionRequest) 
 	cwd, home := request.Input.CWD, request.Input.ActiveHome
 	reading := request
 	reading.operandBounded = true
-	bounded, over := hookpaths.BoundCommandOperands(command, cwd, home)
+	reduced, over := hookpaths.BoundCommandOperands(command, cwd, home)
 	if over {
-		reading = operandBoundReading(reading, bounded)
+		reading = operandBoundReading(reading, reduced)
 	}
 	statements := hookpaths.BoundStatementCommandOperands(command, cwd, home)
 	if !over && statements == command {
@@ -68,7 +64,7 @@ func operandBoundDispatch(parent context.Context, request trustedActionRequest) 
 		findings = mergeBoundedFindings(findings, dispatchTrustedAction(parent, twin))
 	}
 	if over {
-		findings = operandBoundFindings(parent, findings, request.EnforcementCapable)
+		findings = withBoundedTruncation(findings, bounded.Of(bounded.Items), request)
 	}
 	return findings, true
 }
@@ -81,10 +77,10 @@ func operandBoundReading(request trustedActionRequest, reduced string) trustedAc
 	return request
 }
 
-// mergeBoundedFindings is findings with every finding of bounded that does not
+// mergeBoundedFindings is findings with every finding of more that does not
 // repeat one of them (the same rule, severity and enforcement).
-func mergeBoundedFindings(findings, bounded []RuleFinding) []RuleFinding {
-	for _, finding := range bounded {
+func mergeBoundedFindings(findings, more []RuleFinding) []RuleFinding {
+	for _, finding := range more {
 		if !slices.ContainsFunc(findings, func(f RuleFinding) bool {
 			return f.RuleID == finding.RuleID && f.Severity == finding.Severity && f.enforcement == finding.enforcement
 		}) {
@@ -92,28 +88,4 @@ func mergeBoundedFindings(findings, bounded []RuleFinding) []RuleFinding {
 		}
 	}
 	return findings
-}
-
-// operandBoundFindings is the verdict of a call over the operand bound on top
-// of the findings of its bounded reading: the evaluation-limit block in the
-// strict tier, an alert that never blocks in the others.
-func operandBoundFindings(ctx context.Context, findings []RuleFinding, enforcementCapable bool) []RuleFinding {
-	has := func(ruleID string) bool {
-		return slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == ruleID })
-	}
-	if shareBodyStrictFrom(ctx) {
-		if has("ACTION-COMPOUND-LIMIT") {
-			return findings
-		}
-		return append(findings, trustedActionLimitFindings(enforcementCapable)...)
-	}
-	if has("ACTION-COMPOUND-LIMIT") || has(operandBoundRuleID) {
-		return findings
-	}
-	return append(findings, RuleFinding{
-		RuleID: operandBoundRuleID, Severity: "MEDIUM", Confidence: 1,
-		Title: fmt.Sprintf("Command has more than %d operands: the first %d and every later word that may name a protected file or is a link were judged, the other plain names were not resolved further",
-			actionfacts.MaxOperandsPerCall, actionfacts.MaxOperandsPerCall),
-		enforcement: findingEnforcementAlertOnly,
-	})
 }

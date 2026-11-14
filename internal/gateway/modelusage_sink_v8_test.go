@@ -204,7 +204,7 @@ func TestModelUsageBuildErrorDetail(t *testing.T) {
 		t.Fatal(err)
 	}
 	envelope := observability.FamilyEnvelopeInput{
-		Source: observability.SourceConnector, Connector: "claudecode", Action: "llm_response", Phase: "model",
+		Source: observability.SourceConnector, Connector: "claudecode", Action: "model_usage", Phase: "model",
 		Provenance: observability.FamilyProvenanceInput{Producer: modelUsageV8Producer, BinaryVersion: "test", ConfigGeneration: 1,
 			ConfigDigest: "0000000000000000000000000000000000000000000000000000000000000000"},
 	}

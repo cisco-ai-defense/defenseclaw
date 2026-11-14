@@ -795,7 +795,11 @@ func TestManagedGatewayStopSyncsTheDaemonsRegistration(t *testing.T) {
 			t.Fatalf("%s: %+v %v", name, got, err)
 		}
 	}
-	// A managed gateway that hangs does not hold the stop past the wait.
+	// A managed gateway that hangs does not hold the stop past the wait
+	// (test-sized here: the real one is 5 s).
+	previousWait := managedStopSyncSettingsWait
+	managedStopSyncSettingsWait = 200 * time.Millisecond
+	t.Cleanup(func() { managedStopSyncSettingsWait = previousWait })
 	hung := func(ctx context.Context) (sandboxrelay.DaemonSettings, bool) {
 		<-ctx.Done()
 		return sandboxrelay.DaemonSettings{}, false

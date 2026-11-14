@@ -66,7 +66,6 @@ from defenseclaw import (
     codex_toml,
     credential_provenance,
     envvars,
-    gateway_token_adoption,
     legacy_connector,
     rulepack_validation,
     ux,
@@ -2628,12 +2627,12 @@ def _env_names_equal(left: str, right: str, *, platform_name: str | None = None)
 
 
 _CANONICAL_GATEWAY_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN"
-_LEGACY_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
+_OPENCLAW_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
 
 
 def _known_gateway_token_env(name: str) -> str:
     """Return the canonical spelling for a built-in gateway token env name."""
-    for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+    for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _OPENCLAW_GATEWAY_TOKEN_ENV):
         if _env_names_equal(name, candidate):
             return candidate
     return ""
@@ -2672,8 +2671,6 @@ def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
     path = os.path.join(normalized_data_dir, ".env")
     try:
         body = read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
-        # The daemon leaves out an adopted copy that a one-spelling edit outdated.
-        shadowed = gateway_token_adoption.shadowed_names(body)
         for raw_line in body.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(b"#"):
@@ -2686,7 +2683,7 @@ def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
             except UnicodeError:
                 continue
             canonical_key = _known_gateway_token_env(key)
-            if not canonical_key or gateway_token_adoption.is_shadowed(shadowed, canonical_key):
+            if not canonical_key:
                 continue
             value = raw_value.strip()
             if len(value) >= 2 and value[:1] == value[-1:] and value[:1] in {b'"', b"'"}:
@@ -2781,13 +2778,15 @@ def _gateway_dotenv_safety_problem(cfg) -> str:
 
 
 def _daemon_effective_gateway_token(cfg) -> tuple[str, str, str]:
-    """Resolve the token a newly started gateway child will actually use.
+    """Resolve the master token a newly started gateway child will actually use.
 
-    The Go daemon replaces inherited canonical/legacy token variables with
-    values from ``.env`` whenever that file contains either token. A custom
-    ``gateway.token_env`` remains externally managed and retains precedence.
-    Return ``(token, env_name, source_label)`` without ever rendering the
-    token itself.
+    The Go daemon replaces inherited gateway token variables with values from
+    ``.env`` whenever that file contains them. A custom ``gateway.token_env``
+    remains externally managed and retains precedence. ``OPENCLAW_GATEWAY_TOKEN``
+    is the OpenClaw WebSocket credential, never the master (R-TOK), and a
+    ``DEFENSECLAW_GATEWAY_TOKEN`` equal to it does not count either: the gateway
+    mints a separate one. Return ``(token, env_name, source_label)`` without
+    ever rendering the token itself.
     """
     gateway = getattr(cfg, "gateway", None)
     if gateway is None:
@@ -2801,26 +2800,24 @@ def _daemon_effective_gateway_token(cfg) -> tuple[str, str, str]:
             return custom_value, custom_env, "configured token provider"
 
     dotenv_values = _gateway_dotenv_tokens(str(getattr(cfg, "data_dir", "") or ""))
-    if dotenv_values:
-        configured_known = _known_gateway_token_env(configured_env)
-        if configured_known and dotenv_values.get(configured_known):
-            return (
-                dotenv_values[configured_known],
-                configured_known,
-                "gateway dotenv",
-            )
-        for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
-            if dotenv_values.get(candidate):
-                return dotenv_values[candidate], candidate, "gateway dotenv"
+    openclaw = dotenv_values.get(_OPENCLAW_GATEWAY_TOKEN_ENV) or _normalized_gateway_token(
+        os.environ.get(_OPENCLAW_GATEWAY_TOKEN_ENV, "")
+    )
+    canonical = dotenv_values.get(_CANONICAL_GATEWAY_TOKEN_ENV, "")
+    if canonical and not (openclaw and _gateway_tokens_equal(canonical, openclaw)):
+        return canonical, _CANONICAL_GATEWAY_TOKEN_ENV, "gateway dotenv"
 
     resolved = _normalized_gateway_token(gateway.resolved_token())
     if not resolved:
-        return "", configured_env, ""
-    if configured_env and _normalized_gateway_token(os.environ.get(configured_env, "")):
+        return "", "" if _env_names_equal(configured_env, _OPENCLAW_GATEWAY_TOKEN_ENV) else configured_env, ""
+    if (
+        configured_env
+        and not _env_names_equal(configured_env, _OPENCLAW_GATEWAY_TOKEN_ENV)
+        and _gateway_tokens_equal(_normalized_gateway_token(os.environ.get(configured_env, "")), resolved)
+    ):
         return resolved, configured_env, "configured environment"
-    for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
-        if _gateway_tokens_equal(_normalized_gateway_token(os.environ.get(candidate, "")), resolved):
-            return resolved, candidate, "process environment"
+    if _gateway_tokens_equal(_normalized_gateway_token(os.environ.get(_CANONICAL_GATEWAY_TOKEN_ENV, "")), resolved):
+        return resolved, _CANONICAL_GATEWAY_TOKEN_ENV, "process environment"
     return resolved, "", "gateway config"
 
 
@@ -2847,6 +2844,13 @@ def _missing_gateway_token_detail(cfg) -> str:
             f"custom token provider {custom_env!r} is empty — populate it or "
             "explicitly change gateway.token_env; auto-fix preserves custom providers"
         )
+    canonical = _normalized_gateway_token(os.environ.get(_CANONICAL_GATEWAY_TOKEN_ENV, ""))
+    openclaw = _normalized_gateway_token(os.environ.get(_OPENCLAW_GATEWAY_TOKEN_ENV, ""))
+    if canonical and openclaw and _gateway_tokens_equal(canonical, openclaw):
+        return (
+            "DEFENSECLAW_GATEWAY_TOKEN holds the OpenClaw gateway token, which the DefenseClaw "
+            "gateway no longer accepts as its own — run `defenseclaw doctor --fix` to generate a separate one"
+        )
     # The token is in a .env this account cannot read: a new token would
     # replace the file and its other secrets (GAP-0662).
     unreadable = _unreadable_gateway_dotenv(cfg)
@@ -2859,20 +2863,26 @@ def _missing_gateway_token_detail(cfg) -> str:
 
 
 def _cli_effective_gateway_token(cfg) -> tuple[str, str]:
-    """Return the token/source normal Python gateway clients will use."""
+    """Return the token/source normal Python gateway clients will use.
+
+    Same ladder as ``GatewayConfig.resolved_token`` (R-TOK).
+    """
     gateway = getattr(cfg, "gateway", None)
     if gateway is None:
         return "", ""
+    openclaw = _normalized_gateway_token(os.environ.get(_OPENCLAW_GATEWAY_TOKEN_ENV, ""))
+
+    def usable(value: str) -> str:
+        return value if value and not (openclaw and _gateway_tokens_equal(value, openclaw)) else ""
+
     configured_env = str(getattr(gateway, "token_env", "") or "").strip()
-    if configured_env:
-        value = _normalized_gateway_token(os.environ.get(configured_env, ""))
-        if value:
-            return value, configured_env
-    for name in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
-        value = _normalized_gateway_token(os.environ.get(name, ""))
+    for name in (configured_env, _CANONICAL_GATEWAY_TOKEN_ENV):
+        if not name or _env_names_equal(name, _OPENCLAW_GATEWAY_TOKEN_ENV):
+            continue
+        value = usable(_normalized_gateway_token(os.environ.get(name, "")))
         if value:
             return value, name
-    literal = _normalized_gateway_token(getattr(gateway, "token", ""))
+    literal = usable(_normalized_gateway_token(getattr(gateway, "token", "")))
     return (literal, "gateway.token") if literal else ("", "")
 
 
@@ -2902,9 +2912,13 @@ def _gateway_cli_token_mismatch_detail(cfg, daemon_token: str) -> str:
 
 
 def _gateway_rotated_provider_converged(cfg) -> bool:
-    """Return whether a rotated canonical token has effective precedence."""
+    """Return whether a rotated canonical token has effective precedence.
+
+    A ``token_env`` naming ``OPENCLAW_GATEWAY_TOKEN`` is ignored by every
+    resolver (R-TOK), so the canonical token has precedence then too.
+    """
     configured = str(getattr(getattr(cfg, "gateway", None), "token_env", "") or "").strip()
-    return not configured or _env_names_equal(configured, _CANONICAL_GATEWAY_TOKEN_ENV)
+    return not configured or bool(_known_gateway_token_env(configured))
 
 
 def _hilt_observe_remediation(profiles: list[str], connector: str = "<name>") -> str:
@@ -6306,40 +6320,16 @@ def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
         _emit("fail", "OpenClaw gateway", detail, r=r)
 
 
-def _openclaw_active(cfg) -> bool:
-    """True only when OpenClaw is positively among the active connectors.
-
-    Drives the connector-aware token-env messaging (D1): the legacy
-    ``OPENCLAW_GATEWAY_TOKEN`` var is "the configured var" only on a genuine
-    OpenClaw install; on a hook install it is stale drift. Reuses
-    :func:`_doctor_active_connectors`, so an ambiguous/legacy config that
-    floors to the singular ``openclaw`` path default still reads as active —
-    conservative on purpose: we treat OpenClaw as *inactive* only when we can
-    see a real, OpenClaw-free active set.
-    """
-    return "openclaw" in _doctor_active_connectors(cfg)
-
-
 def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
-    """Detect the OPENCLAW_/DEFENSECLAW_ token-env drift the user hit.
+    """Check that ``gateway.token_env`` names a DefenseClaw master token.
 
-    This is the doctor surface for the rebranding fix
-    (cmd_agent/_resolve_gateway_target + config/GatewayConfig). The
-    auto-detect ladder in Phase 1-2 already MASKS the misconfig at
-    runtime — `agent usage` works either way — but doctor should
-    still flag the stale ``token_env`` so operators can clean it up
-    via `--fix` and rely on the explicit (faster, no-fallthrough)
-    path going forward.
-
-    Triggers when ALL of these hold:
-
-    * ``cfg.gateway.token_env`` is set to a non-empty string.
-    * That env var is empty in ``os.environ``.
-    * The CANONICAL var (``DEFENSECLAW_GATEWAY_TOKEN``) IS populated.
-
-    "fail" tag (not "warn") is intentional — without the auto-detect
-    fall-through, this exact config would fail every `agent usage`
-    call. The fall-through is a safety net, not the design.
+    ``OPENCLAW_GATEWAY_TOKEN`` is the OpenClaw WebSocket credential: the
+    OpenClaw account, its plugins and any tool that reads openclaw.json hold
+    it, so no resolver uses it as the DefenseClaw master any more (R-TOK).
+    DefenseClaw 1.0.9 and earlier saved ``token_env: OPENCLAW_GATEWAY_TOKEN``;
+    ``doctor --fix`` (and the upgrade) repoint it at the canonical
+    ``DEFENSECLAW_GATEWAY_TOKEN``. A custom ``token_env`` that is empty while
+    the canonical var is populated is reported too.
     """
     gw = getattr(cfg, "gateway", None)
     if gw is None:
@@ -6347,95 +6337,44 @@ def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
 
     configured_env = getattr(gw, "token_env", "") or ""
     if not configured_env:
-        # No env var configured at all — handled by other checks
-        # (e.g. _check_sidecar's auth probe). Not our concern here.
+        # No env var configured at all: the sidecar auth probe covers it.
+        return
+
+    if _env_names_equal(configured_env, _OPENCLAW_GATEWAY_TOKEN_ENV):
+        _emit(
+            "warn",
+            "Gateway token env",
+            "gateway.token_env names the OpenClaw credential; the DefenseClaw gateway no longer "
+            "uses it as its token. Run `defenseclaw doctor --fix` to repoint it at "
+            "DEFENSECLAW_GATEWAY_TOKEN.",
+            r=r,
+            remediation="defenseclaw doctor --fix",
+        )
         return
 
     configured_val = _normalized_gateway_token(os.environ.get(configured_env, ""))
     if configured_val:
-        # Configured var IS populated — happy path. Nothing to flag.
         _emit("pass", "Gateway token env", f"{configured_env} is set", r=r)
         return
 
-    # Stale token_env: configured var is empty. Check whether the
-    # canonical DEFENSECLAW_ var is populated instead — that's the
-    # drift case worth fixing.
-    canonical = _normalized_gateway_token(os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", ""))
-    if canonical:
-        custom_env = _custom_gateway_token_env(cfg)
-        if custom_env:
-            _emit(
-                "warn",
-                "Gateway token env",
-                f"custom token provider {custom_env!r} is empty; the canonical "
-                "fallback is populated. Auto-fix preserves custom providers — "
-                "populate that provider or intentionally change gateway.token_env.",
-                r=r,
-            )
-            return
-        _emit(
-            "fail",
-            "Gateway token env",
-            f"cfg.gateway.token_env={configured_env!r} is empty in env, "
-            "but DEFENSECLAW_GATEWAY_TOKEN is set. Run `defenseclaw doctor "
-            "--fix` to repoint token_env at the canonical var.",
-            r=r,
-        )
-        return
-
-    legacy = _normalized_gateway_token(os.environ.get("OPENCLAW_GATEWAY_TOKEN", ""))
-    if legacy and not _env_names_equal(configured_env, "OPENCLAW_GATEWAY_TOKEN"):
-        # Custom token_env that's empty, but legacy OPENCLAW_ has a
-        # value. Rare; flag as warn so the operator can decide.
-        _emit(
-            "warn",
-            "Gateway token env",
-            f"cfg.gateway.token_env={configured_env!r} is empty, but "
-            "OPENCLAW_GATEWAY_TOKEN has a legacy value. Migrate via "
-            "`defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN <value>`.",
-            r=r,
-        )
-        return
-
-    # Both vars empty — no token configured anywhere. When token_env still
-    # carries the legacy ``OPENCLAW_GATEWAY_TOKEN`` default on an install that
-    # is NOT running OpenClaw, don't present that var as the one the operator
-    # must set (D1): the gateway auto-generates the canonical
-    # ``DEFENSECLAW_GATEWAY_TOKEN`` on first boot, so the only real action is
-    # to repoint the stale token_env. Only when OpenClaw is genuinely active is
-    # ``OPENCLAW_GATEWAY_TOKEN`` the legitimate var to set.
-    if _env_names_equal(configured_env, "OPENCLAW_GATEWAY_TOKEN") and not _openclaw_active(cfg):
-        _emit(
-            "warn",
-            "Gateway token env",
-            "the gateway auto-generates DEFENSECLAW_GATEWAY_TOKEN on first "
-            "boot, but cfg.gateway.token_env still points at legacy "
-            "OPENCLAW_GATEWAY_TOKEN on a non-OpenClaw install — run "
-            "`defenseclaw doctor --fix` to repoint it.",
-            r=r,
-        )
-        return
-
+    canonical = _normalized_gateway_token(os.environ.get(_CANONICAL_GATEWAY_TOKEN_ENV, ""))
     custom_env = _custom_gateway_token_env(cfg)
     if custom_env:
+        fallback = "; the canonical fallback is populated" if canonical else ""
         _emit(
             "warn",
             "Gateway token env",
-            f"custom token provider {custom_env!r} is empty — populate it or "
+            f"custom token provider {custom_env!r} is empty{fallback} — populate it or "
             "intentionally change gateway.token_env; auto-fix preserves custom providers",
             r=r,
         )
         return
 
-    # Generic "no token anywhere" state (custom token_env, or OpenClaw is
-    # genuinely active). Other checks (sidecar /health probe) catch the
-    # downstream effect; we just report the local config state.
     _emit(
         "warn",
         "Gateway token env",
-        f"{configured_env} is empty and no DEFENSECLAW_GATEWAY_TOKEN "
-        "fallback is present. Start the gateway (auto-generates a "
-        "token) or run `defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN`.",
+        f"{configured_env} is empty. Start the gateway (it generates the token) or run "
+        "`defenseclaw doctor --fix`.",
         r=r,
     )
 
@@ -13087,9 +13026,57 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
     if "openclaw" in connectors:
         from defenseclaw.openclaw_plugin_config import (
+            configured_openclaw_hook_mode,
             configured_openclaw_plugin_config_issue,
             openclaw_plugin_config_unreadable,
+            openclaw_plugin_evidence,
         )
+
+        hook_mode = configured_openclaw_hook_mode(cfg)
+        if hook_mode != "proxy":
+            # Proxy mode has the interception row below as its evidence.
+            live_mode, live_detail, _seen = openclaw_plugin_evidence(cfg, live_health)
+            if live_mode == "unverified":
+                _emit("warn", "OpenClaw hook mode", live_detail, r=r)
+            else:
+                _emit("pass", "OpenClaw hook mode", f"{live_mode}: {live_detail}", r=r)
+        from defenseclaw.openclaw_plugin_config import (
+            openclaw_install_policy_state,
+            openclaw_install_policy_wanted,
+            openclaw_operator_admin_off,
+        )
+
+        if openclaw_operator_admin_off():
+            _emit(
+                "skip",
+                "OpenClaw remediation",
+                "off (no operator.admin): blocks are enforced by DefenseClaw, OpenClaw is not told to disable them",
+                r=r,
+            )
+
+        policy_state = openclaw_install_policy_state(cfg)
+        if policy_state == "ours":
+            _emit(
+                "pass", "OpenClaw install admission", "OpenClaw asks DefenseClaw before a skill or plugin install", r=r
+            )
+        elif openclaw_install_policy_wanted(cfg):
+            _emit(
+                "warn",
+                "OpenClaw install admission",
+                "connectors.openclaw.install_policy is on, but OpenClaw does not ask DefenseClaw before installs"
+                + (" (another security.installPolicy is configured)" if policy_state == "operator" else ""),
+                remediation=(
+                    "remove your own security.installPolicy from openclaw.json, then run `defenseclaw setup openclaw`"
+                    if policy_state == "operator"
+                    else "run `defenseclaw setup openclaw` (needs OpenClaw 2026.8.35 or later); "
+                    "the setup output names the reason"
+                ),
+                r=r,
+            )
+        if hook_mode == "native" and connectors == ["openclaw"]:
+            # No guardrail proxy carries OpenClaw traffic in native mode, so
+            # there is no proxy hop to prove; the plugin hooks guard it.
+            return
 
         if issue := configured_openclaw_plugin_config_issue(cfg):
             _emit(
@@ -13166,7 +13153,7 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         detail = "plugin self-test rewrote an LLM URL onto the local guardrail proxy"
         last_traffic = info.get("last_agent_traffic_at")
         if isinstance(last_traffic, str) and last_traffic.strip():
-            detail += "; agent traffic has reached :4000"
+            detail += f"; agent traffic has reached :{cfg.guardrail.port}"
         _emit("pass", label, detail, r=r)
         return
     if info.get("verified") is True:
@@ -13430,6 +13417,14 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
 )
 
 
+def _openclaw_runs_native_hooks(cfg) -> bool:
+    """Whether the OpenClaw plugin runs in native hook mode (Windows, no proxy)."""
+    from defenseclaw.openclaw_plugin_config import configured_openclaw_hook_mode
+    from defenseclaw.platform_support import uses_guardrail_proxy
+
+    return not uses_guardrail_proxy("openclaw") or configured_openclaw_hook_mode(cfg) == "native"
+
+
 def _guardrail_proxy_intentionally_closed(cfg) -> str:
     """Return a detail string when the proxy port is expected to be closed.
 
@@ -13454,9 +13449,18 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
     connectors = _doctor_active_connectors(cfg)
     if not connectors:
         return ""
-    if any(c not in _HOOK_ENFORCED_CONNECTORS for c in connectors):
+    native_openclaw = "openclaw" in connectors and _openclaw_runs_native_hooks(cfg)
+    if any(c not in _HOOK_ENFORCED_CONNECTORS and not (c == "openclaw" and native_openclaw) for c in connectors):
         return ""
     modes = {c: _doctor_effective_guardrail_mode(gc, c) for c in sorted(connectors)}
+    if native_openclaw:
+        # Native Windows OpenClaw: the plugin hooks guard it and DefenseClaw
+        # hosts no guardrail proxy there.
+        parts = [
+            f"{c} (mode={mode} via native plugin hooks)" if c == "openclaw" else f"{c} (mode={mode})"
+            for c, mode in modes.items()
+        ]
+        return "plugin-enforced for " + ", ".join(parts) + " — no guardrail proxy in native hook mode"
     # Preserve the exact single-connector wording; aggregate (sorted, stable)
     # for a multi-connector all-hook-enforced fan-out.
     label = connectors[0] if len(connectors) == 1 else ", ".join(sorted(connectors))
@@ -16739,7 +16743,7 @@ def _plan_existing_fixer(
         if fixer is _fix_gateway_token:
             if _CANONICAL_GATEWAY_TOKEN_ENV in detail:
                 state_key = "gateway-token-canonical-present"
-            elif _LEGACY_GATEWAY_TOKEN_ENV in detail:
+            elif _OPENCLAW_GATEWAY_TOKEN_ENV in detail:
                 state_key = "gateway-token-legacy-present"
         return RepairDecision(
             "applicable",
@@ -18003,7 +18007,7 @@ def _run_fixers(
     dotenv_safety_problem = ""
     external_gateway_env_names: list[str] = []
     data_dir = str(getattr(cfg, "data_dir", "") or "")
-    for env_name in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+    for env_name in (_CANONICAL_GATEWAY_TOKEN_ENV, _OPENCLAW_GATEWAY_TOKEN_ENV):
         value = _normalized_gateway_token(os.environ.get(env_name, ""))
         if value and not credential_provenance.was_injected_from_dotenv(
             data_dir,
@@ -18396,12 +18400,13 @@ def _guardrail_enable_command(cfg, connector: str) -> str:
     ``guardrail enable`` refuses a proxy connector (OpenClaw, ZeptoClaw) with
     no ``guardrail.model``: it would forward model traffic to an unset
     upstream. Their setup command asks for it (docs guardrail/disabling).
+    Native Windows OpenClaw has no proxy, so it needs no model.
     """
-    from defenseclaw.platform_support import is_proxy_connector
+    from defenseclaw.platform_support import uses_guardrail_proxy
 
     gc = getattr(cfg, "guardrail", None)
     llm = getattr(cfg, "llm", None)
-    if is_proxy_connector(connector) and not (getattr(gc, "model", "") or getattr(llm, "model", "")):
+    if uses_guardrail_proxy(connector) and not (getattr(gc, "model", "") or getattr(llm, "model", "")):
         return f"defenseclaw setup {connector}"
     return "defenseclaw guardrail enable"
 
@@ -19182,7 +19187,14 @@ def _check_hook_contract_lock(
     pathext: str | None = None,
 ) -> None:
     if connector in {"openclaw", "zeptoclaw"}:
-        _emit("skip", "Hook contract", f"{connector} uses proxy/chat surfaces", r=r)
+        detail = f"{connector} uses proxy/chat surfaces"
+        if connector == "openclaw":
+            from defenseclaw.openclaw_plugin_config import configured_openclaw_hook_mode
+
+            mode = configured_openclaw_hook_mode(cfg)
+            if mode != "proxy":
+                detail = f"openclaw uses its plugin hooks in {mode} mode, which need no hook contract lock"
+        _emit("skip", "Hook contract", detail, r=r)
         return
     if connector == "kiro":
         _emit(
@@ -20361,6 +20373,9 @@ def _fix_gateway_token_after_cleanup(
     rotate_required: bool,
     active_connector: str,
 ) -> tuple[str, str]:
+    # The OpenClaw WebSocket credential is kept in sync first. It is never the
+    # DefenseClaw master (R-TOK), so the master is still ensured below.
+    synced = ""
     if active_connector == "openclaw" and not rotate_required:
         from defenseclaw.commands.cmd_setup import (
             _detect_openclaw_gateway_token,
@@ -20368,37 +20383,34 @@ def _fix_gateway_token_after_cleanup(
         )
 
         token = _normalized_gateway_token(_detect_openclaw_gateway_token(cfg.claw.config_file, cfg=cfg))
-        if token:
-            env_var = "OPENCLAW_GATEWAY_TOKEN"
-            current = _gateway_dotenv_tokens(cfg.data_dir).get(env_var, "")
-            if _gateway_tokens_equal(current, token):
-                return ("skip", "token already persisted and in sync")
+        oc_var = _OPENCLAW_GATEWAY_TOKEN_ENV
+        if token and not _gateway_tokens_equal(_gateway_dotenv_tokens(cfg.data_dir).get(oc_var, ""), token):
             if plan_only:
-                return ("plan", f"persist {env_var} from the trusted OpenClaw configuration")
-            if not assume_yes and not click.confirm(
-                f"    Update {env_var} in ~/.defenseclaw/.env from OpenClaw?",
+                synced = f"persist {oc_var} (the OpenClaw credential) from the trusted OpenClaw configuration"
+            elif assume_yes or click.confirm(
+                f"    Update {oc_var} (the OpenClaw credential) in ~/.defenseclaw/.env from OpenClaw?",
                 default=True,
             ):
-                return ("skip", "declined by user")
-            from defenseclaw.logger import keep_running_gateway_token
+                _save_secret_to_dotenv(oc_var, token, cfg.data_dir)
+                synced = f"{oc_var} updated from openclaw.json"
 
-            keep_running_gateway_token(None, cfg.data_dir, cfg.gateway.resolved_token(), token)
-            _save_secret_to_dotenv(env_var, token, cfg.data_dir)
-            return ("pass", f"{env_var} updated from openclaw.json")
-        # OpenClaw can be local and unauthenticated while the DefenseClaw
-        # sidecar still requires its own canonical token. Fall through to
-        # canonical generation instead of leaving that sidecar broken.
+    def _with_sync(status: str, detail: str) -> tuple[str, str]:
+        if not synced:
+            return status, detail
+        if status == "skip":
+            return ("plan" if plan_only else "pass"), synced
+        return status, f"{synced}; {detail}"
 
     env_var = _CANONICAL_GATEWAY_TOKEN_ENV
     current, _current_env, _current_source = _daemon_effective_gateway_token(cfg)
     if current and not rotate_required:
-        return ("skip", f"{env_var} already set")
+        return _with_sync("skip", f"{env_var} already set")
     if _unreadable_gateway_dotenv(cfg):
-        return ("fail", _missing_gateway_token_detail(cfg))
+        return _with_sync("fail", _missing_gateway_token_detail(cfg))
 
     configured_env = (getattr(cfg.gateway, "token_env", "") or "").strip()
     if configured_env and not any(
-        _env_names_equal(configured_env, allowed) for allowed in (_LEGACY_GATEWAY_TOKEN_ENV, env_var)
+        _env_names_equal(configured_env, allowed) for allowed in (_OPENCLAW_GATEWAY_TOKEN_ENV, env_var)
     ):
         if rotate_required:
             return (
@@ -20406,7 +20418,7 @@ def _fix_gateway_token_after_cleanup(
                 f"token_env={configured_env!r} is externally managed and may have "
                 "been exposed; rotate that provider manually before restarting",
             )
-        return ("skip", f"token_env={configured_env!r} is externally managed; not generating a replacement")
+        return _with_sync("skip", f"token_env={configured_env!r} is externally managed; not generating a replacement")
 
     action = "Rotate" if rotate_required else "Generate and store"
     if plan_only:
@@ -20414,13 +20426,13 @@ def _fix_gateway_token_after_cleanup(
         provider_effect = ""
         if rotate_required and _env_names_equal(
             configured_env,
-            _LEGACY_GATEWAY_TOKEN_ENV,
+            _OPENCLAW_GATEWAY_TOKEN_ENV,
         ):
             provider_effect = (
-                f"; repoint gateway.token_env from {_LEGACY_GATEWAY_TOKEN_ENV!r} "
+                f"; repoint gateway.token_env from {_OPENCLAW_GATEWAY_TOKEN_ENV!r} "
                 f"to {_CANONICAL_GATEWAY_TOKEN_ENV!r} in config.yaml"
             )
-        return (
+        return _with_sync(
             "plan",
             f"{verb} {env_var} in {os.path.join(cfg.data_dir, '.env')} "
             f"({'restart and authenticate replacement gateway' if rotate_required else 'value remains redacted'})"
@@ -20430,7 +20442,7 @@ def _fix_gateway_token_after_cleanup(
         f"    {action} {env_var} in {cfg.data_dir}/.env?",
         default=True,
     ):
-        return ("skip", "declined by user")
+        return _with_sync("skip", "declined by user")
 
     import secrets
 
@@ -20443,8 +20455,8 @@ def _fix_gateway_token_after_cleanup(
     try:
         _save_secret_to_dotenv(env_var, token, cfg.data_dir)
     except OSError as exc:
-        return ("fail", f"could not persist gateway token: {exc}")
-    return ("pass", f"generated {env_var} in {os.path.join(cfg.data_dir, '.env')} (value redacted)")
+        return _with_sync("fail", f"could not persist gateway token: {exc}")
+    return _with_sync("pass", f"generated {env_var} in {os.path.join(cfg.data_dir, '.env')} (value redacted)")
 
 
 def _rotate_exposed_gateway_token(cfg, token: str) -> tuple[str, str]:
@@ -20456,7 +20468,7 @@ def _rotate_exposed_gateway_token(cfg, token: str) -> tuple[str, str]:
     configured_env = str(getattr(gateway, "token_env", "") or "").strip()
     repointed = bool(configured_env) and _env_names_equal(
         configured_env,
-        _LEGACY_GATEWAY_TOKEN_ENV,
+        _OPENCLAW_GATEWAY_TOKEN_ENV,
     )
 
     # The transaction starts B from an authoritative reload of config.yaml.
@@ -20567,7 +20579,7 @@ def _fix_gateway_token_env(
         plan_only
         and canonical_projected
         and bool(getattr(cfg, "_doctor_gateway_token_rotation_required", False))
-        and _env_names_equal(configured_env, _LEGACY_GATEWAY_TOKEN_ENV)
+        and _env_names_equal(configured_env, _OPENCLAW_GATEWAY_TOKEN_ENV)
     ):
         return (
             "skip",
@@ -20575,15 +20587,21 @@ def _fix_gateway_token_env(
             f"performs the gateway.token_env repoint to {canonical}",
         )
 
-    # A populated configured provider is working and retains precedence. In
-    # particular, do not rewrite an active OpenClaw token merely because the
-    # canonical fallback is also present.
-    if not exposure_rotation and configured_env and _normalized_gateway_token(os.environ.get(configured_env, "")):
+    # OPENCLAW_GATEWAY_TOKEN is the OpenClaw credential, never the master
+    # (R-TOK): it is repointed even when populated. Any other populated
+    # provider is working and retains precedence.
+    legacy = _env_names_equal(configured_env, _OPENCLAW_GATEWAY_TOKEN_ENV)
+    if (
+        not exposure_rotation
+        and configured_env
+        and not legacy
+        and _normalized_gateway_token(os.environ.get(configured_env, ""))
+    ):
         return ("skip", f"configured token provider {configured_env} is populated")
 
-    # Don't touch a custom operator override. Only auto-repoint the
+    # Do not touch a custom operator override. Only auto-repoint the
     # legacy OPENCLAW_ default.
-    if configured_env and not _env_names_equal(configured_env, "OPENCLAW_GATEWAY_TOKEN"):
+    if configured_env and not legacy:
         return (
             "skip",
             f"token_env={configured_env!r} is a custom override; not auto-rewriting",

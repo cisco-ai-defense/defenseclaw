@@ -1,0 +1,251 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package connector
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+// The separate-user layout (connectors.openclaw.plugin_account): the
+// OpenClaw gateway runs as its own OS account and owns openclaw.json; the
+// DefenseClaw gateway runs as another. DefenseClaw then never writes
+// openclaw.json. An administrator adds the DefenseClaw entry once (setup
+// prints it) and installs the plugin (plugin_install: external). Setup
+// publishes the plugin credential to plugin_token_file for the plugin
+// account and checks the entry read-only.
+
+// openClawSeparateUser reports the separate-user layout for opts.
+func openClawSeparateUser(opts SetupOpts) bool {
+	return strings.TrimSpace(opts.OpenClawPluginAccount) != ""
+}
+
+// openClawSeparateUserEntry is the plugin connection config the plugin needs
+// when it cannot read the DefenseClaw data folder.
+func openClawSeparateUserEntry(opts SetupOpts) map[string]interface{} {
+	host, apiPort := splitOpenClawAddr(opts.APIAddr, 18970)
+	// The plugin talks only to loopback; a wildcard or LAN bind still
+	// answers there.
+	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		host = "127.0.0.1"
+	}
+	_, proxyPort := splitOpenClawAddr(opts.ProxyAddr, 4000)
+	entry := map[string]interface{}{
+		"tokenFile":     strings.TrimSpace(opts.OpenClawPluginTokenFile),
+		"sidecarHost":   host,
+		"sidecarPort":   apiPort,
+		"guardrailPort": proxyPort,
+	}
+	// No promptGate key: in this layout the plugin takes the prompt gate
+	// from GET /api/v1/openclaw/runtime, so turning it on or off never needs
+	// an openclaw.json change (rel-1-0-10 GAP-0138).
+	if keys := openClawPluginKeysFor(opts, openClawObservedVersion(opts)); keys.hookMode != OpenClawHookModeProxy {
+		entry[openClawHookModeKey] = keys.hookMode
+	}
+	return entry
+}
+
+func splitOpenClawAddr(addr string, defaultPort int) (string, int) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil || host == "" {
+		return "127.0.0.1", defaultPort
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n <= 0 {
+		return host, defaultPort
+	}
+	return host, n
+}
+
+// openClawSeparateUserBlock is the openclaw.json block the administrator
+// merges in, as indented JSON.
+func openClawSeparateUserBlock(opts SetupOpts, paths openClawPaths) string {
+	entry := map[string]interface{}{"enabled": true, "config": openClawSeparateUserEntry(opts)}
+	// OpenClaw runs the conversation hooks (before_agent_run, prompt
+	// gate) of a non-bundled plugin only with this grant (GAP-0082).
+	if openClawSeparateUserNeedsConversationGrant(opts) {
+		entry["hooks"] = map[string]interface{}{"allowConversationAccess": true}
+	}
+	block := map[string]interface{}{"plugins": map[string]interface{}{
+		"load":    map[string]interface{}{"paths": []string{paths.external}},
+		"entries": map[string]interface{}{"defenseclaw": entry},
+	}}
+	if opts.HILTEnabled {
+		block["approvals"] = map[string]interface{}{"plugin": map[string]interface{}{"enabled": true, "mode": "session"}}
+	}
+	if policy := openClawSeparateUserInstallPolicy(opts); policy != nil {
+		block["security"] = map[string]interface{}{"installPolicy": policy}
+	}
+	out, _ := json.Marshal(block)
+	return string(out)
+}
+
+// openClawSeparateUserNeedsConversationGrant: the native hooks run.
+func openClawSeparateUserNeedsConversationGrant(opts SetupOpts) bool {
+	return ResolveOpenClawHookMode(opts.OpenClawHooksMode, openClawObservedVersion(opts)) != OpenClawHookModeProxy
+}
+
+// openClawSeparateUserMissing names what openclaw.json lacks of the block.
+func openClawSeparateUserMissing(cfg map[string]interface{}, opts SetupOpts, paths openClawPaths) []string {
+	var missing []string
+	plugins, _ := cfg["plugins"].(map[string]interface{})
+	// An allowlist the operator has must name defenseclaw; none is needed.
+	if allow, ok := plugins["allow"].([]interface{}); ok && len(allow) > 0 && !containsJSONString(allow, "defenseclaw") {
+		missing = append(missing, "defenseclaw in your plugins.allow")
+	}
+	load, _ := plugins["load"].(map[string]interface{})
+	loadPaths, _ := load["paths"].([]interface{})
+	if !containsJSONString(loadPaths, paths.external) {
+		missing = append(missing, "plugins.load.paths "+paths.external)
+	}
+	entries, _ := plugins["entries"].(map[string]interface{})
+	entry, _ := entries["defenseclaw"].(map[string]interface{})
+	if entry["enabled"] != true {
+		missing = append(missing, "plugins.entries.defenseclaw.enabled true")
+	}
+	if openClawSeparateUserNeedsConversationGrant(opts) {
+		hooks, _ := entry["hooks"].(map[string]interface{})
+		if hooks["allowConversationAccess"] != true {
+			missing = append(missing, "plugins.entries.defenseclaw.hooks.allowConversationAccess true")
+		}
+	}
+	have, _ := entry["config"].(map[string]interface{})
+	for key, want := range openClawSeparateUserEntry(opts) {
+		if fmt.Sprint(have[key]) != fmt.Sprint(want) {
+			missing = append(missing, fmt.Sprintf("plugins.entries.defenseclaw.config.%s %v", key, want))
+		}
+	}
+	if opts.HILTEnabled {
+		approvals, _ := cfg["approvals"].(map[string]interface{})
+		plugin, _ := approvals["plugin"].(map[string]interface{})
+		if plugin["enabled"] != true {
+			missing = append(missing, "approvals.plugin.enabled true")
+		}
+	}
+	missing = append(missing, openClawSeparateUserInstallPolicyMissing(cfg, opts)...)
+	return missing
+}
+
+func containsJSONString(list []interface{}, want string) bool {
+	for _, v := range list {
+		if s, _ := v.(string); s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// registerSeparateUser is Setup in the separate-user layout. It changes
+// only the plugin token file.
+func (c *OpenClawConnector) registerSeparateUser(opts SetupOpts, paths openClawPaths) error {
+	if paths.external == "" {
+		return fmt.Errorf("%w: connectors.openclaw.plugin_account needs plugin_install: external", errOpenClawPreflight)
+	}
+	if err := verifyExternalOpenClawPlugin(paths.external, paths); err != nil {
+		return fmt.Errorf("%w: %v", errOpenClawPreflight, err)
+	}
+	token := strings.TrimSpace(opts.HookAPIToken)
+	if !opts.HookAPITokenScoped || token == "" {
+		return fmt.Errorf("openclaw: the separate-user layout needs the connector-scoped plugin credential, which could not be issued in %s; run defenseclaw doctor", opts.DataDir)
+	}
+	if err := publishOpenClawPluginToken(strings.TrimSpace(opts.OpenClawPluginTokenFile),
+		strings.TrimSpace(opts.OpenClawPluginTokenGroup), strings.TrimSpace(opts.OpenClawPluginAccount), token); err != nil {
+		return fmt.Errorf("openclaw: publish the plugin credential to %s: %w", opts.OpenClawPluginTokenFile, err)
+	}
+	block := openClawSeparateUserBlock(opts, paths)
+	saved := saveOpenClawMergeBlock(opts.DataDir, block)
+	data, err := readConnectorStateFile(paths.config)
+	if errors.Is(err, fs.ErrPermission) {
+		// OpenClaw rewrites openclaw.json 0600 on every config change, so a
+		// read grant does not last. The check is a convenience: the plugin
+		// works from the merged block alone (rel-1-0-10 GAP-0116).
+		fmt.Fprintf(os.Stderr, "[openclaw] %s is not readable by this account, so setup cannot check it: "+
+			"make sure this block is merged%s: %s\n", paths.config, saved, block)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("openclaw: read %s: %w", paths.config, err)
+	}
+	cfg, err := parseOpenClawConfig(paths.config, data)
+	if err != nil {
+		return err
+	}
+	if missing := openClawSeparateUserMissing(cfg, opts, paths); len(missing) > 0 {
+		// One line: the setup output shows only the first line of a
+		// multi-line refusal (GAP-0081). The block is also saved to a file.
+		return fmt.Errorf("openclaw: %s (owned by %s) does not register DefenseClaw yet (missing: %s); DefenseClaw does not write it in the separate-user layout: "+
+			"as %s or an administrator merge this JSON into it%s, then restart the OpenClaw gateway%s: %s",
+			paths.config, opts.OpenClawPluginAccount, strings.Join(missing, ", "), opts.OpenClawPluginAccount, saved,
+			openClawSeparateUserProxyReason(opts), block)
+	}
+	return nil
+}
+
+// saveOpenClawMergeBlock writes the block to <data_dir>/openclaw-merge.json
+// and returns the note for the message, or "" when it could not.
+func saveOpenClawMergeBlock(dataDir, block string) string {
+	if dataDir == "" {
+		return ""
+	}
+	file := filepath.Join(dataDir, "openclaw-merge.json")
+	if err := os.WriteFile(file, []byte(block+"\n"), 0o644); err != nil {
+		return ""
+	}
+	return " (also saved in " + file + ")"
+}
+
+// openClawSeparateUserProxyReason says why the block has no native hooks when
+// this account could not read the OpenClaw version (rel-1-0-10 GAP-0139).
+func openClawSeparateUserProxyReason(opts SetupOpts) string {
+	if strings.EqualFold(strings.TrimSpace(opts.OpenClawHooksMode), "proxy") || openClawObservedVersion(opts) != "" {
+		return ""
+	}
+	return " (the block uses the proxy mode, without the native hooks or the prompt gate, because this account " +
+		"could not run openclaw to read its version: install OpenClaw where both accounts can run it, such as /usr/local/bin, " +
+		"and run setup again)"
+}
+
+// teardownSeparateUser removes the published plugin credential and says
+// which openclaw.json entries the administrator removes.
+func (c *OpenClawConnector) teardownSeparateUser(opts SetupOpts, paths openClawPaths) error {
+	tokenFile := strings.TrimSpace(opts.OpenClawPluginTokenFile)
+	if tokenFile != "" {
+		if err := os.Remove(tokenFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove the plugin credential %s: %w", tokenFile, err)
+		}
+	}
+	// openclaw-merge.json stays: a failed setup rolls back through this
+	// teardown, and the file is what the administrator merges next
+	// (rel-1-0-10 GAP-0081). The next setup rewrites it.
+	fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: removed the plugin credential; DefenseClaw does not write %s in the separate-user layout, "+
+		"so remove plugins.entries.defenseclaw, defenseclaw from plugins.allow, %s from plugins.load.paths and a security.installPolicy that runs defenseclaw-gateway there yourself\n", paths.config, paths.external)
+	return nil
+}
+
+// RequiresScopedHookToken makes setup fail with the reason when the
+// connector-scoped plugin credential cannot be issued (an untrusted data
+// folder), instead of falling back to the master gateway token: since 1.0.10
+// the plugin reads only the scoped credential, so a fallback would leave it
+// with none and every tool call blocked without saying why.
+func (c *OpenClawConnector) RequiresScopedHookToken() bool { return true }

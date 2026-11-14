@@ -317,7 +317,7 @@ func TestMultiPublicationRollbackUsesRawCodexLockBehindFreshSetupReceipt(t *test
 
 	transaction, err := s.setupConnectorsIsolatedTransaction(
 		context.Background(), []connector.Connector{conn},
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		guardrail.NewRulePackCache(),
 	)
 	if err != nil {

@@ -1736,16 +1736,22 @@ class TestGatewayResolvedToken(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(gw.resolved_token(), "new-token")
 
-    def test_empty_token_env_falls_back_to_openclaw_env(self):
-        """Legacy OPENCLAW_ still works when DEFENSECLAW_ is unset.
+    def test_openclaw_env_is_never_the_master(self):
+        """R-TOK: OPENCLAW_GATEWAY_TOKEN is only the OpenClaw credential.
 
-        Protects upgraders whose Go gateway hasn't been restarted yet
-        and whose dotenv only carries the old name.
+        With DEFENSECLAW_ unset the master is empty (the gateway and
+        ``defenseclaw migrate`` mint one), whether token_env is empty or
+        names the OpenClaw variable; a DEFENSECLAW_ value equal to it does
+        not count either.
         """
-        gw = GatewayConfig(token_env="", token="")
-        env = self._clean_env(OPENCLAW_GATEWAY_TOKEN="legacy-token")
+        env = self._clean_env(OPENCLAW_GATEWAY_TOKEN="oc-token")
         with patch.dict(os.environ, env, clear=True):
-            self.assertEqual(gw.resolved_token(), "legacy-token")
+            self.assertEqual(GatewayConfig(token_env="", token="").resolved_token(), "")
+            self.assertEqual(GatewayConfig(token_env="OPENCLAW_GATEWAY_TOKEN").resolved_token(), "")
+            os.environ["DEFENSECLAW_GATEWAY_TOKEN"] = "oc-token"
+            self.assertEqual(GatewayConfig().resolved_token(), "")
+            os.environ["DEFENSECLAW_GATEWAY_TOKEN"] = "dc-token"
+            self.assertEqual(GatewayConfig(token_env="OPENCLAW_GATEWAY_TOKEN").resolved_token(), "dc-token")
 
     def test_custom_token_env_takes_precedence_over_both_defaults(self):
         """Operator-pinned env var beats both DEFENSECLAW_ and OPENCLAW_."""

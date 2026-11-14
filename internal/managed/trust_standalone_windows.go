@@ -231,13 +231,15 @@ var windowsStandaloneInstallService = sync.OnceValue(func() string {
 })
 
 // gatewayServiceForExecutable is the gateway service of the standalone
-// install root that holds executable in its bin folder, or "".
+// install root that holds executable in its bin folder, or "". A hook or
+// hook guard launch image under bin\hooks\<16 hex> belongs to that bin
+// (GAP-0751).
 func gatewayServiceForExecutable(executable string, roots winpath.EnterpriseRoots) string {
 	if !filepath.IsAbs(executable) {
 		return ""
 	}
-	bin := filepath.Dir(filepath.Clean(executable))
-	if !strings.EqualFold(filepath.Base(bin), "bin") {
+	bin := winpath.EnterpriseInstallBinOf(filepath.Clean(executable))
+	if bin == "" {
 		return ""
 	}
 	service, err := winpath.EnterpriseGatewayServiceForRoot(roots, filepath.Dir(bin))
