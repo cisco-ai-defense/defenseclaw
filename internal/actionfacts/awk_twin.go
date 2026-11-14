@@ -200,7 +200,7 @@ func awkCommandTwin(command string, depth int, trunc *bounded.Truncated, files a
 					continue
 				}
 				end := i + 1
-				for end < len(words) && !(static[end] && (words[end] == ";" || words[end] == "+")) {
+				for end < len(words) && (!static[end] || words[end] != ";" && words[end] != "+") {
 					end++
 				}
 				if end < len(words) && end > i+1 && static[i+1] && awkProgramWord(words[i+1]) {

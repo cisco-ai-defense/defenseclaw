@@ -50,7 +50,7 @@ func awkProgramFilesUnknown(request trustedActionRequest, reading actionfacts.Aw
 	if !reading.ProgramFiles || !reading.FilesUnknown {
 		return false
 	}
-	return !(request.ProtectedHomeHook && request.ResolvedWriteTargets[hookpaths.AwkFilesKey] == "1")
+	return !request.ProtectedHomeHook || request.ResolvedWriteTargets[hookpaths.AwkFilesKey] != "1"
 }
 
 // awkDynamicTitle is the ship-authored title of the finding; the reason
