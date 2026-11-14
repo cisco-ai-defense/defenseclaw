@@ -264,7 +264,8 @@ type trustedActionRequest struct {
 	parentPatch *actionfacts.Input
 	// SandboxGuestCWD is a sandbox call's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
-	// the authorized-keys proofs read it, and only to add a match.
+	// the authorized-keys proofs and the cwd-placed rules (cwdPlacedInput)
+	// read it, and only to add a match.
 	SandboxGuestCWD string
 	// windowsShellDialect is set when Input.DialectHint is inferred from
 	// the call's command (agentHookWindowsShellDialect, Windows host hooks):
@@ -584,14 +585,18 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
-	// Only the Git hook rule uses the hook client's bounded directory. Parse
-	// that view when the action already names a possible active hook mutation;
-	// a text mention or an inactive .sample path needs no second reading.
-	var gitHookFacts *actionfacts.Facts
-	if hasGitHookMutationCandidate(facts) {
-		if twin, ok := protectedHomeGitHookTwinRequest(request); ok {
-			placed := actionfacts.Analyze(twin.Input)
-			gitHookFacts = &placed
+	// The rules whose owner places a path by the working directory
+	// (cwdPlacedRule) read the call once more where the agent's directory is
+	// known but the request's is not: the hook client's bounded directory for
+	// a managed peer, the guest's own directory for a sandbox (GAP-0264).
+	// Parse that view only when the action already names a possible active
+	// mutation of what they own; a text mention or an inactive .sample path
+	// needs no second reading.
+	var placedFacts *actionfacts.Facts
+	if hasGitHookMutationCandidate(facts) || hasGitReadOutputWrite(facts) {
+		if input, ok := cwdPlacedInput(request); ok {
+			placed := actionfacts.Analyze(input)
+			placedFacts = &placed
 		}
 	}
 	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
@@ -626,7 +631,7 @@ func dispatchTrustedAction(
 		if budget == nil {
 			budget = newTrustedActionBudget(false)
 		}
-		return dispatchTrustedActionWith(parent, request, facts, gitHookFacts, generation, budget, &telemetry)
+		return dispatchTrustedActionWith(parent, request, facts, placedFacts, generation, budget, &telemetry)
 	}
 	// A strictest combination of profiles judges the call with each
 	// member's own rules within one budget. Each finding keeps its member for
@@ -636,7 +641,7 @@ func dispatchTrustedAction(
 	}
 	for i, member := range generation.members {
 		var memberTelemetry trustedActionTelemetry
-		found := dispatchTrustedActionWith(parent, request, facts, gitHookFacts, member, budget, &memberTelemetry)
+		found := dispatchTrustedActionWith(parent, request, facts, placedFacts, member, budget, &memberTelemetry)
 		if i < len(generation.memberNames) {
 			for j := range found {
 				found[j].profile = generation.memberNames[i]
@@ -655,7 +660,7 @@ func dispatchTrustedActionWith(
 	ctx context.Context,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
-	gitHookFacts *actionfacts.Facts,
+	placedFacts *actionfacts.Facts,
 	generation *compiledRulePackCategories,
 	budget *trustedActionBudget,
 	telemetry *trustedActionTelemetry,
@@ -1126,14 +1131,15 @@ func dispatchTrustedActionWith(
 		clear(excluded)
 		semanticFindings = semanticFindings[:0]
 	}
-	// The managed Git-hook reading shares this dispatch and budget. Its CWD
-	// can add only the Git-hook rule's positive semantic finding; all other
-	// rules and fallback lanes keep the gateway's original facts.
-	if gitHookFacts != nil && gitHookFacts.Authoritative() {
-		if projection, code := semantic.Project(*gitHookFacts); code == semantic.ProjectionOK {
-			evaluateSemanticRules(4, *gitHookFacts, projection,
+	// The working-directory reading (cwdPlacedInput) shares this dispatch
+	// and budget. Its CWD can add only a positive semantic finding of a rule
+	// whose owner places paths by it; all other rules and fallback lanes keep
+	// the gateway's original facts.
+	if placedFacts != nil && placedFacts.Authoritative() {
+		if projection, code := semantic.Project(*placedFacts); code == semantic.ProjectionOK {
+			evaluateSemanticRules(4, *placedFacts, projection,
 				func(candidate compiledSemanticRule) bool {
-					return candidate.rule.ID == "persistence.git_hook_write"
+					return cwdPlacedRule(candidate.rule.ID)
 				}, true, nil)
 		}
 	}
@@ -3709,21 +3715,68 @@ func hasGitHookMutationCandidate(facts actionfacts.Facts) bool {
 	return false
 }
 
-// protectedHomeGitHookTwinRequest places a managed action in the hook
-// client's project directory only when the action names a .git path. The
-// verified peer's home bounds that directory (protectedHomeClientDirectory).
-// The caller retains only persistence.git_hook_write from this reading.
-func protectedHomeGitHookTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
-	cwd, ok := protectedHomeClientDirectory(request)
-	if !ok || request.SkipLocalFilesystemResolution ||
-		!strings.Contains(strings.ToLower(trustedActionInputText(request.Input, request.LegacyText)), ".git") {
-		return trustedActionRequest{}, false
+// hasGitReadOutputWrite avoids a second parse for every call but a git
+// show, log, diff or whatchanged that writes its output to a file: the
+// reading gitReadOutputConfigPrerequisite places by the working directory.
+func hasGitReadOutputWrite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		invocation, ok := parseIntegrityGitInvocation(command)
+		if ok && oneOfFold(invocation.subcommand, "show", "log", "diff", "whatchanged") &&
+			hasOperation(command, actionfacts.OperationWrite) {
+			return true
+		}
 	}
-	twin := request
-	twin.record, twin.recordTelemetry = nil, nil
-	twin.conflictSource = nil
-	twin.Input.CWD = cwd
-	return twin, true
+	return false
+}
+
+// cwdPlacedRule names the rules whose semantic owner decides that a path is
+// active by the call's working directory, so a reading that knows a working
+// directory the request lacks can prove them: persistence.git_hook_write
+// (matchesActiveGitHook: <cwd>/.git/hooks/<name>, or the git directory of a
+// git show/log --output) and source.git_config_exec (its --output into the
+// active <git dir>/config, integrityGitDirectory). Every other persistence
+// and integrity owner places paths by the home or by absolute system paths,
+// which the request already has.
+func cwdPlacedRule(ruleID string) bool {
+	switch ruleID {
+	case "persistence.git_hook_write", "source.git_config_exec":
+		return true
+	}
+	return false
+}
+
+// cwdPlacedInput is the call placed in the working directory the agent ran
+// it in, when the gateway's request has none or another one:
+//   - a managed hook peer's call, in the hook client's project directory
+//     (protectedHomeClientDirectory, which the verified peer's home bounds),
+//     when the call names a .git path and may resolve local paths;
+//   - a sandbox call (every Substrate actor, an OpenShell sandbox), in the
+//     guest's own working directory (SandboxGuestCWD, lexical). A copy-mode
+//     request has no working directory at all and a mount-mode one has its
+//     host mount, while the agent names its project, "/work/.git/hooks/
+//     pre-commit" or ".git/hooks/pre-commit", in the guest namespace; "~" is
+//     already the guest home there (hookActiveHome). Without this the actor
+//     path lost every cwd-placed rule (GAP-0264).
+//
+// The reading is lexical (actionfacts.Analyze reads no files) and the caller
+// keeps only the positive findings of cwdPlacedRule rules from it.
+func cwdPlacedInput(request trustedActionRequest) (actionfacts.Input, bool) {
+	if cwd, ok := protectedHomeClientDirectory(request); ok {
+		if request.SkipLocalFilesystemResolution ||
+			!strings.Contains(strings.ToLower(trustedActionInputText(request.Input, request.LegacyText)), ".git") {
+			return actionfacts.Input{}, false
+		}
+		input := request.Input
+		input.CWD = cwd
+		return input, true
+	}
+	guestCWD := request.SandboxGuestCWD
+	if guestCWD == "" || guestCWD == request.Input.CWD {
+		return actionfacts.Input{}, false
+	}
+	input := request.Input
+	input.CWD = guestCWD
+	return input, true
 }
 
 // stateLinkResolver resolves a path through links: the hook's resolved
