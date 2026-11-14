@@ -1731,7 +1731,7 @@ def test_the_frozen_1_0_9_key_list_is_the_published_1_0_9_schema() -> None:
     regenerated = sorted(_schema_key_paths(schema))
     assert regenerated == _CONFIG_KEYS_1_0_9.read_text(encoding="utf-8").split()
     assert "guardrail.mode" in regenerated
-    assert not {"guardrail.cascade", "guardrail.secret_flow", "routing"} & set(regenerated)
+    assert not {"guardrail.cascade", "guardrail.secret_flow", "guardrail.effects_rules_tier", "routing.min_confidence"} & set(regenerated)
 
 
 def test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade() -> None:
