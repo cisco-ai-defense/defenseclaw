@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -70,7 +71,12 @@ func TestSubstrateChainEgressActionGatewayAndLeaderAgree(t *testing.T) {
 			if err := os.WriteFile(path, []byte(r.configYAML), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if strict, err := config.LoadFromFile(path); err == nil {
+			// The renders configure Linux pods: the strict loader's host rules
+			// (Windows path forms, Secure Client config versions) refuse them
+			// elsewhere, so the cross-check runs on Linux only.
+			if runtime.GOOS != "linux" {
+				// decoded substrate section only
+			} else if strict, err := config.LoadFromFile(path); err == nil {
 				if got, want := strict.Substrate.ChainEgressAction, doc.Substrate.ChainEgressAction; got != want {
 					t.Fatalf("the strict loader reads chain_egress_action %q, the substrate section says %q", got, want)
 				}
