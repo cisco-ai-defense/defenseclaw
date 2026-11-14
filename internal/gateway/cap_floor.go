@@ -156,12 +156,15 @@ func capFloorTwin(request trustedActionRequest, text string) trustedActionReques
 
 // capFloorProven keeps the findings of a piece twin that a reader proved: an
 // enforcing finding with an authoritative proof that is not an evaluation
-// limit or a parse failure (a cap the piece hits is the call's own unknown
-// tier already).
+// limit or a parse failure, by proof and by rule id (a cap or a parse failure
+// the piece meets is the call's own unknown tier already, whatever pass
+// re-proved it).
 func capFloorProven(found []RuleFinding) []RuleFinding {
 	return slices.DeleteFunc(found, func(f RuleFinding) bool {
+		id := canonicalTrustedRuleID(f.RuleID)
 		return !f.contributesToEnforcement() || !f.proof.authorizes(f.RuleID) ||
-			f.proof.kind == findingProofEvaluationFailure
+			f.proof.kind == findingProofEvaluationFailure ||
+			id == evaluationLimitRuleID || id == canonicalTrustedRuleID(parseFailureRuleID)
 	})
 }
 
