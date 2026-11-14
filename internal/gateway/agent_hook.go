@@ -4719,6 +4719,15 @@ func (a *APIServer) provenHookActionMustEnforce(ctx context.Context, verdict *To
 // observe mode also enforces a call the evaluation failed on: the hook
 // recovery's failed-check answer was a block in every mode, and the
 // contained fault keeps that answer (rel-1-0-10:GAP-0486).
+//
+// The observe-mode asymmetry is deliberate (1.0.10 lead, 2026-11-14): a hook
+// route in observe mode BLOCKS a call the evaluation failed on, while
+// /api/v1/inspect/tool and ACP in observe mode answer would_block on a normal
+// 200 verdict. The hook routes already blocked such a call in every mode on
+// rel, and a fix is never weaker than rel; /inspect/tool and ACP crashed on
+// rel, so there is no block to keep and they follow observe mode like any
+// other block. Do not drop evaluationFaultMustEnforce here to make the routes
+// match: that makes the hook routes weaker than rel.
 func (a *APIServer) hookActionMustEnforce(ctx context.Context, verdict *ToolInspectVerdict) bool {
 	return a.provenHookActionMustEnforce(ctx, verdict) || a.evaluationFaultMustEnforce(ctx, verdict)
 }

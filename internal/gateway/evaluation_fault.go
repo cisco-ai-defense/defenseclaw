@@ -73,7 +73,9 @@ func hasEvaluationFault(findings []RuleFinding) bool {
 // evaluation fault, which a hook route enforces in observe mode, as the hook
 // recovery's failed-check answer did. The Secure Client integration keeps
 // its own mapping. /inspect/tool and ACP report it as would_block in observe
-// mode, as any block.
+// mode, as any block. The asymmetry is deliberate (rel parity on the hook
+// routes, which blocked it on rel); see hookActionMustEnforce before changing
+// either side.
 func (a *APIServer) evaluationFaultMustEnforce(ctx context.Context, verdict *ToolInspectVerdict) bool {
 	if verdict == nil || normalizeCodexAction(verdict.Action) != "block" || !hasEvaluationFault(verdict.DetailedFindings) {
 		return false
