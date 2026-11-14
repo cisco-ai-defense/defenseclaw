@@ -2220,6 +2220,7 @@ func exactSecretReadChainDigest(facts actionfacts.Facts) (string, bool) {
 // files).
 func externalUploadProofDigest(facts actionfacts.Facts) (string, bool) {
 	uploads := make(map[int64]struct{})
+	writes := callWritesAnyFile(facts)
 	for _, command := range facts.Commands {
 		if command.Effect != actionfacts.EffectExecute ||
 			!hasOperation(command, actionfacts.OperationUpload) ||
@@ -2233,6 +2234,10 @@ func externalUploadProofDigest(facts actionfacts.Facts) (string, bool) {
 	}
 	if len(uploads) == 0 {
 		return "", false
+	}
+	if writes {
+		// The upload call derives a file: it names no one file (GAP-0445).
+		return guardrail.ToolChainFileUnknownDigest, true
 	}
 	selected, exact := "", true
 	for _, candidate := range facts.Paths {
@@ -2315,6 +2320,12 @@ func exactSingleReadPathDigest(facts actionfacts.Facts) (string, bool) {
 }
 
 func exactExternalUploadPathDigest(facts actionfacts.Facts) (string, bool) {
+	if callWritesAnyFile(facts) {
+		// The upload call itself links, moves, copies or redirects a file to a
+		// new name: the file it uploads may be a copy of the one read earlier,
+		// so it names no one file (GAP-0445, the upload-side twin of GAP-0410).
+		return "", false
+	}
 	externalUploadCommands := make(map[int64]struct{})
 	for _, command := range facts.Commands {
 		if command.Effect == actionfacts.EffectExecute &&
