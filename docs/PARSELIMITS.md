@@ -90,6 +90,15 @@ still blocks before, after or inside the padding that hit the cap, in every
 tier, and a state write still blocks in observe (rel-1-0-10:GAP-0312,
 GAP-0360, GAP-0435, GAP-0381).
 
+The action analysis has a bound of its own: a syntax tree deeper than 64
+levels or past its node bound (`actionfacts` `limit_exceeded`, issue
+`depth_limit` or `node_limit`) yields no path facts, which on rel let a state
+write inside 30 to 512 nested subshells through in every tier
+(rel-1-0-10:GAP-0547). Such a call is truncated in the sense of the bound
+rule: it gets the evaluation-limit finding with the reason
+`bounded_truncated cap=depth` (or `nodes`), so at least the unknown tier of
+the pack, and its pieces are judged as above.
+
 A call that names no protected target or state gets no piece and keeps the
 evaluation-limit verdict, so a cap alone is not a new block. Reads beside a
 cap stay reads: a piece is judged by the same rules as the call it is.

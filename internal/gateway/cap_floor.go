@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -69,13 +70,19 @@ type capFloorState struct {
 // withCapFloor adds to the findings of the call in request the blocks its cap
 // pieces prove (see the comment above).
 //
-// analysisStopped reports that the action analysis of the call stopped at its
-// syntax depth or node bound and holds no path of it (capFloorAnalysisStopped,
-// a state write inside 30 nested subshells was allowed in every tier): the
-// pieces of such a call are judged too. No limit finding is added for it, so
-// a call whose pieces prove nothing keeps its rel verdict.
-func withCapFloor(parent context.Context, request trustedActionRequest, findings []RuleFinding, analysisStopped bool) []RuleFinding {
-	if request.capFloor == nil || request.capFloorDepth > capFloorMaxDepth ||
+// analyzed is the cap set of the action analysis of the call
+// (capFloorAnalysisCaps): it stopped at its syntax depth or node bound and
+// holds no path of the call (rel-1-0-10:GAP-0547: a state write inside 30
+// nested subshells was allowed in every tier, with no finding). Such a call is
+// truncated in the sense of the bound rule: it gets the evaluation-limit
+// finding naming the cap (withBoundedTruncation, at least the unknown tier of
+// the pack), and its pieces are judged as for every other cap.
+func withCapFloor(parent context.Context, request trustedActionRequest, findings []RuleFinding, analyzed bounded.CapSet) []RuleFinding {
+	if request.capFloor == nil {
+		return findings
+	}
+	findings = withBoundedTruncation(findings, analyzed, request)
+	if request.capFloorDepth > capFloorMaxDepth ||
 		!trustedBashExecutionTool(request.Input.Tool) ||
 		request.Input.DialectHint != "" && request.Input.DialectHint != actionfacts.DialectPOSIX {
 		return findings
@@ -85,7 +92,7 @@ func withCapFloor(parent context.Context, request trustedActionRequest, findings
 		return findings
 	}
 	cwd, home := request.Input.CWD, request.Input.ActiveHome
-	capped := analysisStopped || boundedLimitIndex(findings) >= 0
+	capped := boundedLimitIndex(findings) >= 0
 	if !capped && !strings.Contains(command, "<<") {
 		return findings
 	}
@@ -573,11 +580,21 @@ func capFloorStripKeywords(text string) string {
 	}
 }
 
-// capFloorAnalysisStopped reports an action analysis that stopped at its
-// syntax depth or node bound (actionfacts StatusLimitExceeded): its facts hold
-// no path of the call.
-func capFloorAnalysisStopped(facts actionfacts.Facts) bool {
-	return facts.Parse.Status == actionfacts.StatusLimitExceeded &&
-		(slices.Contains(facts.Parse.Issues, actionfacts.IssueDepthLimit) ||
-			slices.Contains(facts.Parse.Issues, actionfacts.IssueNodeLimit))
+// capFloorAnalysisCaps is the cap set of an action analysis that stopped at
+// its syntax depth or node bound (actionfacts StatusLimitExceeded with
+// depth_limit or node_limit): its facts hold no path of the call.
+func capFloorAnalysisCaps(facts actionfacts.Facts) bounded.CapSet {
+	var set bounded.CapSet
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
+		return set
+	}
+	for _, issue := range facts.Parse.Issues {
+		switch issue {
+		case actionfacts.IssueDepthLimit:
+			set = set.Union(bounded.Of(bounded.Depth))
+		case actionfacts.IssueNodeLimit:
+			set = set.Union(bounded.Of(bounded.Nodes))
+		}
+	}
+	return set
 }

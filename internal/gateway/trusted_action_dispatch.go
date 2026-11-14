@@ -38,6 +38,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -428,8 +429,8 @@ func dispatchTrustedAction(
 	// binding; the other tiers follow the top-level statements before it.
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
-	// analysisStopped: the action analysis below stopped at its own bound.
-	var analysisStopped bool
+	// analyzedCaps: the caps the action analysis below stopped at.
+	var analyzedCaps bounded.CapSet
 	if !request.capFloorSeen {
 		// After every path below, the budget and limit paths included: a
 		// block proven on a statement the cap did not take still decides
@@ -440,7 +441,7 @@ func dispatchTrustedAction(
 			request.capFloor = &capFloorState{}
 		}
 		floorRequest := request
-		defer func() { findings = withCapFloor(parent, floorRequest, findings, analysisStopped) }()
+		defer func() { findings = withCapFloor(parent, floorRequest, findings, analyzedCaps) }()
 	}
 	bound := trustedActionCommandBound(request.Input)
 	if bound == shellReadingBudget {
@@ -506,6 +507,7 @@ func dispatchTrustedAction(
 	if !request.simpleCommandPass {
 		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
+		analyzedCaps = capFloorAnalysisCaps(facts)
 		if trustedCallOverStatementBudgetWith(request.Input, facts, request.simpleMemo.commands(request.Input, facts)) {
 			// Over the statement budget the call blocks with
 			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is
@@ -588,7 +590,7 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
-	analysisStopped = capFloorAnalysisStopped(facts)
+	analyzedCaps = capFloorAnalysisCaps(facts)
 	for _, twin := range windowsReadingTwinRequests(request, facts) {
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))

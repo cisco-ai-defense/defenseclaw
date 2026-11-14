@@ -13,7 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
 // The cap floor (cap_floor.go). The writes are existing fixtures, loaded by
@@ -62,9 +64,8 @@ func capFloorParityCommand(t *testing.T, id string) string {
 // capFloorFillers put a call past one cap each: nesting (subshells, command
 // substitutions, brace groups, also inside a double-quoted string and after
 // an escaped blank), the reading budget (chain operators, tokens), the
-// statement budget (also through line continuations) and the depth bound of
-// the action analysis (silent: rel reads such a call alone as allowed, with no
-// limit finding).
+// statement budget and the syntax depth bound of the action analysis
+// (rel-1-0-10:GAP-0547: 30 to 512 nested subshells, no finding on rel).
 var capFloorFillers = []struct {
 	name  string
 	build func(inner string) string
@@ -81,12 +82,44 @@ var capFloorFillers = []struct {
 	{"nest-escaped-blank/600", func(in string) string {
 		return "echo a\\ #" + strings.Repeat("$(", 600) + in + strings.Repeat(")", 600)
 	}},
-	{"nest-paren/64", func(in string) string { return strings.Repeat("(", 64) + in + strings.Repeat(")", 64) }},
 }
 
-// capFloorSilentFillers are the fillers whose cap rel reports with no limit
-// finding (the analysis depth bound).
-var capFloorSilentFillers = map[string]bool{"nest-paren/64": true}
+func init() {
+	// GAP-0547: the analysis depth bound, under the shell nesting budget.
+	for _, n := range []int{30, 64, 128, 256, 512} {
+		capFloorFillers = append(capFloorFillers, struct {
+			name  string
+			build func(inner string) string
+		}{fmt.Sprintf("nest-paren/%d", n), func(in string) string {
+			return strings.Repeat("(", n) + in + strings.Repeat(")", n)
+		}})
+	}
+}
+
+// The analysis depth bound is a lane of the bound rule (rel-1-0-10:GAP-0547).
+// Its limit is the deepest subshell nest the action analysis still reads.
+func init() {
+	registerBoundedLane(boundedLaneCap{lane: "shell analysis depth", cap: bounded.Depth, limit: capFloorAnalysisDepthLimit(),
+		gen: func(size int, shape boundedShape) (boundedLaneCall, bool) {
+			if shape.nested {
+				return boundedLaneCall{}, false
+			}
+			return boundedShellLane(boundedNestedSubshells, boundedNestedAssignments)(size, shape)
+		},
+		seen: boundedShellSeenCall})
+}
+
+// capFloorAnalysisDepthLimit is the largest n for which the action analysis
+// reads n nested subshells.
+func capFloorAnalysisDepthLimit() int {
+	for n := 1; n < shellparse.MaxNestingDepth; n++ {
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: boundedNestedSubshells(n)})
+		if capFloorAnalysisCaps(facts).Any() {
+			return n - 1
+		}
+	}
+	return shellparse.MaxNestingDepth
+}
 
 // capFloorShellBodies put the write inside the script of a shell, behind a
 // pipe chain of n stages.
@@ -215,13 +248,10 @@ func TestCapFloorCapAloneKeepsItsVerdict(t *testing.T) {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		for _, f := range capFloorFillers {
 			want := bounded.Unknown(tier.tier)
-			if capFloorSilentFillers[f.name] {
-				want = bounded.Allow
-			}
 			for _, id := range []string{f.name, f.name + "/listing"} {
 				action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(commands[id]))
 				if got := boundedParse(action); got != want {
-					t.Errorf("%s %s: action=%s, want %s (rel); findings=%v", tier.name, id, action, want, findings)
+					t.Errorf("%s %s: action=%s, want %s; findings=%v", tier.name, id, action, want, findings)
 				}
 			}
 		}

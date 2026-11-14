@@ -152,7 +152,7 @@ func registerBoundedLane(caps ...boundedLaneCap) { boundedLanes = append(bounded
 func init() {
 	registerBoundedLane(
 		boundedLaneCap{lane: "shell-parse nesting", cap: bounded.Depth, limit: shellparse.MaxNestingDepth,
-			gen:  boundedShellLane(boundedNestedSubshells, boundedNestedAssignments),
+			gen:  boundedShellLane(boundedNestedBrackets, boundedNestedAssignments),
 			seen: boundedShellSeenCall,
 			path: boundedLegacyShellReading},
 		boundedLaneCap{lane: "shell-parse statements", cap: bounded.Items, limit: boundedShellStatements,
@@ -205,6 +205,14 @@ func boundedShellLane(fill, multi func(size int) string) func(int, boundedShape)
 // boundedNestedSubshells is a true command nested in size subshells.
 func boundedNestedSubshells(size int) string {
 	return strings.Repeat("(", size) + "true" + strings.Repeat(")", size)
+}
+
+// boundedNestedBrackets is a word of size nested brackets: nesting the
+// shell reading budget counts that the action analysis reads in full (size
+// nested subshells meet its syntax depth bound first, the lane "shell
+// analysis depth", rel-1-0-10:GAP-0547).
+func boundedNestedBrackets(size int) string {
+	return "echo " + strings.Repeat("[", size) + "true" + strings.Repeat("]", size)
 }
 
 // boundedNestedAssignments nests past the statement budget too (depth and
