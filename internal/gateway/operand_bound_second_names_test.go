@@ -48,10 +48,10 @@ func TestSecondNameOfAProtectedFilePastTheOperandBoundBlocks(t *testing.T) {
 				Connector: "claudecode", EnforcementCapable: true,
 			}
 			findings := dispatchTrustedAction(withShareBodyStrict(t.Context(), func() bool { return false }), request)
-			if got := buildVerdict(findings, "tool_call").Action; got != row.want {
+			if got := operandBoundTierAction(findings, false); got != row.want {
 				t.Errorf("%s, want %s; findings %v", got, row.want, findings)
 			}
-			alert := slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == operandBoundRuleID })
+			alert := slices.ContainsFunc(findings, operandBoundTruncated)
 			if alert != row.bound {
 				t.Errorf("bound alert %v, want %v", alert, row.bound)
 			}
