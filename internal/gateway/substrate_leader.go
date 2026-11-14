@@ -26,6 +26,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // Wiring of the Agent Substrate listeners into the sidecar (serve
@@ -50,22 +52,33 @@ func (s *Sidecar) SetSubstrate(build SubstrateBuilder) {
 // alone. A cluster gateway has no host connector, so the sidecar's own
 // guardrail boot stays idle; the actor proxy is built from the same
 // guardrail config, rule pack, judge and stores, and binds no port (the
-// actor listener is its only entry).
+// actor listener is its only entry). It is built again when the config in
+// force changes, so a guardrail mode change reaches running actors' model
+// calls without a restart (GAP-0276).
 func (s *Sidecar) substrateLLMProxy() http.Handler {
 	var (
-		once  sync.Once
-		own   *GuardrailProxy
-		owner error
+		mu     sync.Mutex
+		own    *GuardrailProxy
+		owner  error
+		ownCfg *config.Config
+		built  bool
 	)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := s.proxySnapshot()
+		var ownErr error
 		if p == nil {
-			once.Do(func() { own, owner = s.newSubstrateGuardrailProxy() })
-			p = own
+			cfg := s.currentConfig()
+			mu.Lock()
+			if !built || cfg != ownCfg {
+				own, owner = s.newSubstrateGuardrailProxy(cfg)
+				ownCfg, built = cfg, true
+			}
+			p, ownErr = own, owner
+			mu.Unlock()
 		}
 		if p == nil {
-			if owner != nil {
-				fmt.Fprintf(os.Stderr, "[substrate] guardrail proxy for actors: %v\n", owner)
+			if ownErr != nil {
+				fmt.Fprintf(os.Stderr, "[substrate] guardrail proxy for actors: %v\n", ownErr)
 			}
 			writeSubstrateRefusal(w, http.StatusServiceUnavailable, "guardrail_proxy_unavailable")
 			return
@@ -74,8 +87,7 @@ func (s *Sidecar) substrateLLMProxy() http.Handler {
 	})
 }
 
-func (s *Sidecar) newSubstrateGuardrailProxy() (*GuardrailProxy, error) {
-	cfg := s.currentConfig()
+func (s *Sidecar) newSubstrateGuardrailProxy(cfg *config.Config) (*GuardrailProxy, error) {
 	if cfg == nil {
 		return nil, errors.New("no configuration")
 	}

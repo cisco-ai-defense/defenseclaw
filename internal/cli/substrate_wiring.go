@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
@@ -31,21 +32,51 @@ import (
 
 // newSubstrateController builds the controller the controller deployment
 // runs and the gateway's create path uses for EnsurePolicy: the same
-// admission, profiles and render in both.
+// admission, profiles and render in both. With src, a config.yaml change
+// replaces the config-decided options (substrateControllerLive) before the
+// next pass or create (GAP-0276).
 func newSubstrateController(cfg *config.Config, client ateapi.Client, reg controller.Registry,
 	act controller.ActivitySource, cpu controller.CPUSource, sink controller.Sink, idleAfter bool,
-	resets controller.ResetStore, namespace string, resolver controller.ProfileResolver) (*controller.Controller, error) {
+	resets controller.ResetStore, namespace string, resolver controller.ProfileResolver, src controller.ConfigSource) (*controller.Controller, error) {
+	if act == nil {
+		act = controller.NoActivity{}
+	}
+	// No CPU source: never suspend on silence alone (E4).
+	idle := idleAfter && cpu != nil
+	live := func(c *config.Config) controller.Live {
+		if resolver != nil && c != cfg {
+			sink.Emit(controller.Event{Type: controller.EventWarning, Severity: controller.SeverityWarn,
+				Message: "substrate.bundles: the stage bundles are layered over the profiles config.yaml had when the controller started; " +
+					"a profile change in config.yaml applies when the controller restarts (the egress allow list, secrets, launcher atespaces and template rules apply now)"})
+		}
+		return substrateControllerLive(c, idle, resolver, sink)
+	}
+	lv := live(cfg)
+	o := controller.Options{
+		Client: client, Attestor: lv.Attestor, Activity: act, CPU: cpu,
+		Registry: reg, Resolver: lv.Resolver,
+		Sink:     sink,
+		Settings: lv.Settings, Secrets: lv.Secrets,
+		LauncherAtespaces: lv.LauncherAtespaces, RequireAttestation: lv.RequireAttestation, Templates: lv.Templates,
+		KitVersion: appVersion, IdleSuspendAfter: lv.IdleSuspendAfter, Resets: resets, Namespace: namespace,
+	}
+	if src != nil {
+		o.Config, o.Live = src, live
+	}
+	return controller.New(o)
+}
+
+// substrateControllerLive is the part of the controller config.yaml
+// decides (controller.Live), built the same way at start and on every
+// config change. resolver, when set (bundle mode), is kept as it is.
+func substrateControllerLive(cfg *config.Config, idle bool, resolver controller.ProfileResolver, sink controller.Sink) controller.Live {
 	sub := cfg.Substrate
 	if resolver == nil {
 		resolver = &controller.ConfigResolver{Config: cfg}
 	}
-
-	if act == nil {
-		act = controller.NoActivity{}
-	}
-	idle := sub.EffectiveIdleSuspendAfter()
-	if !idleAfter || cpu == nil {
-		idle = 0 // no CPU source: never suspend on silence alone (E4)
+	var after time.Duration
+	if idle {
+		after = sub.EffectiveIdleSuspendAfter()
 	}
 	// Both the controller and the create path admit only attested,
 	// digest-pinned templates (GAP-0053): the anchors come from the
@@ -60,14 +91,11 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 		}
 		attestor = &controller.TemplateAttestor{Verifier: ver, VolumeImages: sub.Templates.VolumeImages, Registries: controller.AllowedRegistries(sub.Templates)}
 	}
-	return controller.New(controller.Options{
-		Client: client, Attestor: attestor, Activity: act, CPU: cpu,
-		Registry: reg, Resolver: resolver,
-		Sink:     sink,
+	return controller.Live{
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
 		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(), Templates: sub.Templates,
-		KitVersion: appVersion, IdleSuspendAfter: idle, Resets: resets, Namespace: namespace,
-	})
+		Attestor: attestor, Resolver: resolver, IdleSuspendAfter: after,
+	}
 }
 
 // substrateTemplateKit reads what a template was built with from its

@@ -66,7 +66,7 @@ func TestShippedControllerUsesTheAttestationVerifier(t *testing.T) {
 	cfg.Substrate.Enabled = true
 	cfg.Substrate.Templates.TrustAnchors = filepath.Join(t.TempDir(), "absent.pem")
 	var sink bytes.Buffer
-	ctl, err := newSubstrateController(cfg, ateapifake.New(), controller.NewMemoryRegistry(), nil, nil, &controller.JSONSink{W: &sink}, false, nil, "", nil)
+	ctl, err := newSubstrateController(cfg, ateapifake.New(), controller.NewMemoryRegistry(), nil, nil, &controller.JSONSink{W: &sink}, false, nil, "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestShippedControllerUsesTheAttestationVerifier(t *testing.T) {
 	}
 	off := false
 	cfg.Substrate.RequireAttestedTemplates = &off
-	if ctl, err = newSubstrateController(cfg, ateapifake.New(), controller.NewMemoryRegistry(), nil, nil, &controller.JSONSink{W: &sink}, false, nil, "", nil); err != nil {
+	if ctl, err = newSubstrateController(cfg, ateapifake.New(), controller.NewMemoryRegistry(), nil, nil, &controller.JSONSink{W: &sink}, false, nil, "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := ctl.Attestor().(controller.NoAttestor); !ok {
@@ -96,7 +96,7 @@ func TestCreatePathReadsTheTemplateAnchors(t *testing.T) {
 		cfg.Substrate.Enabled = true
 		cfg.Substrate.Templates.TrustAnchors = anchors
 		var sink bytes.Buffer
-		ctl, err := newSubstrateController(cfg, ateapifake.New(), &controller.LeaderRegistry{Store: nil}, nil, nil, &controller.JSONSink{W: &sink}, false, nil, "", nil)
+		ctl, err := newSubstrateController(cfg, ateapifake.New(), &controller.LeaderRegistry{Store: nil}, nil, nil, &controller.JSONSink{W: &sink}, false, nil, "", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

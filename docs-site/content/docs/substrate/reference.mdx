@@ -152,6 +152,26 @@ Keys of the `sandbox` section (and of `substrate.admin`) for the runtime:
 
 `openshell.admin` refuses `sandbox_class`, `idle_suspend_after`, `unattended_asks`, `ask_timeout`, `actor_secrets`, `ask_hosts` and `url_rules`. `substrate.admin` refuses `allow_mount`, `allow_host_ports`, `process_tree`, `driver_fallback`, `require_copy_for` and locked `workdir.*` keys.
 
+### When a config change takes effect
+
+Change the config with `helm upgrade` or GitOps. `helm upgrade` also restarts every DefenseClaw pod (each pod carries a checksum of the config), so every setting below applies within one rollout.
+
+A direct edit of the `defenseclaw-config` ConfigMap, for example with `kubectl edit`, needs no restart for most settings. The controller, the gateway and the leader read the ConfigMap through the Kubernetes API every 2 seconds. An edit that does not load is refused with an alert (`sandbox.config.refused`), and the config in force stays.
+
+| Setting | When running and new agents get it |
+|---|---|
+| `substrate.egress` (allow list, registries, ecosystem packs), `substrate.allow_passthrough_for` | Within about 5 seconds. The controller renders each agent's egress policy again on its next pass |
+| `substrate.admin` and `guardrail.profiles.<name>.sandbox` (egress block and allow-only lists, `allowed`, `runtimes`, sandbox class, idle suspend) | Within about 5 seconds |
+| `guardrail.profile_assignments`, `substrate.launcher_atespaces` | Within about 5 seconds. An agent that is no longer managed loses DefenseClaw's policy. New agents get the profile from the new list |
+| `substrate.secrets` | The egress bindings within about 5 seconds. The gateway's injection list at its next restart |
+| `substrate.templates`, `substrate.require_attested_templates` | Templates are attested again on the next pass |
+| `substrate.chain_egress_action` | Within about 2 seconds, on the gateway's hook answers and the leader's callout verdicts |
+| `guardrail` mode and rules (hooks and model calls) | When the gateway reloads its mounted config file. The kubelet updates the file about a minute after the edit. Managed installs mount the file in a way the kubelet never updates, so they apply it at the next gateway restart |
+| `substrate.identity`, `substrate.rate_limits`, `substrate.llm`, `llm_providers`, `substrate.workspace_max_bytes`, `substrate.unattended.ask_timeout`, `deployment_mode` | At the next restart of the gateway or the leader. Each logs the keys that wait for it |
+| `substrate.extproc`, and the callout's copy of `url_rules`, `ask_hosts`, `actor_secrets` and unattended asks | Only through `helm upgrade`, which renders the callout's own ConfigMap |
+
+After a direct edit of a setting that waits for a restart, run `kubectl -n defenseclaw-system rollout restart deploy/defenseclaw-gateway` (or `deploy/defenseclaw-leader`). With `substrate.bundles` on, the stage bundles are layered over the profiles that config.yaml had when the controller started, so a profile change in config.yaml applies when the controller restarts.
+
 ## Chart values
 
 The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate`. Every value is checked by its schema. The ones you will set:
