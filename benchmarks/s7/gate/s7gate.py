@@ -14,7 +14,7 @@ A corpus entry may carry "ids" (a file of case ids, one per line): only those ca
 judge request stats (calls per tool call, answered, cut at the window, parse failures, latency p50/p95, tokens, USD per 1k tool calls)
 are scored whenever the decisions carry judge_calls. Writes no corpus text to stdout.
 """
-import argparse, collections, json, math, os, random, subprocess, sys, time
+import argparse, collections, hashlib, json, math, os, random, shutil, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from surface import case_surface
 
@@ -67,9 +67,57 @@ FIXTURE_FILES = {".ssh/authorized_keys": "# decoy s7gate fixture\n", ".ssh/known
                  ".aws/credentials": "[default]\n", ".claude/settings.json": "{}\n", ".codex/config.toml": "", ".defenseclaw/config.yaml": "{}\n", ".bashrc": "", ".gitconfig": ""}
 
 
+# The fixture root is the home the corpus paths are rewritten to, and a call's text carries it (HOME, cwd, paths in the command). A root under the run directory
+# made the call length depend on the run LABEL: a case at 4090 bytes under one label was 4099 under a longer one and crossed the 4096-byte reading bound
+# (shellparse nestedBodyMinCommand, ACTION-COMPOUND-LIMIT) on both rel and head, so two runs with labels of different length decided one call differently
+# (rel-1-0-10:GAP-0666, GAP-0648, GAP-0684). The root is now FX_BASE/<12 hex of sha256 of the run directory>: one fixed length, unique per run.
+FX_BASE = os.path.expanduser(os.environ.get("S7_FX_BASE", "~/s7c/fx"))
+FX_HASH_LEN = 12
+
+
+def fixture_root(out):
+    """Directory holding the run's scratch homes. FX_BASE/<hash>: a path of the same length for every label. OUT/fx is a symlink to it. A run directory
+    made before this fix (a real OUT/fx directory) keeps it, so a --resume of that run stays consistent with its already rewritten corpus."""
+    out = os.path.abspath(out)
+    legacy = os.path.join(out, "fx")
+    if os.path.isdir(legacy) and not os.path.islink(legacy):
+        print(f"[s7gate] WARNING {legacy} is a pre-labelfix fixture directory: the call length of this run depends on its label (GAP-0666)", flush=True)
+        return legacy
+    return os.path.join(FX_BASE, hashlib.sha256(out.encode()).hexdigest()[:FX_HASH_LEN])
+
+
+def _read_owner(d):
+    try:
+        with open(os.path.join(d, ".owner")) as f: return f.read().strip()
+    except OSError: return None
+
+
+def gc_fixtures():
+    """Remove FX_BASE/<hash> trees whose run directory is gone (rm -rf gate/<label>, clean-stale, --overwrite)."""
+    try: names = os.listdir(FX_BASE)
+    except OSError: return
+    for h in names:
+        d = os.path.join(FX_BASE, h)
+        owner = _read_owner(d)
+        if owner is None: continue
+        if not os.path.exists(owner): shutil.rmtree(d, ignore_errors=True)
+
+
 def make_fixture(out):
     """Real (scratch) home directories for the corpus accounts, so protected-file and link checks resolve against a filesystem like a live host."""
-    fx = os.path.join(os.path.abspath(out), "fx")
+    out = os.path.abspath(out)
+    fx = fixture_root(out)
+    link = os.path.join(out, "fx")
+    if fx != link:
+        gc_fixtures()
+        if not os.path.lexists(link):   # a new run or --overwrite: never inherit the tree of an earlier run directory of the same name
+            shutil.rmtree(fx, ignore_errors=True)
+        os.makedirs(fx, exist_ok=True)
+        owner = os.path.join(fx, ".owner")
+        prev = _read_owner(fx)
+        if prev is not None and prev != out: raise SystemExit(f"s7gate: fixture root {fx} belongs to {prev}, not {out} (hash collision?)")
+        with open(owner, "w") as f: f.write(out + "\n")
+        if not os.path.lexists(link): os.symlink(fx, link)
     for home in ("home/alice", "Users/alice"):
         for rel, body in FIXTURE_FILES.items():
             p = os.path.join(fx, home, rel)
@@ -122,7 +170,7 @@ def cmd_run(a):
     def start(j):
         name, g, pack, files, idf, out, hargs = j
         env = dict(os.environ, GOMAXPROCS=str(a.gomaxprocs))
-        fxr = os.path.join(os.path.abspath(a.out), "fx")
+        fxr = fx   # the fixed-length fixture root (make_fixture), not a path built from the run label
         home = fxr + (HOMES["macos"] if g.startswith("macos") else HOMES["linux"])
         # lean (default): -det=false everywhere (verdict-neutral, -23% CPU); -post=false only for single-call action cases, where no later
         # decision exists for a PostToolUse to influence. Stateful windows keep their PostToolUse so sequence rules see the same history.
