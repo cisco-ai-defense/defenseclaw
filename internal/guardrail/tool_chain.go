@@ -183,7 +183,10 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		// (cat .env | tr ... | grep) starts the chain (substrate-1:GAP-0226).
 		Step1IdentityOwnsParseProof: true,
 		ArtifactMutationBarrier:     true,
-		DetectionOnly:               true,
+		// A proven chain (both steps exact, one file joined) blocks in the
+		// strict tier; the gateway drops its enforcement bits in the other
+		// tiers, which alert (toolChainProjectionForNamedPosture, GAP-0595).
+		DetectionOnly: false,
 	},
 	{
 		ID: ToolChainWorkloadIdentityThenLateralExec, Version: "1.7",

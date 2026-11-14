@@ -90,7 +90,6 @@ func TestProximityOnlyChainsRemainVisibleButCannotEnforce(t *testing.T) {
 		ToolChainPermissionDeniedThenBypass,
 		ToolChainSecretManagerReadThenEgress,
 		ToolChainWorkloadIdentityThenLateralExec,
-		ToolChainSecretReadThenEgress,
 		ToolChainDownloadDecodeExecuteSameArtifact,
 	} {
 		t.Run(chainID, func(t *testing.T) {

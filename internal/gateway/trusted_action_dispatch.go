@@ -1128,6 +1128,10 @@ func dispatchTrustedActionWith(
 			if request.EnforcementCapable && candidate.owner.alertOnly {
 				finding.enforcement = findingEnforcementAlertOnly
 			}
+			if candidate.owner.strictEnforced && !request.StrictPolicy &&
+				finding.enforcement == findingEnforcementAllowed {
+				finding.enforcement = findingEnforcementAlertOnly
+			}
 			finding = finding.withTrustedActionProof(
 				newActionFactsSemanticFindingProof(
 					candidate.rule.ID,

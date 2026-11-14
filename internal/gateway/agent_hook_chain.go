@@ -729,6 +729,14 @@ func toolChainProjectionForNamedPosture(
 	if posture == "strict" {
 		return projection
 	}
+	// A proven secret-read-then-egress chain blocks only in strict; the
+	// default and permissive tiers keep it as an alert (GAP-0595).
+	if definition, ok := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainSecretReadThenEgress,
+	); ok {
+		projection.EnforcementStepMask &^= definition.Step1Bit | definition.Step2Bit |
+			definition.Step3Bit | definition.Step4Bit | definition.MutationBit
+	}
 
 	definition, ok := guardrail.ToolChainDefinitionByID(
 		guardrail.ToolChainPrivilegeDiscoveryThenElevation,

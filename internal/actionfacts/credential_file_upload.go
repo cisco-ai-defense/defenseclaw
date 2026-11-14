@@ -27,11 +27,23 @@ func projectCredentialFileUploads(facts Facts) []CredentialFileUploadFact {
 	result := make([]CredentialFileUploadFact, 0, 1)
 	for _, command := range facts.Commands {
 		if command.Dialect != DialectPOSIX || command.Effect != EffectExecute ||
-			command.ControlFlowUncertain || command.Program != "curl" {
+			command.ControlFlowUncertain {
 			continue
 		}
-		for _, source := range StaticCurlDirectUploadFileSources(command) {
-			class := credentialFileUploadClass(source.Path)
+		var sources []string
+		switch command.Program {
+		case "curl":
+			for _, source := range StaticCurlDirectUploadFileSources(command) {
+				sources = append(sources, source.Path)
+			}
+		case "scp", "rsync", "wget":
+			// The read paths of a proven upload are the files it sends:
+			// the local operands of scp and rsync, the --post-file or
+			// --body-file of wget (GAP-0595).
+			sources = uploadedReadPaths(facts, command)
+		}
+		for _, source := range sources {
+			class := credentialFileUploadClass(source)
 			if class == "" {
 				continue
 			}
@@ -44,6 +56,36 @@ func projectCredentialFileUploads(facts Facts) []CredentialFileUploadFact {
 		}
 	}
 	return result
+}
+
+// uploadedReadPaths is the read paths of a command that has an upload
+// network fact: none for a command that does not upload.
+func uploadedReadPaths(facts Facts, command CommandFact) []string {
+	if !hasFactOperation(command, OperationUpload) {
+		return nil
+	}
+	upload := false
+	for _, network := range facts.Network {
+		if network.CommandID == command.ID && network.Action == NetworkUpload {
+			upload = true
+			break
+		}
+	}
+	if !upload {
+		return nil
+	}
+	var paths []string
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != command.ID || candidate.Access != PathAccessRead {
+			continue
+		}
+		value := candidate.Resolved
+		if value == "" {
+			value = candidate.Value
+		}
+		paths = append(paths, value)
+	}
+	return paths
 }
 
 func credentialFileUploadClass(value string) string {
