@@ -17,10 +17,8 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"sort"
@@ -388,17 +386,20 @@ func (w *messageWalk) attachment(s string) bool {
 		return false
 	}
 	// Base64 all through, the whole value (a byte scan, about 2 ms per MB): a
-	// value that is not is text, whatever its first part looks like.
-	enc, ok := messageBase64Encoding(payload)
+	// value that is not is text, whatever its first part looks like. Base64 is
+	// read as a lenient decoder reads it (Node's Buffer.from, which OpenClaw
+	// may use): either alphabet, white space skipped, and a "=" ends a group
+	// and starts the next one, so no value a receiver would decode is read as
+	// plain text.
+	spaced, ok := messageLenientBase64(payload)
 	if !ok {
 		return false
 	}
-	// The part inside the budget (whole groups of four characters).
+	// The part inside the budget.
 	read := payload
 	if left := messagePayloadMaxChars - w.payloadUsed; len(payload) > left {
-		read = payload[:max(left, 0)&^3]
+		read = payload[:max(left, 0)]
 		w.trunc.Hit(bounded.Bytes)
-		enc = enc.WithPadding(base64.NoPadding)
 	}
 	if w.nodes >= messageTextMaxNodes {
 		w.trunc.Hit(bounded.Nodes)
@@ -406,61 +407,122 @@ func (w *messageWalk) attachment(s string) bool {
 	}
 	w.nodes++
 	w.payloadUsed += len(read)
-	text, decoded := messageStreamTextRuns(base64.NewDecoder(enc, strings.NewReader(read)))
-	if !decoded {
-		return false
+	if spaced {
+		// Spaces or tabs in the value: base64 to a lenient decoder, and words
+		// to a reader. Both readings are scanned, so neither hides the other.
+		w.leaf(read)
 	}
-	if text != "" {
+	if text := messageAttachmentText(read); text != "" {
 		w.leaf(text)
 	}
 	return true
 }
 
-// messageBase64Encoding is the alphabet and padding of a base64 value, which
-// must be base64 characters all through (either alphabet, padding and line
-// breaks, not both alphabets).
-func messageBase64Encoding(s string) (*base64.Encoding, bool) {
-	std, url := false, false
-	for i := 0; i < len(s); i++ {
-		switch c := s[i]; {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '=', c == '\r', c == '\n':
-		case c == '+' || c == '/':
-			std = true
-		case c == '-' || c == '_':
-			url = true
-		default:
-			return nil, false
+// messageAttachmentText is the text of a base64 payload: the runs of its 8-bit
+// reading, and, when it looks like UTF-16 (a byte order mark, or a NUL beside
+// every other byte), the runs of that reading too: a file that guesses wrong
+// either way still gives up its text.
+func messageAttachmentText(payload string) string {
+	text := messageStreamTextRuns(newMessageBase64Reader(payload))
+	head := make([]byte, messageUTF16ProbeBytes)
+	n, _ := io.ReadFull(newMessageBase64Reader(payload), head)
+	if be, skipBOM, ok := messageUTF16(head[:n]); ok {
+		u16 := messageStreamTextRuns(&messageUTF16Reader{r: newMessageBase64Reader(payload), be: be, bom: skipBOM, buf: make([]byte, messagePayloadChunk)})
+		switch {
+		case text == "":
+			text = u16
+		case u16 != "" && u16 != text:
+			text += "\n" + u16
 		}
 	}
-	if std && url {
-		return nil, false
+	return text
+}
+
+// messageBase64Value is the class of each byte in a base64 value: its six
+// bits, messageB64Skip for white space, messageB64Pad for "=", and
+// messageB64Bad for anything else. Both alphabets are accepted together.
+var messageBase64Value = func() (t [256]uint8) {
+	for i := range t {
+		t[i] = messageB64Bad
 	}
-	enc := base64.StdEncoding
-	if url {
-		enc = base64.URLEncoding
+	const std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	for i := 0; i < len(std); i++ {
+		t[std[i]] = uint8(i)
 	}
-	if !strings.HasSuffix(strings.TrimRight(s, "\r\n"), "=") {
-		enc = enc.WithPadding(base64.NoPadding)
+	t['-'], t['_'] = 62, 63
+	for _, c := range " \t\n\r\f\v" {
+		t[c] = messageB64Skip
 	}
-	return enc, true
+	t['='] = messageB64Pad
+	return t
+}()
+
+const (
+	messageB64Skip = 64
+	messageB64Pad  = 65
+	messageB64Bad  = 255
+)
+
+// messageLenientBase64 reports a value made only of base64 characters (either
+// alphabet), padding and ASCII white space, all through, and whether it has a
+// space or a tab in it (line breaks alone are how base64 is wrapped).
+func messageLenientBase64(s string) (spaced, ok bool) {
+	for i := 0; i < len(s); i++ {
+		switch messageBase64Value[s[i]] {
+		case messageB64Bad:
+			return false, false
+		case messageB64Skip:
+			if s[i] == ' ' || s[i] == '\t' {
+				spaced = true
+			}
+		}
+	}
+	return spaced, true
+}
+
+// messageBase64Reader decodes a base64 value as a lenient decoder does: white
+// space is skipped, either alphabet is read, and "=" drops the bits of the
+// group it ends and starts the next group fresh.
+type messageBase64Reader struct {
+	s    string
+	i    int
+	acc  uint32
+	bits uint
+}
+
+func newMessageBase64Reader(s string) *messageBase64Reader { return &messageBase64Reader{s: s} }
+
+func (r *messageBase64Reader) Read(p []byte) (int, error) {
+	n := 0
+	for n < len(p) && r.i < len(r.s) {
+		v := messageBase64Value[r.s[r.i]]
+		r.i++
+		switch {
+		case v < 64:
+			r.acc = r.acc<<6 | uint32(v)
+			r.bits += 6
+			if r.bits >= 8 {
+				r.bits -= 8
+				p[n] = byte(r.acc >> r.bits)
+				r.acc &= 1<<r.bits - 1
+				n++
+			}
+		case v == messageB64Pad:
+			r.acc, r.bits = 0, 0
+		}
+	}
+	if n == 0 && r.i >= len(r.s) {
+		return 0, io.EOF
+	}
+	return n, nil
 }
 
 // messageStreamTextRuns reads decoded data in chunks and returns the runs of
 // at least messageRunMinBytes text bytes (printable characters and white space
 // of valid UTF-8) joined by newlines: all of a text file, the text of a binary
-// file. It reports false when the stream is not valid base64. The text
-// returned is bounded by messageTextMaxBytes, past it the reading stops.
-func messageStreamTextRuns(r io.Reader) (string, bool) {
-	// UTF-16 text (a byte order mark, or a NUL beside every other byte, as
-	// Windows "Unicode" files are) is converted to UTF-8 first: its NULs would
-	// break every run.
-	br := bufio.NewReaderSize(r, messagePayloadChunk)
-	head, _ := br.Peek(messageUTF16ProbeBytes)
-	if be, skipBOM, ok := messageUTF16(head); ok {
-		r = &messageUTF16Reader{r: br, be: be, bom: skipBOM, buf: make([]byte, messagePayloadChunk)}
-	} else {
-		r = br
-	}
+// file. The text returned is bounded by messageTextMaxBytes, past it the
+// reading stops.
+func messageStreamTextRuns(r io.Reader) string {
 	var out []string
 	var run []byte
 	total := 0
@@ -477,7 +539,7 @@ func messageStreamTextRuns(r io.Reader) (string, bool) {
 		buf = buf[:len(buf)+n]
 		final := err != nil
 		if err != nil && err != io.EOF {
-			return "", false
+			return strings.Join(out, "\n")
 		}
 		end := len(buf)
 		if !final {
@@ -519,7 +581,7 @@ func messageStreamTextRuns(r io.Reader) (string, bool) {
 		}
 	}
 	flush()
-	return strings.Join(out, "\n"), true
+	return strings.Join(out, "\n")
 }
 
 // messageUTF16ProbeBytes is how much of a decoded attachment is looked at to

@@ -17,6 +17,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { BASE64_ALL, ROUTING_KEYS } from "./message-text.js";
 
 /**
  * Fits a call to the gateway's request body limit (GAP-0356).
@@ -27,12 +28,25 @@ import { createHash } from "node:crypto";
  * become its size, media type and SHA-256, and any other very long string
  * keeps its head and its tail. The request then carries `args_partial: true`:
  * the part that was not sent is unread, and the gateway judges the call at
- * least at the unknown tier of its policy (alert in the default pack, block in
- * strict). A call that fits is sent as it is.
+ * least at the unknown tier of its policy (alert in the default and permissive
+ * packs, block in strict). A call that fits is sent as it is.
+ *
+ * Decision (lead, GAP-0356): a message over the limit gets the unknown tier of
+ * the pack, not a block in every pack. Any other tool is never cut here: the
+ * gateway refuses it, as it always has, and the check fails closed.
  */
 
-/** Request body budget: under the gateway's 1 MiB limit, with room for the envelope. */
-export const INSPECT_BODY_BUDGET_BYTES = 768 * 1024;
+/** The gateway's request body limit for /api/v1/inspect/tool (apiRequestBodyMaxBytes). */
+export const GATEWAY_BODY_LIMIT_BYTES = 1 << 20;
+/** What the request carries beyond the call: its envelope fields and the flag. */
+export const ENVELOPE_MARGIN_BYTES = 8 * 1024;
+/**
+ * The body a call may take and still be sent as it is: the gateway's limit
+ * less the margin. A call the gateway reads whole is sent whole
+ * (rel-1-0-10:GAP-0402). schemas/inspect-tool-request-limits.json holds both
+ * numbers for the tests of the two sides.
+ */
+export const INSPECT_BODY_BUDGET_BYTES = GATEWAY_BODY_LIMIT_BYTES - ENVELOPE_MARGIN_BYTES;
 /** Cut strings never go below this (characters). */
 const MIN_CUT_CHARS = 128;
 /** Room for the "not sent" marker inside a cut string (characters). */
@@ -88,8 +102,6 @@ function cutString(value: string, limit: number): string {
   return `${value.slice(0, keep)}\n[... ${value.length - 2 * keep} not sent ...]\n${value.slice(-keep)}`;
 }
 
-const BASE64_ALL = /^[A-Za-z0-9+/_=\r\n-]*$/;
-
 /** True for a long base64 value, bare or behind a base64 data URL header. */
 function isBase64Payload(value: string): boolean {
   let payload = value;
@@ -99,6 +111,38 @@ function isBase64Payload(value: string): boolean {
     payload = value.slice(i + ";base64,".length);
   }
   return BASE64_ALL.test(payload);
+}
+
+/** Keeps the routing values of a call (the recipient, target, channel ...): strings and lists of strings. */
+function collectRouting(args: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  let nodes = 0;
+  let bytes = 0;
+  const visit = (value: unknown, depth: number): void => {
+    if (value === null || typeof value !== "object" || depth > 8 || nodes++ > 4096) return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (ROUTING_KEYS.has(key.toLowerCase())) {
+        const keep =
+          typeof item === "string" ? item.slice(0, 4096)
+            : Array.isArray(item) && item.every((i) => typeof i === "string") ? (item as string[]).slice(0, 64).map((i) => i.slice(0, 4096))
+              : undefined;
+        if (keep !== undefined && bytes < 64 * 1024) {
+          bytes += JSON.stringify(keep).length;
+          let name = key;
+          for (let n = 2; name in out; n++) name = `${key}#${n}`;
+          out[name] = keep;
+        }
+      } else {
+        visit(item, depth + 1);
+      }
+    }
+  };
+  visit(args, 0);
+  return out;
 }
 
 /**
@@ -113,7 +157,7 @@ function isBase64Payload(value: string): boolean {
  * that still does not fit is sent as a note.
  */
 export function fitInspectBody(payload: Record<string, unknown>, budget = INSPECT_BODY_BUDGET_BYTES): FittedPayload {
-  if (payload.tool !== "message" || size(payload) <= budget) return { payload, partial: false };
+  if (String(payload.tool).toLowerCase() !== "message" || size(payload) <= budget) return { payload, partial: false };
   const out: Record<string, unknown> = { ...payload };
   const slots: Slot[] = [];
   if (out.args !== null && typeof out.args === "object") {
@@ -152,11 +196,22 @@ export function fitInspectBody(payload: Record<string, unknown>, budget = INSPEC
       }
     }
   }
-  // A call that still does not fit (a huge number of small values) is sent as
-  // a note: nothing of it is read, and the gateway judges it as unknown.
+  // A call that still does not fit (numbers and short values past the cut)
+  // keeps what is read: the message text (the plugin's own reading of it, cut
+  // to the room left, head and tail) and the routing values. Only the
+  // attachments and the rest of the structure are dropped. The gateway judges
+  // the call as unknown on top of what it reads.
   if (size(out) > budget) {
-    out.args = { note: "call too large to send" };
+    const content = typeof payload.content === "string" ? payload.content : "";
+    out.args = { ...collectRouting(payload.args), note: "call too large to send: attachments and the rest of the structure are not sent" };
     delete out.content;
+    const room = budget - size(out) - 1024;
+    if (content !== "" && room > MIN_CUT_CHARS) {
+      const bytesPerChar = Math.max(1, Buffer.byteLength(JSON.stringify(content)) / content.length);
+      const limit = Math.floor((room / bytesPerChar) * CUT_SAFETY);
+      out.content = limit >= content.length ? content : cutString(content, Math.max(limit, MIN_CUT_CHARS));
+      if (size(out) > budget) delete out.content;
+    }
   }
   out.args_partial = true;
   return { payload: out, partial: true };

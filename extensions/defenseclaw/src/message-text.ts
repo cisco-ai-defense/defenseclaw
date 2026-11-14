@@ -60,7 +60,7 @@ const TEXT_KEYS = [
  * tool policy like the destination of any other send tool (the plugin only
  * counts it against its budget).
  */
-const ROUTING_KEYS = new Set([
+export const ROUTING_KEYS = new Set([
   "action", "channel", "provider", "accountid", "account", "to", "target",
   "targets", "from", "recipient", "recipients", "replyto", "threadid",
   "messageid", "chatid", "id", "type", "kind", "mode", "format", "parsemode",
@@ -71,7 +71,14 @@ const ROUTING_KEYS = new Set([
 /** Fields that carry an attachment, at any depth. A text field is always text. */
 const ATTACHMENT_KEYS = new Set(["buffer", "media"]);
 
-const BASE64_ALL = /^[A-Za-z0-9+/_=\r\n-]*$/;
+/**
+ * A value of base64 characters (either alphabet) and padding, wrapped at line
+ * breaks, all through. A value with a space or a tab in it is not one here: the
+ * gateway reads it as text as well as decoding it, so the plugin reads it as
+ * text (messageLenientBase64 in the gateway takes the rest of what a lenient
+ * decoder such as Node's Buffer.from reads).
+ */
+export const BASE64_ALL = /^[A-Za-z0-9+/_=\n\r\f\v-]*$/;
 
 export interface MessageExtract {
   /** Every string outside the routing values, joined by newlines. */

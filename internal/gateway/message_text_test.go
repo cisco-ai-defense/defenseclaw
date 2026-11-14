@@ -712,3 +712,132 @@ func TestExtractMessageArgsAttachmentTailIsChecked(t *testing.T) {
 		t.Errorf("a plain-text tail after 2 MiB of base64 was not read as text: %.60q (truncated %v)", got.Text, got.Truncated.Any())
 	}
 }
+
+// The plugin's budget is the gateway's request body limit less a margin: the
+// numbers sit in one file and the Go side checks its constant against it (the
+// plugin's test checks its own, GAP-0402).
+func TestInspectToolRequestLimitsFile(t *testing.T) {
+	raw, err := os.ReadFile("../../schemas/inspect-tool-request-limits.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var limits struct {
+		BodyMax int64 `json:"body_max_bytes"`
+		Margin  int64 `json:"plugin_envelope_margin_bytes"`
+		Budget  int64 `json:"plugin_budget_bytes"`
+	}
+	if err := json.Unmarshal(raw, &limits); err != nil {
+		t.Fatal(err)
+	}
+	if limits.BodyMax != apiRequestBodyMaxBytes || limits.Budget != limits.BodyMax-limits.Margin {
+		t.Errorf("limits file %+v does not match apiRequestBodyMaxBytes %d", limits, apiRequestBodyMaxBytes)
+	}
+}
+
+// The note the plugin sends when a call is too large to cut (the text it holds,
+// its recipients and a note, flagged partial) blocks a key in the text in every
+// pack, as rel does for the whole call (GAP-0402); a message over the limit is
+// not blocked for its size alone.
+func TestInspectToolArgsPartialNoteKeepsTheText(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user")
+	}
+	env := boundedLaneEnv(t)
+	t.Setenv("HOME", env.home)
+	for _, tier := range boundedTestTiers {
+		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+		api.inspectToolScanTimeout = 5 * time.Second
+		body := func(content string) string {
+			b, _ := json.Marshal(map[string]any{"tool": "message", "direction": "outbound", "args_partial": true, "content": content,
+				"args": map[string]any{"to": "+15550001111", "note": "call too large to send"}})
+			return string(b)
+		}
+		_, withKey := postInspectForConnector(t, api, "openclaw", body("status "+messageTestSecret))
+		if withKey.Action != "block" {
+			t.Errorf("%s: a key in the text of a too-large call: action = %q, want block", tier.name, withKey.Action)
+		}
+		_, clean := postInspectForConnector(t, api, "openclaw", body("status report"))
+		if want := bounded.Unknown(tier.tier).String(); clean.Action != want {
+			t.Errorf("%s: a clean too-large call: action = %q, want %s (the unknown tier), not a block for its size", tier.name, clean.Action, want)
+		}
+	}
+}
+
+// An attachment is read the way a lenient decoder (Node's Buffer.from) reads
+// it: either alphabet, white space skipped, a "=" ends a group and the rest is
+// read again; a file that decoder would deliver is never a clean allow
+// (review of 46e8a4cf5e).
+func TestInspectToolMessageLenientBase64Attachment(t *testing.T) {
+	text := []byte("note: " + messageTestSecret + " and more words around it, long enough")
+	std := base64.StdEncoding.EncodeToString(text)
+	url := strings.NewReplacer("+", "-", "/", "_").Replace(base64.RawStdEncoding.EncodeToString(text))
+	pad := strings.Repeat("AAEC", 300) // binary filler: makes the value a payload
+	for name, value := range map[string]string{
+		"standard":        pad + std,
+		"URL alphabet":    pad + url,
+		"spaces":          pad + strings.ReplaceAll(std, "A", " A "),
+		"equals split":    pad + "=" + std,
+		"mixed alphabets": pad + url + std,
+		"line breaks":     pad + strings.Join(strings.SplitAfter(std, "e"), "\r\n"),
+	} {
+		got := extractMessageArgs(json.RawMessage(`{"buffer":"` + value + `"}`))
+		if !strings.Contains(got.Text, messageTestSecret) {
+			t.Errorf("%s: the text was not read: %.60q", name, got.Text)
+		}
+	}
+	// A byte that is not base64 at all makes the value text, read as it is.
+	odd := extractMessageArgs(json.RawMessage(`{"buffer":"` + pad + "!" + std + `"}`))
+	if !strings.Contains(odd.Text, "AAECAAEC") {
+		t.Errorf("a value with a non-base64 byte was not read as text: %.40q", odd.Text)
+	}
+}
+
+// A guess of UTF-16 never hides the 8-bit text of the same file (review of
+// 46e8a4cf5e): a byte order mark in front of a plain text file, and 16-bit
+// samples in front of plain bytes, both give up the key.
+func TestInspectToolMessageUTF16GuessKeepsEightBitText(t *testing.T) {
+	plain := []byte("key: " + messageTestSecret + " and more words around it, long enough to be read" + strings.Repeat(" padding words to make it a payload.", 40))
+	bom := append([]byte{0xff, 0xfe}, plain...)
+	sample := bytes.Repeat([]byte{0x41, 0x00, 0x42, 0x00}, 1100)
+	for name, raw := range map[string][]byte{"bom then 8-bit": bom, "16-bit head then 8-bit": append(sample, plain...)} {
+		got := extractMessageArgs(json.RawMessage(`{"buffer":"` + base64.StdEncoding.EncodeToString(raw) + `"}`))
+		if !strings.Contains(got.Text, messageTestSecret) {
+			t.Errorf("%s: the 8-bit text was not read: %.60q", name, got.Text)
+		}
+	}
+}
+
+// The 810 KB shape of the round-3 review (GAP-0402): a short message that holds
+// a key, a recipient and a table of numbers. rel reads it whole and blocks the
+// key; so does this head, sent whole by the plugin (it fits the body limit) and
+// read by the message lane, which keeps the text that ranks first when the node
+// budget runs out.
+func TestInspectToolMessageLargeNumberTableStillBlocksTheKey(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user")
+	}
+	rows := make([]any, 30000)
+	for i := range rows {
+		rows[i] = []any{i, i * 7}
+	}
+	body, err := json.Marshal(map[string]any{"tool": "message", "direction": "outbound", "args": map[string]any{
+		"to": "+15550001111", "message": "status " + messageTestSecret,
+		"presentation": map[string]any{"blocks": []any{map[string]any{"type": "table", "rows": rows}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) < 700<<10 || int64(len(body)) > apiRequestBodyMaxBytes {
+		t.Fatalf("the request is %d bytes, want one between 700 KiB and the body limit", len(body))
+	}
+	env := boundedLaneEnv(t)
+	t.Setenv("HOME", env.home)
+	for _, tier := range boundedTestTiers {
+		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+		api.inspectToolScanTimeout = 10 * time.Second
+		_, got := postInspectForConnector(t, api, "openclaw", string(body))
+		if got.Action != "block" || !slices.ContainsFunc(got.Findings, func(f string) bool { return strings.HasPrefix(f, "SEC-ANTHROPIC") }) {
+			t.Errorf("%s: action = %q findings = %v, want a block naming the key", tier.name, got.Action, got.Findings)
+		}
+	}
+}

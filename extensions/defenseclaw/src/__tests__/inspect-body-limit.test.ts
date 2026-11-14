@@ -16,10 +16,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { INSPECT_BODY_BUDGET_BYTES, fitInspectBody } from "../inspect-body-limit.js";
+import {
+  ENVELOPE_MARGIN_BYTES,
+  GATEWAY_BODY_LIMIT_BYTES as GATEWAY_LIMIT,
+  INSPECT_BODY_BUDGET_BYTES,
+  fitInspectBody,
+} from "../inspect-body-limit.js";
+import { extractMessage } from "../message-text.js";
 
-const GATEWAY_BODY_LIMIT = 1 << 20;
+const GATEWAY_BODY_LIMIT = GATEWAY_LIMIT;
 const bodyBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
 
 // GAP-0356: an attachment over about 770 KB made the inspect request exceed the
@@ -94,7 +101,7 @@ describe("fitInspectBody", () => {
   });
 
   it.each([
-    ["24 x 40,000", 24, 40_000],
+    ["24 x 50,000", 24, 50_000],
     ["30 x 40,000", 30, 40_000],
     ["60 x 33,000", 60, 33_000],
     ["500 x 40,000", 500, 40_000],
@@ -119,7 +126,7 @@ describe("fitInspectBody", () => {
   });
 
   it("describes only an attachment that is base64: other text in a buffer field is cut as text", () => {
-    const words = "word ".repeat(200_000);
+    const words = "word ".repeat(300_000);
     const got = fitInspectBody({ tool: "message", args: { buffer: words, message: "hi" } });
     const buffer = (got.payload.args as Record<string, string>).buffer;
     expect(buffer.startsWith("word word")).toBe(true);
@@ -133,5 +140,71 @@ describe("fitInspectBody", () => {
     expect(got.partial).toBe(true);
     expect(bodyBytes(got.payload)).toBeLessThan(INSPECT_BODY_BUDGET_BYTES);
     expect(got.payload.args_partial).toBe(true);
+  });
+});
+
+// GAP-0402: the budget is the gateway's limit less a margin, from one file both
+// sides check; a call rel read whole is sent whole, and one that is too large
+// keeps its text and its recipients.
+describe("fitInspectBody budget and note (GAP-0402)", () => {
+  const limits = JSON.parse(
+    readFileSync(new URL("../../../../schemas/inspect-tool-request-limits.json", import.meta.url), "utf8"),
+  ) as { body_max_bytes: number; plugin_envelope_margin_bytes: number; plugin_budget_bytes: number };
+  const KEY = "sk-ant-api03-" + "A7b9C2d4E6f8G1h3J5k7L9m2";
+
+  it("takes its numbers from the shared limits file", () => {
+    expect(GATEWAY_LIMIT).toBe(limits.body_max_bytes);
+    expect(ENVELOPE_MARGIN_BYTES).toBe(limits.plugin_envelope_margin_bytes);
+    expect(INSPECT_BODY_BUDGET_BYTES).toBe(limits.plugin_budget_bytes);
+    expect(limits.plugin_budget_bytes).toBe(limits.body_max_bytes - limits.plugin_envelope_margin_bytes);
+  });
+
+  it("sends a call of 810 KB whose bulk is numbers as it is (rel read it whole)", () => {
+    const params = {
+      to: "+15550001111",
+      message: `status ${KEY}`,
+      presentation: { blocks: [{ type: "table", rows: Array.from({ length: 70_000 }, (_, i) => [i, i * 7]) }] },
+    };
+    const payload = { tool: "message", args: params, content: extractMessage(params).text, direction: "outbound" };
+    expect(bodyBytes(payload)).toBeGreaterThan(768 * 1024);
+    expect(bodyBytes(payload)).toBeLessThan(INSPECT_BODY_BUDGET_BYTES);
+    const got = fitInspectBody(payload);
+    expect(got.partial).toBe(false);
+    expect(got.payload).toBe(payload);
+  });
+
+  it("keeps the message text and the recipients when the note is all that fits", () => {
+    const params = {
+      to: "+15550001111",
+      target: { id: "u-7" },
+      message: `status ${KEY}`,
+      presentation: { blocks: [{ type: "table", rows: Array.from({ length: 160_000 }, (_, i) => [i, i * 7]) }] },
+    };
+    const payload = { tool: "message", args: params, content: extractMessage(params).text, direction: "outbound" };
+    expect(bodyBytes(payload)).toBeGreaterThan(GATEWAY_BODY_LIMIT);
+    const got = fitInspectBody(payload);
+    expect(got.partial).toBe(true);
+    expect(got.payload.args_partial).toBe(true);
+    expect(bodyBytes(got.payload)).toBeLessThan(INSPECT_BODY_BUDGET_BYTES);
+    const args = got.payload.args as Record<string, unknown>;
+    expect(args.to).toBe("+15550001111");
+    expect(typeof args.note).toBe("string");
+    expect(got.payload.content).toContain(KEY);
+  });
+
+  it("treats the tool name case-insensitively, as the gateway does", () => {
+    const args = { message: "x".repeat(2 << 20) };
+    expect(fitInspectBody({ tool: "Message", args }).partial).toBe(true);
+    expect(fitInspectBody({ tool: "MESSAGE", args }).partial).toBe(true);
+    expect(fitInspectBody({ tool: "messages", args }).partial).toBe(false);
+  });
+
+  it("describes a line-wrapped base64 value of either alphabet; a value with spaces is cut as text", () => {
+    const wrapped = `${"QUJD".repeat(2000)}=\n${"QUJD".repeat(2000)}-_\r\n${"QUJD".repeat(2000)}`;
+    const described = fitInspectBody({ tool: "message", args: { buffer: wrapped + "x".repeat(1_200_000) } });
+    expect((described.payload.args as Record<string, string>).buffer).toMatch(/^\[attachment bytes not sent/);
+    const spaced = fitInspectBody({ tool: "message", args: { buffer: `${wrapped} ${"x".repeat(1_200_000)}` } });
+    expect((spaced.payload.args as Record<string, string>).buffer).not.toMatch(/^\[attachment bytes not sent/);
+    expect(spaced.partial).toBe(true);
   });
 });
