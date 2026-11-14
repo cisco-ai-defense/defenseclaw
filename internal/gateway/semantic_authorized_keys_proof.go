@@ -1834,6 +1834,17 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return true
 		}
 	}
+	// No operand is proven protected. An operand the one shell word resolver
+	// cannot settle (a glob form it does not model, a glob option the call may
+	// have changed, a variable or substitution, a directory it cannot read) is
+	// not proven to leave the protected files alone either: it is UNCERTAIN, and
+	// the pack tier decides it (default and permissive alert, strict blocks;
+	// rel-1-0-10:GAP-0350, GAP-0378, GAP-0379, GAP-0380).
+	if input.Command != "" && trustedShellCommandInput(request.Input) {
+		if reason := hookpaths.UncertainWriteReason(input.Command, input.CWD, facts.ActiveHome, nil); reason != "" {
+			return unproven(reason, "")
+		}
+	}
 	return false
 }
 
