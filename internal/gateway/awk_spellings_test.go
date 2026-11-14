@@ -66,6 +66,11 @@ func awkSpellings() []awkSpelling {
 		{id: "T-operand", cmd: `awk '{print $1}' "$F"`, want: "allow"},
 		{id: "T-F-computed", cmd: `awk -F"$S" '{print $1}' ordinary/a.txt`, want: "allow"},
 		{id: "T-v-computed", cmd: `awk -v n="$N" '{print n}' ordinary/a.txt`, want: "allow"},
+		// GAP-0656 (by design): a command awk builds at run time is the unknown tier.
+		{id: "D34", cmd: `awk '{print $1 | "sort -k" n}' ordinary/a.txt`, want: "unknown"},
+		{id: "D35", cmd: `awk '{print $1 | cmd}' ordinary/a.txt`, want: "unknown"},
+		{id: "A61", cmd: `awk '{ cmd="date -d @" $1; cmd | getline d; close(cmd); print d }' ordinary/a.txt`, want: "unknown"},
+		{id: "A65", cmd: `awk '{print $0 | "sort -k" $2}' ordinary/a.txt`, want: "unknown"},
 		// GAP-0654: a regular expression after an operator.
 		{id: "A42", cmd: `awk 'BEGIN{ y = 1 + /"/; system("touch keylink"); y = 1 + /"/ }'`, want: "block"},
 		{id: "A43", cmd: `awk 'BEGIN{ if (1) /"/; system("touch keylink"); if (1) /"/ }'`, want: "block"},

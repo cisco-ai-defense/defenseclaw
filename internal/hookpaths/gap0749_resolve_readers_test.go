@@ -82,7 +82,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		LiteralWriteOperands(wrapped, cwd, home)
 		ShellDirectoryWriteOperands(wrapped, cwd, home, sourceFacts, true, false)
 	}
-	if awked := actionfacts.AwkCommandTwin(command); awked.Text != "" && awked.Text != command {
+	if awked := actionfacts.AwkCommandTwinFiles(command, func(name string) (string, bool) { return readActionScript(name, cwd) }); awked.Text != "" && awked.Text != command {
 		readings = append(readings, awked.Text)
 		twin := fallback
 		twin.Command = awked.Text
@@ -149,7 +149,7 @@ var gap0749ResolveReaderCalls = []string{
 	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
 	"actionConcreteProtectedWriteOnWithOperands", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
-	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin", "actionfacts.AwkCommandTwin", "addReading",
+	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin", "actionfacts.AwkCommandTwinFiles", "addReading",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
 	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "quotedGlobNameWriteOperands", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
 }
