@@ -266,13 +266,13 @@ func main() {
 	startArrivalMS := flag.Int("session-start-arrival-ms", 0, "how long the first call of a session waits for its SessionStart to arrive before judging the start in its place (product default 1000). The corpora hold no SessionStart event, so any wait is a constant added to every case: 0 measures the hook work (rel-1-0-10:GAP-0261)")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
-	surface := flag.String("surface", "hook", "hook (tool calls through the connector hook) | prompt (payload.content through the connector UserPromptSubmit hook; the scored decision is the hook answer, the /llm proxy GuardrailInspector text inspection goes to extra.inspect_* for comparison) | tool-result (each event's result as the PostToolUse tool_response; the PostToolUse answer is the decision)")
+	surface := flag.String("surface", "hook", "hook (tool calls through the connector hook) | prompt (payload.content through the connector UserPromptSubmit hook; the scored decision is the hook answer, the /llm proxy GuardrailInspector text inspection goes to extra.inspect_* for comparison) | tool-result (each event's result as the PostToolUse tool_response; the PostToolUse answer is the decision) | response (payload.content as a model completion through the /llm proxy GuardrailInspector, direction completion, the whole text at once) | response-stream (the same text replayed as a stream: mid-stream scans every 500 bytes decide, the final check beside them is recorded in extra but not enforced, as in the proxy)")
 	promptFromContent := flag.Bool("prompt-from-content", false, "send case-v1 payload.content as the session's UserPromptSubmit before the tool calls (the user's task for intent-aware layers)")
 	effectsRules := flag.String("cascade-effects", "", "guardrail.cascade.lanes.effects: off|shadow|on (empty keeps the config default; on bypasses validation, harness only)")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
 	flag.Parse()
-	if *surface != "hook" && *surface != "prompt" && *surface != "tool-result" {
-		fmt.Fprintln(os.Stderr, "-surface must be hook, prompt or tool-result")
+	if *surface != "hook" && *surface != "prompt" && *surface != "tool-result" && *surface != "response" && *surface != "response-stream" {
+		fmt.Fprintln(os.Stderr, "-surface must be hook, prompt, tool-result, response or response-stream")
 		os.Exit(2)
 	}
 	if err := dmCorpusAllowed(*dmURL, *corpusName, *dmAllowCorpus); err != nil {
@@ -599,6 +599,24 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 		}
 		decisions.Add(1)
 		emit(promptRecord(c.ID, conn, st, hb, v, fallback))
+		return
+	}
+	if surface == "response" || surface == "response-stream" {
+		text := firstNonEmpty(c.Payload.Content, c.Payload.Command)
+		t0 := time.Now()
+		r := record{Case: c.ID, Connector: conn, N: 1, SrcTool: "__response__", Tool: "assistant_response", Mapped: "response", Status: 200}
+		if surface == "response" {
+			v := e.InspectText(ctx, "completion", text)
+			r.Action, r.RawAction, r.Severity, r.Findings = v.Action, v.Action, v.Severity, v.Findings
+		} else {
+			sr := e.InspectStream(ctx, text)
+			r.Action, r.RawAction, r.Severity, r.Findings = sr.Action, sr.Action, sr.Severity, sr.Findings
+			r.Extra = map[string]string{"blocked_at": fmt.Sprint(sr.BlockedAt), "scans": fmt.Sprint(sr.Scans), "unchecked_tail": fmt.Sprint(sr.UncheckedTail), "bytes": fmt.Sprint(len(text)),
+				"final_action": sr.FinalAction, "final_sev": sr.FinalSeverity, "final_findings": strings.Join(sr.FinalFindings, ",")}
+		}
+		r.LatencyUs = time.Since(t0).Microseconds()
+		decisions.Add(1)
+		emit(r)
 		return
 	}
 	intent := firstNonEmpty(c.Payload.Intent, c.Payload.Prompt)
