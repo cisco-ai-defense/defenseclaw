@@ -388,8 +388,7 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 		res.flowGuarded = true
 	case choice == "allow" && res.risk <= routing.allowAt:
 		res.route = decisionAllow
-	case choice == "block" && res.risk >= routing.blockAt && score >= routing.blockRiskScore &&
-		(!routing.escalateRuleFlagged || !decisionRuleFloorFrom(ctx)):
+	case choice == "block" && res.risk >= routing.blockAt && score >= routing.blockRiskScore && !routing.ruleFlagEscalates(ctx):
 		// A confident block needs the disposition AND the risk score (R4),
 		// and never lands on a call the rules flagged (RF): those escalate.
 		res.route = decisionBlock
@@ -398,9 +397,10 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 }
 
 // ruleFlagEscalates reports whether the rules flagged this call and
-// decision_model.escalate_rule_flagged keeps a confident block off it.
-func (d *decisionModel) ruleFlagEscalates(ctx context.Context) bool {
-	return d.escalateRuleFlagged && decisionRuleFloorFrom(ctx)
+// escalate_rule_flagged (decision_model, or the call's
+// guardrail.cascade.system_one override) keeps a confident block off it.
+func (r cascadeSystemOneRouting) ruleFlagEscalates(ctx context.Context) bool {
+	return r.escalateRuleFlagged && decisionRuleFloorFrom(ctx)
 }
 
 type decisionParseError struct{ msg string }
