@@ -14,7 +14,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -418,12 +417,10 @@ func TestApplicationProtectionControllerSkipsProxyConnector(t *testing.T) {
 	if len(state.Skipped) != 1 {
 		t.Fatalf("state.Skipped = %+v, want one proxy skip", state.Skipped)
 	}
-	wantReason := "proxy_connector_setup_only"
-	if runtime.GOOS == "windows" {
-		wantReason = "unsupported_os"
-	}
-	if got := state.Skipped[0].Reason; got != wantReason {
-		t.Errorf("skip reason = %q, want %s", got, wantReason)
+	// OpenClaw runs on every OS (native hooks on Windows) and stays
+	// setup-only everywhere.
+	if got := state.Skipped[0].Reason; got != "proxy_connector_setup_only" {
+		t.Errorf("skip reason = %q, want proxy_connector_setup_only", got)
 	}
 }
 

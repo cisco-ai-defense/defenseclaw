@@ -17,12 +17,22 @@
 package config
 
 import (
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestValidateOpenClawConnector(t *testing.T) {
 	no := false
+	// abs is the host form of a Unix absolute path: the checks use
+	// filepath.IsAbs, and on Windows a path needs a volume.
+	abs := func(p string) string {
+		if runtime.GOOS == "windows" {
+			return `C:` + filepath.FromSlash(p)
+		}
+		return p
+	}
 	cases := []struct {
 		name string
 		oc   OpenClawConnectorConfig
@@ -30,17 +40,17 @@ func TestValidateOpenClawConnector(t *testing.T) {
 	}{
 		{"absent", OpenClawConnectorConfig{}, ""},
 		{"managed", OpenClawConnectorConfig{PluginInstall: "managed", OperatorAdmin: &no}, ""},
-		{"external", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: "/opt/dc/openclaw/defenseclaw"}, ""},
+		{"external", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: abs("/opt/dc/openclaw/defenseclaw")}, ""},
 		{"bad mode", OpenClawConnectorConfig{PluginInstall: "copy"}, "managed or external"},
 		{"external no dir", OpenClawConnectorConfig{PluginInstall: "external"}, "clean absolute path"},
 		{"external relative", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: "opt/defenseclaw"}, "clean absolute path"},
-		{"external wrong name", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: "/opt/dc/plugin"}, "named defenseclaw"},
-		{"dir before external", OpenClawConnectorConfig{PluginDir: "/opt/dc/defenseclaw"}, ""},
+		{"external wrong name", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: abs("/opt/dc/plugin")}, "named defenseclaw"},
+		{"dir before external", OpenClawConnectorConfig{PluginDir: abs("/opt/dc/defenseclaw")}, ""},
 		{"bad dir before external", OpenClawConnectorConfig{PluginDir: "opt/plugin"}, "clean absolute path"},
-		{"token file without account", OpenClawConnectorConfig{PluginTokenFile: "/etc/dc/oc.token"}, "need plugin_account"},
-		{"separate user", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: "/opt/dc/defenseclaw", PluginAccount: "openclaw", PluginTokenFile: "/etc/dc/oc.token", PluginTokenGroup: "openclaw"}, ""},
-		{"separate user managed", OpenClawConnectorConfig{PluginAccount: "openclaw", PluginTokenFile: "/etc/dc/oc.token"}, "needs plugin_install: external"},
-		{"separate user no token file", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: "/opt/dc/defenseclaw", PluginAccount: "openclaw"}, "needs plugin_token_file"},
+		{"token file without account", OpenClawConnectorConfig{PluginTokenFile: abs("/etc/dc/oc.token")}, "need plugin_account"},
+		{"separate user", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: abs("/opt/dc/defenseclaw"), PluginAccount: "openclaw", PluginTokenFile: abs("/etc/dc/oc.token"), PluginTokenGroup: "openclaw"}, ""},
+		{"separate user managed", OpenClawConnectorConfig{PluginAccount: "openclaw", PluginTokenFile: abs("/etc/dc/oc.token")}, "needs plugin_install: external"},
+		{"separate user no token file", OpenClawConnectorConfig{PluginInstall: "external", PluginDir: abs("/opt/dc/defenseclaw"), PluginAccount: "openclaw"}, "needs plugin_token_file"},
 		{"bad account", OpenClawConnectorConfig{PluginAccount: "a b"}, "not an account"},
 	}
 	prev := openClawGOOS
