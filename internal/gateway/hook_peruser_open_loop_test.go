@@ -29,10 +29,7 @@ import (
 // way the installed hook does (one PreToolUse per tool call, the answer
 // within 3.5 s, a new connection per call) at 100 calls a second for 20 s:
 // one session at 100/s, and ten sessions at 10/s each (S8 bar H1, rel-1-0-6
-// GAP-0558 to GAP-0560, issue #1384). Each test first runs a grouped leg in
-// which up to 64 correlation occurrences share a transaction and logs it
-// (diagnosis: production runs groups of one, S8 design 17.5), then the leg
-// with the production limits (hookCorrelationGroupLimits), which is judged:
+// GAP-0558 to GAP-0560, issue #1384). They are judged:
 //   - the single-stream baseline of the real path and the measured cadence
 //     are judged as in TestGAP0490OpenLoop* (judgeOpenLoopBaseline,
 //     judgeOpenLoopStream): an overloaded box or a launcher that fell behind
@@ -41,8 +38,11 @@ import (
 //     the 3.5 s window, no benign call is denied by that deadline, and the
 //     p95 is at most 300 ms.
 //
-// They are opt-in (DC_GAP0490_OPEN_LOOP_BUDGET=1) like the 100 calls/s
-// sandbox stream, and built without -race: they measure wall-clock time.
+// S8_OPEN_LOOP_SECONDS (diagnosis only) runs a longer stream: one session
+// for 120 s showed the writer time that grew with the session (S8 design
+// 17.7, rel-1-0-10 GAP-0621). They are opt-in (DC_GAP0490_OPEN_LOOP_BUDGET=1)
+// like the 100 calls/s sandbox stream, and built without -race: they measure
+// wall-clock time.
 func TestHookPerUserOpenLoopOneSession100(t *testing.T) {
 	runHookPerUserOpenLoop(t, 1, 100)
 }
@@ -61,88 +61,70 @@ func runHookPerUserOpenLoop(t *testing.T, sessions, perSecond int) {
 	if os.Getenv("DC_GAP0490_OPEN_LOOP_BUDGET") != "1" {
 		t.Skip("set DC_GAP0490_OPEN_LOOP_BUDGET=1 to drive 100 per-user hook calls a second")
 	}
-	legs := []struct {
-		name        string
-		occurrences int
-		judged      bool
-		duration    time.Duration
-	}{
-		{"grouped", 64, false, perUserOpenLoopDuration},
-		{"production", 0, true, perUserOpenLoopDuration},
-	}
-	// Diagnosis only: a longer stream (S8_OPEN_LOOP_SECONDS) shows the writer
-	// time that grows with the length of a session, and S8_OPEN_LOOP_LEG
-	// runs one leg, so two binaries or legs can be interleaved.
+	duration := perUserOpenLoopDuration
 	if seconds, err := strconv.Atoi(os.Getenv("S8_OPEN_LOOP_SECONDS")); err == nil && seconds > 0 {
-		for i := range legs {
-			legs[i].duration = time.Duration(seconds) * time.Second
+		duration = time.Duration(seconds) * time.Second
+	}
+	f := newAuditFailureHookFixture(t, "open")
+	srv := httptest.NewServer(f.api.handleAgentHook("claudecode"))
+	defer srv.Close()
+	cwd := t.TempDir()
+	names := make([]string, sessions)
+	for i := range names {
+		names[i] = fmt.Sprintf("s8-open-%d-%d", sessions, i)
+		for _, event := range []string{"SessionStart", "UserPromptSubmit"} {
+			status, out, err := postPerUserHook(t.Context(), srv.URL, perUserLifecycleBody(names[i], cwd, event))
+			if err != nil || status != http.StatusOK {
+				t.Fatalf("%s %s: %d %.200s %v", names[i], event, status, out, err)
+			}
 		}
 	}
-	only := os.Getenv("S8_OPEN_LOOP_LEG")
-	for _, leg := range legs {
-		if only != "" && only != leg.name {
-			continue
-		}
-		t.Run(leg.name, func(t *testing.T) {
-			if leg.occurrences > 0 {
-				setHookCorrelationGroupOccurrences(t, leg.occurrences)
-			}
-			if hold, err := time.ParseDuration(os.Getenv("S8_OPEN_LOOP_GROUP_HOLD")); err == nil && leg.occurrences > 1 {
-				// Diagnosis only: another hold for the grouped leg.
-				limits := hookCorrelationGroupLimits
-				limits.Hold = hold
-				setHookCorrelationGroupLimits(t, limits)
-			}
-			f := newAuditFailureHookFixture(t, "open")
-			srv := httptest.NewServer(f.api.handleAgentHook("claudecode"))
-			defer srv.Close()
-			cwd := t.TempDir()
-			names := make([]string, sessions)
-			for i := range names {
-				names[i] = fmt.Sprintf("s8-open-%d-%d", sessions, i)
-				for _, event := range []string{"SessionStart", "UserPromptSubmit"} {
-					status, out, err := postPerUserHook(t.Context(), srv.URL, perUserLifecycleBody(names[i], cwd, event))
-					if err != nil || status != http.StatusOK {
-						t.Fatalf("%s %s: %d %.200s %v", names[i], event, status, out, err)
-					}
-				}
-			}
-			cpuBefore := openLoopProcessCPU(t)
-			base := openLoopResult{problems: map[string]int{}, offered: openLoopBaselineCalls}
-			for n := 0; n < openLoopBaselineCalls; n++ {
-				_, elapsed, status, out, err := performPerUserOpenLoopCall(t.Context(), srv.URL, cwd, names[0], 1000000+n)
-				base.record(elapsed, status, out, err)
-			}
-			base.cpuPerCall = (openLoopProcessCPU(t) - cpuBefore) / openLoopBaselineCalls
-			plan := openLoopPlan{tokens: names, perSecond: perSecond, duration: leg.duration, cores: runtime.GOMAXPROCS(0)}
-			if path := os.Getenv("S8_GOROUTINE_DUMP"); path != "" {
-				// A goroutine profile half way through the stream, for the
-				// diagnosis of a slow run (not part of the judgement).
-				timer := time.AfterFunc(leg.duration/2, func() {
-					if out, err := os.Create(fmt.Sprintf("%s-%d-%s.txt", path, sessions, leg.name)); err == nil {
-						_ = pprof.Lookup("goroutine").WriteTo(out, 1)
-						_ = out.Close()
-					}
-				})
-				defer timer.Stop()
-			}
-			got, denies := drivePerUserOpenLoop(t.Context(), srv.URL, cwd, plan)
-			verdict := judgePerUserOpenLoop(plan, got, base, denies)
-			t.Logf("PERUSER-OPENLOOP leg=%s sessions=%d rate=%d: %s: %s", leg.name, sessions, perSecond, verdict.kind, verdict.detail)
-			if leg.judged && verdict.kind != "ok" {
-				t.Fatal(verdict.detail)
+	cpuBefore := openLoopProcessCPU(t)
+	base := openLoopResult{problems: map[string]int{}, offered: openLoopBaselineCalls}
+	for n := 0; n < openLoopBaselineCalls; n++ {
+		_, elapsed, status, out, err := performPerUserOpenLoopCall(t.Context(), srv.URL, cwd, names[0], 1000000+n)
+		base.record(elapsed, status, out, err)
+	}
+	base.cpuPerCall = (openLoopProcessCPU(t) - cpuBefore) / openLoopBaselineCalls
+	plan := openLoopPlan{tokens: names, perSecond: perSecond, duration: duration, cores: runtime.GOMAXPROCS(0)}
+	if path := os.Getenv("S8_GOROUTINE_DUMP"); path != "" {
+		// A goroutine profile half way through the stream, for the
+		// diagnosis of a slow run (not part of the judgement).
+		timer := time.AfterFunc(duration/2, func() {
+			if out, err := os.Create(fmt.Sprintf("%s-%d.txt", path, sessions)); err == nil {
+				_ = pprof.Lookup("goroutine").WriteTo(out, 1)
+				_ = out.Close()
 			}
 		})
+		defer timer.Stop()
+	}
+	got, denies := drivePerUserOpenLoop(t.Context(), srv.URL, cwd, plan)
+	verdict := judgePerUserOpenLoop(plan, got, base, denies)
+	t.Logf("PERUSER-OPENLOOP sessions=%d rate=%d: %s: %s", sessions, perSecond, verdict.kind, verdict.detail)
+	if verdict.kind != "ok" {
+		t.Fatal(verdict.detail)
 	}
 }
 
-// setHookCorrelationGroupOccurrences sets the group size of a leg; only
-// these opt-in, non-Windows legs use it.
-func setHookCorrelationGroupOccurrences(t *testing.T, occurrences int) {
-	t.Helper()
-	limits := hookCorrelationGroupLimits
-	limits.Occurrences = occurrences
-	setHookCorrelationGroupLimits(t, limits)
+// perUserHookAllowed reports whether a Claude Code hook answer lets the call
+// run: an explicit allow, or no decision at all (the hook then runs it).
+func perUserHookAllowed(out []byte) bool {
+	var answer map[string]any
+	if json.Unmarshal(out, &answer) != nil {
+		return false
+	}
+	if action, ok := answer["action"].(string); ok {
+		return action == "allow"
+	}
+	if specific, ok := answer["hookSpecificOutput"].(map[string]any); ok {
+		if decision, ok := specific["permissionDecision"].(string); ok {
+			return decision == "allow"
+		}
+	}
+	if decision, ok := answer["decision"].(string); ok {
+		return decision != "block" && decision != "deny"
+	}
+	return true
 }
 
 // perUserOpenLoopClient opens a new connection per call, as the hook does.
