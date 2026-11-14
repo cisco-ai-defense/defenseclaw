@@ -520,22 +520,17 @@ def lone_hook_decision_rows_sql(alias: str = "lone") -> str:
     )
 
 
-def lone_hook_decision_sql(alias: str = "", table: str = "audit_events", tracked: bool = False) -> str:
+def lone_hook_decision_sql(alias: str = "", table: str = "audit_events") -> str:
     """SQL predicate: the row is a hook_decision row that is its decision's only hook row.
 
-    ``tracked`` reads audit_hook_lone (one key lookup per row). Without it,
-    on a store no 1.0.10 gateway has opened, the connector-hook ids of the
-    subquery are computed once per statement (an uncorrelated ``NOT IN``), so a
-    scan costs one pass over each kind's projected records.
+    The projected-record form, for a store no 1.0.10 gateway has opened (no
+    audit_hook_lone; :func:`lone_hook_decision_rows_sql` otherwise). The
+    connector-hook ids of the subquery are computed once per statement (an
+    uncorrelated ``NOT IN``), so a scan costs one pass over each kind's
+    projected records.
     """
 
     prefix = f"{alias}." if alias else ""
-    if tracked:
-        row = f"{alias}.id" if alias else f"{table}.id"
-        return (
-            f"({prefix}action = '{HOOK_DECISION_ACTION}' AND EXISTS (SELECT 1 FROM {HOOK_ROWS_TABLE} AS hook_lone"
-            f" WHERE hook_lone.audit_event_id = {row}))"
-        )
     own = hook_semantic_event_id_sql(f"{prefix}projected_record_json")
     sibling = hook_semantic_event_id_sql("sibling.projected_record_json")
     return (

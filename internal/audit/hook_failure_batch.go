@@ -46,9 +46,6 @@ func (l *Logger) LogHookFailureRowsAtomic(ctx context.Context, rows []HookFailur
 		return 0, fmt.Errorf("audit: invalid hook failure batch")
 	}
 	rows = l.hookFailureRowsWithKnownEvents(ctx, rows)
-	// Each report row pairs the listed fail-mode decision of its call
-	// (audit_hook_lone, rel-1-0-10:GAP-0316).
-	ctx = withHookFailureReport(ctx)
 	binding := l.runtimeV8BindingSnapshot()
 	atomicEmitter, ok := binding.emitter.(RuntimeV8AtomicLogBatchEmitter)
 	if !ok {

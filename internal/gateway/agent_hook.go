@@ -1686,11 +1686,13 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// and was written in the audit section with the connector-hook record
 	// export only (#1384); AuditPersisted is then its commit.
 	decisionInAudit := false
-	// connectorRowMissing: the audit section ran and stored no connector-hook
-	// row for this call (its write failed, or the row of record was
-	// abandoned), so the fail-mode decision written below is the decision's
-	// only local hook row (rel-1-0-10:GAP-0316). A panicked section is left
-	// out: a connector-hook row it queued may still commit.
+	// connectorRowMissing: the audit section ran and did not commit the
+	// call's connector-hook row (its write failed, it panicked, or the row
+	// of record was abandoned), so the fail-mode decision written below may
+	// be the decision's only local hook row (rel-1-0-10:GAP-0316). The store
+	// lists it only while no connector-hook row of its event is stored: a
+	// row that is already there, or one a queued write, the failure report
+	// or pending recovery commits later, pairs it.
 	connectorRowMissing := false
 	if !replay {
 		var auditErr error
@@ -1759,7 +1761,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		// verdict the agent never saw. An unjournaled occurrence keeps its
 		// record IDs but nothing recovers it.
 		recoverable := req.pendingJournaled
-		connectorRowMissing = !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured)
+		connectorRowMissing = !result.AuditPersisted && !errors.Is(auditErr, errHookAuditNotConfigured)
 		if !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured) {
 			if auditErr == nil {
 				auditErr = errors.New("the audit section panicked")
@@ -1865,7 +1867,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 					defer cancel()
 				}
 			}
-			if connectorRowMissing && !panicked {
+			if connectorRowMissing {
 				decisionBaseCtx = audit.WithLoneHookDecisionAwaitingReport(decisionBaseCtx)
 			}
 			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(decisionBaseCtx)

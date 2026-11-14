@@ -43,7 +43,7 @@ func trackForTest(t *testing.T, store *Store, action, id, sid string, lone bool)
 }
 
 // trackModeForTest: mode "record" (row of record), "awaiting" (fail-mode
-// decision), "report" (a failure-report connector-hook row), "" plain.
+// decision), "" plain.
 func trackModeForTest(t *testing.T, store *Store, action, id, sid, mode string) {
 	t.Helper()
 	ctx := context.Background()
@@ -52,8 +52,6 @@ func trackModeForTest(t *testing.T, store *Store, action, id, sid, mode string) 
 		ctx = WithLoneHookDecision(ctx)
 	case "awaiting":
 		ctx = WithLoneHookDecisionAwaitingReport(ctx)
-	case "report":
-		ctx = withHookFailureReport(ctx)
 	}
 	tx, err := store.db.Begin()
 	if err != nil {
@@ -152,7 +150,7 @@ func TestLoneHookDecisionsComeFromTheLoneTable(t *testing.T) {
 	}
 	// The failure report writes the call's connector-hook row afterwards.
 	hookRowForTest(t, store.db, "late-report", string(ActionConnectorHook), "sid-late", 0)
-	trackModeForTest(t, store, string(ActionConnectorHook), "late-report", "sid-late", "report")
+	trackModeForTest(t, store, string(ActionConnectorHook), "late-report", "sid-late", "")
 	for _, tracked := range []bool{true, false} {
 		if got := loneHookDecisionIDsForTest(t, store.db, tracked); fmt.Sprint(got) != "[lone]" {
 			t.Fatalf("lone rows after the report (tracked %t) = %v, want [lone]", tracked, got)
@@ -189,21 +187,9 @@ func TestLoneHookDecisionsComeFromTheLoneTable(t *testing.T) {
 
 // TestNonLoneHookRowsWriteNothing: a hook_decision row written without the
 // lone mark and a connector-hook row of a semantic event with no entry
-// leave audit_hook_lone empty: the managed path and every paired decision
-// pay no insert.
+// leave audit_hook_lone empty: every paired decision pays no insert.
 func TestNonLoneHookRowsWriteNothing(t *testing.T) {
 	store := newHookRowTrackingStoreForTest(t)
-	// A connector-hook row that is not the failure report's leaves a listed
-	// fail-mode decision alone: only the report pairs it.
-	hookRowForTest(t, store.db, "wait-hd", hookDecisionEventName, "sid-wait", 0)
-	trackModeForTest(t, store, hookDecisionEventName, "wait-hd", "sid-wait", "awaiting")
-	trackForTest(t, store, string(ActionConnectorHook), "other-ch", "sid-wait", false)
-	if got := loneHookDecisionIDsForTest(t, store.db, true); fmt.Sprint(got) != "[wait-hd]" {
-		t.Fatalf("lone rows = %v, want [wait-hd]", got)
-	}
-	if _, err := store.db.Exec(`DELETE FROM audit_events WHERE id = 'wait-hd'`); err != nil {
-		t.Fatal(err)
-	}
 	trackForTest(t, store, string(ActionConnectorHook), "ch", "sid-1", false)
 	trackForTest(t, store, hookDecisionEventName, "hd", "sid-1", false)
 	trackForTest(t, store, hookDecisionEventName, "no-sid", "", true)
@@ -296,4 +282,86 @@ func TestRowOfRecordEntryIsItsKeyAlone(t *testing.T) {
 	if sid.Valid {
 		t.Fatalf("a row of record's entry stores semantic event %q, want NULL", sid.String)
 	}
+}
+
+// observedHookRowForTest stores a hook row and its correlation observation
+// the way the event-history writer does, on a connection without
+// foreign_keys (no correlation_events row is needed), and runs no lone-row
+// bookkeeping: a 1.0.9 binary, or a row the bookkeeping did not see.
+func observedHookRowForTest(t *testing.T, store *Store, id, action, sid string) {
+	t.Helper()
+	hookRowForTest(t, store.db, id, action, sid, 0)
+	plain, err := sql.Open("sqlite", "file:"+store.dbPath+"?_pragma=foreign_keys(0)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if _, err := plain.Exec(`INSERT INTO correlation_observations (record_id, semantic_event_id, signal, bucket,
+		event_name, observed_time_unix_nano, status) VALUES (?, ?, 'logs', 'guardrail.evaluation', ?, ?, 'export_eligible')`,
+		id, sid, action, time.Now().UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFailModeDecisionIsListedOnlyWhileUnpaired: the fail-mode entry of a
+// call follows the record rule whoever writes the call's connector-hook
+// row (rel-1-0-10:GAP-0316 review P2/P3):
+//   - a connector-hook or connector-hook-synthetic row written later by any
+//     writer (pending recovery, a late queued write, not only the failure
+//     report) removes it;
+//   - it is never listed when such a row is already stored (a report that
+//     committed first, a recovery whose stored-row check failed);
+//   - Init removes an entry that a 1.0.9 binary paired after a rollback.
+//
+// After each step the lone table agrees with the projected-record rule.
+func TestFailModeDecisionIsListedOnlyWhileUnpaired(t *testing.T) {
+	store := newHookRowTrackingStoreForTest(t)
+	agree := func(step, want string) {
+		t.Helper()
+		for _, tracked := range []bool{true, false} {
+			if got := fmt.Sprint(loneHookDecisionIDsForTest(t, store.db, tracked)); got != want {
+				t.Fatalf("%s: lone rows (tracked %t) = %s, want %s", step, tracked, got, want)
+			}
+		}
+	}
+	awaiting := func(id, sid string) {
+		hookRowForTest(t, store.db, id, hookDecisionEventName, sid, 0)
+		trackModeForTest(t, store, hookDecisionEventName, id, sid, "awaiting")
+	}
+
+	awaiting("recovered-hd", "sid-recovered")
+	awaiting("stop-hd", "sid-stop")
+	agree("listed", "[recovered-hd stop-hd]")
+	hookRowForTest(t, store.db, "recovered-ch", string(ActionConnectorHook), "sid-recovered", 0)
+	trackForTest(t, store, string(ActionConnectorHook), "recovered-ch", "sid-recovered", false)
+	hookRowForTest(t, store.db, "stop-syn", string(ActionConnectorHookSynthetic), "sid-stop", 0)
+	trackForTest(t, store, string(ActionConnectorHookSynthetic), "stop-syn", "sid-stop", false)
+	agree("paired by later rows", "[]")
+
+	observedHookRowForTest(t, store, "first-ch", string(ActionConnectorHook), "sid-first")
+	awaiting("first-hd", "sid-first")
+	// Only a connector-hook row pairs: another row kind of the same event
+	// does not.
+	observedHookRowForTest(t, store, "other-block", string(ActionGuardrailBlock), "sid-other")
+	awaiting("other-fail-hd", "sid-other")
+	agree("row already stored", "[other-fail-hd]")
+
+	awaiting("rollback-hd", "sid-rollback")
+	observedHookRowForTest(t, store, "rollback-ch", string(ActionConnectorHook), "sid-rollback")
+	if got := fmt.Sprint(loneHookDecisionIDsForTest(t, store.db, true)); got != "[other-fail-hd rollback-hd]" {
+		t.Fatalf("before the reopen: tracked lone rows = %s, want [other-fail-hd rollback-hd]", got)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewStore(store.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.Init(); err != nil {
+		t.Fatal(err)
+	}
+	store = reopened
+	agree("after Init", "[other-fail-hd]")
 }
