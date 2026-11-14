@@ -63,7 +63,7 @@ jobs:
     # Each part has its own runner: gwN runs shard N of 16 of the gateway
     # package and shard N of 16 of the connector package, both balanced on
     # recorded Windows test times (scripts/test-timings/go-windows.json);
-    # pkN one of fourteen timing-balanced parts of the remaining packages and hxN
+    # pkN one of fifteen timing-balanced parts of the remaining packages and hxN
     # one of six test-level parts of hookexec (still -p=1 within each part).
     # The checks part runs DACL, redaction, isolated connector tests, vet, and
     # builds; stress runs the single-flight and executable
@@ -105,6 +105,7 @@ jobs:
           - { shard: pk11, kind: packages, index: 11 }
           - { shard: pk12, kind: packages, index: 12 }
           - { shard: pk13, kind: packages, index: 13 }
+          - { shard: pk14, kind: packages, index: 14 }
           - { shard: hx0, kind: hookexec, index: 0 }
           - { shard: hx1, kind: hookexec, index: 1 }
           - { shard: hx2, kind: hookexec, index: 2 }
@@ -175,6 +176,77 @@ jobs:
           $escapedRecordTest = [regex]::Escape($recordTest)
           if ([string]$record.StdOut -notmatch "(?m)^--- PASS: $escapedRecordTest ") {
             throw "$recordTest did not complete with PASS on the native Windows runner (a SKIP leaves the real-ACL guard unexercised)"
+          }
+          # The shipped strict and permissive rule packs under the real trust
+          # check (#1445): every test must PASS here, none may SKIP.
+          $shipped = Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=1', '-run', '^TestWindowsShippedRulePacks', './internal/cli'
+          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-shipped-rule-packs-test.log')
+          foreach ($shippedTest in @(
+            'TestWindowsShippedRulePacksConverges',
+            'TestWindowsShippedRulePacksRealTrustMovesAnUntrustedRootAside',
+            'TestWindowsShippedRulePacksRealTrustRewritesALinkInside',
+            'TestWindowsShippedRulePacksRealTrustRewritesAUserOwnedChild',
+            'TestWindowsShippedRulePacksRealTrustAcceptsAnAdministratorOwnedChild'
+          )) {
+            if ([string]$shipped.StdOut -notmatch "(?m)^--- PASS: $([regex]::Escape($shippedTest)) ") {
+              throw "$shippedTest did not complete with PASS on the native Windows runner"
+            }
+          }
+          # The versioned hook image (GAP-0751 review 1): the folder rename that
+          # prune relies on is refused while an image runs, the launch folder
+          # DACL, and the start check (timeout, no inherited handles, filtered
+          # token, the self test of the built hook, the real config scan of a
+          # claudecode target, an account file behind a junction is skipped,
+          # the handle-relative open refuses a swapped junction and a folder,
+          # the vendor folders are listed from the ProgramData handle).
+          # Every test must PASS here, none may SKIP.
+          $hookImage = Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=1', '-run', '^TestWindowsHookImageNative', './internal/cli'
+          ) -TimeoutSeconds 1800 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-hook-image-native-test.log')
+          foreach ($hookImageTest in @(
+            'TestWindowsHookImageNativeRenameRefusedWhileAnImageRuns',
+            'TestWindowsHookImageNativeFolderDACL',
+            'TestWindowsHookImageNativeStarterTimesOut',
+            'TestWindowsHookImageNativeStarterInheritsNoHandles',
+            'TestWindowsHookImageNativeStarterUsesTheFilteredToken',
+            'TestWindowsHookImageNativeSelfTestRunsTheBuiltHook',
+            'TestWindowsHookImageNativeScanWithAClaudeTarget',
+            'TestWindowsHookImageNativeAccountFileBehindAJunction',
+            'TestWindowsHookImageNativeOpenBelowRefusesASwappedJunction',
+            'TestWindowsHookImageNativeVendorFolders'
+          )) {
+            if ([string]$hookImage.StdOut -notmatch "(?m)^--- PASS: $([regex]::Escape($hookImageTest)) ") {
+              throw "$hookImageTest did not complete with PASS on the native Windows runner"
+            }
+          }
+      - name: Run native Windows enterprise Setup recovery and mutex tests
+        if: ${{ matrix.kind == 'checks' }}
+        run: |
+          # The standalone Setup recovery wait and its host-wide mutexes run
+          # only on Windows with an elevated token; none may SKIP here
+          # (rel-1-0-6:GAP-1080 and the 1.0.10 T1 review: a mutex another
+          # account owns is ignored, a rerun waits for the armed recovery).
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $go = (Get-Command go.exe -ErrorAction Stop).Source
+          $setupTests = @(
+            'TestStandaloneUninstallRecoveryHoldsItsMutexThroughTheReplay',
+            'TestStandaloneRerunWaitsForTheArmedRecoveryToFinish',
+            'TestStandaloneUninstallRerunDuringTheArmedRecoveryIsBusy',
+            'TestStandaloneSetupMutexIgnoresAMutexAnotherOwnerHolds',
+            'TestStandaloneSetupMutexWaitsForAMutexAdministratorsOwn',
+            'TestStandaloneRerunGoesOnWhenAnotherObjectSquatsTheRecoveryName',
+            'TestStandaloneEnsureGoesOnWithoutASquattedMutexAndHoldsNothing'
+          )
+          $setup = Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=1', '-run', ('^(' + ($setupTests -join '|') + ')$'), './cmd/defenseclaw-enterprise-setup'
+          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-enterprise-setup-recovery-test.log')
+          foreach ($test in $setupTests) {
+            $escaped = [regex]::Escape($test)
+            if ([string]$setup.StdOut -notmatch "(?m)^--- PASS: $escaped ") {
+              throw "$test did not complete with PASS on the native Windows runner (a SKIP leaves it unexercised)"
+            }
           }
       - name: Run full native Windows redaction key package before downstream stress
         if: ${{ matrix.kind == 'checks' }}
@@ -265,7 +337,7 @@ jobs:
           $suiteKind = [string]$env:GO_SUITE_KIND
           $matrixShard = [int]$env:GO_SUITE_INDEX
           $nativeTestShardCount = 16
-          $remainingPackageShardCount = 14
+          $remainingPackageShardCount = 15
           $hookexecTestShardCount = 6
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
           $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
@@ -402,25 +474,35 @@ jobs:
               @{ Dir = 'internal/gateway/connector'; Skip = $connectorSkip; Extra = @() }
             )) {
               $leaf = ($part.Dir -replace '^internal/', '') -replace '/', '-'
+              # --bounded: the shard comes as -run regexes of at most 16,000
+              # characters, one per line (a Windows command line holds 32,767;
+              # gw6 of 43331326436 could not start go.exe on a 34,028-character
+              # pattern). Each line is its own go test run of the package.
               $selection = Invoke-WindowsNativeProcess $uv @(
                 'run', '--no-project', '--python', '3.12', 'python', 'scripts/go_test_shards.py',
                 '--package-dir', $part.Dir,
                 '--timings', 'scripts/test-timings/go-windows.json',
                 '--shard-count', [string]$nativeTestShardCount,
-                '--shard-index', [string]$matrixShard
+                '--shard-index', [string]$matrixShard,
+                '--bounded'
               ) -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT ("go-$leaf-shard-select.log"))
-              $shardPattern = ([string]$selection.StdOut).Trim()
-              if ($shardPattern -notmatch '^\^\(\?:.+\)\$$') {
+              $shardPatterns = @(
+                [regex]::Split(([string]$selection.StdOut).Trim(), '\r?\n') |
+                  ForEach-Object { $_.Trim() } | Where-Object { $_ }
+              )
+              if (-not $shardPatterns -or @($shardPatterns | Where-Object { $_ -notmatch '^\^\(\?:.+\)\$$' })) {
                 throw "go_test_shards.py selected no $($part.Dir) tests for shard $matrixShard"
               }
-              # -timeout stays below the job's 20 minutes so a hung test
-              # fails with Go's goroutine dump, not a cancelled job.
-              Invoke-WindowsNativeProcess $go (@(
-                'test', '-vet=off', '-json', '-count=1', '-timeout=11m', '-p=1') + $part.Extra + @(
-                '-skip', $part.Skip, '-run', $shardPattern, ('./' + $part.Dir)
-              )) -TimeoutSeconds 840 `
-                -LogPath (Join-Path $env:DC_STATE_ROOT ("go-$leaf-shard-$matrixShard.log")) `
-                -GoTestFailureSummaryPath $goFailureSummary | Out-Null
+              for ($patternIndex = 0; $patternIndex -lt $shardPatterns.Count; $patternIndex++) {
+                # -timeout stays below the job's 20 minutes so a hung test
+                # fails with Go's goroutine dump, not a cancelled job.
+                Invoke-WindowsNativeProcess $go (@(
+                  'test', '-vet=off', '-json', '-count=1', '-timeout=11m', '-p=1') + $part.Extra + @(
+                  '-skip', $part.Skip, '-run', $shardPatterns[$patternIndex], ('./' + $part.Dir)
+                )) -TimeoutSeconds 840 `
+                  -LogPath (Join-Path $env:DC_STATE_ROOT ("go-$leaf-shard-$matrixShard-$patternIndex.log")) `
+                  -GoTestFailureSummaryPath $goFailureSummary | Out-Null
+              }
             }
             Write-Host "Native Windows Go matrix shard $matrixShard completed its gateway and connector shards."
             return

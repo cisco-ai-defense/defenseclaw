@@ -951,8 +951,13 @@ func (repo *CorrelationRepository) BeginOccurrence(
 	// The occurrence reads before it writes. Another writer of this process
 	// that commits in between makes the upgrade fail at once with
 	// SQLITE_BUSY_SNAPSHOT and the hook starts its correlation over, so this
-	// transaction takes the write baton first (writeBaton).
-	turn, err := repo.store.writeBaton.acquire(ctx)
+	// transaction takes the write baton first (writeBaton), ahead of the
+	// records of calls already answered: the answer waits on it.
+	acquireTurn := repo.store.writeBaton.acquireUrgent
+	if repo.store.secureClientSchema {
+		acquireTurn = repo.store.writeBaton.acquire
+	}
+	turn, err := acquireTurn(ctx)
 	if err != nil {
 		release()
 		return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)
@@ -1376,6 +1381,57 @@ func (repo *CorrelationRepository) markReceiptCanonicalPersisted(
 	return nil
 }
 
+// correlationReceiptSettleSQL is SettleReceipt's statement; it seeks the
+// receipts' primary key by its two leading columns or
+// idx_correlation_receipts_event, never reads the table whole.
+const correlationReceiptSettleSQL = `UPDATE correlation_receipts
+	SET expires_time_unix_nano=MAX(last_received_time_unix_nano, MIN(expires_time_unix_nano, ?))
+	WHERE connector_instance_id=? AND source_key_digest=? AND semantic_event_id=?`
+
+// SettleReceipt shortens the delivery receipt of one settled occurrence,
+// named by its own source key, to expire at expiresAt. The hook path calls
+// it for the PreToolUse of a tool call whose PostToolUse has just come
+// (correlationSettledReceiptTTL): the receipt still suppresses the agent
+// sending that PreToolUse again for as long as a replay could still make a
+// second decision of the call count, and retention then removes it instead
+// of keeping it, and its event, for the whole receipt TTL. Only the receipt
+// of that key changes: another rail's receipt of the same event (a native
+// leaf that reported the event's semantic ID) keeps its own expiry. A
+// replay that comes later is recorded again, as one past the TTL always
+// was. A Secure Client store keeps main's receipts (S8 R5).
+func (tx *CorrelationTx) SettleReceipt(
+	ctx context.Context,
+	instance ConnectorInstanceID,
+	sourceKeyDigest string,
+	semantic SemanticEventID,
+	expiresAt time.Time,
+) error {
+	if err := tx.usable(ctx); err != nil {
+		return err
+	}
+	if err := validateUUIDv7("connector instance id", string(instance)); err != nil {
+		return err
+	}
+	if err := validateSHA256("receipt source key digest", sourceKeyDigest, true); err != nil {
+		return err
+	}
+	if err := validateUUIDv7("settled semantic event id", string(semantic)); err != nil {
+		return err
+	}
+	if expiresAt.IsZero() {
+		return errors.New("audit: settled receipt expiry is required")
+	}
+	if tx.repo.store.secureClientSchema {
+		return nil
+	}
+	if _, err := txExecContextObserved(ctx, tx.tx, "correlation_receipt_settle",
+		tx.repo.store.sqliteBusyObservabilityV8(), correlationReceiptSettleSQL,
+		unixNano(expiresAt), string(instance), sourceKeyDigest, string(semantic)); err != nil {
+		return fmt.Errorf("audit: settle correlation receipt: %w", err)
+	}
+	return nil
+}
+
 // MarkOccurrenceCanonicalPersisted finalizes exactly one pending receipt.
 // Hooks, native OTLP, proxy, and stream coordinators may all use this API only
 // after their canonical local observation/export-eligibility commit succeeds.
@@ -1626,6 +1682,19 @@ func (tx *CorrelationTx) PutRelationshipEvidence(
 		evidenceValue = string(evidence.SemanticEventID)
 	}
 	id := deterministicCorrelationID("ev_", evidence.RelationshipID, evidenceValue, string(evidence.Role))
+	if evidence.RecordID == "" && evidence.Role == CorrelationEvidenceSource &&
+		evidence.Integrity == CorrelationIntegrityVerified && !tx.repo.store.secureClientSchema {
+		var fromKind, fromID string
+		err := tx.tx.QueryRowContext(ctx, `SELECT from_kind, from_id FROM correlation_relationships
+			WHERE relationship_id=?`, evidence.RelationshipID).Scan(&fromKind, &fromID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("audit: read relationship of correlation evidence: %w", err)
+		}
+		if err == nil && fromKind == string(CorrelationNodeSemanticEvent) && fromID == string(evidence.SemanticEventID) {
+			// The relationship implies this row (impliedCorrelationEvidence).
+			return id, nil
+		}
+	}
 	_, err := txExecContextObserved(ctx, tx.tx, "correlation_evidence_upsert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_relationship_evidence (
 			evidence_id, relationship_id, evidence_record_id, semantic_event_id, evidence_role,
@@ -1657,13 +1726,51 @@ func (tx *CorrelationTx) RelationshipEvidenceCount(
 	); err != nil {
 		return 0, err
 	}
+	var fromKind, fromID string
+	switch err := tx.tx.QueryRowContext(ctx, `SELECT from_kind, from_id FROM correlation_relationships
+		WHERE relationship_id=?`, relationshipID).Scan(&fromKind, &fromID); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return 0, fmt.Errorf("audit: read correlation relationship of evidence count: %w", err)
+	}
+	implied, hasImplied := impliedCorrelationEvidence(CorrelationRelationship{
+		RelationshipID: relationshipID, FromKind: CorrelationNodeKind(fromKind), FromID: fromID,
+	})
 	var count int64
 	if err := tx.tx.QueryRowContext(ctx, `SELECT COUNT(*)
-		FROM correlation_relationship_evidence WHERE relationship_id = ?`,
-		relationshipID).Scan(&count); err != nil {
+		FROM correlation_relationship_evidence WHERE relationship_id = ? AND evidence_id <> ?`,
+		relationshipID, implied.EvidenceID).Scan(&count); err != nil {
 		return 0, fmt.Errorf("audit: count correlation relationship evidence: %w", err)
 	}
+	if hasImplied {
+		count++
+	}
 	return count, nil
+}
+
+// impliedCorrelationEvidence is the evidence a relationship from a semantic
+// event implies: that event, as its verified source. Every writer of such a
+// relationship records the occurrence it came from as its source, so the
+// row only repeated the relationship's own from_id. PutRelationshipEvidence
+// stores it no more; QueryGraph (loadEvidence) and RelationshipEvidenceCount
+// add it, with the evidence ID and creation time a stored row had, so the
+// graph a reader gets and the exported evidence count are the same with or
+// without the stored row (a store a 1.0.9 binary wrote keeps its rows). A
+// Secure Client store keeps storing the row, so its rows stay main's.
+// Retention was already blind to it: a relationship's from node protects it
+// exactly when this row's semantic event did (S8 R5).
+func impliedCorrelationEvidence(relationship CorrelationRelationship) (CorrelationRelationshipEvidence, bool) {
+	if relationship.FromKind != CorrelationNodeSemanticEvent || relationship.FromID == "" {
+		return CorrelationRelationshipEvidence{}, false
+	}
+	return CorrelationRelationshipEvidence{
+		EvidenceID: deterministicCorrelationID("ev_", relationship.RelationshipID, relationship.FromID,
+			string(CorrelationEvidenceSource)),
+		RelationshipID:  relationship.RelationshipID,
+		SemanticEventID: SemanticEventID(relationship.FromID),
+		Role:            CorrelationEvidenceSource, Integrity: CorrelationIntegrityVerified,
+		CreatedAt: relationship.CreatedAt,
+	}, true
 }
 
 func (tx *CorrelationTx) requireExistingOccurrenceTarget(
@@ -1799,6 +1906,42 @@ func (tx *CorrelationTx) PutPendingOperation(
 	return fmt.Errorf("audit: pending operation identity collision: %w", ErrCorrelationConflict)
 }
 
+// The statements of ResolvePendingOperation; the index trim test runs
+// EXPLAIN on them. The exact key is the primary key of the table.
+const (
+	correlationPendingResolveSQL = `DELETE FROM correlation_pending_operations
+		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
+		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=? AND status='active'`
+	correlationPendingMarkResolvedSQL = `UPDATE correlation_pending_operations SET
+		terminal_semantic_event_id=?, terminal_time_unix_nano=?, status=?, updated_time_unix_nano=?
+		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
+		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=? AND status='active'`
+	correlationPendingExactStatusSQL = `SELECT status FROM correlation_pending_operations
+		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
+		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=?`
+	correlationPendingOtherScopeSQL = `SELECT 1 FROM correlation_pending_operations
+		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
+		AND operation_id=? AND operation_type=? AND status='active' LIMIT 1`
+)
+
+// ResolvePendingOperation ends the active operation at locator.
+//
+// Outside Secure Client it deletes the operation: every reader of pending
+// operations asks for active ones, and every caller treats an operation
+// already ended (ErrCorrelationStale) and one not in the locator's scope
+// (ErrCorrelationNotFound) alike, so the ended row, with its terminal event
+// and status, was never read again and only took bytes until retention (S8
+// R5). Without that row an end can no longer tell "ended already" from
+// "another scope holds an operation of this ID" (a provider ID reused across
+// sessions, in either order), so both are ErrCorrelationNotFound: a second
+// delivery of an end, or a late one, is recorded without a pending join and
+// never fails the hook's correlation, and the other scope's operation stays
+// active. An operation a 1.0.9 binary ended is still found stale. Ended rows
+// are removed by retention's ended-operation batch.
+//
+// A Secure Client store keeps main's state: the operation is marked ended
+// with terminalEventID, status and terminalAt, and an operation of the ID in
+// another scope only is ErrCorrelationConflict.
 func (tx *CorrelationTx) ResolvePendingOperation(
 	ctx context.Context,
 	locator CorrelationPendingLocator,
@@ -1821,14 +1964,16 @@ func (tx *CorrelationTx) ResolvePendingOperation(
 	if terminalAt.IsZero() {
 		terminalAt = time.Now().UTC()
 	}
+	key := []any{string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind),
+		locator.OperationID, string(locator.Type), string(locator.ScopeKind), locator.ScopeID}
+	secureClient := tx.repo.store.secureClientSchema
+	statement, args := correlationPendingResolveSQL, key
+	if secureClient {
+		statement = correlationPendingMarkResolvedSQL
+		args = append([]any{string(terminalEventID), unixNano(terminalAt), string(status), unixNano(terminalAt)}, key...)
+	}
 	result, err := txExecContextObserved(ctx, tx.tx, "correlation_pending_resolve",
-		tx.repo.store.sqliteBusyObservabilityV8(), `UPDATE correlation_pending_operations SET
-		terminal_semantic_event_id=?, terminal_time_unix_nano=?, status=?, updated_time_unix_nano=?
-		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
-		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=? AND status='active'`,
-		string(terminalEventID), unixNano(terminalAt), string(status), unixNano(terminalAt),
-		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
-		string(locator.Type), string(locator.ScopeKind), locator.ScopeID)
+		tx.repo.store.sqliteBusyObservabilityV8(), statement, args...)
 	if err != nil {
 		return fmt.Errorf("audit: resolve correlation pending operation: %w", err)
 	}
@@ -1840,23 +1985,18 @@ func (tx *CorrelationTx) ResolvePendingOperation(
 		return nil
 	}
 	var exactStatus string
-	err = tx.tx.QueryRowContext(ctx, `SELECT status FROM correlation_pending_operations
-		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
-		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=?`,
-		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
-		string(locator.Type), string(locator.ScopeKind), locator.ScopeID).Scan(&exactStatus)
+	err = tx.tx.QueryRowContext(ctx, correlationPendingExactStatusSQL, key...).Scan(&exactStatus)
 	if err == nil {
 		return ErrCorrelationStale
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("audit: inspect unresolved exact pending operation: %w", err)
 	}
+	if !secureClient {
+		return ErrCorrelationNotFound
+	}
 	var otherScope int
-	err = tx.tx.QueryRowContext(ctx, `SELECT 1 FROM correlation_pending_operations
-		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
-		AND operation_id=? AND operation_type=? AND status='active' LIMIT 1`,
-		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
-		string(locator.Type)).Scan(&otherScope)
+	err = tx.tx.QueryRowContext(ctx, correlationPendingOtherScopeSQL, key[:5]...).Scan(&otherScope)
 	if err == nil {
 		return fmt.Errorf("audit: pending operation exists in a different scope: %w", ErrCorrelationConflict)
 	}

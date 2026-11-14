@@ -157,10 +157,12 @@ func sssdADNamesakes(records []enterprisehooks.IdentitySpoolRecord, entry string
 // human-approval warnings of the config itself, which config validate and
 // profile-explain already gave (id.GAP-1264).
 func standaloneProfileWarnings(set *guardrailProfileSet, cfg *config.Config) []string {
+	// An exclude_users entry that matches no account is listed too
+	// (GAP-1111).
 	if set != nil {
-		return set.healthProfileWarnings()
+		return append(set.healthProfileWarnings(), enrollmentExcludeWarnings(cfg)...)
 	}
-	return ConfigHILTWarnings(cfg)
+	return append(ConfigHILTWarnings(cfg), enrollmentExcludeWarnings(cfg)...)
 }
 
 // inertHILTWarning uses the same resolved threshold as enforcement. Keep

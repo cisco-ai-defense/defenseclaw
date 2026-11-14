@@ -26,7 +26,18 @@ import (
 // TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood reproduces a
 // timed-out hook client whose tool attempt must still be audited. Five clients
 // disconnect before PreToolUse reaches the production handler; their PostToolUse
-// partners and the other 995 pairs keep the 25/s flood going.
+// partners and the other 25 pairs keep the 25/s flood going.
+//
+// The live flood that found rel-1-0-6:GAP-0503 sent 1000 pairs, and 5 of its
+// PreToolUse calls lost their tool rows. The loss is per call: a PreToolUse
+// whose client is gone before the handler runs emitted its tool rows with the
+// cancelled request context. The handler runs each call to its end before the
+// next one starts, so the calls around a disconnected one only interleave it
+// with live pairs on the same store; 30 pairs at the flood's 25/s, with the
+// five disconnected PreToolUse calls spread across them and live pairs after
+// the last one, keep that shape at a thirtieth of the cost. With the fix
+// reverted (emission on the request context) this flood records 25 of 30
+// tool_start rows, as the 1000-pair one recorded 995.
 func TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood(t *testing.T) {
 	grace := agentHookDisconnectGrace
 	agentHookDisconnectGrace = 0
@@ -46,7 +57,8 @@ func TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
 	bindHookLifecycleV8(t, api, fixture.runtime)
 	handler := api.handleAgentHook("claudecode")
-	const pairs = 1000
+	const pairs = 30
+	const disconnectEvery = 6
 	const interval = time.Second / 25
 	next := time.Now()
 	for index := range pairs {
@@ -65,7 +77,7 @@ func TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood(t *testing.T) {
 				t.Fatal(err)
 			}
 			client, disconnect := context.WithCancel(t.Context())
-			if index%200 == 0 && req.HookEventName == "PreToolUse" {
+			if index%disconnectEvery == 0 && req.HookEventName == "PreToolUse" {
 				disconnect()
 			}
 			request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)).WithContext(client)
@@ -78,10 +90,10 @@ func TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, event := range []string{
-		"tool_start", "tool.invocation.requested",
-		"tool_end", "tool.invocation.completed",
-	} {
+	// A PreToolUse keeps its tool call in its hook_decision row; its
+	// tool_start and tool.invocation.requested records are exported only
+	// (#1384). The completion keeps its tool_end and completed rows.
+	for _, event := range []string{"tool_end", "tool.invocation.completed"} {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE event_name = ?`, event).Scan(&count); err != nil {
 			t.Fatal(err)
@@ -89,6 +101,15 @@ func TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood(t *testing.T) {
 		if count != pairs {
 			t.Errorf("%s rows = %d, want %d", event, count, pairs)
 		}
+	}
+	var requested int
+	if err := db.QueryRow(`SELECT COUNT(DISTINCT json_extract(projected_record_json,'$.correlation.tool_invocation_id')) FROM audit_events WHERE event_name = 'hook_decision'
+		AND json_extract(projected_record_json,'$.body."defenseclaw.hook.event"') = 'PreToolUse'
+		`).Scan(&requested); err != nil {
+		t.Fatal(err)
+	}
+	if requested != pairs {
+		t.Errorf("PreToolUse hook_decision rows naming their tool call = %d, want %d", requested, pairs)
 	}
 }
 

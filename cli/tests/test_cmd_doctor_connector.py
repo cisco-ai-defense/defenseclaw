@@ -54,6 +54,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_doctor import (
@@ -833,7 +835,9 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         provenance = "no-installed-mode" if os.name == "nt" else "config"
         self.assertEqual(
             labels["Mode"]["detail"],
-            f"action; fail-mode=closed; provenance={provenance}",
+            f"action; fail-mode=closed; provenance={provenance}; "
+            # What each kind of hook failure does (#1441).
+            "on failure: gateway down: block; no answer: block; hook or answer error: block",
         )
         self.assertIn("Rule pack", labels)
 
@@ -3119,6 +3123,7 @@ class TestConnectorEnabled(unittest.TestCase):
 
 
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class TestDisabledGuardrailDoctorRows(unittest.TestCase):
     """GAP-2511: after setup guardrail --disable doctor says the hooks are removed.
 

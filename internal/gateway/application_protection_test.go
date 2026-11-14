@@ -14,7 +14,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +36,6 @@ func TestNewApplicationProtectionControllerHandlesMissingConfig(t *testing.T) {
 		"tok",
 		"127.0.0.1:4000",
 		"127.0.0.1:18970",
-		"master",
 	)
 	if controller == nil {
 		t.Fatal("controller is nil")
@@ -69,7 +67,7 @@ func TestApplicationProtectionControllerActivatesHookConnector(t *testing.T) {
 		hookConfigPath:    hookConfigPath,
 	}
 	registry.RegisterBuiltin(conn)
-	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -149,7 +147,7 @@ func TestApplicationProtectionRulePackFailureIsConnectorScoped(t *testing.T) {
 	registry.RegisterBuiltin(invalid)
 	registry.RegisterBuiltin(valid)
 	controller := newApplicationProtectionController(
-		sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master",
+		sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970",
 	)
 
 	now := time.Now().UTC()
@@ -197,7 +195,7 @@ func TestApplicationProtectionControllerSkipsMissingHookConfig(t *testing.T) {
 		hookConfigPath:    hookConfigPath,
 	}
 	registry.RegisterBuiltin(conn)
-	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -250,7 +248,7 @@ func TestApplicationProtectionControllerManagedEnterpriseDoesNotWriteUserHooks(t
 		hookConfigPath:    hookConfigPath,
 	}
 	registry.RegisterBuiltin(conn)
-	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -301,7 +299,7 @@ func TestApplicationProtectionControllerSkipsUnverifiedHookContractInActionMode(
 		hookConfigPath:    hookConfigPath,
 	}
 	registry.RegisterBuiltin(conn)
-	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -362,7 +360,7 @@ func TestApplicationProtectionControllerRepairsPreviouslyActiveWithoutHookConfig
 		hookConfigPath:    hookConfigPath,
 	}
 	registry.RegisterBuiltin(conn)
-	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -397,7 +395,7 @@ func TestApplicationProtectionControllerSkipsProxyConnector(t *testing.T) {
 		Guardrail:             config.GuardrailConfig{HookSelfHeal: false},
 	}
 	sidecar := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
-	controller := newApplicationProtectionController(sidecar, connector.NewDefaultRegistry(), "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master")
+	controller := newApplicationProtectionController(sidecar, connector.NewDefaultRegistry(), "tok", "127.0.0.1:4000", "127.0.0.1:18970")
 
 	now := time.Now().UTC()
 	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -419,12 +417,10 @@ func TestApplicationProtectionControllerSkipsProxyConnector(t *testing.T) {
 	if len(state.Skipped) != 1 {
 		t.Fatalf("state.Skipped = %+v, want one proxy skip", state.Skipped)
 	}
-	wantReason := "proxy_connector_setup_only"
-	if runtime.GOOS == "windows" {
-		wantReason = "unsupported_os"
-	}
-	if got := state.Skipped[0].Reason; got != wantReason {
-		t.Errorf("skip reason = %q, want %s", got, wantReason)
+	// OpenClaw runs on every OS (native hooks on Windows) and stays
+	// setup-only everywhere.
+	if got := state.Skipped[0].Reason; got != "proxy_connector_setup_only" {
+		t.Errorf("skip reason = %q, want proxy_connector_setup_only", got)
 	}
 }
 

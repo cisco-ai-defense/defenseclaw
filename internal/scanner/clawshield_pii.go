@@ -23,6 +23,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/paymentcard"
 )
 
 // ClawShieldPIIScanner detects personally identifiable information across 10 categories.
@@ -36,29 +38,58 @@ func (s *ClawShieldPIIScanner) Version() string            { return "1.0.0" }
 func (s *ClawShieldPIIScanner) SupportedTargets() []string { return []string{"skill", "code"} }
 
 type csPIIRule struct {
-	id          string
-	category    string
-	pattern     *regexp.Regexp
-	severity    Severity
-	validator   func(string) bool
-	contextPat  *regexp.Regexp
+	id       string
+	category string
+	pattern  *regexp.Regexp
+	severity Severity
+	// validator, when set, must accept text[start:end] for a match to count.
+	validator  func(text string, start, end int) bool
+	contextPat *regexp.Regexp
+	// once reports at most one finding per file for this rule.
+	once        bool
 	remediation string
 }
 
+var csEmailPattern = regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`)
+
+const (
+	csEmailListMinDistinct = 5
+	csEmailListWindow      = 4096
+)
+
+// csEmailListAt reports csEmailListMinDistinct or more distinct addresses
+// within csEmailListWindow bytes from the address at start.
+func csEmailListAt(text string, start, _ int) bool {
+	end := min(len(text), start+csEmailListWindow)
+	seen := make(map[string]struct{}, csEmailListMinDistinct)
+	for _, loc := range csEmailPattern.FindAllStringIndex(text[start:end], -1) {
+		seen[strings.ToLower(text[start+loc[0]:start+loc[1]])] = struct{}{}
+		if len(seen) >= csEmailListMinDistinct {
+			return true
+		}
+	}
+	return false
+}
+
 var csPIIRules = []csPIIRule{
-	// Credit cards (Luhn-validated)
-	{id: "CS-PII-CC-VISA", category: "credit_card", pattern: regexp.MustCompile(`\b4[0-9]{12}(?:[0-9]{3})?\b`), severity: SeverityCritical, validator: csLuhnCheck, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-MC", category: "credit_card", pattern: regexp.MustCompile(`\b5[1-5][0-9]{14}\b`), severity: SeverityCritical, validator: csLuhnCheck, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-AMEX", category: "credit_card", pattern: regexp.MustCompile(`\b3[47][0-9]{13}\b`), severity: SeverityCritical, validator: csLuhnCheck, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-DISC", category: "credit_card", pattern: regexp.MustCompile(`\b(?:6011|65[0-9]{2}|64[4-9][0-9])[0-9]{12}\b`), severity: SeverityCritical, validator: csLuhnCheck, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-FMT", category: "credit_card", pattern: regexp.MustCompile(`\b[0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}\b`), severity: SeverityCritical, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	// Credit cards: the shared paymentcard rules (Luhn, scheme prefix and
+	// length, card layout, not inside a UUID/hash/id token).
+	{id: "CS-PII-CC-VISA", category: "credit_card", pattern: regexp.MustCompile(`\b4[0-9]{12}(?:[0-9]{3})?\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-MC", category: "credit_card", pattern: regexp.MustCompile(`\b5[1-5][0-9]{14}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-AMEX", category: "credit_card", pattern: regexp.MustCompile(`\b3[47][0-9]{13}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-DISC", category: "credit_card", pattern: regexp.MustCompile(`\b(?:6011|65[0-9]{2}|64[4-9][0-9])[0-9]{12}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-FMT", category: "credit_card", pattern: regexp.MustCompile(`\b[0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
 
 	// SSN
 	{id: "CS-PII-SSN-DASH", category: "ssn", pattern: regexp.MustCompile(`\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b`), severity: SeverityCritical, remediation: "Remove SSNs; never store or transmit in plaintext"},
 	{id: "CS-PII-SSN-SPACE", category: "ssn", pattern: regexp.MustCompile(`\b[0-9]{3}\s[0-9]{2}\s[0-9]{4}\b`), severity: SeverityCritical, remediation: "Remove SSNs; never store or transmit in plaintext"},
 
 	// Email
-	{id: "CS-PII-EMAIL", category: "email", pattern: regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`), severity: SeverityMedium, remediation: "Avoid hardcoding email addresses; use configuration or environment variables"},
+	// Email: one address is LOW (an author or vendor contact); five or more
+	// distinct addresses together is a bulk list (MEDIUM, one finding per
+	// file). Same rule as the guardrail packs (substrate-1:GAP-0149, GAP-0159).
+	{id: "CS-PII-EMAIL", category: "email", pattern: csEmailPattern, severity: SeverityLow, remediation: "Avoid hardcoding email addresses; use configuration or environment variables"},
+	{id: "CS-PII-EMAIL-LIST", category: "email", pattern: csEmailPattern, severity: SeverityMedium, validator: csEmailListAt, once: true, remediation: "Remove lists of email addresses; load contact data from a protected store"},
 
 	// Phone (US — requires separator to avoid false positives on timestamps)
 	{id: "CS-PII-PHONE-1", category: "phone", pattern: regexp.MustCompile(`\b(?:\+1[\s.-]?)?\(?[0-9]{3}\)[\s.-]?[0-9]{3}[\s.-][0-9]{4}\b`), severity: SeverityMedium, remediation: "Remove phone numbers from code and logs"},
@@ -126,7 +157,7 @@ func csPIIScanContent(content []byte, path string) []Finding {
 		for _, loc := range matches {
 			match := text[loc[0]:loc[1]]
 
-			if rule.validator != nil && !rule.validator(match) {
+			if rule.validator != nil && !rule.validator(text, loc[0], loc[1]) {
 				continue
 			}
 
@@ -141,35 +172,13 @@ func csPIIScanContent(content []byte, path string) []Finding {
 				Scanner:     "clawshield-pii",
 				Tags:        []string{"pii", rule.category, "clawshield"},
 			})
+			if rule.once {
+				break
+			}
 		}
 	}
 
 	return findings
-}
-
-// csLuhnCheck implements the Luhn algorithm for credit card validation.
-func csLuhnCheck(number string) bool {
-	cleaned := strings.NewReplacer(" ", "", "-", "").Replace(number)
-	if len(cleaned) < 13 || len(cleaned) > 19 {
-		return false
-	}
-	sum := 0
-	double := false
-	for i := len(cleaned) - 1; i >= 0; i-- {
-		digit := int(cleaned[i] - '0')
-		if digit < 0 || digit > 9 {
-			return false
-		}
-		if double {
-			digit *= 2
-			if digit > 9 {
-				digit -= 9
-			}
-		}
-		sum += digit
-		double = !double
-	}
-	return sum%10 == 0
 }
 
 // csRedactPII partially masks PII values for safe logging.

@@ -341,6 +341,12 @@ func init() {
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksLifecycleCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsTargetRuntimeCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsNamespacePurgeCommand())
+	// #1445: the lifecycle transaction writes the strict and permissive
+	// rule packs this release ships with the installed gateway.
+	enterpriseWindowsCmd.AddCommand(newWindowsShippedRulePacksCommand())
+	// GAP-0751: the lifecycle stages the versioned hook launch folder and
+	// prunes the ones no agent config names any more.
+	enterpriseWindowsCmd.AddCommand(newWindowsHookImageCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHookContractCleanupCommand())
 	// Hook-enumerator subcommand. Windows-only; the
 	// whole file is //go:build windows so a non-Windows build never

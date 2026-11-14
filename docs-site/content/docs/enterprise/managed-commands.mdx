@@ -27,6 +27,7 @@ This table says which `defenseclaw` commands a standard user gets on a computer 
 | --- | --- | --- | --- | --- | --- |
 | `defenseclaw --help, --version, help` | Offered | Offered | Offered | Linux, macOS, Windows | The launcher shows its own help; `help` explains the sandbox and status commands. |
 | `defenseclaw status` | Offered | Offered | Offered | Linux, macOS, Windows | Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`; the reason says whether the machine policy still inspects its calls. An administrator's run shows the deployment. |
+| `defenseclaw routing status` | Offered | Offered | Offered | Linux, macOS, Windows | `routing status`, `routing budgets list` and `routing explain <id>` show your own model routing decisions and budgets, read from the managed gateway; every other routing command is set in the administrator's config. |
 | `defenseclaw sandbox ...` | Offered | Offered | Not supported | Linux, macOS | OpenShell sandboxes run on Linux and macOS only. |
 | `defenseclaw guardrail profile explain` | Offered | Offered | Refused | Linux, macOS, Windows | Shows the guardrail profile that applies to your agents. On Windows the answer points to the administrator's policy view. |
 | `defenseclaw guardrail` | Refused | Refused | Refused | Linux, macOS, Windows | Every guardrail command except `profile explain`, which the row above offers. The guardrail is set in the administrator's config. |
@@ -45,6 +46,8 @@ This table says which `defenseclaw` commands a standard user gets on a computer 
 | `defenseclaw <other per-user command>` | Refused | Refused | Refused | Linux, macOS, Windows | Every other per-user command (acp, agent, aibom, codeguard, edge-connector, init, keys, migrate, observability, quickstart, registry, reset, settings, uninstall, version) belongs to the per-user install; each answers with the managed message and changes nothing. |
 | `defenseclaw policy show` | Refused | Refused | Administrators only | Linux, macOS, Windows | A standard account is told to use an elevated prompt. |
 | `defenseclaw audit export` | Refused | Refused | Administrators only | Linux, macOS, Windows | The managed audit log is administrator-only. |
+| `defenseclaw audit compact` | Refused | Refused | Administrators only | Linux, macOS, Windows | Gives the disk space of deleted audit history back. An administrator runs it after stopping the gateway service. |
+| `defenseclaw audit rejected` | Refused | Refused | Administrators only | Linux, macOS, Windows | The records the schema gate refused are part of the managed audit store, which is administrator-only. |
 
 ## The launcher refusal
 

@@ -255,7 +255,7 @@ This is the Windows path, the enterprise-managed path, and the standalone Unix p
 | `styleCodex` | block only on control events of the bound contract (`emitCodexBlock`) |
 | `styleHookEcho` | print `hook_output` and exit 0 (Cursor synthesizes event-native JSON) |
 | `styleHookEchoDecision` | print, then exit 2 if the decision is deny or block |
-| `styleHookDecisionStderr` | Kiro: no stdout; a deny prints the reason on stderr and exits 2 |
+| `styleHookDecisionStderr` | Kiro: no stdout except the v3 prompt note (`KiroV3PromptCheckedNote`); a deny prints the reason on stderr and exits 2 |
 | `styleActionStderr` | Amp: a block prints the reason on stderr and exits 2 |
 | `stylePluginBridge` | print the whole compacted response as one JSON line |
 

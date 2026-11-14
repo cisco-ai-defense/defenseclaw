@@ -1180,7 +1180,7 @@ func TestHookIdempotencyBounds(t *testing.T) {
 func mainAPIRoutePaths(t *testing.T) []string {
 	t.Helper()
 	known := []string{
-		"/health", "/status", "/api/v1/admin/shutdown", "/skill/disable", "/skill/enable",
+		"/health", "/status", "/usage", "/api/v1/admin/shutdown", "/skill/disable", "/skill/enable",
 		"/plugin/disable", "/plugin/enable", "/config/patch", "/scan/result", "/enforce/block",
 		"/enforce/allow", "/enforce/blocked", "/enforce/allowed", "/alerts", "/audit/event",
 		"/policy/evaluate", "/policy/reload", "/skills", "/mcps", "/tools/catalog",
@@ -1188,10 +1188,12 @@ func mainAPIRoutePaths(t *testing.T) []string {
 		"/v1/guardrail/evaluate", "/v1/guardrail/config", "/api/v1/guardrail/profiles/resolve", identityRefreshPath,
 		"/api/v1/acp/challenge", "/api/v1/acp/evaluate",
 		"/v1/acp/catalog", "/v1/acp/profiles", "/api/v1/inspect/tool", "/api/v1/inspect/request",
-		"/api/v1/inspect/response", "/api/v1/inspect/tool-response", "/api/v1/scan/code",
+		"/api/v1/inspect/response", "/api/v1/inspect/tool-response", "/api/v1/scan/code", openClawRuntimePath,
 		"/api/v1/network-egress", "/api/v1/telemetry/canary", "/api/v1/watchdog/recovery",
 		destinationtest.EndpointPath, cliObservabilityV8Path, alertAcknowledgementV8Path,
 		"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/agents/discovery", "/api/v1/agents/identities", "/api/v1/ai-usage",
+		// GET /usage (S10 tokenomics, api_usage.go): sandbox credentials are refused like every other route.
+		"/usage",
 		"/api/v1/ai-usage/scan", "/api/v1/ai-usage/discovery", "/api/v1/ai-usage/components", "/api/v1/ai-usage/ide-plugins",
 		"/api/v1/ai-usage/runtime", "/api/v1/ai-usage/runtime/scan", "/api/v1/correlation/graph",
 		"/api/v1/correlation/explain", "/api/v1/correlation/timeline", "/api/v1/correlation/conflicts",
@@ -1243,6 +1245,7 @@ func routesRegisteredInRun(t *testing.T) []string {
 		"destinationtest.EndpointPath":                  destinationtest.EndpointPath,
 		"enterprisepolicy.ForeignHookSessionPathPrefix": enterprisepolicy.ForeignHookSessionPathPrefix,
 		"identityRefreshPath":                           identityRefreshPath,
+		"openClawRuntimePath":                           openClawRuntimePath,
 	}
 	var resolve func(ast.Expr) string
 	resolve = func(expr ast.Expr) string {

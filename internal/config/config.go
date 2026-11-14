@@ -445,6 +445,18 @@ type RoutingConfig struct {
 	Models    []RoutingModelBackend `mapstructure:"models"        yaml:"models,omitempty"`
 	Signals   RoutingSignalConfig   `mapstructure:"signals"       yaml:"signals,omitempty"`
 	Decisions []RoutingDecisionRule `mapstructure:"decisions"     yaml:"decisions,omitempty"`
+
+	// 1.0.10 keys (routing_policy.go). Absent keeps the 1.0.9 meaning.
+	Classifier        string                  `mapstructure:"classifier"          yaml:"classifier,omitempty"`
+	MinConfidence     float64                 `mapstructure:"min_confidence"      yaml:"min_confidence,omitempty"`
+	OnClassifierError string                  `mapstructure:"on_classifier_error" yaml:"on_classifier_error,omitempty"`
+	DefaultAlias      string                  `mapstructure:"default_alias"       yaml:"default_alias,omitempty"`
+	Categories        map[string]string       `mapstructure:"categories"          yaml:"categories,omitempty"`
+	AllowUserOverride bool                    `mapstructure:"allow_user_override" yaml:"allow_user_override,omitempty"`
+	Sensitive         *RoutingSensitiveConfig `mapstructure:"sensitive"           yaml:"sensitive,omitempty"`
+	SystemOne         *RoutingSystemOneConfig `mapstructure:"systemone"           yaml:"systemone,omitempty"`
+	RouteOnly         RoutingRouteOnlyConfig  `mapstructure:"route_only"          yaml:"route_only,omitempty"`
+	Admin             *RoutingAdminConfig     `mapstructure:"admin"               yaml:"admin,omitempty"`
 }
 
 type RoutingModelBackend struct {
@@ -454,6 +466,15 @@ type RoutingModelBackend struct {
 	BaseURL      string   `mapstructure:"base_url"          yaml:"base_url,omitempty"`
 	APIKeyEnv    string   `mapstructure:"api_key_env"       yaml:"api_key_env,omitempty"`
 	Capabilities []string `mapstructure:"capabilities"      yaml:"capabilities,omitempty"`
+	// APIs lists the API families this backend serves without translation
+	// (routing_policy.go RoutingAPIs); empty uses the provider default.
+	APIs []string `mapstructure:"apis" yaml:"apis,omitempty"`
+	// Credential names the protected credential that holds the key on a
+	// standalone managed host (preferred there; api_key_env still works
+	// for 1.0.9 configs, with a doctor warning).
+	Credential string `mapstructure:"credential" yaml:"credential,omitempty"`
+	// Bedrock says how the gateway signs calls to a bedrock backend.
+	Bedrock *RoutingBedrockAuthConfig `mapstructure:"bedrock" yaml:"bedrock,omitempty"`
 }
 
 type RoutingSignalConfig struct {
@@ -2620,6 +2641,16 @@ type GatewayConfig struct {
 	Watcher      GatewayWatcherConfig      `mapstructure:"watcher"           yaml:"watcher"`
 	Watchdog     WatchdogConfig            `mapstructure:"watchdog"          yaml:"watchdog"`
 	ClawHome     string                    `mapstructure:"-"                 yaml:"-"`
+	// OpenClawConfigPath is the openclaw.json the OpenClaw client reads its
+	// gateway token from (Config.OpenClawConfigPath, set at Load). Empty
+	// falls back to <ClawHome>/.openclaw/openclaw.json.
+	OpenClawConfigPath string `mapstructure:"-" yaml:"-"`
+	// OpenClawToken is the credential the OpenClaw WebSocket client presents
+	// (OPENCLAW_GATEWAY_TOKEN from the environment, else <data_dir>/.env,
+	// set at Load). Empty makes the client read openclaw.json
+	// gateway.auth.token. It is never the DefenseClaw gateway token:
+	// ResolvedToken skips a value equal to it.
+	OpenClawToken string `mapstructure:"-" yaml:"-"`
 }
 
 type GatewayConfigReloadConfig struct {
@@ -2656,49 +2687,48 @@ type WatchdogConfig struct {
 // defaultGatewayTokenEnv is the canonical env var for the gateway auth token.
 const defaultGatewayTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
 
-// legacyGatewayTokenEnv is the old env var name, still consulted for
-// backward compatibility with existing .env files.
-const legacyGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
-
-// ResolvedToken returns the gateway token, walking the precedence
-// ladder. The order mirrors GatewayConfig.resolved_token in
-// cli/defenseclaw/config.py so the Python CLI and the Go gateway
-// can never disagree on which token is "live".
+// ResolvedToken returns the DefenseClaw gateway token (the master API
+// token), walking the precedence ladder. The order mirrors
+// GatewayConfig.resolved_token in cli/defenseclaw/config.py so the Python
+// CLI and the Go gateway can never disagree on which token is "live".
 //
 // Resolution:
 //
 //  1. g.TokenEnv (operator-supplied override) — if set AND the
-//     named env var is populated, return it.
+//     named env var is populated, return it. A TokenEnv naming
+//     OPENCLAW_GATEWAY_TOKEN is skipped (case-insensitive on Windows).
 //  2. defaultGatewayTokenEnv (DEFENSECLAW_GATEWAY_TOKEN) — the
 //     canonical name EnsureGatewayToken writes on first boot.
-//  3. legacyGatewayTokenEnv (OPENCLAW_GATEWAY_TOKEN) — back-compat
-//     shim for installs that bootstrapped before the rename.
-//  4. g.Token literal — last resort because plaintext secrets in
+//  3. g.Token literal — last resort because plaintext secrets in
 //     config.yaml are discouraged.
 //
-// Why fall through past g.TokenEnv when it's set-but-empty:
-// pre-fix this function had `if/else` semantics — when TokenEnv
-// was set the canonical+legacy checks were SKIPPED entirely.
-// That broke the symmetric Python flow: with the pre-defenseclaw
-// default token_env=OPENCLAW_GATEWAY_TOKEN in config.yaml AND
-// only DEFENSECLAW_GATEWAY_TOKEN in the dotenv (the post-firstboot
-// state), Python found the token via fall-through while Go
-// silently returned g.Token (empty) for every non-sidecar-boot
-// caller (judge LLM init, etc.). The sidecar boot path masked
-// the bug via EnsureGatewayToken's own fallback, so it only
-// surfaced in obscure code paths until investigation.
+// The token never comes from OPENCLAW_GATEWAY_TOKEN (R-TOK): that is the
+// OpenClaw WebSocket credential (g.OpenClawToken), readable by the OpenClaw
+// account, its plugins and agent tools. Before 1.0.10 it was a fallback
+// name here and setup wrote token_env: OPENCLAW_GATEWAY_TOKEN, so the
+// OpenClaw token could allow blocked tools and stop the gateway. A
+// candidate whose value equals g.OpenClawToken is skipped too: a 1.0.9
+// auth repair wrote the OpenClaw token under both names. With nothing
+// left the gateway mints a new DEFENSECLAW_GATEWAY_TOKEN at boot.
+//
+// A set-but-empty g.TokenEnv falls through to the canonical name, so
+// a custom name with no value never hides the token first boot wrote.
 //
 // SecretRef text an earlier build saved as a token is skipped (issue #1404).
 func (g *GatewayConfig) ResolvedToken() string {
-	for _, name := range []string{g.TokenEnv, defaultGatewayTokenEnv, legacyGatewayTokenEnv} {
-		if name == "" {
+	openClaw := strings.TrimSpace(g.OpenClawToken)
+	usable := func(v string) bool {
+		return v != "" && !envvars.IsSecretRefText(v) && (openClaw == "" || strings.TrimSpace(v) != openClaw)
+	}
+	for _, name := range []string{g.TokenEnv, defaultGatewayTokenEnv} {
+		if strings.TrimSpace(name) == "" || IsOpenClawGatewayTokenEnv(name) {
 			continue
 		}
-		if v := os.Getenv(name); v != "" && !envvars.IsSecretRefText(v) {
+		if v := os.Getenv(name); usable(v) {
 			return v
 		}
 	}
-	if envvars.IsSecretRefText(g.Token) {
+	if !usable(g.Token) {
 		return ""
 	}
 	return g.Token
@@ -3316,6 +3346,12 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, err
 	}
+	if err := cfg.ValidateOpenClawConnector(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "connectors_invalid")
+		}
+		return nil, err
+	}
 	if err := cfg.Guardrail.ProtectedFiles.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
@@ -3333,6 +3369,12 @@ func loadConfigSourceCheckedWithLayout(
 			ReportConfigLoadError(context.Background(), "routing_invalid")
 		}
 		return nil, fmt.Errorf("config: routing: %w", err)
+	}
+	if err := cfg.validateRoutingAdminRules(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "routing_invalid")
+		}
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	if err := cfg.AIDiscovery.ValidateTrustedADChildDomains(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -3388,6 +3430,8 @@ func loadConfigSourceCheckedWithLayout(
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg.Gateway.ClawHome = home
 	}
+	cfg.Gateway.OpenClawConfigPath = cfg.OpenClawConfigPath()
+	cfg.Gateway.OpenClawToken = resolveOpenClawGatewayToken(cfg.DataDir)
 
 	if !inspection && !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		// Older installs can use OpenClaw only through a remote fleet gateway.

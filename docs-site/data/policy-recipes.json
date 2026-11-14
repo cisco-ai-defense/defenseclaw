@@ -1536,14 +1536,14 @@
     },
     {
       "id": "RECIPE-credential.directory_ticket_request",
-      "title": "Exact Kerberos ticket request",
+      "title": "Exact Kerberos ticket request or domain-service credential use (NetExec)",
       "kind": "rule:command",
       "body": {
         "id": "credential.directory_ticket_request",
         "tool_call_only": true,
-        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py', 'nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
         "pattern": "(?i)\\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\\.py)\\b",
-        "title": "Exact Kerberos ticket request",
+        "title": "Exact Kerberos ticket request or domain-service credential use (NetExec)",
         "severity": "HIGH",
         "confidence": 0.99,
         "tags": [
@@ -5021,6 +5021,139 @@
       ]
     },
     {
+      "id": "RECIPE-exec.escaped_binary_write",
+      "title": "Binary bytes written to a file through shell escapes",
+      "kind": "rule:command",
+      "body": {
+        "id": "exec.escaped_binary_write",
+        "tool_call_only": true,
+        "pattern": "inert-exec-escaped-binary-write^",
+        "title": "Binary bytes written to a file through shell escapes",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "execution",
+          "staging",
+          "obfuscation"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "staging",
+        "obfuscation"
+      ]
+    },
+    {
+      "id": "RECIPE-account.literal_password_change_via_stdin",
+      "title": "Account password set from literal stdin",
+      "kind": "rule:command",
+      "body": {
+        "id": "account.literal_password_change_via_stdin",
+        "tool_call_only": true,
+        "pattern": "inert-account-literal-password-change-via-stdin^",
+        "title": "Account password set from literal stdin",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "persistence",
+          "account",
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "persistence",
+        "account",
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-exec.download_then_run_fetched_file",
+      "title": "File fetched from a bare IP address and then run",
+      "kind": "rule:command",
+      "body": {
+        "id": "exec.download_then_run_fetched_file",
+        "tool_call_only": true,
+        "pattern": "inert-exec-download-then-run-fetched-file^",
+        "title": "File fetched from a bare IP address and then run",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "execution",
+          "download-exec"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "download-exec"
+      ]
+    },
+    {
+      "id": "RECIPE-source_control.clone_then_run_or_adhoc_push",
+      "title": "Git clone whose files are then run, or push to an ad-hoc remote",
+      "kind": "rule:command",
+      "body": {
+        "id": "source_control.clone_then_run_or_adhoc_push",
+        "tool_call_only": true,
+        "pattern": "inert-source-control-clone-then-run-or-adhoc-push^",
+        "title": "Git clone whose files are then run, or push to an ad-hoc remote",
+        "severity": "MEDIUM",
+        "confidence": 0.8,
+        "tags": [
+          "execution",
+          "source-control",
+          "exfiltration"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "source-control",
+        "exfiltration"
+      ]
+    },
+    {
+      "id": "RECIPE-exec.inline_code_network_and_exec",
+      "title": "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL",
+      "kind": "rule:command",
+      "body": {
+        "id": "exec.inline_code_network_and_exec",
+        "tool_call_only": true,
+        "pattern": "inert-exec-inline-code-network-and-exec^",
+        "title": "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "execution",
+          "network",
+          "opaque-code"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "network",
+        "opaque-code"
+      ]
+    },
+    {
       "id": "RECIPE-ENT-BULK-SSN",
       "title": "US Social Security Number",
       "kind": "rule:enterprise-data",
@@ -5267,10 +5400,36 @@
         "id": "ENT-EMAIL-BULK",
         "pattern": "(?i)\\b[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
         "title": "Email address",
-        "severity": "MEDIUM",
+        "severity": "LOW",
         "confidence": 0.4,
         "tags": [
           "pii"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity LOW.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-PII-EMAIL-LIST",
+      "title": "Five or more email addresses together",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "PII-EMAIL-LIST",
+        "pattern": "(?i)\\b[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+        "title": "Five or more email addresses together",
+        "severity": "MEDIUM",
+        "confidence": 0.75,
+        "tags": [
+          "pii",
+          "bulk"
         ]
       },
       "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity MEDIUM.",
@@ -5278,7 +5437,35 @@
       "counterexamples": [],
       "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
       "tags": [
-        "pii"
+        "pii",
+        "bulk"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-PII-EMAIL-FIELD",
+      "title": "Email address in a labeled field",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "PII-EMAIL-FIELD",
+        "pattern": "(?i)(?:\\b|_)e-?mails?(?:[\\s_-]*address(?:es)?)?[\"'\\s*_:#=\\[-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+        "title": "Email address in a labeled field",
+        "severity": "MEDIUM",
+        "confidence": 0.7,
+        "tags": [
+          "pii",
+          "structured"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "structured"
       ],
       "data_axis": [
         "sensitive_access"

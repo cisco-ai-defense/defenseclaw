@@ -1,6 +1,102 @@
 {
   "packs": [
     {
+      "id": "active-directory-protection",
+      "title": "Active Directory protection",
+      "status": "selectable",
+      "summary": "This opt-in guardrail profile extends the embedded balanced defaults and blocks the directory credential attacks and bulk directory enumeration that an agent would run against a managed Windows domain. Assign it only to connectors on hosts that are, or can reach, a production Active Directory domain; a domain name is never treated as authorization evidence.",
+      "files": [
+        {
+          "filename": "active-directory",
+          "category": "active-directory-protection",
+          "rules": [
+            {
+              "id": "credential.directory_ticket_request",
+              "tool_call_only": true,
+              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+              "pattern": "(?i)\\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\\.py)\\b",
+              "title": "Kerberos ticket request for offline cracking",
+              "severity": "CRITICAL",
+              "confidence": 0.99,
+              "tags": [
+                "credential",
+                "active-directory",
+                "kerberos",
+                "protected-domain",
+                "bounded-grammar"
+              ]
+            },
+            {
+              "id": "credential.windows_ntds_ifm_dump",
+              "tool_call_only": true,
+              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['ntdsutil', 'ntdsutil.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations)",
+              "pattern": "(?i)\\bntdsutil(?:\\.exe)?\\s+\"?(?:ac i|activate instance) ntds\"?\\s+\"?ifm\"?\\s+\"?create full [A-Z]:\\\\[^\"\\r\\n]+\"?\\s+q\\s+q(?:\\s|$)",
+              "title": "Export the full Active Directory database (NTDS IFM)",
+              "severity": "CRITICAL",
+              "confidence": 0.99,
+              "tags": [
+                "credential",
+                "active-directory",
+                "windows",
+                "protected-domain",
+                "credential-dumping"
+              ]
+            },
+            {
+              "id": "credential.directory_service_credential_use",
+              "tool_call_only": true,
+              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+              "pattern": "a^",
+              "title": "Use a credential against a domain service: password, hash, key, ticket or empty (NetExec)",
+              "severity": "CRITICAL",
+              "confidence": 0.99,
+              "tags": [
+                "credential",
+                "active-directory",
+                "netexec",
+                "protected-domain",
+                "bounded-grammar"
+              ]
+            },
+            {
+              "id": "recon.directory_bulk_collection",
+              "tool_call_only": true,
+              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+              "pattern": "a^",
+              "title": "Bulk Active Directory collection for attack-path mapping (NetExec LDAP)",
+              "severity": "CRITICAL",
+              "confidence": 0.99,
+              "tags": [
+                "recon",
+                "active-directory",
+                "bloodhound",
+                "netexec",
+                "protected-domain",
+                "bounded-grammar"
+              ]
+            },
+            {
+              "id": "credential.directory_password_spray",
+              "tool_call_only": true,
+              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+              "pattern": "a^",
+              "title": "Password spraying against domain services (NetExec wordlist)",
+              "severity": "CRITICAL",
+              "confidence": 0.99,
+              "tags": [
+                "credential",
+                "active-directory",
+                "password-spray",
+                "netexec",
+                "protected-domain",
+                "bounded-grammar"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "cloud-production-protection",
       "title": "Cloud production protection",
       "status": "selectable",
@@ -144,7 +240,7 @@
           "rules": [
             {
               "id": "impact.protected_filesystem_format",
-              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)",
               "pattern": "a^",
               "tool_call_only": true,
               "title": "Protected device filesystem format",
@@ -158,7 +254,7 @@
             },
             {
               "id": "impact.protected_device_wipe",
-              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)",
               "pattern": "a^",
               "tool_call_only": true,
               "title": "Protected device destructive write",
@@ -172,7 +268,7 @@
             },
             {
               "id": "impact.protected_access_control_change",
-              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))",
+              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)",
               "pattern": "a^",
               "tool_call_only": true,
               "title": "Protected security material access-control weakening",
@@ -374,13 +470,25 @@
             },
             {
               "id": "ENT-EMAIL-BULK",
-              "pattern": "(?i)\\b(?:e-?mail)(?:[\\s_-]+address)?[\\s*_:#=-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+              "pattern": "(?i)(?:\\b|_)e-?mails?(?:[\\s_-]*address(?:es)?)?[\"'\\s*_:#=\\[-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
               "title": "Email address in a labeled field",
               "severity": "CRITICAL",
               "confidence": 0.8,
               "tags": [
                 "pii",
                 "structured",
+                "privacy-high-assurance"
+              ]
+            },
+            {
+              "id": "PII-EMAIL-LIST",
+              "pattern": "(?i)\\b[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+              "title": "Five or more email addresses together",
+              "severity": "CRITICAL",
+              "confidence": 0.75,
+              "tags": [
+                "pii",
+                "bulk",
                 "privacy-high-assurance"
               ]
             },

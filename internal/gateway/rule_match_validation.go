@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/paymentcard"
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
 )
 
@@ -237,14 +238,35 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 			return validUSSSN(match) && credibleSSNContext(text, start, end)
 		}
 	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
-		return func(text, match string, start, _ int) bool {
-			return validPaymentCardCandidate(match) && !decimalFractionAt(text, start)
+		return func(text, match string, start, end int) bool {
+			return validPaymentCardCandidateAt(text, match, start, end)
+		}
+	case "PII-CARD-LABELED":
+		// Label-bound (privacy-high-assurance): no Luhn or scheme check by
+		// design, but the digits must not come from a UUID or other token.
+		return func(text, _ string, start, end int) bool {
+			return paymentcard.LabeledRunAt(text, start, end)
 		}
 	case "ENT-IBAN":
 		return func(_, match string, _, _ int) bool { return validIBAN(match) }
-	case "ENT-EMAIL-BULK":
+	case "ENT-EMAIL-BULK", "PII-EMAIL-FIELD":
+		// The labeled forms (PII-EMAIL-FIELD, and ENT-EMAIL-BULK in
+		// privacy-high-assurance) skip git's own identity key: git config
+		// --list prints user.email=..., setup rather than a record field.
 		return func(text, match string, start, end int) bool {
-			return credibleEmailContext(text, match, start, end)
+			return !gitUserEmailKeyAt(text, start) && credibleEmailContext(text, match, start, end)
+		}
+	case "PII-EMAIL-LIST":
+		// One address is ENT-EMAIL-BULK (LOW): a vendor no-reply address in
+		// an agent's own instructions must not block (substrate-1:GAP-0149).
+		// Five or more distinct addresses together (a CSV, a list, mailto
+		// links) is a bulk disclosure (substrate-1:GAP-0159).
+		// Only per-address checks apply: the count already keeps a single
+		// vendor address out, and the whole-text phrases of
+		// credibleEmailContext ("ssh", "bcc to") must not hide a bulk dump.
+		// The bounded window check runs before anything else.
+		return func(text, _ string, start, end int) bool {
+			return emailListMember(text, start, end) && emailListAt(text, start)
 		}
 	case "ENT-PHONE-E164":
 		return func(text, match string, start, _ int) bool {
@@ -487,6 +509,69 @@ func credibleEmailContext(text, match string, start, end int) bool {
 	return true
 }
 
+const (
+	// emailListMinDistinct distinct addresses make a bulk email list.
+	emailListMinDistinct = 5
+	// emailListWindow bounds, in bytes from the first address, where the
+	// other addresses of one list must be.
+	emailListWindow = 4096
+	// emailListMaxScan bounds the addresses read per candidate, so a large
+	// log that repeats one address costs a bounded scan per match.
+	emailListMaxScan = 16
+)
+
+var emailAddressPattern = lazyregexp.New(`(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`)
+
+// gitIdentityLinePattern is the text from the start of a line up to the
+// first address of a commit identity: git log and show headers, commit
+// trailers and git shortlog -e rows. A git log of a busy repository lists
+// many authors; that is project history, not a disclosure of addresses.
+// Only the first address after the label is the identity, so a label line
+// cannot carry a list (no '@' may sit between the label and the address).
+var gitIdentityLinePattern = lazyregexp.New(`(?i)^(?:[\s>*-]*(?:author|commit|committer|co-authored-by|signed-off-by|reviewed-by|acked-by|tested-by|reported-by|suggested-by|helped-by)\s*:|\s*\d+\t)[^@\n]*$`)
+
+// emailListAt reports emailListMinDistinct or more distinct list members in
+// the window that starts at the address at start.
+func emailListAt(text string, start int) bool {
+	end := min(len(text), start+emailListWindow)
+	seen := make(map[string]struct{}, emailListMinDistinct)
+	for _, loc := range emailAddressPattern.Regexp().FindAllStringIndex(text[start:end], emailListMaxScan) {
+		s, e := start+loc[0], start+loc[1]
+		if !emailListMember(text, s, e) {
+			continue
+		}
+		seen[strings.ToLower(text[s:e])] = struct{}{}
+		if len(seen) >= emailListMinDistinct {
+			return true
+		}
+	}
+	return false
+}
+
+// gitUserEmailKeyAt reports a labeled-field match that is git's user.email
+// key (git config --list, .gitconfig).
+func gitUserEmailKeyAt(text string, start int) bool {
+	return start >= 5 && strings.EqualFold(text[start-5:start], "user.")
+}
+
+// emailListMember applies the per-address checks of credibleEmailContext
+// that do not read the whole text, plus the commit-identity exclusion.
+func emailListMember(text string, start, end int) bool {
+	if start < 0 || end > len(text) || start >= end {
+		return false
+	}
+	address := strings.ToLower(text[start:end])
+	if strings.HasSuffix(address, ".compute.amazonaws.com") || emailDomainLooksLikeNumericHost(address) ||
+		emailIsPathSegment(text, start, end) {
+		return false
+	}
+	if strings.HasPrefix(strings.TrimLeft(text[end:], "\"'`"), ":") {
+		return false
+	}
+	lineStart := strings.LastIndexByte(text[:start], '\n') + 1
+	return !gitIdentityLinePattern.MatchString(text[lineStart:start])
+}
+
 // gitUserEmailPlaceholder reports a documentation-domain address given as
 // git's user.email, as git's own "Author identity unknown" hint prints it
 // (git config --global user.email "you@example.com"): setup text, not a
@@ -690,15 +775,21 @@ func emailDomainLooksLikeNumericHost(email string) bool {
 }
 
 // acceptedLocalPIIMatch applies the same structural checks to the legacy local
-// PII regex lane. Custom patterns that do not produce an SSN- or PAN-shaped
-// candidate retain their historical behavior.
+// PII regex lane. A match made only of digits and separators whose digits
+// carry a card-scheme prefix and length is judged by the shared payment card
+// rules (the built-in local card regexes always produce that shape). Any
+// other operator pattern (a labeled match, an IMEI, an account number)
+// keeps its historical behavior: a 13-19 digit candidate must pass Luhn.
 func acceptedLocalPIIMatch(match string) bool {
 	digits := decimalDigits(match)
 	if len(digits) == 9 && strings.Count(match, "-") == 2 {
 		return validUSSSN(match)
 	}
 	if len(digits) >= 13 && len(digits) <= 19 {
-		return validPaymentCardCandidate(match)
+		if localPANShaped(match, digits) {
+			return validPaymentCardCandidate(match)
+		}
+		return paymentcard.Luhn(digits) && !knownPublicTestPAN(digits)
 	}
 	return true
 }
@@ -711,18 +802,28 @@ func acceptedLocalPIIMatchAt(text, match string, start, end int) bool {
 	if len(digits) == 9 && strings.Count(match, "-") == 2 {
 		return credibleSSNContext(text, start, end)
 	}
-	if len(digits) >= 13 && len(digits) <= 19 && decimalFractionAt(text, start) {
-		return false
+	if len(digits) >= 13 && len(digits) <= 19 {
+		if localPANShaped(match, digits) {
+			return !paymentcard.Embedded(text, start, end)
+		}
+		// Historical rule for operator patterns: not the fraction of a
+		// float (GAP-2062).
+		return start < 2 || text[start-1] != '.' || text[start-2] < '0' || text[start-2] > '9'
 	}
 	return true
 }
 
-// decimalFractionAt reports a match that starts right after the decimal
-// point of a number ("9.371449635398431"): the digits of a float, not a card
-// number. Claude Code's ~/.claude.json holds such floats (GAP-2062).
-func decimalFractionAt(text string, start int) bool {
-	return start >= 2 && start <= len(text) && text[start-1] == '.' &&
-		text[start-2] >= '0' && text[start-2] <= '9'
+// localPANShaped reports a local-lane match that is a bare number (digits
+// and separators only) whose digits have a payment-card scheme prefix and
+// length.
+func localPANShaped(match, digits string) bool {
+	for i := 0; i < len(match); i++ {
+		c := match[i]
+		if (c < '0' || c > '9') && c != ' ' && c != '\t' && c != '-' && c != '.' {
+			return false
+		}
+	}
+	return paymentcard.Scheme(digits) != ""
 }
 
 func credibleSSNContext(text string, start, end int) bool {
@@ -1309,24 +1410,19 @@ func validUSSSN(value string) bool {
 	return area > 0 && area != 666 && area < 900 && group > 0 && serial > 0
 }
 
+// validPaymentCardCandidate reports whether value alone is a payment card
+// number under the shared paymentcard rules (Luhn, a real scheme prefix and
+// length, a card layout). The six canonical public test PANs that fill
+// provider documentation are not treated as cards.
 func validPaymentCardCandidate(value string) bool {
-	digits := decimalDigits(value)
-	if len(digits) < 13 || len(digits) > 19 || knownPublicTestPAN(digits) {
-		return false
-	}
-	sum := 0
-	parity := len(digits) % 2
-	for index, char := range digits {
-		digit := int(char - '0')
-		if index%2 == parity {
-			digit *= 2
-			if digit > 9 {
-				digit -= 9
-			}
-		}
-		sum += digit
-	}
-	return sum%10 == 0
+	return paymentcard.Valid(value) && !knownPublicTestPAN(paymentcard.Digits(value))
+}
+
+// validPaymentCardCandidateAt adds the token-boundary check: a digit run glued
+// to a longer token (UUID, hash, trace id, decimal, versioned id) is not a
+// card (substrate-1:GAP-0132).
+func validPaymentCardCandidateAt(text, match string, start, end int) bool {
+	return validPaymentCardCandidate(match) && !paymentcard.Embedded(text, start, end)
 }
 
 func knownPublicTestPAN(digits string) bool {

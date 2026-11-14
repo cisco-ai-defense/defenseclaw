@@ -39,11 +39,40 @@ func fireAnswerDeadline(t *testing.T, w *answerWatchdog, exited chan int, stdout
 	go w.watch(time.Now())
 	select {
 	case code := <-exited:
+		awaitAnswerWatchdogBackground(t, w)
 		return code, stderr.String() + stdout.String()
 	case <-time.After(time.Minute):
 		t.Fatal("the watchdog never answered")
 	}
 	return 0, ""
+}
+
+// awaitAnswerWatchdogBackground waits, after a simulated exit, for the work a
+// watchdog leaves running when its exit does not end the process: watch's
+// deferred close of the prepared failure log, and the prepare goroutine that
+// watch's own timer starts ahead of the deadline (at once for a deadline that
+// has passed), which creates logs and hook-failures.dropped in the account's
+// home. Production exits the process there. A test that returned at once had
+// its TempDir removed under that goroutine (macOS CI run 43337422577:
+// "TempDir RemoveAll cleanup: unlinkat .../logs: directory not empty").
+// It also waits for the record writers watch started (w.records): watch exits
+// once the marker or the ordinary line has recorded the answer, and the
+// other one can still be writing the logs folder (macOS CI, PR #1456,
+// TestPerUserNoAnswerStaysClosed/per-user_deadline_before_contact).
+func awaitAnswerWatchdogBackground(t *testing.T, w *answerWatchdog) {
+	t.Helper()
+	records := make(chan struct{})
+	go func() {
+		w.records.Wait()
+		close(records)
+	}()
+	for _, done := range []<-chan struct{}{w.watchDone, w.failureLog.done, records} {
+		select {
+		case <-done:
+		case <-time.After(time.Minute):
+			t.Fatal("the watchdog's background work did not finish")
+		}
+	}
 }
 
 // TestPerUserRestartOutlastingTheBudgetFollowsTheOutageMode pins rel-1-0-6

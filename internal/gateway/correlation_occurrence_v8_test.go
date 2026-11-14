@@ -544,6 +544,8 @@ func TestHookOccurrenceToolStartAndEndRemainDistinctAcrossRestart(t *testing.T) 
 		"hook_event_name": "PostToolUse", "session_id": "session-3", "turn_id": "turn-3",
 		"agent_id": "agent-3", "tool_name": "Read",
 	}
+	// The start's operation is open until the end resolves it.
+	requireActivePendingStartForTest(t, path, start.SemanticEventID, 1)
 	end := normalizeAgentHookRequestWithProfile("claudecode", endPayload, profile)
 	_, end, err = server.correlateHookOccurrence(t.Context(), profile, end, []byte(`{"hook_event_name":"PostToolUse","session_id":"session-3","turn_id":"turn-3","agent_id":"agent-3","tool_name":"Read"}`))
 	if err != nil {
@@ -559,17 +561,21 @@ func TestHookOccurrenceToolStartAndEndRemainDistinctAcrossRestart(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The end resolved the start's operation, which deletes it (S8 R5).
 	operations, err := repo.ListPendingOperations(t.Context(), audit.CorrelationPendingQuery{
 		ConnectorInstanceID: audit.ConnectorInstanceID(start.ConnectorInstanceID),
-		Type:                audit.CorrelationOperationTool, Status: audit.CorrelationOperationCompleted, Limit: 10,
+		Type:                audit.CorrelationOperationTool, Limit: 10,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].StartSemanticEventID != audit.SemanticEventID(start.SemanticEventID) ||
-		operations[0].TerminalSemanticEventID != audit.SemanticEventID(end.SemanticEventID) {
-		t.Fatalf("resolved pending operations=%+v", operations)
+	if len(operations) != 0 {
+		t.Fatalf("resolved pending operations kept: %+v", operations)
 	}
+	// The end resolved it (only a successful resolve deletes the row) and
+	// carries the call's tool edge.
+	requireActivePendingStartForTest(t, path, start.SemanticEventID, 0)
+	requireToolEdgeForTest(t, path, end.SemanticEventID, start.ToolInvocationID)
 }
 
 func TestCursorHookOccurrencePreservesNativeTurnAcrossToolLifecycleAndRestart(t *testing.T) {
@@ -625,6 +631,8 @@ func TestCursorHookOccurrencePreservesNativeTurnAcrossToolLifecycleAndRestart(t 
 		"generation_id": "cursor-generation-1", "tool_call_id": "cursor-tool-1",
 		"tool_name": "Read", "tool_result": "complete",
 	}
+	// The start's operation is open until the end resolves it.
+	requireActivePendingStartForTest(t, path, start.SemanticEventID, 1)
 	end := normalizeAgentHookRequestWithProfile("cursor", endPayload, profile)
 	_, end, err = server.correlateHookOccurrence(t.Context(), profile, end,
 		[]byte(`{"conversation_id":"cursor-conversation-1","generation_id":"cursor-generation-1","hook_event_name":"postToolUse","tool_call_id":"cursor-tool-1","tool_name":"Read","tool_result":"complete"}`))
@@ -647,17 +655,18 @@ func TestCursorHookOccurrencePreservesNativeTurnAcrossToolLifecycleAndRestart(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The end resolved the start's operation, which deletes it (S8 R5).
 	operations, err := repo.ListPendingOperations(t.Context(), audit.CorrelationPendingQuery{
 		ConnectorInstanceID: audit.ConnectorInstanceID(start.ConnectorInstanceID),
-		OperationID:         "cursor-tool-1", Type: audit.CorrelationOperationTool,
-		Status: audit.CorrelationOperationCompleted, Limit: 10,
+		OperationID:         "cursor-tool-1", Type: audit.CorrelationOperationTool, Limit: 10,
 	})
-	if err != nil || len(operations) != 1 ||
-		operations[0].StartSemanticEventID != audit.SemanticEventID(start.SemanticEventID) ||
-		operations[0].TerminalSemanticEventID != audit.SemanticEventID(end.SemanticEventID) ||
-		operations[0].SessionID != prompt.SessionID || operations[0].TurnID != prompt.TurnID {
-		t.Fatalf("cursor completed operation=%+v err=%v", operations, err)
+	if err != nil || len(operations) != 0 {
+		t.Fatalf("cursor resolved operation kept: %+v err=%v", operations, err)
 	}
+	// The end resolved it (only a successful resolve deletes the row) and
+	// carries the call's tool edge.
+	requireActivePendingStartForTest(t, path, start.SemanticEventID, 0)
+	requireToolEdgeForTest(t, path, end.SemanticEventID, start.ToolInvocationID)
 }
 
 func TestModernCursorCrossPhaseHooksWithoutDeliveryIDNeverSuppressEachOther(t *testing.T) {
@@ -838,6 +847,8 @@ func TestHookOccurrenceReportedToolStartResolvesMissingEndIDAcrossRestart(t *tes
 		"hook_event_name": "PostToolUse", "session_id": "reported-tool-session",
 		"turn_id": "reported-tool-turn", "agent_id": "reported-tool-agent", "tool_name": "Read",
 	}
+	// The start's operation is open until the end resolves it.
+	requireActivePendingStartForTest(t, path, start.SemanticEventID, 1)
 	end := normalizeAgentHookRequestWithProfile("claudecode", endPayload, profile)
 	_, end, err = server.correlateHookOccurrence(t.Context(), profile, end,
 		[]byte(`{"agent_id":"reported-tool-agent","hook_event_name":"PostToolUse","session_id":"reported-tool-session","tool_name":"Read","turn_id":"reported-tool-turn"}`))
@@ -852,17 +863,21 @@ func TestHookOccurrenceReportedToolStartResolvesMissingEndIDAcrossRestart(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The end resolved the start's operation, which deletes it (S8 R5).
 	operations, err := repo.ListPendingOperations(t.Context(), audit.CorrelationPendingQuery{
 		ConnectorInstanceID: audit.ConnectorInstanceID(start.ConnectorInstanceID),
-		Type:                audit.CorrelationOperationTool, Status: audit.CorrelationOperationCompleted, Limit: 10,
+		Type:                audit.CorrelationOperationTool, Limit: 10,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].OperationID != "provider-tool-call-1" ||
-		operations[0].TerminalSemanticEventID != audit.SemanticEventID(end.SemanticEventID) {
-		t.Fatalf("reported tool pending resolution=%+v", operations)
+	if len(operations) != 0 {
+		t.Fatalf("reported tool pending resolution kept %+v", operations)
 	}
+	// The end resolved it (only a successful resolve deletes the row) and
+	// carries the call's tool edge.
+	requireActivePendingStartForTest(t, path, start.SemanticEventID, 0)
+	requireToolEdgeForTest(t, path, end.SemanticEventID, start.ToolInvocationID)
 }
 
 func TestHookOccurrenceExactTerminalIDNeverFallsBackToCurrentPendingOperation(t *testing.T) {

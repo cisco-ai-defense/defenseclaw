@@ -5188,38 +5188,6 @@ attributes:
       max_utf8_bytes: 256
     notes: NFC bounded metric dimension; producer cardinality gate applies
   introduced_in: telemetry-registry-v1
-- id: defenseclaw.metric.cache
-  type: string
-  brief: Canonical bounded metric dimension projected as cache for local observability
-  examples:
-  - unknown
-  stability: stable
-  owner: defenseclaw
-  field_class: metadata
-  sensitivity: internal
-  cardinality: bounded
-  normalization:
-    id: bounded-v1
-    overrides:
-      max_utf8_bytes: 256
-    notes: NFC bounded metric dimension; producer cardinality gate applies
-  introduced_in: telemetry-registry-v1
-- id: defenseclaw.metric.ttl_bucket
-  type: string
-  brief: Canonical bounded metric dimension projected as ttl_bucket for local observability
-  examples:
-  - unknown
-  stability: stable
-  owner: defenseclaw
-  field_class: metadata
-  sensitivity: internal
-  cardinality: bounded
-  normalization:
-    id: bounded-v1
-    overrides:
-      max_utf8_bytes: 256
-    notes: NFC bounded metric dimension; producer cardinality gate applies
-  introduced_in: telemetry-registry-v1
 - id: defenseclaw.metric.verdict
   type: string
   brief: Canonical bounded metric dimension projected as verdict for local observability
@@ -15615,6 +15583,11 @@ producer_identity_sets:
   - event_name: model.stream.completed
     bucket: model.io
     family: log.model.stream.completed
+- id: identity_set.model_usage
+  identities:
+  - event_name: model.usage
+    bucket: model.io
+    family: log.model.usage
 - id: identity_set.network_egress
   identities:
   - event_name: egress.allowed
@@ -16779,6 +16752,21 @@ producer_mappings:
     introduced_in: telemetry-registry-v1
     disposition: translate_to_v8
   allowed_context_identity_set: identity_set.ai_discovery
+- producer: gateway_event
+  key: model_usage
+  source: internal/gatewaylog/events.go
+  event_name_policy: context_optional
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v4
+    disposition: translate_to_v8
+  allowed_context_identity_set: identity_set.model_usage
+  default_identity:
+    event_name: model.usage
+    bucket: model.io
+    family: log.model.usage
 - producer: gateway_event
   key: endpoint_health
   source: internal/gatewaylog/events.go

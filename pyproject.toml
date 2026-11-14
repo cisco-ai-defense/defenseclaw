@@ -145,9 +145,9 @@ dev = [
     "freezegun==1.5.5",
     "jsonschema>=4.23.0",
     "ruff==0.15.7",
-    # CVE-2026-114603 (unbounded tracestate parsing) is fixed in 1.45.1.
-    "opentelemetry-api>=1.45.1",
-    "opentelemetry-sdk>=1.45.1",
+    # CVE-2026-114603 (unbounded tracestate parsing) is fixed in 1.45.1; CVE-2026-126360 in 1.45.2.
+    "opentelemetry-api>=1.45.2",
+    "opentelemetry-sdk>=1.45.2",
 ]
 
 [project.scripts]
@@ -188,6 +188,7 @@ defenseclaw = [
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/lookups/*",
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/metadata/*",
     "_data/llm/*.json",
+    "_data/pricing/*.json",
     "_data/config/v8/*.json",
     "_data/config/v8/*.yaml",
     "_data/config/v8/*.md",

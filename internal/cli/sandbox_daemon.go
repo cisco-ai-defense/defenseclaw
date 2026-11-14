@@ -165,7 +165,7 @@ type stopSyncTarget struct {
 
 // managedStopSyncSettingsWait bounds the read of the managed settings in a
 // stop: a managed gateway that does not answer leaves the default name.
-const managedStopSyncSettingsWait = 5 * time.Second
+var managedStopSyncSettingsWait = 5 * time.Second
 
 // managedStopSyncTarget resolves the registration the account's sandbox
 // daemon registered its managed gateway under (openshell.gateway.name of

@@ -152,6 +152,7 @@ Long PowerShell pipelines now receive the same bounded treatment as POSIX pipeli
 - **GAP-0495:** On per-user Windows, replacing the DefenseClaw home with a junction can leave the copied launcher unable to start doctor, setup or status. Restore a regular home folder before rerunning the command; the gateway refuses to start in this state. See [Windows paths](/docs/get-started/windows/paths-troubleshooting).
 - **GAP-0519:** Per-user Linux performance budgets were measured on x86 hosts with four vCPUs. A two-vCPU arm64 host can exceed hook latency and command-time budgets while remaining inside memory and restart bounds.
 - **GAP-0524:** During a sustained per-user Windows hook flood, some calls can lack a completed audit row even when the agent received a decision. See [Audit completeness](/docs/reference/fail-modes#audit-completeness-under-windows-floods).
+- **GAP-0264:** On managed Windows, Setup's check of a new hook image runs under a filtered copy of its own token, not as an enrolled user, so application control or EDR rules that name one user or group are not evaluated at install. If such a rule blocks the hook later, Claude Code and Codex run the tool call without a DefenseClaw decision whatever the fail mode is. Allow the DefenseClaw signer for every enrolled user and group, and check an audit row from an enrolled account after an upgrade. See [Windows hook images](/docs/enterprise/windows).
 
 ## Claude Code shell
 

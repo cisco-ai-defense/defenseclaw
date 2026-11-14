@@ -76,6 +76,7 @@ from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_policy import policy
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 from defenseclaw.commands.cmd_registry import registry
+from defenseclaw.commands.cmd_routing import routing_cmd
 from defenseclaw.commands.cmd_sandbox import sandbox
 from defenseclaw.commands.cmd_settings import settings_cmd
 from defenseclaw.commands.cmd_setup import setup
@@ -89,6 +90,8 @@ from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
 
 SKIP_LOAD_COMMANDS = {
+    # routing loads config.yaml itself: a managed user cannot read it and gets the gateway's own view.
+    "routing",
     "agent",
     "config",
     "init",
@@ -275,10 +278,11 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
 
 
 def _is_audit_export(ctx: click.Context) -> bool:
-    """Return whether this is the ``audit export``/``findings`` gateway alias.
+    """Return whether this is the ``audit export``/``findings``/``compact`` gateway alias.
 
     The gateway binary loads the configuration and opens the audit database
-    read-only itself, so the CLI must not open the store for writing first.
+    itself (read-only, or alone for ``compact``), so the CLI must not open the
+    store first: ``compact`` refuses a store another process has open.
     """
     if ctx.invoked_subcommand != "audit":
         return False
@@ -287,7 +291,7 @@ def _is_audit_export(ctx: click.Context) -> bool:
         index = argv.index("audit")
     except ValueError:
         return False
-    return index + 1 < len(argv) and argv[index + 1] in {"export", "findings"}
+    return index + 1 < len(argv) and argv[index + 1] in {"export", "findings", "compact", "rejected"}
 
 
 def _audit_logs_can_read_with_ide_scope_typo(ctx: click.Context, result: object) -> bool:
@@ -604,6 +608,7 @@ cli.add_command(migrate_cmd, "migrate")
 cli.add_command(keys_cmd, "keys")
 cli.add_command(config_cmd, "config")
 cli.add_command(observability_cmd, "observability")
+cli.add_command(routing_cmd, "routing")
 cli.add_command(settings_cmd, "settings")
 cli.add_command(uninstall_cmd, "uninstall")
 cli.add_command(reset_cmd, "reset")

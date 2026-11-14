@@ -304,13 +304,23 @@ rules:
     # would remove a shipped result-backed detection instead of adding one. Keeping
     # it at HIGH is also exactly the pre-existing behaviour for these programs, so
     # this rule is a no-op against main for the request class.
+    #
+    # The same owner also claims a complete, statically credentialed NetExec /
+    # CrackMapExec call against a domain service (password, hash, key, ticket or
+    # empty credential; POSIX, PowerShell and cmd; rel-1-0-10:GAP-0014). That is
+    # the same non-dump directory credential use at the same HIGH, so default
+    # alerts and strict blocks it. Folding it here keeps the default catalog
+    # within its semantic-rule headroom. The opt-in active-directory-protection
+    # pack adds credential.directory_service_credential_use at CRITICAL to block
+    # it in every profile; the NTDS dump form stays with
+    # credential.directory_credential_acquisition above.
     expression: >-
       f.commands.exists(c, c.argv_complete &&
       c.program in ['impacket-getuserspns', 'getuserspns.py',
-      'impacket-getnpusers', 'getnpusers.py'] &&
+      'impacket-getnpusers', 'getnpusers.py', 'nxc', 'netexec', 'crackmapexec'] &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
     pattern: '(?i)\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\.py)\b'
-    title: "Exact Kerberos ticket request"
+    title: "Exact Kerberos ticket request or domain-service credential use (NetExec)"
     severity: HIGH
     confidence: 0.99
     tags: [credential, active-directory, kerberos, bounded-grammar]
@@ -1400,3 +1410,55 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [integrity, system-binary, python, binary-hijacking, bounded-grammar]
+  # Staged-file, literal-credential and inline-code effects (rel-1-0-10 S7 shell recall). Each rule is selected by
+  # the code-owned effect proof in internal/actionfacts (semantic owner and exact-fallback contract); all are alert-only.
+  - id: exec.escaped_binary_write
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-exec-escaped-binary-write^'
+    title: "Binary bytes written to a file through shell escapes"
+    severity: HIGH
+    confidence: 0.9
+    tags: [execution, staging, obfuscation]
+  - id: account.literal_password_change_via_stdin
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-account-literal-password-change-via-stdin^'
+    title: "Account password set from literal stdin"
+    severity: HIGH
+    confidence: 0.9
+    tags: [persistence, account, credential]
+  - id: exec.download_then_run_fetched_file
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-exec-download-then-run-fetched-file^'
+    title: "File fetched from a bare IP address and then run"
+    severity: HIGH
+    confidence: 0.9
+    tags: [execution, download-exec]
+  - id: source_control.clone_then_run_or_adhoc_push
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-source-control-clone-then-run-or-adhoc-push^'
+    title: "Git clone whose files are then run, or push to an ad-hoc remote"
+    severity: MEDIUM
+    confidence: 0.8
+    tags: [execution, source-control, exfiltration]
+  - id: exec.inline_code_network_and_exec
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-exec-inline-code-network-and-exec^'
+    title: "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL"
+    severity: HIGH
+    confidence: 0.85
+    tags: [execution, network, opaque-code]

@@ -111,9 +111,12 @@ describe('Cursor observe outage mode', () => {
     for (const stale of ['guardrail/index.mdx', 'reference/setup-commands.mdx', 'segmentation.mdx']) {
       assert.ok(!/Per-user Cursor (?:in )?observe (?:mode )?(?:still|also) blocks/i.test(page(stale)), stale);
     }
-    assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}A verified gateway that gives no final decision before the hook deadline blocks in every tier and saved mode/i);
+    assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}A verified gateway that gives no final decision before the hook deadline blocks in every tier and saved mode, except an ordinary tool call of a connector the \[gateway outage section\]/i);
     assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}Other transport and answer failures block in every tier/i);
     assert.match(perUser, /A verified gateway that accepts the call but gives no final decision before the hook.s fixed deadline blocks in every tier/i);
+    assert.match(perUser, /in an open outage mode .{0,80}an ordinary tool call that plainly names nothing a protected file could be reached through runs with the warning/i);
+    assert.match(page('connectors/capability-matrix.mdx'), /\*\*No answer\*\*.{0,200}with one exception for per-user Claude Code and Codex: a tool call that plainly names nothing a protected file could be reached through runs with the warning/i);
+    assert.match(perUser, /`on-failure=\(gateway down: allow with a warning; no answer: allow with a warning unless the call may reach a protected file; hook or answer error: block\)`/);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": normalizeHookFailMode\(failMode\) == "closed",/);
     assert.match(page('connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call\. Under Secure Client the flag follows the administrator's resolved fail mode instead: `open`, the default there, lets Cursor run the call when the hook process never answers, and `closed` keeps `failClosed: true`\. The administrator's resolved fail mode decides/i);
@@ -1013,7 +1016,7 @@ describe('1.0.4 operator routes and limits', () => {
     assert.match(api, /\| Hook, notify and inspect \| 25\/s \| 100 \| 32 \|\s*\| Delivery receipts \| 25\/s \| 100 \| 32 \|/);
     assert.match(api, /Receipts have the budget of their own above, so a tool\s+call counts once against the hook budget/);
     const managed = page('enterprise/sandboxes.mdx');
-    assert.match(managed, /per-user budget \(40 per second, burst 100 for all of the user's sandboxes together: the rate the managed gateway answers inside the hook's 3\.5 second window\)\. The refusal is immediate and its message names the budget/);
+    assert.match(managed, /per-user budget \(100 per second, burst 200 for all of the user's sandboxes together: the rate the managed gateway answers inside the hook's 3\.5 second window\)\. The refusal is immediate and its message names the budget/);
     assert.match(managed, /Each sandbox also has its own budget at the user's daemon \(25 per second, burst 100\)\. The receipt that confirms an allowed call counts apart/);
   });
 
@@ -1879,8 +1882,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0633", page: "reference/env-vars.mdx", has: ["exported in a shell is dropped when the", "The writers keep writing as usual"], lacks: ["where the profile is standalone, the Linux default"] },
   { gap: "GAP-0669", page: "stories/cursor-secret-exfil.mdx", has: ["defenseclaw setup cursor --yes --mode action --rule-pack default --no-human-approval --restart", "`--yes` re-applies hooks when Cursor is already configured and skips the optional LLM judge prompt", "✓ cursor mode=action"] },
   { gap: "GAP-0520", page: "guardrail/index.mdx", has: ["**Select action connector(s) for LLM judge.**"] },
-  { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["18 DefenseClaw dashboards (19 with the Fleet assets)"] },
-  { gap: "GAP-0388", page: "observability/grafana-dashboards.mdx", has: ["DefenseClaw provisions 18 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
+  { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["19 DefenseClaw dashboards (20 with the Fleet assets)"] },
+  { gap: "GAP-0388", page: "observability/grafana-dashboards.mdx", has: ["DefenseClaw provisions 19 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
   { gap: "GAP-1716", page: "get-started/windows/install-lifecycle.mdx", section: "Upgrade", has: ["exit code 0 means the installer started, not that it finished", "-Rollback -Yes`, which waits and sets the exit code"] },
   { gap: "GAP-1716", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["**Windows upgrade and rollback return before the installer finishes:**"] },
   { gap: "GAP-0922, GAP-0923", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["macOS has no setting that stops a user's sandbox profile", "DefenseClaw does not see or audit its tool calls"], lacks: ["unshare -Urm"] },
@@ -2688,7 +2691,7 @@ describe('saved installer protection matches the rule packs (GAP-1922)', () => {
 // GAP-2289: the setup guardrail connector list matches the CLI's choices per
 // OS: the proxy connectors are refused on native Windows (platform_support.py).
 describe('setup guardrail --connector choices match the CLI (GAP-2289)', () => {
-  it('lists the hook connectors everywhere and openclaw/zeptoclaw only on Linux and macOS', () => {
+  it('lists the hook connectors and openclaw everywhere and zeptoclaw only on Linux and macOS', () => {
     const setup = source('cli/defenseclaw/commands/cmd_setup.py');
     const fallback = setup.split('_CONNECTOR_NAMES_FALLBACK = [')[1]?.split(']')[0] ?? '';
     const names = [...fallback.matchAll(/"([a-z]+)"/g)].map((m) => m[1]).sort();
@@ -2696,14 +2699,15 @@ describe('setup guardrail --connector choices match the CLI (GAP-2289)', () => {
     const support = source('cli/defenseclaw/platform_support.py');
     const windows = support.split('WINDOWS_CONNECTOR_SUPPORT')[1] ?? '';
     const refused = [...windows.matchAll(/"([a-z]+)": ConnectorPlatformSupport\(\s*UNSUPPORTED,/g)].map((m) => m[1]).sort();
-    assert.deepEqual(refused, ['openclaw', 'zeptoclaw']);
+    // OpenClaw runs on native Windows in native hook mode (rel-1-0-10 S2).
+    assert.deepEqual(refused, ['zeptoclaw']);
     const hooks = names.filter((n) => !refused.includes(n));
     const text = page('guardrail/index.mdx');
     const row = text.split('**Which agent framework are you using?**')[1]?.split('| **Enable guardrail?**')[0] ?? '';
     const listed = row.split('; on Linux and macOS also')[0];
     assert.deepEqual([...listed.matchAll(/`([a-z]+)`/g)].map((m) => m[1]).filter((n) => n !== 'connector' && n !== 'agent').sort(), hooks.sort());
-    assert.ok(row.includes('on Linux and macOS also `openclaw` and `zeptoclaw`. Native Windows refuses those two'), 'connector row lost the per-OS split');
-    assert.ok(text.includes('amp or kiro; on Linux and macOS also openclaw or zeptoclaw (native Windows refuses those two: they need the guardrail proxy)'), 'flag table lost the per-OS split');
+    assert.ok(row.includes('on Linux and macOS also `zeptoclaw`. Native Windows runs OpenClaw 2026.8.35 or later in native hook mode, and refuses `zeptoclaw`'), 'connector row lost the per-OS split');
+    assert.ok(text.includes('amp, kiro or openclaw; on Linux and macOS also zeptoclaw (native Windows refuses it: it needs the guardrail proxy'), 'flag table lost the per-OS split');
     assert.ok(!text.includes('`kiro`, `openclaw`, `zeptoclaw`.'), 'old unqualified list is back');
   });
 });

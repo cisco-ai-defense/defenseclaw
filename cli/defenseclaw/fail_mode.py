@@ -139,6 +139,16 @@ def _is_linux() -> bool:
     return sys.platform.startswith("linux")
 
 
+def _claude_native_per_user_os() -> bool:
+    """Where per-user Claude Code hooks use the native launcher.
+
+    Mirrors claudeCodeNativePerUserOS (internal/gateway/connector/claudecode.go):
+    Linux since 1.0.8, macOS since 1.0.10 (#1384, rel-1-0-6 GAP-0559).
+    """
+
+    return _is_linux() or sys.platform == "darwin"
+
+
 def normalize_fail_mode(value: object, *, default: str = "closed") -> str:
     raw = str(value or "").strip().lower()
     return raw if raw in _VALID_MODES else default
@@ -821,16 +831,57 @@ def proxy_outage_source(cfg: Any, connector: str) -> str:
     return f"from the policy tier ({guardrail.hook_policy_tier(connector)} tier); no fail mode is saved."
 
 
-def proxy_outage_note(mode: str) -> str:
+def _native_openclaw(connector: str) -> bool:
+    # OpenClaw on Windows runs the native plugin hooks, with no guardrail proxy.
+    from defenseclaw.platform_support import uses_guardrail_proxy
+
+    return connector == "openclaw" and not uses_guardrail_proxy(connector)
+
+
+def _openclaw_provenance(connector: str) -> str:
+    # The fail-mode provenance label of a proxy connector.
+    if _native_openclaw(connector):
+        return "native-hooks"
+    return "proxy-and-hooks" if _hybrid_openclaw(connector) else "proxy-backed"
+
+
+def _hybrid_openclaw(connector: str) -> bool:
+    # OpenClaw on Linux and macOS with the native plugin hooks next to the
+    # guardrail proxy (hookMode hybrid in openclaw.json).
+    if connector != "openclaw" or _native_openclaw(connector):
+        return False
+    try:
+        from defenseclaw.config import load
+        from defenseclaw.openclaw_plugin_config import configured_openclaw_hook_mode
+
+        return configured_openclaw_hook_mode(load()) == "hybrid"
+    except Exception:  # noqa: BLE001 - a description only
+        return False
+
+
+def proxy_outage_note(mode: str, connector: str = "") -> str:
+    if _hybrid_openclaw(connector):
+        if mode == "open":
+            return (
+                "proxy and plugin hooks: tool calls, prompts and model requests continue with a warning "
+                "while the gateway is down"
+            )
+        return "proxy and plugin hooks: blocked while the gateway is down"
+    if _native_openclaw(connector):
+        if mode == "open":
+            return "native plugin hooks: tool calls and prompts continue with a warning while the gateway is down"
+        return "native plugin hooks: tool calls and prompts are blocked while the gateway is down"
     if mode == "open":
         return "no hooks: model requests continue with a warning while the gateway is down"
     return "no hooks: blocked while the gateway is down"
 
 
-def proxy_outage_summary(mode: str) -> str:
+def proxy_outage_summary(mode: str, connector: str = "") -> str:
     """The one-line outage behaviour of a proxy-backed connector, as every fail-mode view prints it."""
 
     shown = "open" if mode == "open" else "closed"
+    if _native_openclaw(connector) or _hybrid_openclaw(connector):
+        return shown + " (" + proxy_outage_note(mode, connector) + ")"
     return shown + " (proxy-backed, " + proxy_outage_note(mode) + ")"
 
 
@@ -849,13 +900,126 @@ def proxy_requests_note(cfg: Any, connector: str, *, saved: str | None = None) -
     return "Its proxied model requests are blocked while the gateway is down."
 
 
+# The connectors whose hook runs a call that its verified gateway took and did
+# not answer in time, in the open outage mode, when the call plainly names
+# nothing a protected file could be reached through (GAP-0518: Go
+# hookpaths.LateOrdinaryCall and hookexec.OrdinaryNoAnswerPayload read only
+# Claude Code and Codex tool calls). Every other connector blocks such a call.
+_LATE_ORDINARY_CONNECTORS = frozenset({"claudecode", "codex"})
+
+# The kinds of hook failure failure_outcomes tells apart, in the order status
+# and doctor print them.
+FAILURE_KINDS = (
+    ("gateway_down", "gateway down"),
+    ("no_answer", "no answer"),
+    ("hook_error", "hook or answer error"),
+)
+
+
+def failure_outcomes(cfg: Any, connector: str, effective: str) -> dict[str, str] | None:
+    """What the hooks of *connector* do for each kind of failure (#1441).
+
+    A single fail-mode=open read as if every failure let a call run. The
+    hooks tell three kinds apart, and the outcome of each follows from the
+    effective outage mode, the deployment and the connector, as the hooks
+    decide it:
+
+    - gateway_down: no gateway took the call (a refused connection, a
+      gateway that is stopped or still restarting). It follows the outage
+      mode: allow (with a warning and a hook-failures.jsonl record) when
+      open, block when closed. A managed host allows it only when the
+      hook proves the gateway service is stopped
+      (allow-if-service-stopped).
+    - no_answer: a verified gateway took the call, or holds its listener
+      and accepts nothing (frozen), and gave no decision before the hook
+      deadline. In a per-user open mode Claude Code and Codex allow it with
+      the warning when the call names nothing a protected file could be
+      reached through (allow-ordinary); every other call, connector and
+      deployment blocks.
+    - hook_error: an answer the gateway gave (an error status, a
+      malformed or cut-off answer), a missing token, another listener on the
+      port, an install in progress or a local failure of the hook itself.
+      It blocks in every tier.
+
+    None where the breakdown does not apply: Secure Client (its hooks keep
+    their own open default), the proxy-backed connectors (no hooks) and a
+    connector Secure Client leaves open upstream.
+    """
+
+    name = normalize(connector)
+    mode = str(effective or "").strip().lower()
+    if mode not in _VALID_MODES:
+        return None
+    from defenseclaw.platform_support import is_proxy_connector
+
+    if is_proxy_connector(name) or upstream_fail_open(cfg, name):
+        return None
+    deployment, _tier = _fail_mode_note_context(cfg, cfg.guardrail, name)
+    if deployment == "secure-client":
+        return None
+    if mode == "closed":
+        return {"gateway_down": "block", "no_answer": "block", "hook_error": "block"}
+    if deployment == "managed":
+        return {"gateway_down": "allow-if-service-stopped", "no_answer": "block", "hook_error": "block"}
+    if name in _LATE_ORDINARY_CONNECTORS:
+        no_answer = "allow-ordinary"
+    elif sys.platform == "win32":
+        # The Windows native hook gives the no-answer allow by payload shape
+        # today, so an ordinary shell call of another hook connector can run
+        # too (GAP-0030, the hook answer path). Status says so rather than
+        # overstate the block.
+        no_answer = "block-windows-shell-may-run"
+    else:
+        no_answer = "block"
+    return {"gateway_down": "allow", "no_answer": no_answer, "hook_error": "block"}
+
+
+_FAILURE_OUTCOME_TEXT = {
+    "allow": "allow with a warning",
+    "allow-if-service-stopped": "allow with a warning when the hook proves the gateway service is stopped",
+    "allow-ordinary": "allow with a warning unless the call may reach a protected file",
+    "block-windows-shell-may-run": "block, but on Windows an ordinary shell call may run with a warning",
+    "block": "block",
+}
+
+
+def failure_outcomes_summary(outcomes: dict[str, str] | None) -> str:
+    """The on_failure outcomes of a report as status and doctor print them, or ""."""
+
+    if not outcomes:
+        return ""
+    parts = []
+    for key, label in FAILURE_KINDS:
+        outcome = outcomes.get(key) or "unknown"
+        parts.append(label + ": " + _FAILURE_OUTCOME_TEXT.get(outcome, outcome))
+    return "; ".join(parts)
+
+
 def connector_fail_mode_report(
     cfg: Any,
     connector: str,
     *,
     inspect_effective_policy: bool = True,
 ) -> dict[str, Any]:
-    """Return the canonical read-only fail-mode report for a connector."""
+    """Return the canonical read-only fail-mode report for a connector.
+
+    on_failure (failure_outcomes) says what each kind of hook failure does
+    under the effective mode, so effective alone is not read as the
+    outcome of every failure (#1441).
+    """
+
+    report = _connector_fail_mode_report(cfg, connector, inspect_effective_policy=inspect_effective_policy)
+    report["on_failure"] = failure_outcomes(cfg, connector, str(report.get("effective") or ""))
+    return report
+
+
+def _connector_fail_mode_report(
+    cfg: Any,
+    connector: str,
+    *,
+    inspect_effective_policy: bool = True,
+) -> dict[str, Any]:
+    """The report of connector_fail_mode_report without its on_failure outcomes."""
 
     name = normalize(connector)
     guardrail = cfg.guardrail
@@ -900,8 +1064,8 @@ def connector_fail_mode_report(
         outage = proxy_model_outage_mode(cfg, name)
         return {
             "effective": outage,
-            "provenance": "proxy-backed",
-            "note": proxy_outage_note(outage),
+            "provenance": _openclaw_provenance(name),
+            "note": proxy_outage_note(outage, name),
             "configured": configured,
             "desired": outage,
             "runtime": None,
@@ -1823,10 +1987,11 @@ def _claude_per_user_native_registration(cfg: Any) -> _ClaudeNativeRegistration 
     the gateway's APIAddr (apiListenAddr): Linux, not managed, the account's
     default data directory, a .gateway-helper record naming
     ~/.local/bin/defenseclaw-gateway and an owner-only defenseclaw-hook-user
-    beside it. macOS, managed and custom data directories keep the shell hook.
+    beside it, on Linux and macOS (_claude_native_per_user_os). Managed and
+    custom data directories keep the shell hook.
     """
 
-    if _is_windows() or not _is_linux():
+    if _is_windows() or not _claude_native_per_user_os():
         return None
     if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
         return None

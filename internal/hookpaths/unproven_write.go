@@ -4,13 +4,16 @@
 package hookpaths
 
 import (
+	"errors"
 	"io"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -21,19 +24,69 @@ import (
 const UnprovenReasonKey = "\x00unproven-write"
 
 var unprovenReasonTitles = map[string]string{
-	"trap":                 "A trap handler can write a protected file",
-	"function":             "A called function can write a protected file",
-	"dynamic-command":      "A dynamic command can write a protected file",
-	"dynamic-argument":     "A dynamic argument can select a protected file",
-	"eval-source":          "Evaluated or sourced code can write a protected file",
-	"interpreter-path":     "Interpreter file effects cannot be proved safe for the protected path",
-	"interpreter-argument": "An interpreter has a dynamic argument after writable code",
-	"shell-parse":          "A shell parse error leaves a protected write unproved",
-	"shell-parse-bound":    "A shell parse exceeded the protected write proof bound",
-	"copy-directory":       "A copy into a directory can select a protected file",
-	"cdpath":               "CDPATH can select a directory containing a protected file link",
-	"nested-shell":         "A nested shell or shell script can write a protected file",
+	"trap":                   "A trap handler can write a protected file",
+	"function":               "A called function can write a protected file",
+	"dynamic-command":        "A dynamic command can write a protected file",
+	"dynamic-argument":       "A dynamic argument can select a protected file",
+	"eval-source":            "Evaluated or sourced code can write a protected file",
+	"interpreter-path":       "Interpreter file effects cannot be proved safe for the protected path",
+	"interpreter-argument":   "An interpreter has a dynamic argument after writable code",
+	"shell-parse":            "A shell parse error leaves a protected write unproved",
+	"shell-parse-bound":      "A shell parse exceeded the protected write proof bound",
+	UnprovenParserFault:      "The command could not be parsed safely",
+	"copy-directory":         "A copy into a directory can select a protected file",
+	"cdpath":                 "CDPATH can select a directory containing a protected file link",
+	"nested-shell":           "A nested shell or shell script can write a protected file",
+	UnprovenLinkUnread:       "A link the command makes or changes could not be read and may lead to a protected file",
+	UnprovenTargetUnresolved: "A write target could not be resolved and may be a protected file",
 }
+
+// linkCallText is link-making code this package does not evaluate:
+// interpreter, PowerShell and Windows link calls, wider than opaqueLink
+// (Perl and Ruby symlink, a .NET or COM link call).
+var linkCallText = lazyregexp.New(`(?i)symlink|hardlink|junction|\bos\.link\b|\bFile\.link\b|\blink\s*\(|mklink|new-item|createsymboliclink|createhardlink`)
+
+// CommandMayMakeLink reports a command that may create a link itself, with a
+// target the static reading cannot place: a link program (also behind a
+// wrapper or a multicall binary), a copy with a link option, link-making
+// interpreter or Windows code, or code it does not read at all (eval,
+// source, a nested shell, a command substitution, a backtick). A link the
+// command makes can point anywhere, the home included, so a write the
+// authorized-keys proof holds as unknown in such a command is not
+// lowered (rel-1-0-10:GAP-0013 review F1).
+func CommandMayMakeLink(command string) bool {
+	if command == "" {
+		return false
+	}
+	if strings.Contains(command, "$(") || strings.Contains(command, "`") || strings.Contains(command, "<(") || strings.Contains(command, ">(") {
+		return true
+	}
+	if opaqueLink.MatchString(command) || linkCallText.MatchString(command) {
+		return true
+	}
+	if tactics.RunsProgram(command, linkPrograms...) || tactics.RunsProgram(command, multicallPrograms...) {
+		return true
+	}
+	if tactics.RunsProgram(command, copyPrograms...) && copyLinkOption.MatchString(command) {
+		return true
+	}
+	return tactics.RunsProgram(command, "eval", "source", ".", "sh", "bash", "zsh", "dash", "ksh", "fish", "pwsh", "powershell", "cmd", "busybox", "toybox")
+}
+
+// The classes of an authorized-keys proof that found no protected file but
+// could not show the write is ordinary (rel-1-0-10:GAP-0013).
+const (
+	UnprovenLinkUnread       = "link-unread"
+	UnprovenTargetUnresolved = "target-unresolved"
+)
+
+// UnprovenParserFault is the class of a command the shell parser failed on
+// internally (shellparse.ErrParserFault: a contained panic, or text the
+// recovering parse refuses because it could loop). Nothing about the command
+// was read, so every pack blocks it, as the gateway's failed-check answer did
+// when the panic reached it (rel-1-0-10:GAP-0437, GAP-0486). It wins over
+// every other class of the same command.
+const UnprovenParserFault = "parser-fault"
 
 // UnprovenWriteTitle gives the operator the class that prevented a proof.
 func UnprovenWriteTitle(reason string) string {
@@ -80,7 +133,11 @@ var (
 // dynamic interpreter write operand can name the protected file directly.
 func UnprovenProtectedWrite(command, cwd, home string) string {
 	budget := unprovenParseBudget{bytes: 8 * MaxPayloadBytes, calls: 512}
-	return unprovenProtectedWriteDepth(command, cwd, home, 0, &budget)
+	reason := unprovenProtectedWriteDepth(command, cwd, home, 0, &budget)
+	if budget.fault {
+		return UnprovenParserFault
+	}
+	return reason
 }
 
 // The budget is shared by every nested and recovered parse of one hook call.
@@ -90,6 +147,10 @@ type unprovenParseBudget struct {
 	bytes   int
 	calls   int
 	bounded bool
+	// fault records a recovering parse the parser failed on
+	// (shellparse.ErrParserFault), at any depth; trunc carries its cap.
+	fault bool
+	trunc bounded.Truncated
 }
 
 func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *unprovenParseBudget) string {
@@ -424,7 +485,14 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 		budget.bounded = true
 		return true // Beyond the command proof bound, effects are unknown.
 	}
-	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(shellparse.Reader(command), "")
+	file, err := shellparse.ParseRecovering(command, 8, &budget.trunc)
+	if errors.Is(err, shellparse.ErrParserFault) {
+		// The parser failed on this text (rel-1-0-10:GAP-0437, GAP-0487):
+		// nothing of it was read. UnprovenProtectedWrite answers
+		// UnprovenParserFault for the whole command, whatever else it found.
+		budget.fault = true
+		return true
+	}
 	if file == nil {
 		return strings.Contains(command, ">") ||
 			unprovenWriter.MatchString(command) && protectedReachFromText(command, cwd, home)

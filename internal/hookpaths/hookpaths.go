@@ -630,7 +630,7 @@ func expandStaticShellWord(word *syntax.Word, env expand.Environ, haveHome bool)
 	for i, part := range word.Parts {
 		switch part := part.(type) {
 		case *syntax.Lit:
-			if strings.ContainsAny(part.Value, "*?[") {
+			if unescapedGlob(part.Value) {
 				return "", false
 			}
 			if i == 0 && strings.HasPrefix(part.Value, "~") &&
@@ -670,6 +670,27 @@ func expandStaticShellWord(word *syntax.Word, env expand.Environ, haveHome bool)
 		return "", false
 	}
 	return fields[0], true
+}
+
+// unescapedGlob reports a *, ? or [ in the unquoted literal text of a word
+// that is not escaped by a backslash: the shell expands it as a pattern. An
+// escaped one (file\*name) is a character of the word, as quoting it is
+// (rel-1-0-10:GAP-0013). On Windows a backslash is also the path separator
+// of a cmd or PowerShell spelling read by this shell parse (C:\x\*), so
+// there every glob character keeps the word dynamic.
+func unescapedGlob(text string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.ContainsAny(text, "*?[")
+	}
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '\\':
+			i++
+		case '*', '?', '[':
+			return true
+		}
+	}
+	return false
 }
 
 // StaticWord expands one shell word using only the known home directory.
@@ -1911,14 +1932,23 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// ordinary text (colour escapes, brackets) is not shell
 				// (RV-p4-1).
 				if shellparse.PastReadingBounds(command) {
-					if !isApplyPatchToolName(tool) {
+					if isApplyPatchToolName(tool) {
+						// An apply_patch command is a patch envelope whose
+						// targets are read from the envelope below; deep text
+						// in it is file content, not shell, and no shell
+						// reader parses it (GAP-2561).
+						break
+					}
+					// No reader parses such a call, so the map says it is
+					// incomplete, and lists the DefenseClaw state it may
+					// write: an empty map must never read as "no state
+					// touched" (BudgetStateReading, GAP-0281).
+					reduced, reducedOK := BudgetStateReading(command)
+					if !reducedOK {
 						return incompleteEvidence(cwd)
 					}
-					// An apply_patch command is a patch envelope whose
-					// targets are read from the envelope below; deep text
-					// in it is file content, not shell, and no shell
-					// reader parses it (GAP-2561).
-					break
+					command = reduced
+					truncated = true
 				}
 				// A POSIX call over the statement budget (more than 128
 				// statements) is refused by the gateway before any reader
@@ -2041,6 +2071,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					literalOperands = append(literalOperands, boundedOperands...)
 				}
 				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
+				literalOperands = append(literalOperands, quotedGlobNameWriteOperands(command, cwd, home, facts.Paths)...)
 				if concreteOperands.ready {
 					literalOperands = append(literalOperands, concreteOperands.loop...)
 					literalOperands = append(literalOperands, concreteOperands.sourceGlob...)

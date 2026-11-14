@@ -35,7 +35,8 @@ func TestDecisionModelDefaultsOff(t *testing.T) {
 		}
 		if d.EffectiveAllowThreshold() != 0.30 || d.EffectiveBlockThreshold() != 0.75 ||
 			d.EffectiveTimeoutSeconds() != 1 || d.EffectiveOnConfidentBlock() != DecisionModelEscalate ||
-			d.EffectiveAPIKeyEnv() != DefenseClawDecisionModelKeyEnv {
+			d.EffectiveAPIKeyEnv() != DefenseClawDecisionModelKeyEnv || d.EffectiveProtocol() != DecisionModelProtocolSystemOne ||
+			d.EffectiveBlockRiskScore() != 1.5 || !d.EffectiveEscalateRuleFlagged() {
 			t.Fatalf("v%d: effective defaults = %+v", version, d)
 		}
 	}
@@ -70,6 +71,9 @@ func TestDecisionModelLoadRefusesBadBlock(t *testing.T) {
 		"inverted":        "decision_model:\n  allow_threshold: 0.8\n  block_threshold: 0.5\n",
 		"bad mode":        "decision_model:\n  on_confident_block: maybe\n",
 		"url credentials": "decision_model:\n  base_url: https://user:pw@dm.example/v1/systemone\n",
+		"bad protocol":    "decision_model:\n  protocol: openai\n",
+		"risk score high": "decision_model:\n  block_risk_score: 2.5\n",
+		"risk score neg":  "decision_model:\n  block_risk_score: -1\n",
 	}
 	for name, section := range cases {
 		if _, err := LoadFromFile(writeDecisionModelConfig(t, 9, section)); err == nil {
@@ -90,13 +94,63 @@ func TestDecisionModelSchema(t *testing.T) {
 	}
 }
 
+// TestDecisionModelProtocol: protocol is a closed set, case-folded, and an
+// existing block without it keeps speaking System One.
+func TestDecisionModelProtocol(t *testing.T) {
+	cfg, err := LoadFromFile(writeDecisionModelConfig(t, 9, `decision_model:
+  enabled: true
+  model: gemini-decision-1
+  base_url: https://generativelanguage.googleapis.com/v1beta/decisions
+  protocol: gemini-decisions
+  api_key_env: GEMINI_API_KEY
+`))
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if got := cfg.DecisionModel.EffectiveProtocol(); got != DecisionModelProtocolGeminiDecisions {
+		t.Fatalf("protocol = %q", got)
+	}
+	for _, p := range []string{"", "system-one", "gemini-decisions"} {
+		if err := (DecisionModelConfig{Protocol: p}).Validate(); err != nil {
+			t.Errorf("protocol %q refused: %v", p, err)
+		}
+	}
+	// Exact values only, as in the schema.
+	for _, p := range []string{"gemini", "openai", "systemone", "Gemini-Decisions", " system-one"} {
+		if err := (DecisionModelConfig{Protocol: p}).Validate(); err == nil {
+			t.Errorf("protocol %q accepted", p)
+		}
+	}
+	good := "config_version: 9\ndecision_model:\n  protocol: gemini-decisions\n"
+	if err := ValidateV8SchemaBytes("config.yaml", []byte(good)); err != nil {
+		t.Fatalf("schema refused protocol: %v", err)
+	}
+}
+
+// TestDecisionModelSaferRoutingConfig: block_risk_score and
+// escalate_rule_flagged load and pass the schema; decide still loads.
+func TestDecisionModelSaferRoutingConfig(t *testing.T) {
+	cfg, err := LoadFromFile(writeDecisionModelConfig(t, 9, "decision_model:\n  block_risk_score: 1.2\n  escalate_rule_flagged: false\n  on_confident_block: decide\n"))
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	d := cfg.DecisionModel
+	if d.EffectiveBlockRiskScore() != 1.2 || d.EffectiveEscalateRuleFlagged() || d.EffectiveOnConfidentBlock() != DecisionModelDecide {
+		t.Fatalf("decision_model = %+v", d)
+	}
+	if err := ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\ndecision_model:\n  block_risk_score: 1.5\n  escalate_rule_flagged: true\n")); err != nil {
+		t.Fatalf("schema refused the routing keys: %v", err)
+	}
+}
+
 func TestValidateDecisionModelURL(t *testing.T) {
-	for _, ok := range []string{"https://dm.example/v1/systemone", "http://127.0.0.1:8791/v1/systemone", "http://localhost:8791/x", "http://[::1]:8791/x"} {
+	for _, ok := range []string{"https://dm.example/v1/systemone", "http://127.0.0.1:8791/v1/systemone", "http://localhost:8791/x", "http://[::1]:8791/x", "https://dm.example/x?alt=json"} {
 		if err := ValidateDecisionModelURL(ok); err != nil {
 			t.Errorf("%s: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"http://localhost.attacker.example/x", "http://192.168.1.5/x", "ftp://dm.example/x", "dm.example/x", "https://a:b@dm.example/x"} {
+	for _, bad := range []string{"http://localhost.attacker.example/x", "http://192.168.1.5/x", "ftp://dm.example/x", "dm.example/x", "https://a:b@dm.example/x",
+		"https://generativelanguage.googleapis.com/v1beta/decisions?key=placeholder", "https://dm.example/x?alt=json&API_KEY=placeholder", "https://dm.example/x?access_token=placeholder"} {
 		if err := ValidateDecisionModelURL(bad); err == nil {
 			t.Errorf("%s accepted", bad)
 		}

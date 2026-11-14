@@ -214,6 +214,54 @@ func (batch *CallWriteBatch) add(write *deferredCallWrite) bool {
 	return true
 }
 
+// CallWritesCommitted reports whether every event-history write tracked by
+// ctx's call write outcome (WithCallWriteOutcome) committed so far; true when
+// ctx tracks none. Work queued behind a flush (DeferAfterCallWrites) reads
+// the final outcome: the flush settles every write before that work runs.
+func CallWritesCommitted(ctx context.Context) bool {
+	if ctx == nil {
+		return true
+	}
+	outcome, _ := ctx.Value(callWriteOutcomeKey{}).(*CallWriteOutcome)
+	return outcome.Err() == nil
+}
+
+// AbandonCallWrites drops, before they are flushed, the writes queued on
+// ctx's open batch with ctx's call write outcome (WithCallWriteOutcome), and
+// records err on that outcome, so the work queued behind them sees them
+// uncommitted (CallWritesCommitted). A hook call uses it when the record
+// written beside its row of record failed: the row is not kept, and the call
+// answers with its fail-mode verdict, whose own record it writes next.
+func AbandonCallWrites(ctx context.Context, err error) {
+	if ctx == nil || err == nil {
+		return
+	}
+	outcome, _ := ctx.Value(callWriteOutcomeKey{}).(*CallWriteOutcome)
+	batch, _ := ctx.Value(callWriteBatchKey{}).(*CallWriteBatch)
+	if outcome == nil || batch == nil {
+		return
+	}
+	var dropped []*deferredCallWrite
+	batch.mu.Lock()
+	kept := batch.writes[:0]
+	for _, write := range batch.writes {
+		if owner, _ := write.ctx.Value(callWriteOutcomeKey{}).(*CallWriteOutcome); owner == outcome {
+			dropped = append(dropped, write)
+			continue
+		}
+		kept = append(kept, write)
+	}
+	for index := len(kept); index < len(batch.writes); index++ {
+		batch.writes[index] = nil
+	}
+	batch.writes = kept
+	batch.mu.Unlock()
+	for _, write := range dropped {
+		write.report.done(err)
+	}
+	outcome.record(err)
+}
+
 // CallWritesOpen reports whether a write with ctx would join an open batch.
 func CallWritesOpen(ctx context.Context, store *Store) bool {
 	batch := deferringBatch(ctx, store)
@@ -366,6 +414,12 @@ func (s *Store) runCallGroupBatch(batch []*groupedWrite) {
 		return
 	}
 	defer release()
+	if durableBatchObserved != nil {
+		if durable := countDurable(batch); durable > 0 {
+			durableBatchObserved(s, durable)
+		}
+	}
+	defer s.syncDurableDirFor(batch)
 	_ = s.runGroupedTx(batch, groupedTxHooks{
 		op: "hook_call_transaction",
 		begin: func(err error) error {

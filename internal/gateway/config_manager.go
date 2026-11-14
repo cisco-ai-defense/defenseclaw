@@ -2301,11 +2301,21 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("application_protection", oldCfg.ApplicationProtection, newCfg.ApplicationProtection)
 	add("notifications", oldCfg.Notifications, newCfg.Notifications)
 	add("routing", oldCfg.Routing, newCfg.Routing)
+	// The vLLM Semantic Router container (classifier vllm_sr) is the only
+	// restart-bound part of routing; the rest is per-generation policy.
+	add("routing.container", routingContainerView(oldCfg.Routing), routingContainerView(newCfg.Routing))
 	add("llm_providers", oldCfg.LLMProviders, newCfg.LLMProviders)
 	add("decision_model", oldCfg.DecisionModel, newCfg.DecisionModel)
 	add("update", oldCfg.Update, newCfg.Update)
-	// connectors.agent_gateway registers a route at start: restart-required.
-	add("connectors", oldCfg.Connectors, newCfg.Connectors)
+	// connectors.agent_gateway registers a route at start, and the rest of
+	// connectors.openclaw is applied by the OpenClaw setup at start:
+	// restart-required. connectors.openclaw.hooks.prompt_gate is read per
+	// request by GET /api/v1/openclaw/runtime, which the plugin polls, so it
+	// reloads hot (rel-1-0-10 GAP-0058).
+	oldConnectors, newConnectors := oldCfg.Connectors, newCfg.Connectors
+	add("connectors.openclaw.hooks.prompt_gate", oldConnectors.OpenClaw.Hooks.PromptGate, newConnectors.OpenClaw.Hooks.PromptGate)
+	oldConnectors.OpenClaw.Hooks.PromptGate, newConnectors.OpenClaw.Hooks.PromptGate = false, false
+	add("connectors", oldConnectors, newConnectors)
 	add("environment", oldCfg.Environment, newCfg.Environment)
 	add("tenant_id", oldCfg.TenantID, newCfg.TenantID)
 	add("workspace_id", oldCfg.WorkspaceID, newCfg.WorkspaceID)
@@ -2374,7 +2384,8 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// The gateway never reads registry sources (the CLI fetches and
 		// promotes them into asset_policy), so a registry add/edit must not
 		// make every later reload fail as restart-required (GAP-2422).
-		"registries": {},
+		"registries":                            {},
+		"connectors.openclaw.hooks.prompt_gate": {},
 		// Sandbox settings are read per launch, and the sandbox listeners
 		// rebind in-process (apiNeedsRestart).
 		"openshell": {},
@@ -2414,6 +2425,9 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// install watcher restarts for quarantine_dir (watcherNeedsRestart).
 		"policy_dir":     {},
 		"quarantine_dir": {},
+		// The routing engine is built per generation (engineRouter); only
+		// routing.container (the vLLM Semantic Router) needs a restart.
+		"routing": {},
 	}
 	if secureClient {
 		hotReloadable = map[string]struct{}{
@@ -2518,6 +2532,8 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 			held.Agent = running.Agent
 		case "routing":
 			held.Routing = running.Routing
+		case "routing.container":
+			holdRoutingContainer(&held.Routing, running.Routing)
 		case "gateway", "gateway.device_key_file":
 			reload, watcher := held.Gateway.ConfigReload, held.Gateway.Watcher
 			held.Gateway = running.Gateway
@@ -2560,8 +2576,12 @@ func holdGuardrailProcessSettings(g *config.GuardrailConfig, running config.Guar
 // gateway and sandbox topology after loading the file, so it is runtime state,
 // not a configuration change. TokenEnv remains in the comparison, which keeps
 // custody changes and effective-secret changes restart-required.
+// OpenClawToken is the OpenClaw WebSocket credential the client owns at
+// runtime (auth repair re-reads openclaw.json and saves it in .env), so a
+// new value is not a configuration change.
 func effectiveGatewayConfigForDiff(gateway config.GatewayConfig) config.GatewayConfig {
 	gateway.Token = gateway.ResolvedToken()
+	gateway.OpenClawToken = ""
 	gateway.NoTLS = false
 	return gateway
 }
@@ -2587,4 +2607,36 @@ func sortedUniqueStrings(values []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// routingContainerView is the part of routing the vLLM Semantic Router
+// container (or its remote endpoint) was started with: its process settings,
+// and, while routing is enabled with classifier vllm_sr, the catalog and
+// decisions translated into its config. Every other routing key is hot.
+func routingContainerView(r config.RoutingConfig) any {
+	view := struct {
+		VLLM               bool
+		Version, Algorithm string
+		Port               int
+		Remote             config.RoutingRemoteConfig
+		Enabled            bool
+		Models             []config.RoutingModelBackend
+		Signals            config.RoutingSignalConfig
+		Decisions          []config.RoutingDecisionRule
+	}{VLLM: r.Enabled && r.EffectiveClassifier() == config.RoutingClassifierVLLMSR, Version: r.Version, Algorithm: r.Algorithm, Port: r.Port, Remote: r.Remote}
+	if view.VLLM {
+		view.Enabled, view.Models, view.Signals, view.Decisions = r.Enabled, r.Models, r.Signals, r.Decisions
+	}
+	return view
+}
+
+// holdRoutingContainer keeps the container settings of running in held;
+// with the running classifier vllm_sr that includes the classifier choice,
+// enablement, catalog and decisions the container was started with.
+func holdRoutingContainer(held *config.RoutingConfig, running config.RoutingConfig) {
+	held.Version, held.Algorithm, held.Port, held.Remote = running.Version, running.Algorithm, running.Port, running.Remote
+	if running.EffectiveClassifier() == config.RoutingClassifierVLLMSR || held.EffectiveClassifier() == config.RoutingClassifierVLLMSR {
+		held.Classifier, held.Enabled = running.Classifier, running.Enabled
+		held.Models, held.Signals, held.Decisions = running.Models, running.Signals, running.Decisions
+	}
 }

@@ -242,12 +242,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
 			ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
 		}
-		if a.agentHookWindowsDialectHint(ctx) {
+		windowsReadings := a.agentHookWindowsDialectHint(ctx)
+		if windowsReadings {
 			actionInput.DialectHint = claudeCodeWindowsShellDialect(actionInput)
 		}
 		if coworkDialect != "" {
 			// The Cowork shell runs in a Linux VM on every host.
 			actionInput.DialectHint = coworkDialect
+			windowsReadings = false
 		}
 		if coworkDeny != nil {
 			verdict = coworkDeny
@@ -262,6 +264,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: actionArgs}),
 				ActiveAgentFileIdentities:     activeAgentContext.identities,
 				SandboxGuestCWD:               req.guestCWD,
+				windowsDialectReadings:        windowsReadings,
 				record:                        toolChainRecorderFromContext(ctx),
 			}, command, commandTool)
 		}
@@ -332,7 +335,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	stateMutation := a.provenHookActionMustEnforce(ctx, verdict) && claudeCodeCanEnforce(req)
+	stateMutation := a.hookActionMustEnforce(ctx, verdict) && claudeCodeCanEnforce(req)
 	wouldBlock := rawAction == "block" && mode != "action" && !stateMutation
 	if rawAction == "block" && !claudeCodeCanEnforce(req) {
 		action = "allow"

@@ -109,6 +109,17 @@ var managedCommands = []managedCommand{
 		Note: "Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`; the reason says whether the machine policy still inspects its calls. An administrator's run shows the deployment.",
 	},
 	{
+		Command: "defenseclaw routing status",
+		Launcher: []launcherPattern{
+			{words: []string{"routing", "status"}}, {words: []string{"routing", "budgets", "list"}},
+			{words: []string{"routing", "explain"}},
+		},
+		Windows: managedOffered,
+		Probes:  [][]string{{"routing", "status"}, {"routing", "budgets", "list"}, {"routing", "explain"}},
+		PerUser: perUserEverywhere, PerUserPath: []string{"routing", "status"},
+		Note: "`routing status`, `routing budgets list` and `routing explain <id>` show your own model routing decisions and budgets, read from the managed gateway; every other routing command is set in the administrator's config.",
+	},
+	{
 		Command:  "defenseclaw sandbox ...",
 		Launcher: []launcherPattern{{words: []string{"sandbox"}}},
 		Windows:  managedUnsupported,
@@ -235,6 +246,20 @@ var managedCommands = []managedCommand{
 		Probes:  [][]string{{"audit", "export"}},
 		PerUser: perUserEverywhere, PerUserPath: []string{"audit", "export"},
 		Note: "The managed audit log is administrator-only.",
+	},
+	{
+		Command: "defenseclaw audit compact",
+		Windows: managedAdminOnly,
+		Probes:  [][]string{{"audit", "compact"}},
+		PerUser: perUserEverywhere, PerUserPath: []string{"audit", "compact"},
+		Note: "Gives the disk space of deleted audit history back. An administrator runs it after stopping the gateway service.",
+	},
+	{
+		Command: "defenseclaw audit rejected",
+		Windows: managedAdminOnly,
+		Probes:  [][]string{{"audit", "rejected"}},
+		PerUser: perUserEverywhere, PerUserPath: []string{"audit", "rejected"},
+		Note: "The records the schema gate refused are part of the managed audit store, which is administrator-only.",
 	},
 }
 

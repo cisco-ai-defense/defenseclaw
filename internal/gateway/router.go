@@ -386,6 +386,9 @@ func (r *EventRouter) rulePack() *guardrail.RulePack {
 
 // Route dispatches a single event frame to the correct handler.
 func (r *EventRouter) Route(evt EventFrame) {
+	// Route runs on the gateway connection's event loop, outside any handler
+	// recovery: a panic in a handler would end the process (GAP-0437).
+	defer recoverGatewayGoroutine("event "+evt.Event, nil)
 	seqStr := "nil"
 	if evt.Seq != nil {
 		seqStr = fmt.Sprintf("%d", *evt.Seq)
@@ -1373,7 +1376,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 					// Keep stderr redacted, but retain the source reason for the v8
 					// route-specific redaction boundary.
 					fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
-						tool, verdict.Severity, redaction.Reason(verdict.Reason))
+						tool, verdict.Severity, logDisplayReason(verdict.Reason))
 					r.logStreamToolAction(sessionID, string(audit.ActionGatewayToolCallJudgeFlagged), tool, toolID,
 						fmt.Sprintf("severity=%s findings=%d reason=%s",
 							verdict.Severity, len(verdict.Findings),
@@ -1521,7 +1524,7 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 	// same treatment.
 	scrubbedFindings := make([]string, len(verdict.Findings))
 	for i, f := range verdict.Findings {
-		scrubbedFindings[i] = redaction.Reason(f)
+		scrubbedFindings[i] = logDisplayReason(f)
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] tool result alert: tool=%s action=%s severity=%s entities=%d findings=%v\n",
 		payload.Tool, verdict.Action, verdict.Severity, entityCount, scrubbedFindings)
@@ -1553,6 +1556,13 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 		fmt.Fprintf(os.Stderr, "[sidecar] parse exec.approval.requested: %v\n", err)
 		return
 	}
+	// Route starts this in its own goroutine (it must not block the event
+	// loop), so Route's recovery does not cover it. A check that fails
+	// internally denies the approval and the process keeps running
+	// (GAP-0437).
+	defer recoverGatewayGoroutine("exec.approval.requested", func() {
+		r.resolveApprovalAsync(payload.ID, false, "defenseclaw: the command check failed internally")
+	})
 
 	rawCmd, argv, cwd := payload.CommandContext()
 	cmdName := baseCommand(rawCmd)

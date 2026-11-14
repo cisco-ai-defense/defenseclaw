@@ -50,6 +50,7 @@ cannot change either tree.
 | Authorization ledger | `C:\ProgramData\Cisco\DefenseClaw\hook-guardian-state` |
 | Service logs | `C:\ProgramData\Cisco\DefenseClaw\logs` |
 | Scanner runtime | `C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`: `defenseclaw-scanners.exe` and the Python runtime it unpacks. The gateway can only read and run it |
+| Shipped rule packs | `C:\ProgramData\Cisco\DefenseClaw-RulePacks\<digest>\strict` and `\permissive`, one folder per version of the packs. Only SYSTEM and Administrators can change them; services can read them ([Strict and permissive rule packs](#strict-and-permissive-rule-packs)) |
 | Hook runtime | `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`, readable by users: the enrollment lists, runtime selectors and `machine-policy.json` |
 | Lifecycle log | `%WINDIR%\Logs\DefenseClaw`: `enterprise-lifecycle.log`, `last-result.json` and `mdm-wrapper.log`. Only Administrators and Event Log Readers can read them |
 
@@ -234,42 +235,40 @@ these permissions ([Custom rule pack app](/docs/enterprise/mdm/intune-windows#cu
 
 #### Strict and permissive rule packs
 
-The Windows Setup ships only the `default` rule pack. `guardrail.rule_pack: default` (or no
-`rule_pack`) needs nothing else. `strict` and `permissive` have no files on the computer, so
-Setup refuses them with `1639` and changes nothing until you bring the pack:
-
-```text
-config rule pack "strict": policy_dir is not set; the Windows Setup ships only the default rule pack, so strict has no files here. ...
-```
-
-To use `strict`, take the `policies/guardrail/strict` folder from the source archive of your
-DefenseClaw release (the Windows Setup does not contain it; `permissive` is the folder next to
-it), put it at `guardrail\strict` under a folder of your own, and make that folder
-administrator-owned with read access for the gateway service SID, as for a
-[custom rule pack](#custom-rule-packs):
-
-```powershell
-$Policies = 'C:\ProgramData\DefenseClaw-Policies'
-New-Item -ItemType Directory -Path "$Policies\guardrail" -Force | Out-Null
-$Acl = Get-Acl -LiteralPath $Policies
-$Acl.SetSecurityDescriptorSddlForm('O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274)', 'Owner, Access')
-Set-Acl -LiteralPath $Policies -AclObject $Acl
-if (Test-Path -LiteralPath "$Policies\guardrail\strict") { Remove-Item -LiteralPath "$Policies\guardrail\strict" -Recurse -Force }
-Copy-Item -LiteralPath .\strict -Destination "$Policies\guardrail\strict" -Recurse -ErrorAction Stop
-icacls "$Policies" /setowner '*S-1-5-32-544' /T /C | Out-Null
-```
-
-Then set `policy_dir` in the config:
+Setup ships all three built-in rule packs. `default` is built into the binaries. Setup
+writes `strict` and `permissive` to `C:\ProgramData\Cisco\DefenseClaw-RulePacks\<digest>`,
+where `<digest>` is the first 16 hex digits of a digest of the packs' files, so a release
+whose packs did not change uses the same folder. A release reads only the folder of its own
+packs, so a rollback keeps working, and only SYSTEM and Administrators can change it. Select
+a pack with no other setting:
 
 ```yaml title="config.yaml (excerpt)"
-policy_dir: 'C:\ProgramData\DefenseClaw-Policies'
 guardrail:
   rule_pack: strict
 ```
 
-Setup refuses a `policy_dir` without the pack folder with `1639` and names both properties.
-To keep one pack under your own name and pin its digest instead, use `guardrail.custom_packs`
-as described above.
+Run `/ensure` to switch, and again with `rule_pack: default` to switch back. A repeated
+`/ensure` changes nothing. The gateway refuses a shipped pack folder whose files are not
+the ones its release ships. `status` and `verify` (the Go checks that Setup `/verify` and
+MDM detection run; the PowerShell verify step does not look at the folder) then report
+`rule_pack_shipped_invalid`, and `/repair` or `/ensure` writes the folder again.
+
+If Setup cannot write the folders while the config uses the default pack, the run still
+succeeds with a warning, and the first run whose config selects `strict` or `permissive`
+writes them (and fails if it cannot).
+
+A `policy_dir` that holds `guardrail\strict` (or `guardrail\permissive`) still takes
+precedence, and that copy is yours to change. This is how 1.0.9 brought the pack, so
+such a config keeps working after the upgrade. To move to the shipped pack, remove that
+folder from `policy_dir` and run Setup `/repair`: an unchanged config makes `/ensure`
+change nothing, and `/repair` restarts the gateway on the shipped pack. A `policy_dir`
+without the folder uses the shipped pack. To keep a pack under your own name with a
+digest pin, use `guardrail.custom_packs` as described above.
+
+Setup does not remove the folders of older packs on upgrade (about 150 KB each, one per
+release whose packs changed), so a rollback finds its own. A failed upgrade from 1.0.9 that
+rolled back leaves the new release's folder; the next upgrade uses it. Uninstall removes all
+of them once no deployment is left.
 
 ### 3. Run Setup
 
@@ -649,13 +648,6 @@ outermost repository (or home) above it, never a folder in between.
   quarantine that cannot finish leaves its asset blocked in place. The gateway
   retries after 2 minutes, then 4, up to every 30 minutes, and `status` and
   `verify` warn `asset_not_scanned` or `asset_not_quarantined`.
-- **Signed-out owners.** When the source of a quarantine is in the profile of a
-  user who is signed out and Windows gives no S4U logon for the account, the
-  copy is in quarantine and blocked, but the hook guardian removes the original
-  folder only when that user next signs in. Until then `status` and `verify`
-  warn `asset_removal_deferred`, naming the folder and why the guardian waits
-  (a Microsoft Entra ID account, an Active Directory account whose S4U logon
-  was refused, or a local account).
 - **`take_action: false`.** A rejected asset is only recorded and stays usable
   until `take_action` is on again; then `asset_rejected_not_enforced` warns.
 - **`admission.mcp.scan_on_install: false`** admits new MCP servers without a scan
@@ -1450,7 +1442,22 @@ state. It refuses an older version (`downgrade_refused`). See
 
 ### The hook during an upgrade
 
-`/repair`, `/ensure` and the hook guardian do not replace a healthy hook: a hook that matches the digest the deployment records keeps its file. An upgrade replaces it once, in one step. The new hook takes the old one's name and the old one stays under a backup name until no program runs it, so a program that starts the hook gets the old one or the new one.
+From 1.0.10, agents start the hook from a folder named after the hook's own digest: `C:\Program Files\Cisco\DefenseClaw\bin\hooks\<first 16 hex digits of its SHA-256>\defenseclaw-hook.exe`, with `defenseclaw-hook-guard.exe` beside it. Every agent hook config DefenseClaw writes (Claude Code managed settings, Codex `requirements.toml`, Cursor, Copilot and the other connectors) names that path. An upgrade never replaces the program an agent starts:
+
+1. Setup copies the new release's hook and guard into a new folder (`bin\hooks\<new digest>`), and checks the bytes against the signed payload.
+2. Setup starts the new hook once (`--version-json`) and the guard once (`--version`), checks that both report this release's version and commit, and runs the managed Claude Code hook command from the new folder (the guard and the hook, through `cmd.exe`) on a test tool call. Those starts run with a filtered copy of Setup's own token (no privileges, Administrators as deny-only). The check proves that the new hook and guard start and answer; it is not the agent's user, so it does not prove that every application control or EDR rule aimed at one user or group allows them. The Setup result notes the token. The test call can leave one audit row for a `Read` of `defenseclaw-hook-image-self-test.txt`. A folder that an antivirus scan keeps busy is retried for about 11 seconds, then the run stops with `hook_image_publish_busy` and exit `1618` (retry later; nothing switched).
+3. Only then are the agent configs switched to the new folder: the Codex requirements during the run, the other configs on the guardian's first check after the run. Each config file is replaced in one step, so an agent reads the old path or the new one.
+4. The previous release's folder stays until the next upgrade, so an agent session that read its hook command before the upgrade keeps starting a hook that exists. Such a session counts as managed: the hook accepts any image under this install's `bin\hooks` and the transition copy below.
+
+If the new hook or guard cannot start (application control or an antivirus blocks the new folder), Setup stops with `hook_image_start_failed` and exit `1603`, rolls back, and every agent keeps running the installed hook. Nothing switches to a hook that does not start. Allow the DefenseClaw signer, not a folder path, in WDAC or AppLocker: the folder name changes with every release.
+
+**Known limit: the start check is not run as the enrolled user (GAP-0264).** The check starts the new hook and guard under the filtered copy of Setup's token, not as an enrolled account. An application control or EDR rule that names one user or group is therefore not evaluated at install, and Setup can finish with a hook that the user's own policy blocks later. When that happens the agent starts the hook as that user and the start fails. Claude Code and Codex treat a hook process that fails to start as non-blocking (see [a stopped pre-tool hook](/docs/enterprise/machine-policy)), so the tool call runs without a DefenseClaw decision or audit row, whatever the fail mode is: the setting `hook_fail_mode` decides what a hook that did start does when the gateway gives no answer, not what happens when the hook process cannot start. To avoid it, allow the DefenseClaw signer in every user and group rule that applies to enrolled accounts, and after an upgrade on a host with such rules run one agent call as an enrolled user and check that its audit row appears. Running the check as the enrolled user needs a start under that user's session token and was not shipped in 1.0.10.
+
+`bin\defenseclaw-hook.exe` stays as the transition copy (same bytes as the current hook). Setup still replaces it in place before it stops the services, as in 1.0.9, because agent configs of 1.0.9 and earlier name it until the first 1.0.10 upgrade switches them, and an agent session started before that upgrade still runs it. Disk use is about 150 MB per hook image, so three copies at most: the transition copy, the current folder and the previous folder. After a committed upgrade Setup removes an older folder under `bin\hooks` only when all of these hold: it is not the current or the replaced release's folder, no hook config DefenseClaw wrote (machine policy, Codex requirements, each enrolled account's agent configs) still names it, and a newer release replaced it at least 14 days ago, so an agent session that stays open across two upgrades keeps its hook. If a machine file DefenseClaw writes cannot be read, nothing is removed. Any account that can read a machine file (Claude Code's `managed-settings.json`, for one) can hold it open so that no other program can read it: Setup tries again for about 1.5 seconds, then names the file with `machine_file_busy` and removes nothing; close the program that holds it and run the prune or `retire` again. An account's own file is read only when no link (a junction, symbolic link or mount point) lies on its path below the account's home, the home included: Setup reads it as SYSTEM, so a folder the account turned into a link would point that read somewhere else. Setup opens each folder of that path from the folder above it and never follows a link, so a folder swapped for a link while Setup reads is refused inside the open, before Setup reaches or connects to what the link points to. Such a file is not read; it is skipped and named in the result (`link_in_account_path`), as is an account file that is a link itself, too large, unreadable or slow to answer. Files in `C:\ProgramData\OpenAI\Codex` and `C:\ProgramData\Cursor` count as an account's when the file or one of its folders is not owned by SYSTEM or Administrators (a standard user can create those folders when they are missing). Setup lists those folders the same way, from `C:\ProgramData`, and reads each owner on the opened folder. A link at one of them is never followed: one an account made is skipped; one owned by SYSTEM or Administrators means nothing is removed (`link_at_machine_folder`; replace it with a plain folder). A skipped file never stops the prune: the folder rules above still keep the current, the replaced and any recently replaced folder. A folder whose hook is running is kept and removed by a later upgrade. Before a rollback to 1.0.9 or earlier, run `hook-image retire` ([Roll back](/docs/enterprise/lifecycle#roll-back)).
+
+`/repair`, `/ensure` and the hook guardian do not replace a healthy hook: a hook that matches the digest the deployment records keeps its file, in `bin` and in the current folder. The guardian restores a changed or missing current hook from its protected copy, in both places. It checks the previous folder and logs a change once, but does not restore it (it keeps no copy of the previous release). `enterprise windows verify` (from an elevated PowerShell prompt) reports `hook_image_not_staged` when the current folder is missing or does not match; agents then run the transition copy until `/repair` stages the folder again.
+
+The rest of this section describes how the transition copy is replaced, which still applies to upgrades from 1.0.9 and earlier. The new hook takes the old one's name and the old one stays under a backup name until no program runs it, so a program that starts the hook gets the old one or the new one.
 
 **Measured.** On Windows Server 2025, 20 upgrades of the 1.0.9 Setup ran with hook starts going the whole time: 10 from 1.0.8 and 10 from an earlier 1.0.9 build, 6 of them with the CPU at 100%. They made 222,039 hook starts and none failed. Before the fix, 1 of 31 upgrades failed 4 starts. The cause was not the swap. It was Setup's own check that nothing holds the hook: the check asked Windows Restart Manager, which opens the file with no sharing for a short time the first time (the length of that hold was not measured in place; the hit rate is the measure). That hit about 3% of upgrades. Setup now tests for a holder first, four times 100 ms apart, and asks Restart Manager only when every test finds a handle that does not share deletion. Before the repeat, Restart Manager still ran in 1 of 7 traced upgrades of the fixed Setup; no start failed in any of them.
 

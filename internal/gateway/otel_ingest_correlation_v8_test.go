@@ -366,6 +366,7 @@ func TestNativeOTLPIDlessToolLinksUniquePendingWithoutCollapse(t *testing.T) {
 	hook := correlateCodexToolStartWithoutNativeID(
 		t, t.Context(), api, "conversation-native-tool-1", "unique",
 	)
+	requireActivePendingStartForTest(t, fixture.path, hook.SemanticEventID, 1)
 	accounting, err := api.importDecodedOTLPRequestV8(
 		t.Context(), codexCorrelationToolRequest(now, ""),
 		otelSignalTraces, "codex", now,
@@ -399,17 +400,12 @@ func TestNativeOTLPIDlessToolLinksUniquePendingWithoutCollapse(t *testing.T) {
 		WHERE relationship_type='same_as'`).Scan(&sameAs); err != nil {
 		t.Fatal(err)
 	}
-	var pendingStatus, terminalSemantic string
-	if err := database.QueryRow(`SELECT status, terminal_semantic_event_id
-		FROM correlation_pending_operations WHERE operation_id=?`,
-		hook.ToolInvocationID).Scan(&pendingStatus, &terminalSemantic); err != nil {
-		t.Fatal(err)
+	if causedBy != 1 || sameAs != 0 {
+		t.Fatalf("derived join caused_by=%d same_as=%d native=%q", causedBy, sameAs, nativeSemantic)
 	}
-	if causedBy != 1 || sameAs != 0 || pendingStatus != string(audit.CorrelationOperationCompleted) ||
-		terminalSemantic != nativeSemantic {
-		t.Fatalf("derived join caused_by=%d same_as=%d pending=%q terminal=%q native=%q",
-			causedBy, sameAs, pendingStatus, terminalSemantic, nativeSemantic)
-	}
+	// The native end that joined the start (caused_by) resolved its
+	// operation: only a successful resolve deletes the row (S8 R5).
+	requireActivePendingStartForTest(t, fixture.path, hook.SemanticEventID, 0)
 }
 
 func TestNativeOTLPIDlessToolAmbiguityRemainsUnresolved(t *testing.T) {
@@ -612,7 +608,10 @@ func TestNativeOTLPCodexResponseLinksUniqueDurablePromptWithoutCollapse(t *testi
 		"conversation-native-1", prompt.TurnID, prompt.AgentID).Scan(&relationshipProjection); err != nil {
 		t.Fatal(err)
 	}
-	if events != 3 || groups != 3 || causedBy != 1 || exactMerges != 0 || derivedMembership != 2 ||
+	// The cursor-derived turn and agent are in the native observations
+	// (nativeProjection), not in correlation_identifiers: turn and agent
+	// identifiers are no longer stored (S8 R5, correlationIdentifierStored).
+	if events != 3 || groups != 3 || causedBy != 1 || exactMerges != 0 || derivedMembership != 0 ||
 		nativeProjection == 0 || relationshipProjection != 0 {
 		t.Fatalf("durable prompt join events=%d groups=%d caused_by=%d exact_merges=%d derived_membership=%d native_projection=%d relationship_projection=%d",
 			events, groups, causedBy, exactMerges, derivedMembership, nativeProjection, relationshipProjection)

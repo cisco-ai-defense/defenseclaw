@@ -1076,6 +1076,15 @@ def _print_agents(
                 ux.warn(f"{issue}. Fix the syntax error in openclaw.json (OpenClaw reads JSON5).")
             else:
                 ux.warn(f"{issue}; OpenClaw may skip reload. Run defenseclaw setup openclaw.")
+        else:
+            from defenseclaw.openclaw_plugin_config import openclaw_plugin_evidence
+
+            hook_mode, hook_detail, _seen = openclaw_plugin_evidence(cfg, None if sidecar_down else health)
+            _status_row("OpenClaw hooks", f"{hook_mode} ({hook_detail})")
+            from defenseclaw.openclaw_plugin_config import openclaw_operator_admin_off
+
+            if openclaw_operator_admin_off():
+                _status_row("OpenClaw remediation", "off (no operator.admin)")
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
     if sidecar_down and enabled_count and not sidecar_unread and not sidecar_unchecked:
@@ -1098,6 +1107,7 @@ def _print_agents(
         fail_mode = _effective_status_fail_mode(cfg, conn)
         fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
         fail_mode_suffix = f" fail-mode={fail_mode['effective']}{fail_mode_note} provenance={fail_mode['provenance']}"
+        fail_mode_suffix += _status_failure_outcomes_suffix(fail_mode)
         friendly = _friendly_connector_name(conn)
         disclosure = _cursor_priority_conflict_disclosure(conn)
         disclosure_suffix = f" {disclosure}" if disclosure else ""
@@ -1444,6 +1454,15 @@ def _effective_status_mode(cfg, connector: str, source: str = "manual") -> str:
         except Exception:
             return ""
     return ""
+
+
+def _status_failure_outcomes_suffix(fail_mode: dict) -> str:
+    """What each kind of hook failure does, after fail-mode= (#1441), or ""."""
+
+    from defenseclaw.fail_mode import failure_outcomes_summary
+
+    summary = failure_outcomes_summary(fail_mode.get("on_failure"))
+    return f" on-failure=({summary})" if summary else ""
 
 
 def _effective_status_fail_mode(cfg, connector: str) -> dict:
@@ -1922,6 +1941,22 @@ def _semantic_routing_status(cfg, health: dict | None = None) -> dict:
     return state
 
 
+def _route_only_status(cfg, health: dict | None = None) -> list[dict]:
+    """One state per route-only connector: the doctor rows without the agent
+    config and signing detail rows (S1 DESIGN 7.4)."""
+    from defenseclaw.doctor_route_only import route_only_rows
+
+    try:
+        rows = route_only_rows(cfg, health, profile=_enterprise_profile(cfg))
+    except Exception:
+        return []
+    listed = (getattr(cfg.routing, "route_only", None) or {}).get("connectors") or []
+    keep = {f"Route-only {c}" for c in listed} | {"Route-only", "Route-only API port"}
+    return [
+        {"label": row.label, "tag": row.tag, "detail": row.detail, "fix": row.fix} for row in rows if row.label in keep
+    ]
+
+
 def _print_semantic_routing(cfg, health: dict | None = None) -> None:
     state = _semantic_routing_status(cfg, health=health)
     if not state["configured"]:
@@ -1931,6 +1966,9 @@ def _print_semantic_routing(cfg, health: dict | None = None) -> None:
     color = "green" if runtime == "running" else "yellow"
     value = f"{state['mode']} — {runtime}; {state['model_count']} model(s)"
     _status_row("Model routing", ux._style(value, fg=color))
+    for row in _route_only_status(cfg, health):
+        row_color = {"pass": "green", "fail": "red"}.get(row["tag"], "yellow")
+        _status_row(row["label"], ux._style(row["detail"], fg=row_color))
 
 
 def _print_audit_log_health(cfg, health: dict | None) -> None:
@@ -2623,6 +2661,7 @@ def _status_payload(app) -> dict:
         payload["cowork"] = cowork_row.as_dict()
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
+    payload["semantic_routing"]["route_only"] = _route_only_status(cfg, health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)
     payload["fleet"] = _fleet_health_payload(cfg, _fleet_status_client(client, health))
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()

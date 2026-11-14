@@ -50,7 +50,6 @@ from defenseclaw import (
     connector_paths,
     credential_provenance,
     envvars,
-    gateway_token_adoption,
     legacy_connector,
 )
 from defenseclaw.config_writer import ManagedConfigWriteError
@@ -1766,7 +1765,14 @@ DECISION_MODEL_KEY_ENV = "DEFENSECLAW_DECISION_MODEL_KEY"
 DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD = 0.30
 DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD = 0.75
 DECISION_MODEL_DEFAULT_TIMEOUT = 1.0
+# "decide" is retired (owner 2026-11-13: a decision-model block is never final); it still loads and acts as escalate.
 DECISION_MODEL_ON_CONFIDENT_BLOCK = ("escalate", "decide")
+DECISION_MODEL_DEFAULT_BLOCK_RISK_SCORE = 1.5
+# Wire protocols: System One ({model, state, questions}, Bearer token) and
+# Google's Decisions API ({model, input, questions}, x-goog-api-key).
+DECISION_MODEL_PROTOCOL_SYSTEM_ONE = "system-one"
+DECISION_MODEL_PROTOCOL_GEMINI = "gemini-decisions"
+DECISION_MODEL_PROTOCOLS = (DECISION_MODEL_PROTOCOL_SYSTEM_ONE, DECISION_MODEL_PROTOCOL_GEMINI)
 
 
 @dataclass
@@ -1789,12 +1795,18 @@ class DecisionModelConfig:
     enabled: bool = False
     model: str = ""
     base_url: str = ""
+    # system-one (default) or gemini-decisions (Gemini Decision 1).
+    protocol: str = ""
     api_key_env: str = ""
     credential: str = ""
     timeout: float = 0.0
     allow_threshold: float = 0.0
     block_threshold: float = 0.0
     on_confident_block: str = ""
+    # A confident block also needs the risk score answer (0..2) at or above this; 0 = 1.5.
+    block_risk_score: float = 0.0
+    # A call the rules flagged never gets a confident block (it escalates); None = true.
+    escalate_rule_flagged: bool | None = None
     # Connectors whose hook-lane tool calls the model answers on its own
     # where the LLM judge does not run ("*" = all). Empty = only in front
     # of the judge. Omitted from YAML when empty.
@@ -1806,6 +1818,10 @@ class DecisionModelConfig:
     def effective_api_key_env(self) -> str:
         return self.api_key_env.strip() or DECISION_MODEL_KEY_ENV
 
+    def effective_protocol(self) -> str:
+        # Exact values only (validation_error refuses anything else), as in Go and the schema.
+        return self.protocol or DECISION_MODEL_PROTOCOL_SYSTEM_ONE
+
     def effective_timeout(self) -> float:
         return self.timeout if self.timeout > 0 else DECISION_MODEL_DEFAULT_TIMEOUT
 
@@ -1814,6 +1830,12 @@ class DecisionModelConfig:
 
     def effective_block_threshold(self) -> float:
         return self.block_threshold if self.block_threshold > 0 else DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD
+
+    def effective_block_risk_score(self) -> float:
+        return self.block_risk_score if self.block_risk_score > 0 else DECISION_MODEL_DEFAULT_BLOCK_RISK_SCORE
+
+    def effective_escalate_rule_flagged(self) -> bool:
+        return self.escalate_rule_flagged is not False
 
     def effective_on_confident_block(self) -> str:
         return (self.on_confident_block or "").strip().lower() or "escalate"
@@ -1836,10 +1858,16 @@ class DecisionModelConfig:
                 f"allow_threshold ({self.effective_allow_threshold()}) must be lower than "
                 f"block_threshold ({self.effective_block_threshold()})"
             )
+        if self.escalate_rule_flagged is not None and not isinstance(self.escalate_rule_flagged, bool):
+            return f"escalate_rule_flagged must be true or false, got {self.escalate_rule_flagged!r}"
+        if not 0 <= self.block_risk_score <= 2:
+            return f"block_risk_score must be between 0 and 2, got {self.block_risk_score}"
         if not 0 <= self.timeout <= 30:
             return f"timeout must be between 0 and 30 seconds, got {self.timeout}"
         if self.effective_on_confident_block() not in DECISION_MODEL_ON_CONFIDENT_BLOCK:
             return f"on_confident_block must be escalate or decide, got {self.on_confident_block!r}"
+        if self.protocol not in ("", *DECISION_MODEL_PROTOCOLS):
+            return f"protocol must be system-one or gemini-decisions, got {self.protocol!r}"
         if self.base_url.strip():
             err = decision_model_url_error(self.base_url)
             if err:
@@ -1850,6 +1878,13 @@ class DecisionModelConfig:
             if not self.model.strip():
                 return "enabled needs model (the model name the endpoint serves)"
         return ""
+
+
+# Query parameters that carry a key or token. Mirrors decisionModelKeyQueryParams in Go.
+_DECISION_MODEL_KEY_QUERY_PARAMS = frozenset({
+    "key", "api_key", "apikey", "api-key", "x-goog-api-key", "access_token", "token",
+    "auth_token", "auth", "secret", "client_secret", "password",
+})
 
 
 def decision_model_url_error(raw: str) -> str:
@@ -1866,6 +1901,14 @@ def decision_model_url_error(raw: str) -> str:
         return "base_url must be an absolute http(s) URL"
     if parsed.username or parsed.password:
         return f"base_url must not carry credentials; put the token in {DECISION_MODEL_KEY_ENV}"
+    from urllib.parse import parse_qsl
+
+    for name, _value in parse_qsl(parsed.query, keep_blank_values=True):
+        if name.lower() in _DECISION_MODEL_KEY_QUERY_PARAMS:
+            return (
+                f"base_url must not carry a key in its query string ({name}=); put the key in "
+                f"{DECISION_MODEL_KEY_ENV} (decision_model.api_key_env)"
+            )
     scheme = parsed.scheme.lower()
     if scheme == "https":
         return ""
@@ -1895,12 +1938,17 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
         enabled=raw.get("enabled") is True or str(raw.get("enabled", "")).strip().lower() == "true",
         model=str(raw.get("model", "") or ""),
         base_url=str(raw.get("base_url", "") or ""),
+        protocol=str(raw.get("protocol", "") or ""),
         api_key_env=str(raw.get("api_key_env", "") or ""),
         credential=str(raw.get("credential", "") or ""),
         timeout=_num("timeout"),
         allow_threshold=_num("allow_threshold"),
         block_threshold=_num("block_threshold"),
         on_confident_block=str(raw.get("on_confident_block", "") or ""),
+        block_risk_score=_num("block_risk_score"),
+        # Strict: a YAML bool or nothing; anything else is kept as given so
+        # validation_error reports it (Go refuses it at load too).
+        escalate_rule_flagged=raw.get("escalate_rule_flagged"),
         hook_connectors=_decision_model_connector_list(raw.get("hook_connectors")),
     )
 
@@ -2349,43 +2397,57 @@ class GatewayConfig:
     watchdog: GatewayWatchdogConfig = field(default_factory=GatewayWatchdogConfig)
 
     def resolved_token(self) -> str:
-        """Return the gateway auth token, walking the precedence ladder.
+        """Return the DefenseClaw master gateway token.
 
-        Resolution order:
+        Mirror of ``GatewayConfig.ResolvedToken`` in internal/config/config.go;
+        the two must agree. Resolution order:
 
-        1. ``self.token_env`` — operator-supplied override, ALWAYS wins.
-           This lets ``defenseclaw setup`` / ops tooling pin the var
-           name explicitly without us guessing.
-        2. ``DEFENSECLAW_GATEWAY_TOKEN`` — the canonical name the Go
-           gateway (`internal/gateway/firstboot.go::EnsureGatewayToken`)
-           writes to ``~/.defenseclaw/.env`` on first boot.
-        3. ``OPENCLAW_GATEWAY_TOKEN`` — back-compat shim for installs
-           that bootstrapped before the defenseclaw rename. The Go
-           gateway also reads this for the same reason; honouring it
-           here keeps the two sides symmetric.
-        4. ``self.token`` — literal value from ``config.yaml``. Last
-           resort because plaintext secrets in YAML are discouraged
-           (and ``_warn_plaintext_secrets`` already nags about it).
+        1. ``self.token_env`` - an operator-chosen variable name, unless it
+           names ``OPENCLAW_GATEWAY_TOKEN``.
+        2. ``DEFENSECLAW_GATEWAY_TOKEN`` - the name the gateway mints into
+           ``~/.defenseclaw/.env`` (EnsureGatewayToken).
+        3. ``self.token`` - the literal from ``config.yaml``.
 
-        When ``.env`` holds both gateway-token spellings with different
-        values, the earlier name in this order wins, except that a copy the
-        gateway adopted from ``openclaw.json`` (recorded by the marker comment
-        in ``.env``, see ``defenseclaw.gateway_token_adoption``) never shadows a
-        value the operator saved under the other spelling: the load leaves the
-        adopted copy out. ``defenseclaw keys set`` on either name replaces every
-        spelling already saved.
+        ``OPENCLAW_GATEWAY_TOKEN`` is never the master (R-TOK): it is only the
+        credential the gateway presents to the OpenClaw WebSocket, and the
+        OpenClaw account, its plugins and any tool that reads openclaw.json
+        hold it. A candidate whose value equals it is skipped too, because a
+        1.0.9 adoption wrote the OpenClaw token under both names; the gateway
+        and ``defenseclaw migrate`` mint a separate master then. SecretRef text
+        an earlier build saved as a token is never one (#1404).
 
-        Returns the empty string when no token is reachable; callers
-        gate on the truthiness, so empty == "unauthenticated".
+        Returns the empty string when no token is reachable; callers gate on
+        the truthiness, so empty == "unauthenticated".
         """
-        # SecretRef text an earlier build saved as a token is never one (#1404).
         from defenseclaw.connector_paths import is_secret_ref_text
 
-        for name in (self.token_env, "DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
-            val = os.environ.get(name, "") if name else ""
-            if val and not is_secret_ref_text(val):
+        openclaw = os.environ.get(OPENCLAW_GATEWAY_TOKEN_ENV, "").strip()
+
+        def usable(value: str) -> bool:
+            return bool(value) and not is_secret_ref_text(value) and value.strip() != openclaw
+
+        token_env = (self.token_env or "").strip()
+        for name in (token_env, _GATEWAY_TOKEN_ENV_NAME):
+            if not name or is_openclaw_gateway_token_env(name):
+                continue
+            val = os.environ.get(name, "")
+            if usable(val):
                 return val
-        return "" if is_secret_ref_text(self.token) else self.token
+        return self.token if usable(self.token) else ""
+
+
+# The DefenseClaw master gateway token and the OpenClaw WebSocket credential
+# (R-TOK). They are separate values; see GatewayConfig.resolved_token.
+_GATEWAY_TOKEN_ENV_NAME = "DEFENSECLAW_GATEWAY_TOKEN"
+OPENCLAW_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
+
+
+def is_openclaw_gateway_token_env(name: str) -> bool:
+    """True when *name* is ``OPENCLAW_GATEWAY_TOKEN`` (any case on Windows)."""
+    name = (name or "").strip()
+    if os.name == "nt":
+        return name.upper() == OPENCLAW_GATEWAY_TOKEN_ENV
+    return name == OPENCLAW_GATEWAY_TOKEN_ENV
 
 
 @dataclass
@@ -2815,6 +2877,55 @@ class PerConnectorObservability:
     webhooks: list[WebhookConfig] | None = None
 
 
+TOKENOMICS_ROLES = ("agent", "judge", "decision_model", "ai_defense", "router_classifier")
+TOKENOMICS_METRIC_LABELS = ("connector", "provider", "model", "route_decision", "call_role", "profile")
+
+
+@dataclass
+class PriceRates:
+    """Per-million-token USD rates. ``None`` is absent (never 0)."""
+
+    input_per_mtok: float | None = None
+    output_per_mtok: float | None = None
+    cache_read_per_mtok: float | None = None
+    cache_write_per_mtok: float | None = None
+    reasoning_per_mtok: float | None = None
+
+
+@dataclass
+class PriceEntry(PriceRates):
+    provider: str = ""
+    model: str = ""
+
+
+@dataclass
+class PricingConfig:
+    """``observability.pricing`` (mirrors ``config.PricingConfig``)."""
+
+    version: str = ""
+    models: list[PriceEntry] = field(default_factory=list)
+    ai_defense_per_call_usd: float | None = None
+    unknown_model: str = "omit"
+    fallback: PriceRates = field(default_factory=PriceRates)
+
+
+@dataclass
+class TokenomicsConfig:
+    """``observability.tokenomics`` (mirrors ``config.TokenomicsConfig``). Off by default."""
+
+    enabled: bool = False
+    record_routing_provenance: bool = True
+    roles: list[str] = field(default_factory=list)
+    native_claudecode: bool = True
+    native_codex: bool = True
+    cost_compute: bool = True
+    cost_currency: str = "USD"
+    cost_keep_reported: bool = True
+    local_store_enabled: bool = False
+    local_store_retention_days: int = 30
+    metric_labels: list[str] = field(default_factory=lambda: list(TOKENOMICS_METRIC_LABELS))
+
+
 @dataclass
 class ObservabilityConfig:
     """Notification-only connector compatibility inside ``observability``.
@@ -2826,6 +2937,8 @@ class ObservabilityConfig:
     """
 
     connectors: dict[str, PerConnectorObservability] = field(default_factory=dict)
+    tokenomics: TokenomicsConfig = field(default_factory=TokenomicsConfig)
+    pricing: PricingConfig = field(default_factory=PricingConfig)
 
     def _connector_override(self, connector: str) -> PerConnectorObservability | None:
         """Return the override block for ``connector`` if configured.
@@ -2970,6 +3083,9 @@ class GuardrailProfile:
     connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
     # Tightens openshell.admin for subjects of this profile; None adds nothing.
     sandbox: OpenShellAdminConfig | None = None
+    # Tightens routing.admin for subjects of this profile (Go
+    # RoutingPolicyConfig); kept as a mapping, None adds nothing.
+    routing: dict[str, Any] | None = None
     enabled: bool | None = None
     hook_fail_mode: str = ""
 
@@ -4113,6 +4229,20 @@ class RoutingConfig:
     models: list[dict[str, Any]] = field(default_factory=list)
     signals: dict[str, Any] = field(default_factory=dict)
     decisions: list[dict[str, Any]] = field(default_factory=list)
+    # 1.0.10 keys (Go internal/config/routing_policy.go). Absent keeps the
+    # 1.0.9 meaning; validation is the v8 schema plus the Go gateway.
+    classifier: str = ""
+    min_confidence: float = 0.0
+    on_classifier_error: str = ""
+    default_alias: str = ""
+    categories: dict[str, Any] = field(default_factory=dict)
+    allow_user_override: bool = False
+    sensitive: dict[str, Any] = field(default_factory=dict)
+    systemone: dict[str, Any] = field(default_factory=dict)
+    route_only: dict[str, Any] = field(default_factory=dict)
+    # routing.admin: the floor keys (S1) plus rules / budgets / visibility
+    # (S11), kept as a mapping so every key round-trips.
+    admin: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"enabled": self.enabled}
@@ -4130,7 +4260,21 @@ class RoutingConfig:
             d["signals"] = copy.deepcopy(self.signals)
         if self.decisions:
             d["decisions"] = copy.deepcopy(self.decisions)
+        for name in ("classifier", "on_classifier_error", "default_alias"):
+            if getattr(self, name):
+                d[name] = getattr(self, name)
+        if self.min_confidence:
+            d["min_confidence"] = self.min_confidence
+        if self.allow_user_override:
+            d["allow_user_override"] = True
+        for name in ROUTING_NESTED_1010_KEYS:
+            if getattr(self, name):
+                d[name] = copy.deepcopy(getattr(self, name))
         return d
+
+
+# Nested routing keys added in 1.0.10, kept as raw mappings.
+ROUTING_NESTED_1010_KEYS = ("categories", "sensitive", "systemone", "route_only", "admin")
 
 
 @dataclass
@@ -5710,7 +5854,7 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
                 continue
             _strip_empty_keys(
                 profile,
-                ("description", "mode", "block_message", "hilt", "enabled", "hook_fail_mode", "sandbox"),
+                ("description", "mode", "block_message", "hilt", "enabled", "hook_fail_mode", "sandbox", "routing"),
             )
             if isinstance(profile.get("sandbox"), dict):
                 _strip_unset_sandbox_keys(profile["sandbox"])
@@ -5769,6 +5913,7 @@ def _serialize_routing(d: dict[str, Any]) -> None:
         "models",
         "signals",
         "decisions",
+        *ROUTING_NESTED_1010_KEYS,
     )
     has_value = any(
         (
@@ -5776,6 +5921,11 @@ def _serialize_routing(d: dict[str, Any]) -> None:
             routing.get("version"),
             routing.get("port"),
             routing.get("algorithm"),
+            routing.get("classifier"),
+            routing.get("min_confidence"),
+            routing.get("on_classifier_error"),
+            routing.get("default_alias"),
+            routing.get("allow_user_override"),
             *(routing.get(name) for name in nested_fields),
         )
     )
@@ -5788,6 +5938,9 @@ def _serialize_routing(d: dict[str, Any]) -> None:
         routing.pop("port", None)
     if not routing.get("algorithm"):
         routing.pop("algorithm", None)
+    for name in ("classifier", "min_confidence", "on_classifier_error", "default_alias", "allow_user_override"):
+        if not routing.get(name):
+            routing.pop(name, None)
     for name in nested_fields:
         if not routing.get(name):
             routing.pop(name, None)
@@ -6988,6 +7141,7 @@ def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
             block_message=str(entry.get("block_message", "") or ""),
             connectors=_merge_guardrail_connectors(entry.get("connectors"), profile=True),
             sandbox=_merge_openshell_admin(entry["sandbox"]) if isinstance(entry.get("sandbox"), dict) else None,
+            routing=copy.deepcopy(entry["routing"]) if isinstance(entry.get("routing"), dict) else None,
             enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
             hook_fail_mode=str(entry.get("hook_fail_mode", "") or ""),
         )
@@ -7421,6 +7575,72 @@ def _merge_observability(raw: Any) -> ObservabilityConfig:
         return ObservabilityConfig()
     return ObservabilityConfig(
         connectors=_merge_observability_connectors(raw.get("connectors")),
+        tokenomics=_merge_tokenomics(raw.get("tokenomics")),
+        pricing=_merge_pricing(raw.get("pricing")),
+    )
+
+def _opt_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _merge_rates(raw: Any, rates: type[PriceRates] = PriceRates, **extra: Any) -> Any:
+    raw = raw if isinstance(raw, dict) else {}
+    return rates(
+        input_per_mtok=_opt_float(raw.get("input_per_mtok")),
+        output_per_mtok=_opt_float(raw.get("output_per_mtok")),
+        cache_read_per_mtok=_opt_float(raw.get("cache_read_per_mtok")),
+        cache_write_per_mtok=_opt_float(raw.get("cache_write_per_mtok")),
+        reasoning_per_mtok=_opt_float(raw.get("reasoning_per_mtok")),
+        **extra,
+    )
+
+
+def _merge_pricing(raw: Any) -> PricingConfig:
+    """Parse ``observability.pricing``. Absent keys stay absent; no price is invented."""
+    if not isinstance(raw, dict):
+        return PricingConfig()
+    models = [
+        _merge_rates(entry, PriceEntry, provider=str(entry.get("provider", "")), model=str(entry.get("model", "")))
+        for entry in (raw.get("models") or [])
+        if isinstance(entry, dict)
+    ]
+    ai_defense = raw.get("ai_defense")
+    return PricingConfig(
+        version=str(raw.get("version", "") or ""),
+        models=models,
+        ai_defense_per_call_usd=_opt_float(ai_defense.get("per_call_usd")) if isinstance(ai_defense, dict) else None,
+        unknown_model=str(raw.get("unknown_model", "") or "omit"),
+        fallback=_merge_rates(raw.get("fallback")),
+    )
+
+
+def _merge_tokenomics(raw: Any) -> TokenomicsConfig:
+    """Parse ``observability.tokenomics``. Off unless ``enabled: true``."""
+    if not isinstance(raw, dict):
+        return TokenomicsConfig()
+
+    def child(key: str) -> dict[str, Any]:
+        value = raw.get(key)
+        return value if isinstance(value, dict) else {}
+
+    native, cost, store, metrics = child("native_otel_import"), child("cost"), child("local_store"), child("metrics")
+    labels = metrics.get("labels")
+    return TokenomicsConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        record_routing_provenance=_coerce_bool(raw.get("record_routing_provenance", True), default=True),
+        roles=[str(r) for r in (raw.get("roles") or [])],
+        native_claudecode=_coerce_bool(native.get("claudecode", True), default=True),
+        native_codex=_coerce_bool(native.get("codex", True), default=True),
+        cost_compute=_coerce_bool(cost.get("compute", True), default=True),
+        cost_currency=str(cost.get("currency", "USD") or "USD"),
+        cost_keep_reported=_coerce_bool(cost.get("keep_reported", True), default=True),
+        local_store_enabled=_coerce_bool(store.get("enabled", False)),
+        local_store_retention_days=int(store.get("retention_days", 30) or 30),
+        metric_labels=(
+            [str(x) for x in labels] if isinstance(labels, list) and labels else list(TOKENOMICS_METRIC_LABELS)
+        ),
     )
 
 
@@ -7912,8 +8132,6 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     managed_host: bool | None = None
     try:
         body = read_regular_file_no_follow(env_path, max_bytes=MAX_DOTENV_BYTES)
-        # An adopted gateway token copy never shadows the one the operator saved.
-        shadowed = gateway_token_adoption.shadowed_names(body)
         for raw_line in body.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(b"#"):
@@ -7948,12 +8166,6 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 seen_keys.add(key)
                 current = os.environ.get(key)
                 injected = current is None or credential_provenance.holds_injected_value(data_dir, key, current)
-                if gateway_token_adoption.is_shadowed(shadowed, key):
-                    # A long-lived process (the TUI) may hold the adopted copy an
-                    # earlier load injected.
-                    if current is not None and injected:
-                        del os.environ[key]
-                    continue
                 if injected:
                     os.environ[key] = value
                 credential_provenance.note_dotenv_candidate(
@@ -8682,6 +8894,16 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
         models=mapping_list("models"),
         signals=mapping("signals"),
         decisions=mapping_list("decisions"),
+        classifier=str(raw.get("classifier", "") or ""),
+        min_confidence=_optional_float(raw.get("min_confidence")) or 0.0,
+        on_classifier_error=str(raw.get("on_classifier_error", "") or ""),
+        default_alias=str(raw.get("default_alias", "") or ""),
+        categories=mapping("categories"),
+        allow_user_override=_coerce_bool(raw.get("allow_user_override", False)),
+        sensitive=mapping("sensitive"),
+        systemone=mapping("systemone"),
+        route_only=mapping("route_only"),
+        admin=mapping("admin"),
     )
 
 

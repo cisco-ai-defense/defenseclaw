@@ -219,9 +219,18 @@ func (d *Daemon) IsRunning() (bool, int) {
 			// A live process this account may not signal is another
 			// account's. Its record (start identity and this data
 			// directory, checked above) may name the gateway an
-			// administrator started for this home whose identity this
+			// administrator started for this home whose executable this
 			// account could not read; that is not stale evidence this
-			// account may discard.
+			// account may discard. A live start identity that this
+			// account can read and that differs from the record is: the
+			// PID was reused by another account's program, and the record
+			// kept status and stop pinned to it (CodeRabbit on #1427).
+			// An identity that cannot be read keeps the record, and so does an older
+			// Darwin record within the five-second window of its launch time (its
+			// ps lstart token depends on locale and timezone).
+			if live, err := processStartIdentity(info.PID); err == nil && live != "" && !d.verifyStartIdentityForAuthenticatedMigration(info) {
+				d.removePIDFileIfStarted(info)
+			}
 			return false, 0
 		}
 		// Closes (chain ): a stale gateway.pid
@@ -922,8 +931,6 @@ func readGatewayTokenDotenv(path string) map[string]string {
 	if err != nil {
 		return values
 	}
-	// An adopted gateway token copy never shadows the one the operator saved.
-	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -935,7 +942,7 @@ func readGatewayTokenDotenv(path string) map[string]string {
 		}
 		key = strings.TrimSpace(key)
 		canonicalKey, ok := canonicalGatewayTokenEnvironmentKey(key)
-		if !ok || shadowed.Has(canonicalKey) {
+		if !ok {
 			continue
 		}
 		value = strings.TrimSpace(value)

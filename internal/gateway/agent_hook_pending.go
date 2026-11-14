@@ -145,7 +145,7 @@ func (p *pendingHookOccurrence) request() agentHookRequest {
 		AgentID: r.AgentID, AgentName: r.AgentName, AgentType: r.AgentType,
 		ToolInvocationID: r.ToolInvocationID, ToolName: r.ToolName,
 		CorrelationUnavailable: r.CorrelationUnavailable,
-		pendingOccurrenceID:    p.ID, pendingBodyBytes: p.BodyBytes, pendingRecovery: true,
+		pendingOccurrenceID:    p.ID, pendingBodyBytes: p.BodyBytes, pendingRecovery: true, pendingJournaled: true,
 		pendingProvenance: &p.Provenance,
 	}
 }
@@ -216,6 +216,12 @@ type pendingHookOccurrence struct {
 	Settled bool
 	// Attempts counts recovery tries recorded before each.
 	Attempts int `json:",omitempty"`
+	// unjournaled is an occurrence of a gateway that keeps no journal row
+	// for its calls (journalsHookDeliveries): a per-user gateway runs no
+	// recovery, so a row would only be written and deleted, each with a
+	// synchronous=FULL fsync on the answer path. The call still has its
+	// stable record IDs and its receipt-backed write context.
+	unjournaled bool
 }
 
 type sandboxPendingHookReceipt struct {
@@ -496,7 +502,8 @@ func truncatePendingHookText(s string, text int) string {
 // carry. On an error the answer must not be offered. The IDs are set even
 // then: if the row landed anyway, recovery completes the records the caller
 // writes instead of auditing the call a second time. The caller ends with
-// settlePendingHook.
+// settlePendingHook. A gateway that runs no recovery writes no row: the call
+// keeps its IDs and provenance, and the occurrence is unjournaled.
 func (a *APIServer) journalHookDelivery(
 	ctx context.Context, req *agentHookRequest, proposed agentHookResponse,
 	rawEventIDs []string, bodyBytes int64, elapsed time.Duration,
@@ -531,6 +538,15 @@ func (a *APIServer) journalHookDelivery(
 	if a.store == nil {
 		return p, errors.New("hook audit store is unavailable")
 	}
+	if !a.journalsHookDeliveries() {
+		// Only recovery and the sandbox receipt read a journal row, and
+		// only a standalone managed gateway runs them (a sandbox receipt
+		// is wanted only there). Two durable fsyncs per call held per-user
+		// answers on a disk that is slow to flush (rel-1-0-10 GAP-0088).
+		p.unjournaled = true
+		return p, nil
+	}
+	req.pendingJournaled = true
 	data, err := encodePendingHookOccurrence(p)
 	if err != nil {
 		return p, err
@@ -560,6 +576,11 @@ func (a *APIServer) pendingHookDecidedContext(ctx context.Context, p *pendingHoo
 	}
 	verdict := pendingResponse(resp)
 	p.Decided = &verdict
+	if p.unjournaled {
+		// No recovery can write this call differently: its records leave
+		// as any other record does.
+		return ctx
+	}
 	data, err := encodePendingHookOccurrence(p)
 	if err == nil {
 		// No row: the journal refused it, so no recovery follows.
@@ -577,7 +598,7 @@ func (a *APIServer) pendingHookDecidedContext(ctx context.Context, p *pendingHoo
 // running server takes it once this handler is done
 // (wakePendingHookRecovery).
 func (a *APIServer) settlePendingHook(ctx context.Context, p *pendingHookOccurrence, result hookFinalizationResult) {
-	if p == nil {
+	if p == nil || p.unjournaled {
 		return
 	}
 	settled := false
@@ -1104,7 +1125,9 @@ func (p *pendingHookOccurrence) responseFor(stored audit.StoredHookVerdict, deci
 		if decision {
 			reason, _ = hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes).Get()
 		}
-		if strings.EqualFold(resp.Action, stored.Action) && reason == stored.Reason {
+		// A reason a redaction profile transformed is not text and proves
+		// nothing: the action decides alone.
+		if strings.EqualFold(resp.Action, stored.Action) && (stored.ReasonRedacted || reason == stored.Reason) {
 			return resp, true
 		}
 	}

@@ -39,6 +39,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-hook-keep-smoke.ps1",
     "enterprise-standalone-hook-swap-launch-smoke.ps1",
     "enterprise-standalone-install-tree-smoke.ps1",
+    "enterprise-standalone-lifecycle-lock-inherited-acl-smoke.ps1",
     "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
     "enterprise-standalone-manifest-adoption-smoke.ps1",
     "enterprise-standalone-mdm-rotation-journal-smoke.ps1",

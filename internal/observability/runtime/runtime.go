@@ -128,6 +128,9 @@ type Runtime struct {
 	shutdownLossesCounted bool
 	carried               carriedShutdownLosses
 	localWriteLosses      *localWriteLossJournal
+	// rejected is the process-stable owner of the opt-in rejected-record
+	// store; its generations are inert while the key is off.
+	rejected *rejectedRecordFactory
 }
 
 // PendingLocalWriteLosses returns the log records whose mandatory SQLite
@@ -287,9 +290,14 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	if options.TelemetryProviderFactory != nil {
 		factories = append(factories, options.TelemetryProviderFactory)
 	}
+	rejectedFactory := &rejectedRecordFactory{
+		store: options.Store, engine: options.Engine,
+		log: options.RetentionController.log, secureClient: options.SecureClient,
+	}
 	factories = append(factories,
 		factory,
 		dispatchFactory,
+		rejectedFactory,
 	)
 	manager, err := runtimegraph.New(
 		ctx,
@@ -319,8 +327,19 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	return &Runtime{
 		manager: manager, store: options.Store, retention: options.RetentionController,
 		destinationObserver: destinationObserver, secureClient: options.SecureClient,
-		localWriteLosses: lostWrites,
+		localWriteLosses: lostWrites, rejected: rejectedFactory,
 	}, nil
+}
+
+// LogsCollected reports whether the active plan collects the logs of
+// bucket; false without an active plan or for a bucket it does not name.
+func (runtime *Runtime) LogsCollected(bucket observability.Bucket) bool {
+	graph := runtime.Active()
+	if graph == nil {
+		return false
+	}
+	effective, ok := graph.Plan().Bucket(bucket)
+	return ok && effective.Collect.Logs
 }
 
 // Active returns the exact currently published graph pointer.
@@ -475,6 +494,13 @@ func (runtime *Runtime) emitWithLeaseControls(
 	if !inbound {
 		export = observability.RemoteExportFrom(ctx)
 	}
+	if !localOnly && !inbound && originDestination == "" && !suppressAll &&
+		observability.ExportOnlyInCall(ctx) && !observability.SkipLocalWrite(ctx) &&
+		audit.CallWritesOpen(ctx, local.store) {
+		// The hook call stores this occurrence in its row of record: no local
+		// row, export after the call commits (dispatchAfterLocalCommit).
+		ctx = observability.WithSkipLocalWrite(ctx)
+	}
 	var outcome pipeline.LocalLogOutcome
 	var processErr error
 	switch {
@@ -497,7 +523,7 @@ func (runtime *Runtime) emitWithLeaseControls(
 			if inbound {
 				return pipeline.LocalLogOutcome{}, processErr
 			}
-			if export == observability.RemoteExportDefault {
+			if export == observability.RemoteExportDefault && !observability.ExportAfterCallCommit(ctx) {
 				runtime.dispatchOptional(ctx, lease, graph, outcome)
 			}
 		}
@@ -545,6 +571,11 @@ func (runtime *Runtime) dispatchAfterLocalCommit(
 			dispatchCtx := context.WithoutCancel(ctx)
 			if audit.DeferAfterCallWrites(ctx, store, func() {
 				defer fork.Release()
+				if observability.ExportAfterCallCommit(dispatchCtx) && !audit.CallWritesCommitted(dispatchCtx) {
+					// The row of record did not commit: the call exports the
+					// decision with its fail-mode verdict instead.
+					return
+				}
 				runtime.dispatchOptional(dispatchCtx, fork, graph, outcome)
 			}) {
 				return
