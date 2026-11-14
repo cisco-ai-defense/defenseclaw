@@ -113,7 +113,7 @@ func srd2Round2Run(t *testing.T, label, cwd string, flows []srd2Round2Flow, pack
 			got := callAgentHookForTest(t, handler, send)
 			chain := slices.Contains(got.RuleIDs, guardrail.ToolChainSecretReadThenEgress)
 			_ = rgot
-			if want := srd2Round2Chain[flow.id]; chain != want && !(chain && srdConservativeJoin(label == "local")) {
+			if want := srd2Round2Chain[flow.id]; chain != want && (!chain || !srdConservativeJoin(label == "local")) {
 				t.Errorf("%s %s probe %s: chain = %t, want %t", label, pack, flow.id, chain, want)
 			}
 			if chain && got.Action != "alert" {
