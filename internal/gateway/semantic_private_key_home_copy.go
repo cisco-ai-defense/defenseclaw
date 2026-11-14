@@ -30,14 +30,43 @@ var (
 		"mkdir", "md", "chmod", "echo", "printf", "true", "false", ":", "cd", "pwd",
 		"ls", "dir", "test", "[", "write-host", "write-output",
 	}
-	// trustedActionHomeSharedFolders are the folders of a home that other
-	// accounts or the network can read.
-	trustedActionHomeSharedFolders = []string{"public", "public_html", "sites", "www", "html", "shared"}
 )
 
+// homeClosedToOthers reports a place at or below home that no other account
+// reaches: a directory on the way from the home to the nearest part of the place
+// that exists has no group or other permission bit, so nothing below it can be
+// opened by another account. Nothing of the way exists on this host (a home the
+// gateway cannot see): the name is all there is, and the place counts as the
+// user's own. A folder that is shared by being served or synced is not private
+// by its name; the permission bits of the way decide, so a home others can
+// open, or a folder opened to them, keeps the key copy a block.
+func homeClosedToOthers(home, value string) bool {
+	existing := value
+	for existing != home && pathWithin(existing, home) {
+		if _, err := hookpaths.Lstat(existing); err == nil {
+			break
+		}
+		existing = path.Dir(existing)
+	}
+	seen := false
+	for dir := existing; pathWithin(dir, home); dir = path.Dir(dir) {
+		info, err := hookpaths.Lstat(dir)
+		if err == nil {
+			seen = true
+			if info.IsDir() && info.Mode().Perm()&0o077 == 0 {
+				return true
+			}
+		}
+		if dir == home {
+			break
+		}
+	}
+	return !seen
+}
+
 // trustedActionPrivateHomeDestination reports a write target below the active
-// home (the home itself too) that no one else reads: not a shared folder and
-// not a file of the SSH folder that sshd or ssh read as policy.
+// home (the home itself too) that no one else reads (homeClosedToOthers) and
+// that is not a file of the SSH folder that sshd or ssh read as policy.
 func trustedActionPrivateHomeDestination(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
 	if !ok {
@@ -47,7 +76,7 @@ func trustedActionPrivateHomeDestination(facts actionfacts.Facts, candidate acti
 		return true
 	}
 	first, rest, _ := strings.Cut(relative, "/")
-	if slices.Contains(trustedActionHomeSharedFolders, first) {
+	if !homeClosedToOthers(facts.ActiveHome, path.Join(facts.ActiveHome, relative)) {
 		return false
 	}
 	if first == ".ssh" && !strings.Contains(rest, "/") {
@@ -381,16 +410,14 @@ func ownSSHFolderMkdirCall(args []string, cwd, home string) bool {
 }
 
 // ownSSHFolderPrivateDestination reports a destination inside home, outside the
-// SSH folder and the shared folders, whose existing part, links followed, stays
+// SSH folder, closed to other accounts (homeClosedToOthers), whose existing part, links followed, stays
 // there too; a part that does not exist yet is only a name.
 func ownSSHFolderPrivateDestination(destination, cwd, home string) bool {
 	value := path.Clean(hookpaths.OperandPath(destination, cwd))
 	if !pathWithin(value, home) || pathWithin(value, home+"/.ssh") {
 		return false
 	}
-	relative := strings.TrimPrefix(strings.TrimPrefix(value, home), "/")
-	first, _, _ := strings.Cut(relative, "/")
-	if slices.Contains(trustedActionHomeSharedFolders, strings.ToLower(first)) {
+	if !homeClosedToOthers(home, value) {
 		return false
 	}
 	// Nothing of the destination below the home exists on this host (the home

@@ -45,6 +45,9 @@ func TestHardcodedCredentialRuleIgnoresPlaceholderValues(t *testing.T) {
 		{"placeholder word inside a longer word", `api_key = "fakirjewelrysecretvalue12"`, true},
 		{"vendor test key", "api_key = \"sk" + "_test_" + "4eC39HqLyjWDarjtT1zdp7dc\"", true},
 		{"placeholder beside a real key", `a = {api_key: "fake_value_for_docs_only", secret_key: "9f8e7d6c5b4a39281706f5e4d3c2b1a0"}`, true},
+		{"three or more words read as a stand-in", `secret_key = "correct-horse-battery-staple"`, false},
+		{"two pieces are one random string", `secret_key = "abcdefghijklmnop-qrstuvwxyz"`, true},
+		{"a piece with a digit and a letter mix is a key", `api_key = "build.number.7f3a9c.release"`, true},
 		{"short value", `api_key = "short"`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

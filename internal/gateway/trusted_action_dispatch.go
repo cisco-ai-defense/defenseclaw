@@ -7367,7 +7367,6 @@ func filterTrustedLegacyActionContext(
 					filtered,
 					trustedLegacyProvenCommandFinding(
 						generation,
-						input,
 						finding,
 						facts,
 						loadNestedActions(),
@@ -7410,7 +7409,6 @@ func filterTrustedLegacyActionContext(
 						filtered,
 						trustedLegacyProvenCommandFinding(
 							generation,
-							input,
 							finding,
 							facts,
 							loadNestedActions(),
@@ -7440,7 +7438,6 @@ func filterTrustedLegacyActionContext(
 
 func trustedLegacyProvenCommandFinding(
 	generation *compiledRulePackCategories,
-	input actionfacts.Input,
 	finding RuleFinding,
 	facts actionfacts.Facts,
 	nestedActions []trustedNestedAction,
@@ -7458,11 +7455,6 @@ func trustedLegacyProvenCommandFinding(
 		finding.RuleID,
 		contract,
 	) && (contract.prerequisite == nil || contract.prerequisite(facts)) {
-		finding.enforcement = findingEnforcementDetectionOnly
-	}
-	if finding.RuleID == "CMD-EVAL" && evalEnvInitOnly(input, facts) {
-		// eval "$(opam env)": the shell is configured by a known tool whose
-		// call is visible; audit telemetry only (rel-1-0-10:GAP-0018).
 		finding.enforcement = findingEnforcementDetectionOnly
 	}
 	if finding.RuleID == "CMD-EVAL" &&

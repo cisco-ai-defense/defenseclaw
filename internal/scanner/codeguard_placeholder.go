@@ -18,7 +18,6 @@ package scanner
 
 import (
 	"regexp"
-	"slices"
 	"strings"
 	"unicode"
 )
@@ -27,28 +26,40 @@ import (
 // value of 16 or more characters. Group 2 is the value.
 var hardcodedCredentialAssignment = regexp.MustCompile(`(?i)(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key)\s*[:=]\s*["']([^\s"']{16,})["']`)
 
-// placeholderCredentialWords are the words that make a quoted value a
-// stand-in, not a secret: a test fixture or a document names its fake key
-// "SG.fake.sendgrid.test.token" or "your-api-key-example". A word must stand
-// as a whole piece of the value, so "examplesys" or "fakir" do not count.
-var placeholderCredentialWords = []string{
-	"fake", "dummy", "example", "placeholder", "changeme", "redacted", "mock", "notreal", "sample",
-}
-
-// placeholderCredentialValue reports a value that is plainly not a secret: it
-// holds a placeholder word as a whole piece (split at anything but a letter
-// or a digit), or it repeats one character (xxxxxxxxxxxxxxxx).
+// placeholderCredentialValue reports a value that is plainly not a secret by
+// its shape. A secret is one random string; a stand-in a test fixture or a
+// document names its fake key ("SG.fake.sendgrid.test.token",
+// "your-api-key-example-0000") reads as words: three or more pieces, split at
+// anything but a letter or a digit, each made of letters only or of one
+// repeated character. A value that repeats one character (xxxxxxxxxxxxxxxx)
+// is a stand-in too. No word is looked up. Other values stay findings: a
+// random string, a vendor key with a test prefix, a single long word.
 func placeholderCredentialValue(value string) bool {
-	pieces := strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+	pieces := strings.FieldsFunc(value, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
+	compact := strings.Join(pieces, "")
+	if compact != "" && strings.Trim(compact, compact[:1]) == "" {
+		return true
+	}
+	if len(pieces) < 3 {
+		return false
+	}
 	for _, piece := range pieces {
-		if slices.Contains(placeholderCredentialWords, piece) {
-			return true
+		if !onlyLetters(piece) && strings.Trim(piece, piece[:1]) != "" {
+			return false
 		}
 	}
-	compact := strings.Join(pieces, "")
-	return compact != "" && strings.Trim(compact, compact[:1]) == ""
+	return true
+}
+
+func onlyLetters(piece string) bool {
+	for _, r := range piece {
+		if !unicode.IsLetter(r) {
+			return false
+		}
+	}
+	return piece != ""
 }
 
 // hardcodedCredentialView is the line CG-CRED-001 reads: an assignment whose
