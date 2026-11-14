@@ -4036,7 +4036,7 @@ func trustedUnparsedToolCallReason(reason string) bool {
 	return ok && unparsedToolCallReasonConnector.MatchString(name)
 }
 
-// selectWindowsShellDialect selects a complete grammar for a native Windows
+// selectWindowsShellDialectReading selects a complete grammar for a native Windows
 // shell call. Codex names its shell tool Bash everywhere, but on Windows it
 // runs the command in PowerShell, so a command such as
 // `Add-Content -Path $HOME\.ssh\authorized_keys -Value k` was parsed as POSIX
@@ -4051,14 +4051,10 @@ func trustedUnparsedToolCallReason(reason string) bool {
 // PowerShell statement, pipeline, redirect or expansion is PowerShell code,
 // and reading the whole line as CMD would hide its write. An exact
 // cmd /d /c wrapper that PowerShell cannot read may still use CMD grammar.
-func selectWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
-	dialect, _ := selectWindowsShellDialectReading(tool, command, input)
-	return dialect
-}
-
-// selectWindowsShellDialectReading is selectWindowsShellDialect, and for a
-// call it places in no dialect the PowerShell reading it made of it, which
-// the Windows hook readings reuse (windowsReadingTwinRequests).
+//
+// For a call it places in no dialect it also returns the PowerShell reading it
+// made of the call, which the Windows hook readings reuse instead of parsing
+// the call again (windowsReadingTwinRequests).
 func selectWindowsShellDialectReading(tool, command string, input actionfacts.Input) (actionfacts.Dialect, *windowsHintedReading) {
 	tool = strings.ToLower(strings.TrimSpace(tool))
 	switch tool {

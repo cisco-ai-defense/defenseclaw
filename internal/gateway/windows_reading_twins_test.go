@@ -23,6 +23,13 @@ import (
 // reading.
 const windowsUnreadableStatement = "Write-Output $(Get-Date)"
 
+// selectWindowsShellDialect is the dialect of selectWindowsShellDialectReading,
+// as the tests of the Windows hook selection read it.
+func selectWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
+	dialect, _ := selectWindowsShellDialectReading(tool, command, input)
+	return dialect
+}
+
 // windowsHookShellCall is command as a Windows hook places it: a generic shell
 // tool call whose dialect is chosen by the hook's own selection
 // (selectWindowsShellDialect), never forced by the test.

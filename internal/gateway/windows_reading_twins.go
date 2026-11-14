@@ -22,7 +22,7 @@ import (
 // twin proves (withTwinProvenBlocks): no finding of the chosen reading is
 // dropped and a twin only adds.
 //
-// The hook's selection (selectWindowsShellDialect) places such a call in no
+// The hook's selection (selectWindowsShellDialectReading) places such a call in no
 // dialect, and its unhinted reading is then an ambiguous PowerShell reading.
 // That reading is kept as the call's own: it enforces findings the hinted
 // partial reading leaves detection-only, so the call is not moved to
@@ -76,7 +76,7 @@ func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.
 	return []trustedActionRequest{twin}, bounded.CapSet{}
 }
 
-// windowsHintedReading is the PowerShell reading selectWindowsShellDialect
+// windowsHintedReading is the PowerShell reading selectWindowsShellDialectReading
 // made of a call it placed in no dialect, kept so the readings of the same
 // call do not parse it again.
 type windowsHintedReading struct {
