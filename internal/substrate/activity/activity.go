@@ -25,6 +25,10 @@
 // snapshot per idle pass (Source, MethodActivitySnapshot). A lost batch
 // only makes an actor look idle a few seconds early; the controller still
 // needs a low CPU sample before it suspends.
+//
+// KindTaskEnd is not activity: it is when an actor's --task run ended (the
+// relay's report), kept apart (Snapshot.Ended) so that the controller can
+// free a finished task's worker (GAP-0274).
 package activity
 
 import (
@@ -41,6 +45,8 @@ const (
 	KindModel  = "model"
 	KindRelay  = "relay"
 	KindEgress = "egress"
+	// KindTaskEnd is the end of a --task run, not activity.
+	KindTaskEnd = "task_end"
 )
 
 const (
@@ -66,11 +72,12 @@ type Batch struct {
 	Entries []Entry `json:"entries"`
 }
 
-// Snapshot is the leader's answer: last activity by actor UID, and the UIDs
-// with an ask waiting.
+// Snapshot is the leader's answer: last activity by actor UID, the UIDs
+// with an ask waiting, and when each actor's --task run last ended.
 type Snapshot struct {
 	Last    map[string]time.Time `json:"last"`
 	Pending []string             `json:"pending,omitempty"`
+	Ended   map[string]time.Time `json:"ended,omitempty"`
 }
 
 // ---- gateway replica ----
@@ -162,9 +169,10 @@ type Store struct {
 	Pending func() []string
 	Now     func() time.Time
 
-	mu   sync.Mutex
-	last map[string]time.Time
-	seen map[string]time.Time // when the leader last heard of the UID
+	mu    sync.Mutex
+	last  map[string]time.Time
+	ended map[string]time.Time // KindTaskEnd
+	seen  map[string]time.Time // when the leader last heard of the UID
 }
 
 func (s *Store) now() time.Time {
@@ -182,18 +190,22 @@ func (s *Store) Observe(_ context.Context, b Batch) (struct{}, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.last == nil {
-		s.last, s.seen = map[string]time.Time{}, map[string]time.Time{}
+		s.last, s.ended, s.seen = map[string]time.Time{}, map[string]time.Time{}, map[string]time.Time{}
 	}
 	for _, e := range b.Entries {
 		if e.UID == "" {
 			continue
 		}
-		for _, t := range e.Last {
+		for kind, t := range e.Last {
 			if t.After(now) {
 				t = now
 			}
-			if t.After(s.last[e.UID]) {
-				s.last[e.UID] = t
+			into := s.last
+			if kind == KindTaskEnd {
+				into = s.ended
+			}
+			if t.After(into[e.UID]) {
+				into[e.UID] = t
 			}
 		}
 		s.seen[e.UID] = now
@@ -209,6 +221,7 @@ func (s *Store) prune(now time.Time) {
 		if now.Sub(at) > retention || len(s.last) > maxActors {
 			delete(s.seen, uid)
 			delete(s.last, uid)
+			delete(s.ended, uid)
 		}
 	}
 }
@@ -220,6 +233,12 @@ func (s *Store) Snapshot(context.Context, struct{}) (Snapshot, error) {
 	out := Snapshot{Last: make(map[string]time.Time, len(s.last))}
 	for uid, t := range s.last {
 		out.Last[uid] = t
+	}
+	if len(s.ended) > 0 {
+		out.Ended = make(map[string]time.Time, len(s.ended))
+		for uid, t := range s.ended {
+			out.Ended[uid] = t
+		}
 	}
 	s.mu.Unlock()
 	if s.Pending != nil {
@@ -287,6 +306,15 @@ func (s *Source) LastActivity(uid string) (time.Time, bool) {
 	defer s.mu.Unlock()
 	s.refresh()
 	t, ok := s.snap.Last[uid]
+	return t, ok
+}
+
+// TaskEnded implements controller.TaskEndSource.
+func (s *Source) TaskEnded(uid string) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refresh()
+	t, ok := s.snap.Ended[uid]
 	return t, ok
 }
 

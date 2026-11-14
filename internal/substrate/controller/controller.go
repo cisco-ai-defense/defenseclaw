@@ -58,6 +58,10 @@ const (
 	// idle; DefaultCPUSampleMaxAge how fresh the sample must be.
 	DefaultIdleCPU         = 0.05
 	DefaultCPUSampleMaxAge = 2 * time.Minute
+	// DefaultTaskEndGrace is how long a finished --task actor keeps its
+	// worker before it is suspended (GAP-0274): time for the launcher that
+	// followed it to read the end; pull, logs and connect wake it.
+	DefaultTaskEndGrace = time.Minute
 	// templateCacheTTL bounds how long a template's attestation verdict is
 	// reused; after it the attestor runs again (it has its own short
 	// cache), so a revoked key or rotated anchors reach admitted templates.
@@ -117,6 +121,9 @@ type Options struct {
 	IdleSuspendAfter time.Duration
 	IdleCPU          float64
 	CPUSampleMaxAge  time.Duration
+	// TaskEndGrace is how long a finished --task actor runs on before it
+	// is suspended; default DefaultTaskEndGrace.
+	TaskEndGrace time.Duration
 
 	IdleInterval, FastInterval, FastWindow time.Duration
 	Workers                                int
@@ -228,6 +235,7 @@ func New(o Options) (*Controller, error) {
 	def(&o.FastWindow, DefaultFastWindow)
 	def(&o.ConflictWindow, DefaultConflictWindow)
 	def(&o.CPUSampleMaxAge, DefaultCPUSampleMaxAge)
+	def(&o.TaskEndGrace, DefaultTaskEndGrace)
 	if o.IdleCPU <= 0 {
 		o.IdleCPU = DefaultIdleCPU
 	}

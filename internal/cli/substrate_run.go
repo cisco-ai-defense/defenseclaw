@@ -308,6 +308,42 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 	return t, nil
 }
 
+// substrateNoWorkerError is a create the pool had no worker for.
+type substrateNoWorkerError struct{ msg string }
+
+func (e substrateNoWorkerError) Error() string { return e.msg }
+
+// A batch task waits up to substrateBatchWorkerWait for a free worker,
+// trying again every substrateBatchWorkerPoll.
+const (
+	substrateBatchWorkerWait = 15 * time.Minute
+	substrateBatchWorkerPoll = 15 * time.Second
+)
+
+// substrateWaitForWorker runs try again while it finds no free worker, for
+// up to wait; note is called once, at the first wait. The last result is
+// returned, so a pool that stays full still says so.
+func substrateWaitForWorker(ctx context.Context, wait, poll time.Duration, try func() (int, error), note func()) (int, error) {
+	deadline := time.Now().Add(wait)
+	noted := false
+	for {
+		code, err := try()
+		var full substrateNoWorkerError
+		if !errors.As(err, &full) || time.Now().Add(poll).After(deadline) {
+			return code, err
+		}
+		if !noted && note != nil {
+			note()
+			noted = true
+		}
+		select {
+		case <-ctx.Done():
+			return code, err
+		case <-time.After(poll):
+		}
+	}
+}
+
 // substrateNoWorkerMessage says the pool is full (GAP-0167), how many of the
 // person's own agents hold a worker, and how to free one.
 func substrateNoWorkerMessage(ctx context.Context, s *substrateSession) string {
@@ -360,7 +396,7 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	a, err = s.Client.Create(ctx, req)
 	if err != nil {
 		if e, ok := api.AsError(err); ok && e.Status == 503 && e.Reason == "no_free_worker" {
-			return a, withExitCode(errors.New(substrateNoWorkerMessage(ctx, s)), substrateAPIExit(e))
+			return a, withExitCode(substrateNoWorkerError{substrateNoWorkerMessage(ctx, s)}, substrateAPIExit(e))
 		}
 		return a, substrateFail(err)
 	}
@@ -649,7 +685,14 @@ func runSubstrateBatch(ctx context.Context, cmd *cobra.Command, s *substrateSess
 			sub.SetOut(io.Discard)
 			sub.SetErr(io.Discard)
 			sub.SetContext(ctx)
-			code, err := runSubstrateOneTask(ctx, sub, s, tt, &quiet, project, task.Task, batchID, name, agentArgs, false)
+			// A full pool is waited out: a finished task frees its worker
+			// about a minute after it ends (GAP-0274), so a batch larger
+			// than the pool drains through it.
+			code, err := substrateWaitForWorker(ctx, substrateBatchWorkerWait, substrateBatchWorkerPoll, func() (int, error) {
+				return runSubstrateOneTask(ctx, sub, s, tt, &quiet, project, task.Task, batchID, name, agentArgs, false)
+			}, func() {
+				fmt.Fprintf(w, "Task %d waits for a free worker (a finished task frees its worker about a minute after it ends).\n", i+1)
+			})
 			r := result{Task: task.Task, Code: code, Status: "finished"}
 			switch {
 			case err != nil && code < 0:

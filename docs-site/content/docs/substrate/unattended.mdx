@@ -34,6 +34,12 @@ The task ended with exit code 1. Review it with: defenseclaw substrate logs code
 
 If the cluster refused the agent's calls, `run` says `The task did not run` instead and exits with code 1 (see [Troubleshooting](/docs/substrate/troubleshooting)).
 
+A run that makes no progress for 10 minutes ends with exit code 124, and `logs` shows why (see [When a run stops making progress](#when-a-run-stops-making-progress)):
+
+```text
+defenseclaw: the task made no progress for 10m0s (no output, CPU or I/O); the cluster gateway answers, so the agent is stuck on a connection of its own. The task is ended with exit code 124.
+```
+
 ## A batch
 
 ```yaml
@@ -52,7 +58,7 @@ defenseclaw substrate status --batch BATCH
 defenseclaw substrate delete --batch BATCH
 ```
 
-The file is a list of tasks, under `tasks:` or bare. A task is a line of text, or `name`, `task` and `agent` (a task may name its own agent). One batch takes at most 500 tasks. Each task gets its own actor, with a shared batch ID, and `--parallel` (default 4) limits how many run at once. `--clone` and `--ref` start every task from the same commit; without them every task starts from a copy of the same folder. `status --batch` shows each agent's state. `usage --batch` is not available yet: see [Feature coverage](/docs/substrate/features#routing-budgets-and-cost).
+The file is a list of tasks, under `tasks:` or bare. A task is a line of text, or `name`, `task` and `agent` (a task may name its own agent). One batch takes at most 500 tasks. Each task gets its own actor, with a shared batch ID, and `--parallel` (default 4) limits how many run at once. A batch can be larger than the worker pool: a task that finds every worker taken waits up to 15 minutes for one, and a finished task gives its worker back about a minute after it ends. With `--parallel` at most the number of free workers, no task waits. `--clone` and `--ref` start every task from the same commit; without them every task starts from a copy of the same folder. `status --batch` shows each agent's state. `usage --batch` is not available yet: see [Feature coverage](/docs/substrate/features#routing-budgets-and-cost).
 
 ## From CI
 
@@ -71,9 +77,11 @@ defenseclaw substrate run claude --task "triage the open dependabot PRs" --detac
 
 | Situation | What happens |
 |---|---|
-| The gateway can't be reached | Hooks **fail closed**, always, whatever the interactive setting. A hook that waits retries first, then blocks |
+| The gateway can't be reached | Hooks **fail closed**, always, whatever the interactive setting. A hook that waits retries first, then blocks: each hook call gives up within about 21 seconds (2 s to connect, 9 s, then one 12 s retry). Model calls are the agent's own: it retries them, and the run carries on once the gateway is back |
+| The run stops making progress | After 10 minutes with no output (retry notices don't count) and almost no CPU or I/O, the relay ends the agent: exit code **124**, a line in `logs` that says why and whether the gateway answers, and an audit row. This is what ends a run whose model call never answers after a gateway outage |
 | The agent asks to reach a new site, or a tool needs approval | **Denied by default.** A profile can set `unattended_asks: queue` to hold the ask for a person for up to `ask_timeout` (30 minutes by default). The agent's step pauses, the agent doesn't stop, and a person answers with `defenseclaw substrate approvals` and `approve` or `reject`. A timeout is a deny |
-| The agent has been quiet for a while | **No idle suspend** for `--task` runs unless the profile sets it, and never while an ask is pending. A silent long job isn't mistaken for an idle one: CPU use counts as activity |
+| The agent has been quiet for a while | **No idle suspend** for a running `--task` run unless the profile sets it, and never while an ask is pending. A silent long job isn't mistaken for an idle one: CPU use counts as activity |
+| The task ended | The end (exit code and cause) goes to the audit log. About a minute later the actor is **suspended**, which frees its worker; `pull`, `logs` and `connect` wake it. With idle suspend off (`idle_suspend_after: 0s`) it keeps its worker |
 | A step crashes the actor | The actor shows as `crashed`, and pending asks close. Substrate brings a crashed actor back only with a revert (`kubectl ate revert`); DefenseClaw doesn't do it for you |
 | You want to know it is alive | `status`, `list` (it has a `STATE` column) and `logs -f` show it. `checkpoint NAME --every 1h` saves a restore point on that schedule for as long as the command runs |
 | The result | Have the agent push a branch (the git credential is injected on the git host only), or `defenseclaw substrate pull` the changes |
@@ -84,12 +92,20 @@ A rejected or expired ask is not remembered. If the agent asks for the same site
 
 ![defenseclaw substrate approvals listing one ask waiting: ID ask-4c49616b8f92eb8c85c8fc2b, agent nightly-528031bf, what GET example.com, age 7s, run unattended with 4m left, and the line with the approve and reject commands; then defenseclaw substrate approve for that ID prints Approved](/images/substrate/oss/approvals.png)
 
+## When a run stops making progress
+
+Nobody watches an unattended run, so DefenseClaw makes sure it never hangs without a word. The relay in the actor watches the agent. If for 10 minutes the agent prints nothing but retry notices and its processes use almost no CPU or I/O, the relay checks whether the cluster gateway answers, prints the reason, stops the agent (TERM, then KILL after 10 seconds) and the task exits with code **124**. A long silent build or test run still counts as progress through its CPU and I/O, and a running tool of Claude Code prints a heartbeat every 30 seconds.
+
+The typical cause is a gateway outage: hooks give up within about 21 seconds and fail closed, and the agent retries its model calls. If a model call was cut off without an answer, Claude Code waits about 6 minutes for that attempt before it retries, and a path that keeps hanging would leave the run silent for much longer. The bound is `relay.task_stall_ms` in the template's kit configuration (default 10 minutes, at least 1 minute).
+
+Every task end, finished, failed or ended for no progress, is reported to the gateway: a `substrate` audit row (`event` `task_end`, with the actor, batch, exit code and reason; severity INFO for a finish, MEDIUM for a failure, HIGH for a run the relay ended), and the controller then frees the actor's worker (`sandbox.task_end_suspend`).
+
 ## Telemetry volume
 
 A batch of hundreds of actors produces a lot of events. Set `substrate.unattended.telemetry_sampling` (1.0 keeps everything) to sample the routine ones. Blocks, asks, refusals and lifecycle records are never sampled.
 
 ## Limits
 
-- A finished `--task` agent stays until you delete it. Pull its changes first: what is not pulled is gone when you `delete` it.
+- A finished `--task` agent stays until you delete it, suspended: it gives its worker back about a minute after its task ends, and waking it for `pull`, `logs` or `connect` takes a free worker again. Pull its changes first: what is not pulled is gone when you `delete` it.
 - A task runs as the connector's headless mode allows. `run --task` for a connector that cannot run one says so. See [Agents and features](/docs/substrate/agents).
 - The cluster's worker pools bound how many actors run at once. A full pool answers that no worker is free, and `run` starts nothing. See [Troubleshooting](/docs/substrate/troubleshooting#no-free-worker-for-a-new-agent).
