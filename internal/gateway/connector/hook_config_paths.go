@@ -935,3 +935,35 @@ func hookCommandMatches(command, needle string) bool {
 	}
 	return command == needle || command == shellWord(needle)
 }
+
+// PatchedFilesNameOwnHook reports whether one of the agent files conn patches
+// names this own hook command of this install (ownedHookCommandNeedles), so a boot
+// cleanup of an unguarded connector never removes the hooks of another
+// DefenseClaw data directory on the account (rel-1-0-10:GAP-0275). On
+// Windows the per-user commands name the per-account launcher, not a data
+// directory, so every DefenseClaw entry there belongs to this account.
+func PatchedFilesNameOwnHook(opts SetupOpts, conn Connector) bool {
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	needles := ownedHookCommandNeedles(opts, conn)
+	if len(needles) == 0 {
+		return false
+	}
+	provider, ok := conn.(AgentPathProvider)
+	if !ok {
+		return false
+	}
+	for _, path := range provider.AgentPaths(opts).PatchedFiles {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, needle := range needles {
+			if needle != "" && bytes.Contains(data, []byte(needle)) {
+				return true
+			}
+		}
+	}
+	return false
+}

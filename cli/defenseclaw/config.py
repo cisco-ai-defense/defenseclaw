@@ -1807,6 +1807,12 @@ class DecisionModelConfig:
     block_risk_score: float = 0.0
     # A call the rules flagged never gets a confident block (it escalates); None = true.
     escalate_rule_flagged: bool | None = None
+    # Session history the model sees: last N turns, calls only (None = 25, 0 = none, at most 100).
+    history_turns: int | None = None
+    # Add each tool's result (cut to 1 KB) to that history. Off by default.
+    history_tool_results: bool = False
+    # Flow questions that turn an unauthorized or off-task confident allow into an escalation; None = true.
+    flow_guard: bool | None = None
     # Connectors whose hook-lane tool calls the model answers on its own
     # where the LLM judge does not run ("*" = all). Empty = only in front
     # of the judge. Omitted from YAML when empty.
@@ -1837,6 +1843,12 @@ class DecisionModelConfig:
     def effective_escalate_rule_flagged(self) -> bool:
         return self.escalate_rule_flagged is not False
 
+    def effective_history_turns(self) -> int:
+        return 25 if self.history_turns is None else self.history_turns
+
+    def effective_flow_guard(self) -> bool:
+        return self.flow_guard is not False
+
     def effective_on_confident_block(self) -> str:
         return (self.on_confident_block or "").strip().lower() or "escalate"
 
@@ -1860,6 +1872,14 @@ class DecisionModelConfig:
             )
         if self.escalate_rule_flagged is not None and not isinstance(self.escalate_rule_flagged, bool):
             return f"escalate_rule_flagged must be true or false, got {self.escalate_rule_flagged!r}"
+        if self.flow_guard is not None and not isinstance(self.flow_guard, bool):
+            return f"flow_guard must be true or false, got {self.flow_guard!r}"
+        if self.history_turns is not None and (
+            isinstance(self.history_turns, bool)
+            or not isinstance(self.history_turns, int)
+            or not 0 <= self.history_turns <= 100
+        ):
+            return f"history_turns must be between 0 and 100, got {self.history_turns!r}"
         if not 0 <= self.block_risk_score <= 2:
             return f"block_risk_score must be between 0 and 2, got {self.block_risk_score}"
         if not 0 <= self.timeout <= 30:
@@ -1949,6 +1969,9 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
         # Strict: a YAML bool or nothing; anything else is kept as given so
         # validation_error reports it (Go refuses it at load too).
         escalate_rule_flagged=raw.get("escalate_rule_flagged"),
+        history_turns=raw.get("history_turns"),
+        history_tool_results=raw.get("history_tool_results") is True,
+        flow_guard=raw.get("flow_guard"),
         hook_connectors=_decision_model_connector_list(raw.get("hook_connectors")),
     )
 
@@ -3095,6 +3118,56 @@ class GuardrailProfile:
 
 
 @dataclass
+class SecretFlowLabelSets:
+    credentials: bool = True
+    extra_path_globs: list[str] = field(default_factory=list)
+    extra_secret_patterns: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecretFlowSinkAction:
+    default: str = "alert"  # the default pack never blocks
+    strict: str = "block"  # a managed install follows its pack
+
+
+@dataclass
+class SecretFlowMemory:
+    max_labeled_paths: int = 512
+    max_value_digests: int = 256
+
+
+@dataclass
+class SecretFlowConfig:
+    """guardrail.secret_flow: Secret flow tracking settings. The live/shadow
+    switch is guardrail.cascade.lanes.secret_flow; these are the feature's own
+    settings. Mirrors internal/config.SecretFlowConfig."""
+
+    label_sets: SecretFlowLabelSets = field(default_factory=SecretFlowLabelSets)
+    sink_action: SecretFlowSinkAction = field(default_factory=SecretFlowSinkAction)
+    reencodings: bool = True
+    memory: SecretFlowMemory = field(default_factory=SecretFlowMemory)
+    destination_allowlist: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CascadeLanesConfig:
+    """guardrail.cascade.lanes: one live/shadow switch per lane. Both lanes ship
+    shadow-only in 1.0.10, so the values are off | shadow ("on" is refused by the
+    Go validator). Mirrors internal/config.CascadeLanes."""
+
+    effects: str = "shadow"
+    secret_flow: str = "shadow"
+
+
+@dataclass
+class CascadeConfig:
+    """guardrail.cascade (the per-lane switches so far). Mirrors
+    internal/config.CascadeConfig."""
+
+    lanes: CascadeLanesConfig = field(default_factory=CascadeLanesConfig)
+
+
+@dataclass
 class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"  # observe | action
@@ -3122,6 +3195,9 @@ class GuardrailConfig:
     detection_strategy_prompt: str = ""  # per-direction override
     detection_strategy_completion: str = ""  # per-direction override
     detection_strategy_tool_call: str = ""  # per-direction override
+    cascade: CascadeConfig = field(default_factory=CascadeConfig)  # per-lane live/shadow switches
+    effects_rules_tier: str = "restricted"  # restricted | full (effect block scope)
+    secret_flow: SecretFlowConfig = field(default_factory=SecretFlowConfig)  # Secret flow tracking
     # Run full judge classification on content with no regex signal
     # (regex_judge mode). Flipped from False to True in the
     # multi-provider-adapters PR: pure-regex triage misses enough
@@ -7073,6 +7149,9 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_prompt=raw.get("detection_strategy_prompt", ""),
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
+        cascade=_merge_cascade(raw.get("cascade")),
+        effects_rules_tier=raw.get("effects_rules_tier", "restricted"),
+        secret_flow=_merge_secret_flow(raw.get("secret_flow")),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack=str(raw.get("rule_pack", "") or ""),
         custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
@@ -7275,6 +7354,51 @@ def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
     return HILTConfig(
         enabled=bool(raw.get("enabled", False)),
         min_severity=str(raw.get("min_severity", "HIGH") or "HIGH").upper(),
+    )
+
+
+def _merge_cascade(raw: dict[str, Any] | None) -> CascadeConfig:
+    if not isinstance(raw, dict):
+        return CascadeConfig()
+    lanes_raw = raw.get("lanes") or {}
+    if not isinstance(lanes_raw, dict):
+        return CascadeConfig()
+    return CascadeConfig(
+        lanes=CascadeLanesConfig(
+            effects=str(lanes_raw.get("effects", "shadow") or "shadow"),
+            secret_flow=str(lanes_raw.get("secret_flow", "shadow") or "shadow"),
+        )
+    )
+
+
+def _merge_secret_flow(raw: dict[str, Any] | None) -> SecretFlowConfig:
+    if not isinstance(raw, dict):
+        return SecretFlowConfig()
+    label_raw = raw.get("label_sets") or {}
+    sink_raw = raw.get("sink_action") or {}
+    mem_raw = raw.get("memory") or {}
+    allow_raw = raw.get("destination_allowlist", [])
+    allow = (
+        [str(v).strip() for v in allow_raw if str(v).strip()]
+        if isinstance(allow_raw, list | tuple)
+        else []
+    )
+    return SecretFlowConfig(
+        label_sets=SecretFlowLabelSets(
+            credentials=bool(label_raw.get("credentials", True)),
+            extra_path_globs=_string_list(label_raw.get("extra_path_globs")),
+            extra_secret_patterns=_string_list(label_raw.get("extra_secret_patterns")),
+        ),
+        sink_action=SecretFlowSinkAction(
+            default=str(sink_raw.get("default", "alert") or "alert"),
+            strict=str(sink_raw.get("strict", "block") or "block"),
+        ),
+        reencodings=bool(raw.get("reencodings", True)),
+        memory=SecretFlowMemory(
+            max_labeled_paths=int(mem_raw.get("max_labeled_paths", 512) or 512),
+            max_value_digests=int(mem_raw.get("max_value_digests", 256) or 256),
+        ),
+        destination_allowlist=allow,
     )
 
 

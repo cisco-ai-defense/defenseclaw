@@ -369,7 +369,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	stateMutation := a.provenHookActionMustEnforce(ctx, verdict)
+	stateMutation := a.hookActionMustEnforce(ctx, verdict)
 	effectiveMode := mode
 	if stateMutation {
 		effectiveMode = "action"
@@ -1010,6 +1010,9 @@ func (a *APIServer) inspectCodexToolResult(
 ) *ToolInspectVerdict {
 	req = req.withTrustedActiveHome(ctx)
 	content := codexToolResponseString(req.ToolResponse)
+	for _, j := range a.hookSessionJudges(ctx) {
+		j.ObserveToolResult(ctx, content) // decision_model.history_tool_results only
+	}
 	if sandboxToolResultUntrusted(ctx) {
 		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, ruleContentScopeUntrusted))
 	}

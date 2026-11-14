@@ -98,6 +98,13 @@ type RuleFinding struct {
 	// file. It is private and value-free; guardrailActionForProfile keeps its
 	// block in every profile.
 	omittedOperand bool
+	// evaluationFault marks the finding of a call the evaluation failed on:
+	// the shell parser failed on its text (shellparse.ErrParserFault) or a
+	// reader panicked (recoverTrustedActionFault). Nothing proves what the
+	// call does, so it blocks in every pack; on the hook routes observe mode
+	// enforces it too, as the failed-check answer of the hook recovery did
+	// (rel-1-0-10:GAP-0486). Private and value-free.
+	evaluationFault bool
 }
 
 type findingEnforcement uint8
@@ -108,6 +115,19 @@ const (
 	findingDispositionUnspecified findingDisposition = iota
 	findingDispositionAudit
 	findingDispositionAdvisory
+	// findingDispositionEffectKnown and findingDispositionEffectUnknown are the
+	// effect-model rule-lane dispositions. Known marks a known effect on a
+	// protected target or a known attack tool; Unknown marks an unknown effect
+	// touching a protected set. They let the benchmark and S8 tell an effect
+	// verdict from today's, and S8 map the unknown tier to ask later, without
+	// changing the public finding schema.
+	findingDispositionEffectKnown
+	findingDispositionEffectUnknown
+	// findingDispositionFlowSecretEgress marks a Secret flow tracking hit: a
+	// labeled secret reached an external sink. S8 maps it to a native ask
+	// where a connector supports one; until then default alerts and
+	// strict/managed block.
+	findingDispositionFlowSecretEgress
 )
 
 const (
@@ -853,15 +873,22 @@ func scanContentRuleCategoryWithGeneration(
 	scope ruleContentScope,
 	category string,
 ) []RuleFinding {
+	return scanContentRulesWithOptions(generation, text, toolName, scope, ruleScanOptions{onlyCategory: category})
+}
+
+// scanContentRulesWithOptions is scanContentRuleCategoryWithGeneration with
+// the caller's category options (the content scope is set from scope).
+func scanContentRulesWithOptions(
+	generation *compiledRulePackCategories,
+	text, toolName string,
+	scope ruleContentScope,
+	options ruleScanOptions,
+) []RuleFinding {
 	if scope == ruleContentScopeSource {
 		text = neutralizeKnownFixtureDataLiterals(text)
 	}
-	findings := scanRuleGeneration(
-		generation,
-		text,
-		toolName,
-		ruleScanOptions{contentScope: scope, onlyCategory: category},
-	)
+	options.contentScope = scope
+	findings := scanRuleGeneration(generation, text, toolName, options)
 	if scope == ruleContentScopeSource {
 		// Physically verified test, fixture, and bundled rule sources are useful
 		// telemetry, but their contents are not an action by the agent. Keeping
@@ -1131,6 +1158,13 @@ func scanRuleCategoriesWithOptions(
 				}
 				if seen[rule.ID] {
 					continue // already found on raw pass
+				}
+				if rule.ID == secretAssignmentRuleID {
+					// A secret assignment is read in the text as written.
+					// normalizeShell turns an escaped newline into the letter n
+					// and so joins one assignment to the next; the rule pattern
+					// reads the JSON escape itself.
+					continue
 				}
 				loc := normalizedMatches.match(rule, normalizedText, normalizedScan)
 				if loc == nil {

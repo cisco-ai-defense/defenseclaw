@@ -22,3 +22,8 @@ explicit DOB/date-of-birth label or a direct “born on” statement and a numer
 slash, dot, dash, or ISO date. Medical-record values require an MRN/patient
 label plus identifier structure; schema prose such as “medical record number
 field” is not a value.
+
+On a tool's output (a tool result), rules tagged `contact`, `pci` or
+`financial` do not run, so this profile's email, phone, card and IBAN rules
+apply to prompts, replies and tool-call arguments only. The SSN, DOB and
+medical-record rules still run on tool output.

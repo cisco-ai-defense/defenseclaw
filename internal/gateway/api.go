@@ -65,6 +65,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
+	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
 
 // APIServer exposes a local REST API for CLI and plugin communication
@@ -541,7 +542,7 @@ func (a *APIServer) hookSessionJudges(ctx context.Context) []*LLMJudge {
 // later tool calls be excused by. scopeText is the part of the prompt that may
 // name scope targets; "" when it is not known to be what the owner typed.
 func (a *APIServer) observeUserTurn(ctx context.Context, prompt, scopeText, cwd string, verdict *ToolInspectVerdict) {
-	if verdict != nil && strings.EqualFold(verdict.Action, "block") {
+	if verdict != nil && normalizedGuardrailAction(verdict.Action) == guardrailActionBlock {
 		prompt, scopeText = "", ""
 	} else {
 		// Only text the owner typed names a run-from host, as for the scope.
@@ -1235,6 +1236,14 @@ func newAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 	if len(cfg) > 0 {
 		s.scannerCfg = cfg[0]
 	}
+	if logger != nil {
+		// Secret flow tracking: write each shadow hit to the audit log (the
+		// in-memory explain ring does not survive a restart).
+		SetSecretFlowAuditSink(func(ctx context.Context, r FlowAuditRecord) {
+			defer func() { _ = recover() }()
+			_ = logger.LogActionCtxSeverity(ctx, string(audit.ActionGuardrailInspection), "secret-flow:shadow", r.Details(), "INFO")
+		})
+	}
 	return s
 }
 
@@ -1480,6 +1489,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
+	mux.HandleFunc("/v1/guardrail/secret-flow", a.handleSecretFlow)
 	// Secure Client serves none of the identity routes (issue #1092).
 	if !a.managedAIDOnly() {
 		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", awaitConfigReload(a.handleGuardrailProfileResolve))
@@ -4910,10 +4920,19 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 	})
 }
 
-const (
-	apiRequestBodyMaxBytes  int64 = 1 << 20
-	otlpRequestBodyMaxBytes int64 = 64 << 20
-)
+const otlpRequestBodyMaxBytes int64 = 64 << 20
+
+// apiRequestBodyMaxBytes is the ordinary API request body limit, read from the
+// embedded limits file the OpenClaw plugin build copies too.
+var apiRequestBodyMaxBytes = func() int64 {
+	var limits struct {
+		BodyMax int64 `json:"body_max_bytes"`
+	}
+	if err := json.Unmarshal(publicschemas.InspectToolRequestLimits, &limits); err != nil || limits.BodyMax <= 0 {
+		panic("gateway: schemas/inspect-tool-request-limits.json has no body_max_bytes")
+	}
+	return limits.BodyMax
+}()
 
 // apiBodyLimitMiddleware preserves the ordinary API mutation ceiling while
 // allowing exact OTLP-HTTP ingest routes to receive exporter batches. The

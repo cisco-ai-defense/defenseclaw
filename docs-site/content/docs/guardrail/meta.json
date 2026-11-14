@@ -7,6 +7,8 @@
     "switching-connectors",
     "disabling",
     "protected-files",
+    "secret-flow-tracking",
+    "tool-results",
     "semantic-routing",
     "unified-llm-key",
     "decision-model",

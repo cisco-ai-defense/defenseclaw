@@ -668,7 +668,7 @@ func (j *LLMJudge) SnapshotSessionGitRemotes(ctx context.Context, cwd string) {
 	if j == nil || cwd == "" {
 		return
 	}
-	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
+	sessionID := judgeSessionKey(ctx)
 	if sessionID == "" {
 		return
 	}
@@ -807,7 +807,7 @@ func (j *LLMJudge) scopeFloorReason(ctx context.Context, toolName, args, cwd str
 	if j == nil {
 		return ""
 	}
-	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
+	sessionID := judgeSessionKey(ctx)
 	if sessionID == "" {
 		return ""
 	}
