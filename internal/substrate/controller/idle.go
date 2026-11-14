@@ -32,8 +32,9 @@ import (
 //
 // A --task actor whose task ended is suspended TaskEndGrace after the end
 // (taskEnded), so a batch larger than the pool drains through it
-// (GAP-0274); woken again later (pull, logs, connect), it is idle like any
-// other actor.
+// (GAP-0274). Once it reached the gateway after the end (pull, logs,
+// connect), or was woken again later, it is idle like any other actor
+// (GAP-0288).
 func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, base Event, after time.Duration) error {
 	if after <= 0 || c.o.Activity == nil || a.GetStatus().GetState() != ateapi.ActorStateRunning || st.conflict {
 		return nil
@@ -53,7 +54,9 @@ func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, 
 			return nil // the task runs
 		}
 		if ended.After(st.runningAt) {
-			return c.taskEnded(ctx, a, st, reg, base, uid, ended, now)
+			if t, ok := c.o.Activity.LastActivity(uid); !ok || !t.After(ended.Add(taskEndSlack)) {
+				return c.taskEnded(ctx, a, st, reg, base, ended, now)
+			}
 		}
 	}
 	last := st.runningAt
@@ -85,13 +88,10 @@ func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, 
 // report itself is relay traffic).
 const taskEndSlack = 10 * time.Second
 
-// taskEnded suspends a --task actor TaskEndGrace after its task ended,
-// unless the actor reached the gateway again since (something still runs).
-func (c *Controller) taskEnded(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, base Event, uid string, ended, now time.Time) error {
+// taskEnded suspends a --task actor TaskEndGrace after its task ended; the
+// caller checked that nothing reached the gateway since.
+func (c *Controller) taskEnded(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, base Event, ended, now time.Time) error {
 	if now.Sub(ended) < c.o.TaskEndGrace {
-		return nil
-	}
-	if t, ok := c.o.Activity.LastActivity(uid); ok && t.After(ended.Add(taskEndSlack)) {
 		return nil
 	}
 	if _, err := c.o.Client.SuspendActor(ctx, ateapi.RefOf(a.GetMetadata())); err != nil {

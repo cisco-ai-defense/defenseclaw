@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
@@ -45,7 +46,7 @@ const TaskReportPath = "/api/v1/substrate/relay/task"
 const (
 	// stallTick is how often the watchdog samples the agent.
 	stallTick = 30 * time.Second
-	// stallIO is the process group's I/O per tick that counts as progress,
+	// stallIO is the agent tree's I/O per tick that counts as progress,
 	// and 1% of a core over the tick the CPU time. An agent stuck on a model
 	// request that never answers uses about 0.2% of a core and a few hundred
 	// bytes a minute (Claude Code 2.1.322, measured for GAP-0273); a live
@@ -95,7 +96,7 @@ type TaskEnd struct {
 	DurationMS int64  `json:"duration_ms"`
 }
 
-// Usage is an agent process group's CPU time and I/O bytes so far.
+// Usage is the agent tree's CPU time and I/O bytes so far.
 type Usage struct {
 	CPU time.Duration
 	IO  uint64
@@ -109,9 +110,10 @@ type HeadlessOptions struct {
 	// Stall overrides the configuration's no-progress bound, Tick the
 	// watchdog's sample period (tests).
 	Stall, Tick time.Duration
-	// Usage reads the process group's usage; default processGroupUsage
-	// (Linux /proc; elsewhere only output counts).
-	Usage func(pgid int) (Usage, bool)
+	// Usage reads the agent tree's usage (tests); default the /proc tree of
+	// the agent (procTree: its descendants and its process group, Linux;
+	// elsewhere only output counts).
+	Usage func(pid int) (Usage, bool)
 }
 
 type task struct {
@@ -176,8 +178,9 @@ func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest, o Headles
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	cmd.Stdin = nil
-	// The agent and everything it starts are one process group: the
-	// watchdog measures it and a stalled task ends all of it.
+	// The agent gets a process group of its own; the watchdog measures and
+	// stops its whole process tree, tools in sessions of their own too
+	// (procTree, GAP-0289).
 	setProcessGroup(cmd)
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	// Own pipes, not StdoutPipe: the relay must not wait forever on a pipe
@@ -259,9 +262,10 @@ func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest, o Headles
 }
 
 // watch ends the agent when it makes no progress for stall: no output line
-// (retry notices aside) and less than stallCPU and stallIO of use in its
-// process group in every tick. A tick much later than planned is a suspend
-// and resume of the actor, not a stall.
+// (retry notices aside) and less than 1% of a core and stallIO of use in its
+// process tree in every tick. A tick much later than planned is a suspend
+// and resume of the actor, not a stall. A stalled task is stopped whole:
+// TERM to the group and the tree, then KILL after stopGrace.
 func watch(cmd *exec.Cmd, connector string, stall time.Duration, o HeadlessOptions, progress *atomic.Int64, exited <-chan struct{}, stalled func(string)) {
 	tick := o.Tick
 	if tick <= 0 {
@@ -270,15 +274,16 @@ func watch(cmd *exec.Cmd, connector string, stall time.Duration, o HeadlessOptio
 	if o.Stall > 0 {
 		stall = o.Stall
 	}
-	usage := o.Usage
-	if usage == nil {
-		usage = processGroupUsage
-	}
-	cpuMin := tick / 100
 	pid := cmd.Process.Pid
+	tree := newProcTree(pid)
+	usage := o.Usage
+	cpuMin := tick / 100
 	t := time.NewTicker(tick)
 	defer t.Stop()
-	prev, havePrev := usage(pid)
+	prev, havePrev := tree.usage()
+	if usage != nil {
+		prev, havePrev = usage(pid)
+	}
 	lastTick, last := time.Now(), time.Now()
 	for {
 		select {
@@ -292,7 +297,13 @@ func watch(cmd *exec.Cmd, connector string, stall time.Duration, o HeadlessOptio
 			if progress.Swap(0) > 0 {
 				last = now
 			}
-			if u, ok := usage(pid); ok {
+			// The tree is walked every tick, whoever measures it, so a tool
+			// whose parent exits stays known and is stopped with the rest.
+			u, ok := tree.usage()
+			if usage != nil {
+				u, ok = usage(pid)
+			}
+			if ok {
 				// A child that exited takes its counts with it: only growth
 				// counts.
 				if havePrev && (u.CPU-prev.CPU >= cpuMin || (u.IO > prev.IO && u.IO-prev.IO >= stallIO)) {
@@ -314,12 +325,17 @@ func watch(cmd *exec.Cmd, connector string, stall time.Duration, o HeadlessOptio
 			}
 			stalled(fmt.Sprintf("the task made no progress for %s (no output, CPU or I/O); %s. The task is ended with exit code %d.",
 				stall.Round(time.Second), probe, ExitStalled))
+			// The tree first, while the agent still holds its children.
+			tree.signal(syscall.SIGTERM)
 			_ = termProcessGroup(cmd)
 			select {
 			case <-exited:
 			case <-time.After(stopGrace):
 				_ = killProcessGroup(cmd)
 			}
+			// What outlived the agent (tools in sessions of their own) goes
+			// too: a stalled task leaves nothing running.
+			tree.signal(syscall.SIGKILL)
 			return
 		}
 	}

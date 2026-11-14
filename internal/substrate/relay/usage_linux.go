@@ -12,66 +12,143 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
 // clockTicks is USER_HZ, the unit of /proc/<pid>/stat CPU times (100 on
-// every Linux the actor images run).
+// every Linux the actor images run, gVisor included).
 const clockTicks = 100
 
-// processGroupUsage sums the CPU time and the I/O bytes (rchar + wchar) of
-// the live processes of process group pgid, from /proc. A process whose
-// io file cannot be read adds its CPU time only.
-func processGroupUsage(pgid int) (Usage, bool) {
-	return procGroupUsage("/proc", pgid)
+// procTree is the agent's process tree, from /proc (GAP-0289): the agent,
+// every process whose parent is in the tree, and every process of its
+// process group. Agents start tools in sessions of their own (Claude Code's
+// Bash tool and hooks run under setsid; Codex puts exec-server and MCP
+// children in their own groups), so the group alone misses them. A process
+// once seen stays in the tree while it lives (its start time tells it from
+// a reused PID), so a tool whose parent exits is still counted and stopped.
+// gVisor and the microVM kernel both serve /proc/<pid>/stat; a missing io
+// file only leaves the I/O out.
+type procTree struct {
+	proc  string
+	root  int
+	known map[int]uint64 // pid -> start time
 }
 
-func procGroupUsage(proc string, pgid int) (Usage, bool) {
-	ents, err := os.ReadDir(proc)
+func newProcTree(root int) *procTree {
+	return &procTree{proc: "/proc", root: root, known: map[int]uint64{}}
+}
+
+type procStat struct {
+	ppid, pgrp int
+	start      uint64
+	cpu        time.Duration
+}
+
+// scan reads every process, rebuilds the tree and returns its live members.
+func (t *procTree) scan() map[int]procStat {
+	ents, err := os.ReadDir(t.proc)
 	if err != nil {
-		return Usage{}, false
+		return nil
 	}
-	var u Usage
-	found := false
+	all := map[int]procStat{}
+	kids := map[int][]int{}
 	for _, e := range ents {
-		if _, err := strconv.Atoi(e.Name()); err != nil {
-			continue
-		}
-		dir := filepath.Join(proc, e.Name())
-		stat, err := os.ReadFile(filepath.Join(dir, "stat"))
+		pid, err := strconv.Atoi(e.Name())
 		if err != nil {
 			continue
 		}
-		group, cpu, ok := parseProcStat(stat)
-		if !ok || group != pgid {
+		b, err := os.ReadFile(filepath.Join(t.proc, e.Name(), "stat"))
+		if err != nil {
 			continue
 		}
-		found = true
-		u.CPU += cpu
-		u.IO += readProcIO(filepath.Join(dir, "io"))
+		st, ok := parseProcStat(b)
+		if !ok {
+			continue
+		}
+		all[pid] = st
+		kids[st.ppid] = append(kids[st.ppid], pid)
 	}
-	return u, found
+	in := map[int]procStat{}
+	var queue []int
+	add := func(pid int) {
+		if _, done := in[pid]; done {
+			return
+		}
+		if st, ok := all[pid]; ok {
+			in[pid] = st
+			queue = append(queue, pid)
+		}
+	}
+	add(t.root)
+	for pid, start := range t.known {
+		if st, ok := all[pid]; ok && st.start == start {
+			add(pid)
+		}
+	}
+	for pid, st := range all {
+		if st.pgrp == t.root {
+			add(pid)
+		}
+	}
+	for len(queue) > 0 {
+		pid := queue[0]
+		queue = queue[1:]
+		for _, c := range kids[pid] {
+			add(c)
+		}
+	}
+	t.known = make(map[int]uint64, len(in))
+	for pid, st := range in {
+		t.known[pid] = st.start
+	}
+	return in
 }
 
-// parseProcStat reads the process group and utime + stime of a stat line;
-// the command name in parentheses may hold spaces and parentheses.
-func parseProcStat(b []byte) (int, time.Duration, bool) {
+// usage sums the CPU time and the I/O bytes (rchar + wchar) of the tree.
+func (t *procTree) usage() (Usage, bool) {
+	in := t.scan()
+	if len(in) == 0 {
+		return Usage{}, false
+	}
+	var u Usage
+	for pid, st := range in {
+		u.CPU += st.cpu
+		u.IO += readProcIO(filepath.Join(t.proc, strconv.Itoa(pid), "io"))
+	}
+	return u, true
+}
+
+// signal sends sig to every live process of the tree (a fresh scan, so a
+// process started since the last sample is included).
+func (t *procTree) signal(sig syscall.Signal) {
+	for pid := range t.scan() {
+		_ = syscall.Kill(pid, sig)
+	}
+}
+
+// parseProcStat reads the parent, process group, start time and utime +
+// stime of a stat line; the command name in parentheses may hold spaces and
+// parentheses.
+func parseProcStat(b []byte) (procStat, bool) {
 	i := bytes.LastIndexByte(b, ')')
 	if i < 0 || i+2 > len(b) {
-		return 0, 0, false
+		return procStat{}, false
 	}
 	f := strings.Fields(string(b[i+1:]))
-	// f[0] state, f[1] ppid, f[2] pgrp, ..., f[11] utime, f[12] stime.
-	if len(f) < 13 {
-		return 0, 0, false
+	// f[0] state, f[1] ppid, f[2] pgrp, ..., f[11] utime, f[12] stime, ..., f[19] starttime.
+	if len(f) < 20 {
+		return procStat{}, false
 	}
-	group, err1 := strconv.Atoi(f[2])
-	ut, err2 := strconv.ParseUint(f[11], 10, 64)
-	st, err3 := strconv.ParseUint(f[12], 10, 64)
-	if err1 != nil || err2 != nil || err3 != nil {
-		return 0, 0, false
+	ppid, err1 := strconv.Atoi(f[1])
+	group, err2 := strconv.Atoi(f[2])
+	ut, err3 := strconv.ParseUint(f[11], 10, 64)
+	st, err4 := strconv.ParseUint(f[12], 10, 64)
+	start, err5 := strconv.ParseUint(f[19], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil {
+		return procStat{}, false
 	}
-	return group, time.Duration(ut+st) * time.Second / clockTicks, true
+	return procStat{ppid: ppid, pgrp: group, start: start, cpu: time.Duration(ut+st) * time.Second / clockTicks}, true
 }
 
 func readProcIO(path string) uint64 {

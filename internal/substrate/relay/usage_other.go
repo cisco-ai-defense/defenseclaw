@@ -5,6 +5,12 @@
 
 package relay
 
-// processGroupUsage is not measured off Linux (actors run Linux): only the
-// agent's output counts as progress there.
-func processGroupUsage(int) (Usage, bool) { return Usage{}, false }
+import "syscall"
+
+// procTree is not measured off Linux (actors run Linux): only the agent's
+// output counts as progress there, and a stall stops its process group.
+type procTree struct{}
+
+func newProcTree(int) *procTree             { return &procTree{} }
+func (*procTree) usage() (Usage, bool)      { return Usage{}, false }
+func (*procTree) signal(sig syscall.Signal) {}

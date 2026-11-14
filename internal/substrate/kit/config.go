@@ -140,6 +140,12 @@ type RelayConfig struct {
 // stuck ends with a reason instead of hanging (GAP-0273).
 const DefaultTaskStall = 10 * time.Minute
 
+// MinTaskStallMS and MaxTaskStallMS bound relay.task_stall_ms (1m, 24h).
+const (
+	MinTaskStallMS = 60_000
+	MaxTaskStallMS = 24 * 60 * 60 * 1000
+)
+
 // TaskStall is the relay's no-progress bound of a --task run.
 func (r RelayConfig) TaskStall() time.Duration {
 	if r.TaskStallMS > 0 {
@@ -233,8 +239,8 @@ func (c Config) Validate() error {
 	if c.MaxTimeMS+c.RetryMaxTimeMS > 28000 {
 		return errors.New("actor kit config: max_time_ms + retry_max_time_ms must fit the agent's 30 s hook envelope")
 	}
-	if c.Relay.TaskStallMS < 0 || (c.Relay.TaskStallMS > 0 && c.Relay.TaskStallMS < 60000) {
-		return errors.New("actor kit config: relay.task_stall_ms must be 0 (the default) or at least 60000")
+	if c.Relay.TaskStallMS < 0 || (c.Relay.TaskStallMS > 0 && (c.Relay.TaskStallMS < MinTaskStallMS || c.Relay.TaskStallMS > MaxTaskStallMS)) {
+		return fmt.Errorf("actor kit config: relay.task_stall_ms must be 0 (the default, 10m) or %d to %d (1m to 24h)", MinTaskStallMS, MaxTaskStallMS)
 	}
 	if c.MaxAttachBytes < 0 || c.MaxAttachBytes > MaxAttachBytes {
 		return fmt.Errorf("actor kit config: max_attach_bytes must be 0..%d", MaxAttachBytes)

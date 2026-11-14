@@ -23,37 +23,36 @@ import (
 // frees its worker.
 //
 // The route takes the actor's verified JWT like every actor route, and the
-// agent could post here itself: what it could gain is its own actor
-// suspended early and a wrong end row of its own run, so the row says the
-// actor reported it, and each actor gets few rows.
+// agent shares that token: it could post here itself. So the row says the
+// actor reported it, and no report is dropped (GAP-0291): every one is
+// audited, numbered per actor on this replica, and those after the first
+// are marked as repeats, so ends the agent posted first cannot hide the
+// relay's own. The actor listener's per-actor rate limit bounds the rows,
+// as it bounds hook rows. Early ends cost the agent only its own worker
+// (the controller suspends a task actor that stays quiet after its end).
+// A relay-only credential is the root fix (tracked in GAP-0291).
 
 const (
-	// substrateTaskEndMaxRows bounds the audit rows one actor can write
-	// here (one task per actor; the relay retries an unanswered report).
-	substrateTaskEndMaxRows = 3
-	// substrateTaskEndMaxActors bounds the per-actor row counts.
+	// substrateTaskEndMaxActors bounds the per-actor report counts.
 	substrateTaskEndMaxActors = 10000
 	substrateTaskCauseMax     = 512
 )
 
-// substrateTaskEnds counts the end rows per actor UID.
+// substrateTaskEnds counts the end reports per actor UID.
 type substrateTaskEnds struct {
 	mu   sync.Mutex
 	rows map[string]int
 }
 
-// take reports whether uid may write one more row.
-func (t *substrateTaskEnds) take(uid string) bool {
+// next numbers uid's report: 1 for its first on this replica.
+func (t *substrateTaskEnds) next(uid string) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.rows == nil || len(t.rows) >= substrateTaskEndMaxActors {
 		t.rows = map[string]int{}
 	}
-	if t.rows[uid] >= substrateTaskEndMaxRows {
-		return false
-	}
 	t.rows[uid]++
-	return true
+	return t.rows[uid]
 }
 
 // serveSubstrateRelayTask takes a task end: POST {"exit_code", "stalled",
@@ -88,7 +87,8 @@ func (a *APIServer) serveSubstrateRelayTask(st *substrateState, w http.ResponseW
 	if st.cfg.Activity != nil {
 		st.cfg.Activity.ObserveActivity(SubstrateActivityTaskEnd, actor.Atespace, actor.UID, time.Now())
 	}
-	if st.alert != nil && st.taskEnds.take(actor.UID) {
+	if st.alert != nil {
+		n := st.taskEnds.next(actor.UID)
 		severity, outcome := "INFO", "finished"
 		switch {
 		case in.Stalled:
@@ -102,9 +102,13 @@ func (a *APIServer) serveSubstrateRelayTask(st *substrateState, w http.ResponseW
 		if cause != "" {
 			summary += "; " + cause
 		}
+		if n > 1 {
+			summary = fmt.Sprintf("repeat %d: %s", n, summary)
+		}
 		st.alert(r.Context(), severity, summary, map[string]any{
 			"event": "task_end", "atespace": actor.Atespace, "actor": actor.Name, "actor_uid": actor.UID,
 			"batch_id": reg.BatchID, "exit_code": in.ExitCode, "stalled": in.Stalled, "cause": cause, "duration_ms": max(in.DurationMS, 0),
+			"report": n, "repeat": n > 1,
 		})
 	}
 	w.WriteHeader(http.StatusNoContent)

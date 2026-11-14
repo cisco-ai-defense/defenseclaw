@@ -12,6 +12,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -34,9 +35,12 @@ type Options struct {
 	GatewayURL string // default kit.DefaultGatewayURL
 	// FailMode is the interactive outage mode, "open" or "closed".
 	FailMode string
-	Provider string
-	Model    string
-	UID, GID int // default 1000
+	// TaskStall is the relay's no-progress bound of a --task run
+	// (relay.task_stall_ms, GAP-0273); 0 keeps kit.DefaultTaskStall.
+	TaskStall time.Duration
+	Provider  string
+	Model     string
+	UID, GID  int // default 1000
 
 	// HookBinary and RelayBinary are the static binaries of the kit.
 	HookBinary, RelayBinary []byte
@@ -93,6 +97,12 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 	}
 	if o.FailMode != "" {
 		cfg.FailMode = o.FailMode
+	}
+	if o.TaskStall != 0 {
+		cfg.Relay.TaskStallMS = int(o.TaskStall / time.Millisecond)
+		if err := cfg.Validate(); err != nil {
+			return zero, attest.TemplateInfo{}, fmt.Errorf("kit spec: --task-stall %s: %w", o.TaskStall, err)
+		}
 	}
 	cfg.KitVersion = o.KitVersion
 	if o.RelayListen != "" {

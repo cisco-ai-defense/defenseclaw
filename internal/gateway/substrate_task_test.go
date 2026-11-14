@@ -64,18 +64,21 @@ func TestSubstrateRelayTaskEnd(t *testing.T) {
 	if rec := f.do(t, f.actor, http.MethodPost, substrateRelayTask, "", `{"exit_code":0}`); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("no actor token: %d", rec.Code)
 	}
-	// One actor writes few rows, however often it reports.
-	for range 10 {
+	// GAP-0291: no report is dropped; those after the first are repeats.
+	for range 4 {
 		f.do(t, f.actor, http.MethodPost, substrateRelayTask, "tok-bob", `{"exit_code":0}`)
 	}
 	events, _ = store.ListEvents(100)
-	n := 0
+	n, repeats := 0, 0
 	for _, e := range events {
 		if strings.Contains(e.Details, "task_end") && strings.Contains(e.Details, "eng-web/bob-1") {
 			n++
+			if strings.Contains(e.Details, `"repeat":true`) && strings.Contains(e.Details, "repeat ") {
+				repeats++
+			}
 		}
 	}
-	if n != substrateTaskEndMaxRows {
-		t.Fatalf("%d task-end rows for one actor, want %d", n, substrateTaskEndMaxRows)
+	if n != 5 || repeats != 4 {
+		t.Fatalf("%d task-end rows (%d repeats) for 5 reports, want 5 (4 repeats)", n, repeats)
 	}
 }
