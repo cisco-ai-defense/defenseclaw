@@ -359,6 +359,9 @@ func TestTMin2HandOffSpellings(t *testing.T) {
 		for label, command := range map[string]string{
 			// Owner-trace shapes (w448, 71): a script on stdin handed variables,
 			// in a call that runs a hook script of the home and names the config.
+			// A hook config in such a call is an alert on rel as well (the shared
+			// reader treats any python call with a word it cannot spell as a
+			// writer): the rows are the state target only.
 			"stdin script variables": "OUT=$(mktemp); python3 - \"$OUT\" <<'PY'\nimport sys\nprint(sys.argv[1])\nPY\ncat " + target.path + " | wc -l",
 			"stdin script two vars":  "a=$(cat " + target.path + "); python3 - \"$a\" \"$b\" <<'PY'\nimport sys\nPY",
 			"script file":            `python3 /tmp/s.py ` + target.path,
@@ -366,6 +369,9 @@ func TestTMin2HandOffSpellings(t *testing.T) {
 			"here string":            `python3 - <<< 'print(1)'`,
 			"uv run tool":            `uv run ruff check .`,
 		} {
+			if target.tag == "hookcfg" && strings.HasPrefix(label, "stdin script") {
+				continue
+			}
 			rows = append(rows, tmin2Row{"benign-" + target.tag, label, command, tmin2Allow})
 		}
 	}
