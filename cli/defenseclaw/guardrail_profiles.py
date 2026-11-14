@@ -79,6 +79,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f24c07c3beea7d1b590347461d9d263db597aad5bd73f1a43b4a546f60df4ad0",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
+            # 1.0.10 (s7/shellrecall): five alert-only effect rules
+            # (staged file, stdin password, download-run, git, inline code).
+            "fbb392bb8ac84607447cefa5a889cfe95ad396026c46159501d634c52bdd25ef",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
@@ -87,6 +90,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "b82abc998f4b917dbbc856bda3bb4f9211ce829b3ab86a6464a031b6953b680a",
             # 1.0.10 (s7/response-fields): SEC-BEARER-BARE and SEC-PASSWORD-ASSIGN (GAP-0371).
             "69e71164e4798439ed96acd8070ff36eb03bfe2ce260b3c46221824497610275",
+            # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
+            "657b41873648522db2f5f1d2237a822f94712b4775267cd7e129b62c2bfbbc16",
         }
     ),
     "permissive": frozenset(
@@ -122,6 +127,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "fa8ca0ad415436e8b4f5d6043f36de782cfe27bfbfca83f27d2359b97914f5f7",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
+            # 1.0.10 (s7/shellrecall): five alert-only effect rules
+            # (staged file, stdin password, download-run, git, inline code).
+            "9a79a431a425ee9a61e856af9bccfe840d0dbc1cd14757d7ba352eee704c671a",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
@@ -130,6 +138,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "969de899d5a8544152cd09ad05b1e67ac841a4da53c4bb1e992a3b55c796f7a1",
             # 1.0.10 (s7/response-fields): SEC-BEARER-BARE and SEC-PASSWORD-ASSIGN (GAP-0371).
             "1e424c14053a75a0eb15df080839833433717195bd0bd7736ec35cddd4564524",
+            # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
+            "d0744d25ec528674c66da161034c6bfe2478a54cde9167647fe80c3e86454d8b",
         }
     ),
     "strict": frozenset(
@@ -164,6 +174,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f5d6d19b78fe7d3897acb6a28a9fae08049fcda9745f944d5cdb45e573669bc5",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
+            # 1.0.10 (s7/shellrecall): five alert-only effect rules
+            # (staged file, stdin password, download-run, git, inline code).
+            "bdd27d5347627c74b8b90da944b7dca7de20d5488c6e36c50b28d5a9d73763fc",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
@@ -172,6 +185,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f6ba060634b55b87887932700fbd73cd7d658f175f2bc83a75b057e45e8355aa",
             # 1.0.10 (s7/response-fields): SEC-BEARER-BARE and SEC-PASSWORD-ASSIGN (GAP-0371).
             "23259c8008f836ee1e60f5dd9ebe86050736da685dc76e8bf4fdcbd56ab53f0f",
+            # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
+            "b956db73b9de22f9b3d9b107754c458bf4c042d7d109ae4baeb32803f9f378d7",
         }
     ),
 }
