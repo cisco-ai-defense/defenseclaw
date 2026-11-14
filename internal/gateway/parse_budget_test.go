@@ -123,9 +123,11 @@ func TestParseBudgetKeepsTheStateWriteProof(t *testing.T) {
 
 // TestParseBudgetProbesStayBounded asserts the memory and the time of the
 // hook on every over-budget row (refused before any reader, so a few MiB)
-// and at the cap of each chain shape (read in full). The bounds are loose:
-// they hold under -race on a loaded box, and the cost curve of the caps is
-// PARSE_BUDGET_CURVE=1 (TestParseBudgetCostCurve).
+// and at the cap of each chain shape (read in full). The memory bound is a
+// count and holds on every host; the time is read against the host that runs
+// the test (parseBudgetTimeBound), so it holds under -race on a loaded or
+// small runner, and the cost curve of the caps is PARSE_BUDGET_CURVE=1
+// (TestParseBudgetCostCurve).
 func TestParseBudgetProbesStayBounded(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX homes")
@@ -137,27 +139,55 @@ func TestParseBudgetProbesStayBounded(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	api := readingBoundTierTestAPI(t, "claudecode", config.HookPolicyTierDefault)
+	hook := func(command string) string {
+		return gap0568ToolHookAction(t, api, "claudecode", "Bash", home, cwd, command, true, false)
+	}
 	for _, row := range append(append([]overBudget(nil), overBudgetRows...),
 		overBudget{"pipe", shellparse.MaxChainOperators}, overBudget{"subst-pipe", shellparse.MaxChainOperators},
 		overBudget{"flat-words", 4000}, overBudget{"heredoc-lines", 4000}) {
 		command := row.command()
 		over := shellparse.BudgetExceeded(command) != ""
-		memory, window := uint64(256<<20), 10*time.Second
+		memory := uint64(256 << 20)
 		if over {
-			memory, window = 96<<20, 5*time.Second
+			memory = 96 << 20
 		}
+		window := parseBudgetTimeBound(len(command), func(command string) { hook(command) })
 		var before, after runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&before)
 		start := time.Now()
-		action := gap0568ToolHookAction(t, api, "claudecode", "Bash", home, cwd, command, true, false)
+		action := hook(command)
 		took := time.Since(start)
 		runtime.ReadMemStats(&after)
+		t.Logf("%s (%d bytes, over=%t): %d MiB in %s (bound %s)", row, len(command), over, (after.TotalAlloc-before.TotalAlloc)>>20, took, window)
 		if alloc := after.TotalAlloc - before.TotalAlloc; alloc > memory || took > window {
-			t.Errorf("%s (%d bytes, over=%t): %d MiB allocated in %s", row, len(command), over, alloc>>20, took)
+			t.Errorf("%s (%d bytes, over=%t): %d MiB allocated in %s (bound %s)", row, len(command), over, alloc>>20, took, window)
 		}
 		if over && action != guardrailActionAlert {
 			t.Errorf("%s: action=%s, want alert", row, action)
 		}
 	}
+}
+
+// parseBudgetTimeBound is the most the hook may take on a command of bytes
+// bytes on this host: parseBudgetTimeFactor times the hook's time on a
+// reference command (a fixed in-budget flat text of a few KB, best of three,
+// each a text of its own), scaled up by the size ratio when the command is
+// longer. A hook that is 50 times slower on a shared runner is 50 times
+// slower on the reference, and the bound moves with it; a fixed number of
+// seconds does not.
+func parseBudgetTimeBound(bytes int, call func(command string)) time.Duration {
+	const parseBudgetTimeFactor = 6
+	best, size := time.Duration(-1), 0
+	for run := range 3 {
+		command := budgetShapeNamed("flat-words").command(500 + run)
+		size = len(command)
+		start := time.Now()
+		call(command)
+		if took := time.Since(start); best < 0 || took < best {
+			best = took
+		}
+	}
+	scale := max(1, float64(bytes)/float64(size))
+	return 250*time.Millisecond + time.Duration(float64(best)*scale*parseBudgetTimeFactor)
 }
