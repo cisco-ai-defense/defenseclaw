@@ -217,11 +217,16 @@ func TestPassthroughCoverageBedrockStreamProperty(t *testing.T) {
 		}},
 	}
 	rnd := rand.New(rand.NewSource(0xbed0))
-	for _, s := range slots {
-		for _, pfx := range []string{"", "data:x,"} {
-			for _, split := range []int{0, 1, 5, 17, 64 + rnd.Intn(200)} {
+	pick := covPick(covSample(t, "TestPassthroughCoverageBedrockStreamProperty",
+		[]string{"slot", "prefix", "split"}, []int{len(slots), 2, 5}, nil, nil))
+	for sli, s := range slots {
+		for pxi, pfx := range []string{"", "data:x,"} {
+			for spi, split := range []int{0, 1, 5, 17, 64 + rnd.Intn(200)} {
 				s, pfx, split := s, pfx, split
 				t.Run(fmt.Sprintf("%s/pfx=%s/split=%d", s.name, pfx, split), func(t *testing.T) {
+					if !pick(sli, pxi, spi) {
+						t.Skip("not in the sample")
+					}
 					up := newCovUpstream(t)
 					insp := &covInspector{}
 					proxy := covProxy(t, up, "bedrock", insp)
@@ -487,8 +492,17 @@ func TestPassthroughCoverageReplyAmbiguousKeysProperty(t *testing.T) {
 		}
 		return s, false
 	}
-	for _, managed := range []bool{true, false} {
-		for _, w := range covReplyWires() {
+	wires := covReplyWires()
+	maxSlots := 0
+	for _, w := range wires {
+		maxSlots = max(maxSlots, len(w.slots))
+	}
+	// variant 0 is the buffered body, 1 to 3 the three SSE framings.
+	pick := covPick(covSample(t, "TestPassthroughCoverageReplyAmbiguousKeysProperty",
+		[]string{"mode", "wire", "slot", "variant"}, []int{2, len(wires), maxSlots, 4},
+		func(c []int) bool { return c[2] < len(wires[c[1]].slots) && (c[3] == 0 || wires[c[1]].events != nil) }, nil))
+	for mi, managed := range []bool{true, false} {
+		for wi, w := range wires {
 			for si, s := range w.slots {
 				w, s, si, managed := w, s, si, managed
 				check := func(t *testing.T, raw []byte, ctype string) {
@@ -505,6 +519,9 @@ func TestPassthroughCoverageReplyAmbiguousKeysProperty(t *testing.T) {
 					}
 				}
 				t.Run(fmt.Sprintf("managed=%v/body/%s/%s", managed, w.name, s.name), func(t *testing.T) {
+					if !pick(mi, wi, si, 0) {
+						t.Skip("not in the sample")
+					}
 					plain := string(covJSON(t, s.build("a harmless sentence")))
 					mutated, ok := inject(plain)
 					if !ok {
@@ -515,9 +532,12 @@ func TestPassthroughCoverageReplyAmbiguousKeysProperty(t *testing.T) {
 				if w.events == nil {
 					continue
 				}
-				for _, fr := range []string{"lf-space", "crlf", "multiline"} {
+				for fi, fr := range []string{"lf-space", "crlf", "multiline"} {
 					fr := fr
 					t.Run(fmt.Sprintf("managed=%v/stream/%s/%s/%s", managed, w.name, s.name, fr), func(t *testing.T) {
+						if !pick(mi, wi, si, fi+1) {
+							t.Skip("not in the sample")
+						}
 						events := w.events("a harmless sentence", si)
 						done := false
 						for i, e := range events {

@@ -141,17 +141,47 @@ func TestPassthroughCoverageProbeProperty(t *testing.T) {
 		{"probe-then-benign-text", func(p string) string { return p + " Thanks, and have a nice day." }, false},
 		{"probe-alone", func(p string) string { return p }, false},
 	}
-	for _, managed := range []bool{false, true} {
-		for _, w := range wires {
-			for _, pr := range probes {
-				for _, sh := range shapes {
-					for _, stream := range []bool{false, true} {
+	// The sample covers every value of every dimension and every pair except
+	// probe x shape (each probe is run against several shapes and each shape
+	// against several probes); DEFENSECLAW_PROPERTY_FULL=1 runs the 600.
+	pick := covPick(covSample(t, "TestPassthroughCoverageProbeProperty",
+		[]string{"mode", "wire", "probe", "shape", "stream"}, []int{2, len(wires), len(probes), len(shapes), 2}, nil,
+		func(a, b int) bool { return a != 2 || b != 3 }))
+	// One upstream, inspector and proxy per mode and wire serve the sampled
+	// combinations (a proxy opens an audit store, the dearest part of a case);
+	// each case resets what it reads.
+	type fixture struct {
+		up    *covUpstream
+		insp  *covInspector
+		proxy *GuardrailProxy
+	}
+	pt := t
+	fixtures := map[[2]int]*fixture{}
+	fixtureFor := func(mi, wi int, w wire) *fixture {
+		if f := fixtures[[2]int{mi, wi}]; f != nil {
+			return f
+		}
+		f := &fixture{up: newCovUpstream(pt), insp: &covInspector{}}
+		f.proxy = covProxy(pt, f.up, w.provider, f.insp)
+		fixtures[[2]int{mi, wi}] = f
+		return f
+	}
+	for mi, managed := range []bool{false, true} {
+		for wi, w := range wires {
+			for pi, pr := range probes {
+				for si, sh := range shapes {
+					for sti, stream := range []bool{false, true} {
+						if !pick(mi, wi, pi, si, sti) {
+							continue
+						}
 						w, pr, sh, stream, managed := w, pr, sh, stream, managed
 						t.Run(fmt.Sprintf("managed=%v/%s/%s/%s/stream=%v", managed, w.name, pr.name, sh.name, stream), func(t *testing.T) {
 							covSetManaged(t, managed)
-							up := newCovUpstream(t)
-							insp := &covInspector{}
-							proxy := covProxy(t, up, w.provider, insp)
+							f := fixtureFor(mi, wi, w)
+							up, insp, proxy := f.up, f.insp, f.proxy
+							insp.mu.Lock()
+							insp.prompts, insp.completes = nil, nil
+							insp.mu.Unlock()
 							up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
 							body := w.body(w.user(sh.text(pr.text)))
 							if stream {
