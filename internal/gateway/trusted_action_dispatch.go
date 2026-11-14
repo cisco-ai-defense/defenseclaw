@@ -454,7 +454,14 @@ func dispatchTrustedAction(
 		return trustedActionLimitFindings(request.EnforcementCapable)
 	}
 	if request.EnforcementCapable && shellReason == "shell-parse-bound" {
-		return trustedActionLimitFindings(true)
+		if !trustedCallReadsSyntaxTail(request) {
+			return trustedActionLimitFindings(true)
+		}
+		// A plain syntax error stops the recovering parse at its proof
+		// bound too, but the statements that parse are read: they are
+		// judged in full below, and the bound still decides the call at
+		// least as the evaluation limit does (rel-1-0-10:GAP-0526).
+		defer func() { findings = withTrustedActionLimitFinding(findings, true) }()
 	}
 	if bound == shellReadingNestedProof {
 		// The readers below read it, but past this weight they do not prove
@@ -710,6 +717,14 @@ func dispatchTrustedActionWith(
 				if simple.EvaluationFailure != "" {
 					if simple.EvaluationFailure == actionfacts.EvaluationFailureInternal {
 						findings = withSimpleCommandFindings(findings, trustedActionParseFailureFindings(request.EnforcementCapable))
+						continue
+					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax {
+						// A text with a syntax error: its readable statements
+						// are judged as the simple commands around this one,
+						// and the part that was not read is unknown
+						// (rel-1-0-10:GAP-0526).
+						findings = withSimpleCommandFindings(findings, trustedActionSyntaxUnreadFindings(request.EnforcementCapable))
 						continue
 					}
 					if simple.EvaluationFailure != "limit" {
@@ -9661,7 +9676,7 @@ func trustedCallOverStatementBudgetWith(input actionfacts.Input, facts actionfac
 	}
 	if facts.Parse.Dialect == actionfacts.DialectPOSIX && facts.Parse.Status != actionfacts.StatusLimitExceeded &&
 		!slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
-			return simple.EvaluationFailure == "parse"
+			return simple.EvaluationFailure == "parse" || simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax
 		}) {
 		// A complete POSIX split already enforced the limit. The extra
 		// count is needed only when the analyzer reached its own bound or
@@ -9778,6 +9793,23 @@ func trustedActionParseFailureFindings(enforcementCapable bool) []RuleFinding {
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
 
+// syntaxUnreadTitle is the reason of a command with a shell syntax error:
+// the statements that parse were judged, the rest was not read.
+const syntaxUnreadTitle = "Part of this command has a shell syntax error and could not be read, so that part was not checked"
+
+// trustedActionSyntaxUnreadFindings is the unknown-tier finding of a command
+// read only in part because of a syntax error
+// (actionfacts.EvaluationFailureSyntax): parseFailureRuleID, which alerts
+// outside the strict tier and blocks in it, managed or not. A block proven on
+// a statement that was read stays a block (rel-1-0-10:GAP-0526).
+func trustedActionSyntaxUnreadFindings(enforcementCapable bool) []RuleFinding {
+	findings := trustedActionParseFailureFindings(enforcementCapable)
+	for index := range findings {
+		findings[index].Title = syntaxUnreadTitle
+	}
+	return findings
+}
+
 // shellReadingBound is the reading bound a command is past
 // (trustedActionCommandBound).
 type shellReadingBound uint8
@@ -9869,6 +9901,23 @@ func trustedCallShellParseReason(request trustedActionRequest) string {
 		return ""
 	}
 	return hookpaths.ShellParseReason(request.Connector, request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome)
+}
+
+// trustedCallReadsSyntaxTail reports a call with a plain syntax error, in
+// its command or in a static eval or shell -c body of it, that the
+// per-command pass reads in part (actionfacts.EvaluationFailureSyntax): that
+// pass judges the statements that parse (rel-1-0-10:GAP-0526). It is asked
+// only of a call at the recovered-parse proof bound.
+func trustedCallReadsSyntaxTail(request trustedActionRequest) bool {
+	if _, ok := trustedBashCommandInput(request.Input); !ok {
+		return false
+	}
+	simples := actionfacts.SimpleCommands(request.Input, actionfacts.Analyze(request.Input))
+	return slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
+		return simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax
+	}) && slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
+		return simple.EvaluationFailure == "" && simple.Text != ""
+	})
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {

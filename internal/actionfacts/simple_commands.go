@@ -67,9 +67,52 @@ type SimpleCommand struct {
 	// any other (rel-1-0-6:GAP-0630 review 5).
 	AbsoluteOnly bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
-	// view can be produced, and EvaluationFailureInternal when the reader
-	// itself failed. A parse gap is not an action refusal.
+	// view can be produced, EvaluationFailureInternal when the reader
+	// itself failed, and EvaluationFailureSyntax when a text with a syntax
+	// error was read only in part. A parse gap is not an action refusal.
 	EvaluationFailure string
+}
+
+// EvaluationFailureSyntax is the EvaluationFailure that closes the readings
+// of a text the shell parser rejects with a syntax error, at the top level or
+// in a static eval or shell -c body (shellparse.ReadSyntaxTail): its
+// readable statements come before it, each judged as any other command, and
+// what was not read is unknown, judged at the unknown tier of the pack
+// (rel-1-0-10:GAP-0526).
+const EvaluationFailureSyntax = "syntax"
+
+func isSyntaxTailUnread(simple SimpleCommand) bool {
+	return simple.EvaluationFailure == EvaluationFailureSyntax
+}
+
+// syntaxTailCommands is the per-command reading of a text with a syntax
+// error (tail): each readable statement, as a command of its own and with
+// its own commands, in the directory the text starts in, then the
+// EvaluationFailureSyntax marker for the part that was not read. A statement
+// keeps the readings it has alone, a limit included.
+func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
+	result := make([]SimpleCommand, 0, len(tail.Statements)+1)
+	emitted := make(map[SimpleCommand]bool, len(tail.Statements))
+	add := func(command SimpleCommand) bool {
+		if !emitted[command] {
+			emitted[command] = true
+			result = append(result, command)
+		}
+		return len(result) <= maxSimpleEvaluations
+	}
+	for _, statement := range tail.Statements {
+		piece := input
+		piece.Command, piece.Args, piece.Argv = statement, nil, nil
+		if !add(SimpleCommand{Text: statement, CWD: input.CWD}) {
+			return []SimpleCommand{{EvaluationFailure: "limit"}}
+		}
+		for _, command := range simpleCommands(piece, Analyze(piece), depth+1, interpreter, inherited, guess, nil) {
+			if !add(command) {
+				return []SimpleCommand{{EvaluationFailure: "limit"}}
+			}
+		}
+	}
+	return append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntax})
 }
 
 // EvaluationFailureInternal is the EvaluationFailure of a call whose
@@ -163,7 +206,11 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 		// The POSIX reader rejected the call (a construct only Bash has) and
 		// the shell parse reads it only to add readings (simpleCommands): a
 		// call it cannot read in full keeps the judgment it had without them.
-		if slices.ContainsFunc(result, func(simple SimpleCommand) bool { return simple.EvaluationFailure != "" }) {
+		// The readings of a text with a syntax error are not such additions:
+		// the call as written was not read, so they are all of it that is.
+		if slices.ContainsFunc(result, func(simple SimpleCommand) bool {
+			return simple.EvaluationFailure != "" && !isSyntaxTailUnread(simple)
+		}) {
 			return nil
 		}
 		// A command that is a piece of the call as written adds nothing: the
@@ -236,6 +283,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	}
 	if source == "" {
 		return nil
+	}
+	if tail, ok := shellparse.ReadSyntaxTail(source); ok {
+		return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess)
 	}
 	if !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&
 		!strings.Contains(source, "eval") && !strings.Contains(source, "trap") &&
@@ -328,6 +378,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	result := make([]SimpleCommand, 0, len(parts))
 	changed := reduced || len(parts) != 1
 	unproven := false
+	// syntaxUnread: a nested body with a syntax error was read only in part
+	// (syntaxTailCommands).
+	syntaxUnread := false
 	previousScope := "0"
 	unreadLoops := make(map[string]bool)
 	var plainWords simplePlainWords
@@ -551,9 +604,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 							innerInput.Command = resolved
 						}
 					}
-					if _, ok := shellparse.Parse(innerInput.Command); !ok {
-						return []SimpleCommand{{EvaluationFailure: "parse"}}
-					}
+					// A body with a syntax error is read as far as it parses
+					// (syntaxTailCommands, rel-1-0-10:GAP-0526); a body the
+					// parser cannot read at all stays a parse gap.
+					_, bodyParsed := shellparse.Parse(innerInput.Command)
 					innerFacts := Analyze(innerInput)
 					if innerInterpreter == "" {
 						innerInterpreter = interpreter
@@ -566,6 +620,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					}
 					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter,
 						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, innerPieces)
+					if !bodyParsed && !slices.ContainsFunc(inner, isSyntaxTailUnread) {
+						return []SimpleCommand{{EvaluationFailure: "parse"}}
+					}
 					if len(inner) == 0 && strings.TrimSpace(innerInput.Command) != "" {
 						zshHistory := innerInterpreter == "zsh" && len(innerFacts.Commands) == 1 &&
 							innerFacts.Commands[0].Executable == "history"
@@ -577,6 +634,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					}
 					changed = changed || len(inner) != 0
 					for _, child := range inner {
+						if isSyntaxTailUnread(child) {
+							syntaxUnread = true
+							continue
+						}
 						if child.EvaluationFailure != "" {
 							unproven = true
 							continue
@@ -588,6 +649,12 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						if len(result) > maxSimpleEvaluations {
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
 						}
+					}
+					if shared && !bodyParsed {
+						// The directory a shared body leaves is not known
+						// past its unread part.
+						state.cwd, state.cwdUnknown = "", true
+						delete(state.vars, "PWD")
 					}
 					if shared {
 						for _, innerCommand := range innerFacts.Commands {
@@ -657,6 +724,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	result, fits := simpleExpandPlainWords(result, &plainWords)
 	if !fits {
 		return []SimpleCommand{{EvaluationFailure: "limit"}}
+	}
+	if syntaxUnread {
+		result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntax})
 	}
 	if unproven {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})
