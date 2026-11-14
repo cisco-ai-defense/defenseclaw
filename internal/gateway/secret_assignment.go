@@ -226,7 +226,7 @@ func secretAssignmentRejection(raw string) string {
 	// word-shaped runs of three letters or more. A generated token with
 	// separators (dd_api_7f8a9b0c1d2e) has random letter runs of one or two
 	// and digits among its letters.
-	if strings.ContainsAny(value, "_-.") && secretAssignmentNameShaped(value) {
+	if strings.ContainsAny(value, "_-./") && secretAssignmentNameShaped(value) {
 		return "name"
 	}
 	// A value built from short underscore- or dash-separated pieces
@@ -362,7 +362,7 @@ func secretAssignmentCodeChar(c byte) bool {
 }
 
 // secretAssignmentNameShaped reports a value a person composed: words and
-// numbers joined by _, - or ., where the letters and digits of the value that
+// numbers joined by _, -, . or / (a relative path), where the letters and digits of the value that
 // do not sit in a word-shaped run of three letters or more are under three
 // tenths. A separator-delimited number of nine digits or fewer is a counter or
 // a year and weighs nothing; so does ONE number of ten or thirteen digits,
@@ -373,7 +373,7 @@ func secretAssignmentCodeChar(c byte) bool {
 func secretAssignmentNameShaped(value string) bool {
 	letters, digits, wordLetters := 0, 0, 0
 	sawTimestamp, sawVersion := false, false
-	for _, segment := range strings.FieldsFunc(value, func(r rune) bool { return r == '_' || r == '-' || r == '.' }) {
+	for _, segment := range strings.FieldsFunc(value, func(r rune) bool { return r == '_' || r == '-' || r == '.' || r == '/' }) {
 		if secretAssignmentCounter(segment) {
 			if len(segment) < 10 {
 				continue

@@ -205,3 +205,35 @@ func TestSecretRecallSR6VersionTokensInNames(t *testing.T) {
 		t.Errorf("word and 12 lower+digit accepted %d of %d, want at least 1640", accepted, n)
 	}
 }
+
+// A relative path (words joined by /) is a name, like a path that starts with
+// a slash; a random base64 value that holds a / is still a value. The path
+// rows are synthetic, with one version-like segment, as home trees have
+// (runtime/k8s/overlays).
+func TestSecretRecallSR6RelativePathsAreNames(t *testing.T) {
+	for _, path := range []string{
+		"home/builder/projects/k8s/overlays/production/config",
+		"srv/data/backups/s3x/archive/monthly/reports/summary",
+		"var/lib/services/app2/releases/current/shared/config",
+	} {
+		if got := secretAssignmentRejection(path); got == "" {
+			t.Errorf("a relative path was accepted as a secret: %q", path)
+		}
+	}
+	const base64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	r := rand.New(rand.NewSource(473))
+	const n = 2000
+	accepted := 0
+	for i := 0; i < n; i++ {
+		v := randomString(r, base64Alphabet, 40)
+		if !strings.Contains(v, "/") {
+			v = v[:20] + "/" + v[21:]
+		}
+		if secretAssignmentRejection(v) == "" {
+			accepted++
+		}
+	}
+	if accepted < 1940 {
+		t.Errorf("base64 values with a slash accepted %d of %d, want at least 1940 (1948 before the path rule, same sample)", accepted, n)
+	}
+}
