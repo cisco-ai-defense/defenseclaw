@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -26,8 +27,10 @@ const (
 	wordUncertainTruncated = "shell-parse-bound"
 )
 
-// maxResolvedCandidates bounds the paths one word may expand to. A word past
-// it is uncertain, not cut short.
+// maxResolvedCandidates bounds the paths one word may expand to, counted by
+// a bounded.Counter on bounded.Paths (the one bound rule, rel-1-0-10
+// GAP-0301): a word past it is truncated, so uncertain, never cut short and
+// never judged below the unknown tier.
 const maxResolvedCandidates = 256
 
 // shellGlobOptions are the bash options that change pathname expansion. The
@@ -105,6 +108,9 @@ func shellGlobOptionsForCall(command string, startup ShellStartup) shellGlobOpti
 type resolvedWord struct {
 	candidates []string
 	uncertain  string
+	// caps are the caps the word hit (bounded.Paths past the candidate
+	// bound); a hit also sets uncertain to wordUncertainTruncated.
+	caps bounded.CapSet
 }
 
 // resolveShellWord is the one reading of a write operand:
@@ -163,11 +169,13 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	userView := !hidden && actionProcessOwnsHome(home)
 	dots := func() bool { return opts.dotGlob || actionShellProfileMayDotglob(home) }
 	matches, complete, unseen := actionExpandGlobFold(OperandPath(pattern, cwd), base, hidden, userView, dots, opts.noCaseGlob)
+	var truncated bounded.Truncated
+	candidates := bounded.NewCounter(&truncated, bounded.Paths, maxResolvedCandidates)
 	switch {
 	case unseen || !complete:
 		return resolvedWord{uncertain: wordUncertainUnread}
-	case len(matches) > maxResolvedCandidates:
-		return resolvedWord{uncertain: wordUncertainTruncated}
+	case !candidates.TakeN(len(matches)):
+		return resolvedWord{uncertain: wordUncertainTruncated, caps: truncated.Set(&candidates)}
 	case len(matches) > 0:
 		return resolvedWord{candidates: matches}
 	case opts.nullGlob || opts.failGlob:
@@ -196,6 +204,7 @@ func resolveWriteWord(word *syntax.Word, values actionValues, cwd string, opts s
 	if _, active := resolverWordPattern(word, values, cwd); !active {
 		value := resolveShellWord(tail, values, cwd, opts)
 		whole.candidates = append(whole.candidates, value.candidates...)
+		whole.caps = whole.caps.Union(value.caps)
 		if whole.uncertain == "" {
 			whole.uncertain = value.uncertain
 		}
