@@ -150,9 +150,11 @@ func TestBoundRuleShadowLaneNeverDecides(t *testing.T) {
 // The table check itself rejects each misuse it names.
 func TestBoundRuleShadowLaneTableRejectsMisuse(t *testing.T) {
 	ok := boundedShadowLane{lane: "x", cap: bounded.Items, limit: 1,
-		gen:            func(int, boundedShape) (boundedLaneCall, bool) { return boundedLaneCall{}, true },
-		seen:           func() boundedLaneCall { return boundedLaneCall{} },
-		route:          func(*testing.T, *APIServer, boundedEnv, boundedLaneCall, string) (string, []string, []string) { return "", nil, nil },
+		gen:  func(int, boundedShape) (boundedLaneCall, bool) { return boundedLaneCall{}, true },
+		seen: func() boundedLaneCall { return boundedLaneCall{} },
+		route: func(*testing.T, *APIServer, boundedEnv, boundedLaneCall, string) (string, []string, []string) {
+			return "", nil, nil
+		},
 		recordNamesCap: func(string, bounded.Cap) bool { return false }}
 	if errs := boundedShadowLaneTableErrors([]boundedShadowLane{ok}); len(errs) != 0 {
 		t.Fatalf("a complete row is rejected: %v", errs)
