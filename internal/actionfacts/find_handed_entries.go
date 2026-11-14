@@ -116,6 +116,9 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 		// words: it is judged (rel-1-0-10:GAP-0365).
 		rest := args
 		for len(rest) > 0 && !strings.HasPrefix(rest[0], "-") && strings.Contains(rest[0], "=") {
+			if envAssignmentLoadsCode(rest[0]) {
+				return mayChange
+			}
 			rest = rest[1:]
 		}
 		if len(rest) == 0 || strings.HasPrefix(rest[0], "-") {
@@ -661,4 +664,18 @@ func copyOutputs(inEntryDir bool, output string) HandedEntries {
 		return HandedEntries{MayChange: true}
 	}
 	return HandedEntries{Outputs: []string{output}}
+}
+
+// envAssignmentLoadsCode reports an env NAME=VALUE that changes what the
+// program loads or how it finds it (BASH_ENV, LD_PRELOAD, PYTHONSTARTUP,
+// PATH, ...): the program is then not the one it names.
+func envAssignmentLoadsCode(assignment string) bool {
+	name, _, _ := strings.Cut(assignment, "=")
+	name = strings.ToUpper(name)
+	for _, prefix := range []string{"LD_", "DYLD_", "PYTHON", "PERL", "RUBY", "NODE", "BASH", "SHELL", "GIT_", "ENV"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return name == "PATH" || name == "IFS" || name == "HOME" || name == "PS4" || name == "CDPATH"
 }

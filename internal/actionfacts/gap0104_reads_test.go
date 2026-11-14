@@ -216,6 +216,9 @@ func TestGAP0104FindHandedReadOnlyBodies(t *testing.T) {
 		{[]string{"find", "/h", "-exec", "python3", "-I", "-c", "import sys; print(open(sys.argv[1]).read())", "{}", ";"}, false},
 		{[]string{"find", "/h", "-execdir", "/usr/bin/python3", "-s", "-c", "import sys; print(open(sys.argv[1]).read())", "{}", ";"}, false},
 		{[]string{"find", "/h", "-exec", "env", "python3", "-c", "import sys; open(sys.argv[1], 'w')", "{}", ";"}, true},
+		{[]string{"find", "/h", "-exec", "env", "A=1", "python3", "-c", "import sys; print(open(sys.argv[1]).read())", "{}", ";"}, false},
+		{[]string{"find", "/h", "-exec", "env", "PYTHONSTARTUP=/tmp/x", "python3", "-c", "import sys; print(open(sys.argv[1]).read())", "{}", ";"}, true},
+		{[]string{"find", "/h", "-exec", "env", "BASH_ENV=/tmp/x", "bash", "-n", "{}", ";"}, true},
 		{[]string{"find", "/h", "-exec", "python3", "-I", "-c", "import sys; open(sys.argv[1], 'w')", "{}", ";"}, true},
 		{[]string{"find", "/h", "-exec", "timeout", "5", "python3", "-c", "import sys; open(sys.argv[1], 'w')", "{}", ";"}, true},
 	} {
