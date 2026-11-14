@@ -37,6 +37,11 @@ import (
 // of comparing.
 const argvGoldenRecordEnv = "DEFENSECLAW_HOOK_ARGV_RECORD"
 
+// argvGoldenCompareEnv names a full-CLI defenseclaw-hook binary to compare
+// with case by case on this host, without a golden file: the check for an OS
+// whose answers depend on what is installed on the host (Windows, macOS).
+const argvGoldenCompareEnv = "DEFENSECLAW_HOOK_ARGV_COMPARE"
+
 const argvGoldenHelperEnv = "DEFENSECLAW_HOOK_ARGV_HELPER"
 
 type argvCase struct {
@@ -232,6 +237,15 @@ func normalizeArgvOutput(text, dir string) string {
 // exit code, stdout and stderr (DESIGN 16.5 test 3).
 func TestArgvGoldenMatchesTheFullCLIMain(t *testing.T) {
 	golden := filepath.Join("testdata", "argv-golden-"+runtime.GOOS+".json")
+	if compare := os.Getenv(argvGoldenCompareEnv); compare != "" {
+		for _, tc := range argvCases() {
+			want, got := runArgvCase(t, compare, tc), runArgvCase(t, "", tc)
+			if got != want {
+				t.Errorf("%s:\n got exit %d stdout %q stderr %q\nwant exit %d stdout %q stderr %q", got.Name, got.Exit, got.Stdout, got.Stderr, want.Exit, want.Stdout, want.Stderr)
+			}
+		}
+		return
+	}
 	record := os.Getenv(argvGoldenRecordEnv)
 	var results []argvResult
 	for _, tc := range argvCases() {
@@ -252,6 +266,13 @@ func TestArgvGoldenMatchesTheFullCLIMain(t *testing.T) {
 		return
 	}
 	body, err := os.ReadFile(golden)
+	if os.IsNotExist(err) && runtime.GOOS != "linux" {
+		// The answers of the managed and per-user entries depend on what the
+		// host has installed, so the golden is the Linux one; on Windows and
+		// macOS the slim main was compared with the full-CLI main on the test
+		// hosts (argvGoldenCompareEnv).
+		t.Skipf("no golden for %s; compare on a host with %s=<full-CLI defenseclaw-hook>", runtime.GOOS, argvGoldenCompareEnv)
+	}
 	if err != nil {
 		t.Fatalf("no golden for %s (record it with %s=<full-CLI defenseclaw-hook>): %v", runtime.GOOS, argvGoldenRecordEnv, err)
 	}

@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -111,6 +112,10 @@ const slimHookMaxBytes = 45 << 20
 func TestSlimHookSizeBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the hook for two platforms")
+	}
+	if runtime.GOOS != "linux" {
+		// One check is enough: the Linux run cross-builds both targets.
+		t.Skip("the size budget is checked on Linux, for the Windows and Linux builds")
 	}
 	gotool := goToolOrSkip(t)
 	for _, target := range []struct{ goos, goarch, ldflags string }{
