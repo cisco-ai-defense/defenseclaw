@@ -306,8 +306,12 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	if source == "" {
 		return nil
 	}
-	if tail, ok := shellparse.ReadSyntaxTail(source); ok {
-		return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess)
+	// Only a text the analysis already rejected with a syntax error is read
+	// for its tail, so a call that parses pays no second parse.
+	if facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) {
+		if tail, ok := shellparse.ReadSyntaxTail(source); ok {
+			return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess)
+		}
 	}
 	if !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&
 		!strings.Contains(source, "eval") && !strings.Contains(source, "trap") &&
