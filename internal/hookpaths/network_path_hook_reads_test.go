@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // hookPathRawReads are the file system reads that wait for a network share
@@ -180,8 +182,13 @@ func TestOneHookCallWaitsForItsSharesOneAnswerWaitInAll(t *testing.T) {
 	}
 	start := time.Now()
 	got := Resolve(payload)
-	if took := time.Since(start); took > 2*time.Second {
-		t.Fatalf("one hook call spent %v on %d shares that do not answer (%d probes); want one 750ms answer wait in all", took, shares, probes.Load())
+	// One wait in all takes 2 s here on an idle host (under -race); a wait for
+	// each share takes shares x 750 ms = 6 s at least. The window stretches
+	// with the host's slowdown (a box starved of CPU took 2.03 s, GAP-0538)
+	// but stays under that 6 s, so it still tells the two apart.
+	limit := min(testenv.Scale(2*time.Second, testenv.HostSlowdown()), (shares-1)*750*time.Millisecond)
+	if took := time.Since(start); took > limit {
+		t.Fatalf("one hook call spent %v on %d shares that do not answer (%d probes); want one 750ms answer wait in all (window %v)", took, shares, probes.Load(), limit)
 	}
 	targets, ok := Decode(got)
 	if !ok {
