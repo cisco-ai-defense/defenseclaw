@@ -191,9 +191,6 @@ type ToolInspectVerdict struct {
 	// agent cannot ask, such a confirm is the HIGH alert the judge mapping
 	// gives, not a block (decisionConfirmWithoutAsk). Never serialized.
 	decisionConfirm bool
-	// cascadeOutcome is what the cascade's final step (the policy, the
-	// CRITICAL floor) did with the call, nil when it changed nothing.
-	cascadeOutcome *CascadeOutcome
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -1100,6 +1097,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			firstNonEmpty(req.Connector, action.Connector),
 			observation.ParserUncertaintyCount,
 		)
+	}
+	// The live shadow run of the effect lane records through the audit log
+	// (guardrail.cascade.lanes.effects=shadow, GAP-0256); it never changes the verdict.
+	action.recordEffectShadow = func(res EffectShadowResult) {
+		a.recordEffectShadow(ctx, firstNonEmpty(req.Connector, action.Connector), res)
 	}
 	// CodeGuard: scan file content for any file-write tool.
 	//
@@ -2369,6 +2371,15 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	} else {
 		workerDone := a.inspectToolWorkerDone
 		go func() {
+			// This goroutine is outside net/http's handler recovery: a
+			// panic here would end the gateway process (GAP-0437). A
+			// failed check answers block unless a verdict was already sent.
+			defer recoverGatewayGoroutine("inspect/tool", func() {
+				select {
+				case ch <- verdictResult{toolCheckFaultVerdict()}:
+				default:
+				}
+			})
 			if workerDone != nil {
 				defer workerDone()
 			}

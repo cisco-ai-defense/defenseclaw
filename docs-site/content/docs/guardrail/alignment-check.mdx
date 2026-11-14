@@ -39,7 +39,7 @@ guardrail:
 | `alert` | `ALIGNMENT-DRIFT` alerts (MEDIUM). |
 | `block` | `ALIGNMENT-DRIFT` blocks (HIGH). |
 
-The lane follows the cascade [scopes](/docs/guardrail/configure-cascade#scopes): set it per connector or per profile under `guardrail.connectors.<agent>.cascade.lanes.alignment` or `guardrail.profiles.<name>.cascade.lanes.alignment`. On a managed install, `guardrail.cascade.admin.locked: [lanes.alignment]` keeps the top-level value, and a connector or profile that sets it makes the cascade invalid.
+The lane follows the cascade [scopes](/docs/guardrail/configure-cascade#scopes): set it per connector or per profile under `guardrail.connectors.<agent>.cascade.lanes.alignment` or `guardrail.profiles.<name>.cascade.lanes.alignment`. On a managed install, `guardrail.cascade.admin.locked: [lanes.alignment]` keeps the top-level value: writers refuse a connector or profile that sets it, and if one reaches the gateway anyway its value is ignored and named by doctor and `cascade explain`.
 
 `defenseclaw status` shows an **Alignment check** row while the lane is not off. `defenseclaw doctor` names live lanes on the **Guardrail cascade** row, and `defenseclaw guardrail cascade explain` lists every lane with the key that set it.
 

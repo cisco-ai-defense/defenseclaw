@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -183,7 +184,7 @@ type CascadeScope struct {
 	Judge     CascadeJudgeConfig     `mapstructure:"judge" yaml:"judge,omitempty" json:"judge,omitempty"`
 	SystemOne CascadeSystemOneConfig `mapstructure:"system_one" yaml:"system_one,omitempty" json:"system_one,omitempty"`
 	// Lanes maps a registered lane (RegisterCascadeLane) to off, shadow or on.
-	Lanes map[string]string `mapstructure:"lanes" yaml:"lanes,omitempty" json:"lanes,omitempty"`
+	Lanes CascadeLaneValues `mapstructure:"lanes" yaml:"lanes,omitempty" json:"lanes,omitempty"`
 }
 
 // IsZero reports an unset scope.
@@ -228,7 +229,7 @@ type CascadeConfig struct {
 	Unknown   string                 `mapstructure:"unknown" yaml:"unknown,omitempty" json:"unknown,omitempty"`
 	Judge     CascadeJudgeConfig     `mapstructure:"judge" yaml:"judge,omitempty" json:"judge,omitempty"`
 	SystemOne CascadeSystemOneConfig `mapstructure:"system_one" yaml:"system_one,omitempty" json:"system_one,omitempty"`
-	Lanes     map[string]string      `mapstructure:"lanes" yaml:"lanes,omitempty" json:"lanes,omitempty"`
+	Lanes     CascadeLaneValues      `mapstructure:"lanes" yaml:"lanes,omitempty" json:"lanes,omitempty"`
 	Policy    CascadePolicyConfig    `mapstructure:"policy" yaml:"policy,omitempty" json:"policy,omitempty"`
 	Admin     CascadeAdminConfig     `mapstructure:"admin" yaml:"admin,omitempty" json:"admin,omitempty"`
 
@@ -239,6 +240,39 @@ type CascadeConfig struct {
 	// invalid is set when the load replaced an invalid cascade with its
 	// fallback (CascadeInvalid).
 	invalid *CascadeInvalid
+	// ignored lists the narrower-scope values the load did not apply: a
+	// value the administrator locked, or a connector or profile cascade that
+	// does not validate (enforceCascadeOverlays). The top-level cascade stays.
+	ignored []CascadeIgnored
+	// candidateErr is the full validation error of the document as written
+	// (ValidateCascade), before the load ignored or replaced anything:
+	// writers refuse it (CascadeCandidateError).
+	candidateErr error
+}
+
+// CascadeIgnored is one narrower-scope value the gateway does not apply.
+type CascadeIgnored struct {
+	// Path is the config path of the value (guardrail.profiles.p.block_at).
+	Path string `json:"path"`
+	// Reason says why it is ignored and what applies instead.
+	Reason string `json:"reason"`
+}
+
+// Ignored lists the narrower-scope values the load did not apply.
+func (c CascadeConfig) Ignored() []CascadeIgnored { return slices.Clone(c.ignored) }
+
+// IgnoredMessage is the operator message for the ignored values, "" when
+// there are none.
+func (c CascadeConfig) IgnoredMessage() string {
+	if len(c.ignored) == 0 {
+		return ""
+	}
+	parts := make([]string, len(c.ignored))
+	for i, ig := range c.ignored {
+		parts[i] = ig.Path + ": " + ig.Reason
+	}
+	return "guardrail.cascade: the gateway does not apply " + fmt.Sprint(len(c.ignored)) +
+		" narrower-scope setting(s); the administrator's top-level values apply: " + strings.Join(parts, "; ")
 }
 
 // IsZero reports an unset cascade block.
@@ -313,6 +347,9 @@ type CascadeLane struct {
 	// finding at an action the admin picks (for example off, shadow, alert,
 	// block). Nil means off, shadow and on.
 	Values []string
+	// Global, when set, makes the lane a process-wide switch: only the top
+	// level (guardrail.cascade.lanes) may set it.
+	Global bool
 }
 
 var (
@@ -366,14 +403,6 @@ func (l CascadeLane) accepts(v string) bool {
 		return slices.Contains(l.Values, v)
 	}
 	return cascadeLaneValue(v)
-}
-
-// valueList names the values of the lane for an error message.
-func (l CascadeLane) valueList() string {
-	if l.Values != nil {
-		return strings.Join(l.Values, ", ")
-	}
-	return "off, shadow, on"
 }
 
 // CascadeLockableKeys are the names guardrail.cascade.admin.locked accepts.
@@ -509,20 +538,33 @@ func (g *GuardrailConfig) cascadeScopes() []cascadeScopeAt {
 
 // ValidateCascade checks guardrail.cascade at every scope. checkFiles also
 // reads the policy module against its digest and compiles it. Writers refuse
-// a configuration it rejects; the loader replaces an invalid cascade with its
-// fallback (applyCascadeFallback) instead of refusing the configuration.
+// a configuration it rejects (CascadeCandidateError). The loader is more
+// forgiving and never lets a narrower scope weaken the administrator's
+// cascade: a locked value or an invalid connector or profile cascade is
+// ignored and named (enforceCascadeOverlays), and only an invalid top-level
+// cascade falls back (applyCascadeFallback).
 func (c *Config) ValidateCascade(checkFiles bool) error {
 	if c == nil {
 		return nil
 	}
 	g := &c.Guardrail
-	top := g.Cascade
 	if c.SecureClientIntegration() {
-		if !top.IsZero() || hasScopeCascade(g) {
+		if !g.Cascade.IsZero() || hasScopeCascade(g) {
 			return errors.New("guardrail.cascade is not available under the Secure Client integration; remove it")
 		}
 		return nil
 	}
+	errs := []error{c.validateCascadeTop(checkFiles)}
+	for _, ig := range c.cascadeOverlayViolations(false) {
+		errs = append(errs, errors.New(ig.Path+": "+ig.Reason))
+	}
+	return errors.Join(errs...)
+}
+
+// validateCascadeTop checks the top-level guardrail.cascade block: the only
+// part whose error makes the load fall back.
+func (c *Config) validateCascadeTop(checkFiles bool) error {
+	top := c.Guardrail.Cascade
 	var errs []error
 	if err := validateCascadeScope("guardrail.cascade", top.scope()); err != nil {
 		errs = append(errs, err)
@@ -536,29 +578,263 @@ func (c *Config) ValidateCascade(checkFiles bool) error {
 	if err := validateCascadeAdmin(top.Admin); err != nil {
 		errs = append(errs, err)
 	}
-	for _, at := range g.cascadeScopes() {
-		if err := validateCascadeScope(at.path+".cascade", at.scope); err != nil {
-			errs = append(errs, err)
-		}
-		for _, key := range append(at.scope.keysSet(), at.policy...) {
-			if top.Admin.locked(key) {
-				shown := at.path + ".cascade." + key
-				if slices.Contains(at.policy, key) {
-					shown = at.path + "." + key
-				}
-				errs = append(errs, fmt.Errorf("%s: %q is locked by guardrail.cascade.admin.locked; set it at the top level only, or ask the administrator to unlock it", shown, key))
+	return errors.Join(errs...)
+}
+
+// cascadeLockedReason is the reason of a locked value a narrower scope sets.
+func cascadeLockedReason(key string) string {
+	return fmt.Sprintf("%q is locked by guardrail.cascade.admin.locked; the top-level value applies (set it at the top level only, or ask the administrator to unlock it)", key)
+}
+
+// cascadeOverlayViolations lists every narrower-scope value the cascade does
+// not allow: a key guardrail.cascade.admin.locked names, set by a connector
+// scope (guardrail.connectors.<c>, its legacy hook mode, an
+// application_protection overlay), a profile or a profile connector (the
+// identity profiles are these profiles), and a connector or profile cascade
+// that does not validate. With apply it also takes them out of c, so the
+// gateway decides with the administrator's values: a locked value is
+// dropped, an invalid scope cascade is dropped whole. Maps are copied before
+// they are written.
+func (c *Config) cascadeOverlayViolations(apply bool) []CascadeIgnored {
+	if c == nil || c.SecureClientIntegration() {
+		return nil
+	}
+	g := &c.Guardrail
+	admin := g.Cascade.Admin
+	var out []CascadeIgnored
+	lockedKeys := func(keys []string) []string {
+		var hit []string
+		for _, key := range keys {
+			if admin.locked(key) {
+				hit = append(hit, key)
 			}
 		}
+		return hit
 	}
-	for name, pc := range c.ApplicationProtection.Connectors {
-		if pc.Guardrail.Cascade != nil {
-			errs = append(errs, fmt.Errorf("application_protection.connectors.%s.guardrail.cascade: not supported; use guardrail.connectors.%s.cascade", name, name))
+	// scope checks one connector or profile cascade and returns what the
+	// gateway applies of it.
+	scope := func(path string, s *CascadeScope) *CascadeScope {
+		if s == nil {
+			return nil
+		}
+		if err := validateCascadeScope(path+".cascade", *s); err != nil {
+			out = append(out, CascadeIgnored{Path: path + ".cascade", Reason: err.Error() + "; this scope's cascade is not applied, the wider scopes decide"})
+			return nil
+		}
+		hit := lockedKeys(s.keysSet())
+		if len(hit) == 0 {
+			return s
+		}
+		kept := *s
+		for _, key := range hit {
+			out = append(out, CascadeIgnored{Path: path + ".cascade." + key, Reason: cascadeLockedReason(key)})
+			kept = withoutCascadeKey(kept, key)
+		}
+		return &kept
+	}
+	policy := func(path string, pc PerConnectorGuardrailConfig, withLevels bool) PerConnectorGuardrailConfig {
+		keys := policyKeysSet(pc)
+		if !withLevels {
+			keys = slices.DeleteFunc(keys, func(k string) bool { return k == "block_at" || k == "alert_at" })
+		}
+		for _, key := range lockedKeys(keys) {
+			out = append(out, CascadeIgnored{Path: path + "." + key, Reason: cascadeLockedReason(key)})
+			pc = withoutPolicyKey(pc, key)
+		}
+		return pc
+	}
+
+	if len(g.Connectors) > 0 {
+		conns := g.Connectors
+		if apply {
+			conns = maps.Clone(g.Connectors)
+		}
+		for _, name := range sortedKeys(g.Connectors) {
+			path := "guardrail.connectors." + name
+			pc := policy(path, g.Connectors[name], true)
+			pc.Cascade = scope(path, pc.Cascade)
+			if apply {
+				conns[name] = pc
+			}
+		}
+		g.Connectors = conns
+	}
+	if len(g.Profiles) > 0 {
+		profiles := g.Profiles
+		if apply {
+			profiles = maps.Clone(g.Profiles)
+		}
+		for _, name := range sortedKeys(g.Profiles) {
+			profile := g.Profiles[name]
+			path := "guardrail.profiles." + name
+			fields := profile.policyFields()
+			fields.Rules = profile.Rules
+			fields = policy(path, fields, true)
+			profile.Mode, profile.HILT, profile.RulePack, profile.RulePackDir = fields.Mode, fields.HILT, fields.RulePack, fields.RulePackDir
+			profile.BlockAt, profile.AlertAt, profile.Rules = fields.BlockAt, fields.AlertAt, fields.Rules
+			profile.Cascade = scope(path, profile.Cascade)
+			if len(profile.Connectors) > 0 {
+				conns := profile.Connectors
+				if apply {
+					conns = maps.Clone(profile.Connectors)
+				}
+				for _, cname := range sortedKeys(profile.Connectors) {
+					cpath := path + ".connectors." + cname
+					pc := policy(cpath, profile.Connectors[cname], true)
+					pc.Cascade = scope(cpath, pc.Cascade)
+					if apply {
+						conns[cname] = pc
+					}
+				}
+				profile.Connectors = conns
+			}
+			if apply {
+				profiles[name] = profile
+			}
+		}
+		g.Profiles = profiles
+	}
+
+	ap := &c.ApplicationProtection
+	if ap.Guardrail.Cascade != nil {
+		out = append(out, CascadeIgnored{Path: "application_protection.guardrail.cascade", Reason: "not supported; use guardrail.cascade"})
+	}
+	apGuardrail := policy("application_protection.guardrail", ap.Guardrail, false)
+	apGuardrail.Cascade = nil
+	apConns := ap.Connectors
+	if apply && len(ap.Connectors) > 0 {
+		apConns = maps.Clone(ap.Connectors)
+	}
+	for _, name := range sortedKeys(ap.Connectors) {
+		entry := ap.Connectors[name]
+		path := "application_protection.connectors." + name + ".guardrail"
+		if entry.Guardrail.Cascade != nil {
+			out = append(out, CascadeIgnored{Path: path + ".cascade", Reason: "not supported; use guardrail.connectors." + name + ".cascade"})
+		}
+		entry.Guardrail = policy(path, entry.Guardrail, false)
+		entry.Guardrail.Cascade = nil
+		if apply {
+			apConns[name] = entry
 		}
 	}
-	if c.ApplicationProtection.Guardrail.Cascade != nil {
-		errs = append(errs, errors.New("application_protection.guardrail.cascade: not supported; use guardrail.cascade"))
+
+	// The legacy per-connector hook modes are connector overlays of mode.
+	type legacyMode struct {
+		path, mode string
+		clear      func()
 	}
-	return errors.Join(errs...)
+	var legacy []legacyMode
+	if admin.locked("mode") {
+		global := NormalizeHookMode(g.Mode)
+		differs := func(mode string) bool {
+			mode = strings.TrimSpace(mode)
+			return mode != "" && !strings.EqualFold(mode, "inherit") && NormalizeHookMode(mode) != global
+		}
+		if differs(c.ClaudeCode.Mode) {
+			legacy = append(legacy, legacyMode{"claude_code.mode", c.ClaudeCode.Mode, func() { c.ClaudeCode.Mode = "" }})
+		}
+		if differs(c.Codex.Mode) {
+			legacy = append(legacy, legacyMode{"codex.mode", c.Codex.Mode, func() { c.Codex.Mode = "" }})
+		}
+		hooks := c.ConnectorHooks
+		cloned := false
+		for _, name := range sortedKeys(c.ConnectorHooks) {
+			if !differs(c.ConnectorHooks[name].Mode) {
+				continue
+			}
+			legacy = append(legacy, legacyMode{"connector_hooks." + name + ".mode", c.ConnectorHooks[name].Mode, func() {
+				if !cloned {
+					hooks, cloned = maps.Clone(hooks), true
+				}
+				h := hooks[name]
+				h.Mode = ""
+				hooks[name] = h
+				c.ConnectorHooks = hooks
+			}})
+		}
+	}
+	for _, l := range legacy {
+		out = append(out, CascadeIgnored{Path: l.path, Reason: cascadeLockedReason("mode")})
+	}
+	if apply {
+		ap.Guardrail = apGuardrail
+		ap.Connectors = apConns
+		for _, l := range legacy {
+			l.clear()
+		}
+	}
+	return out
+}
+
+// withoutCascadeKey is s without the lockable key (a group name drops
+// every key under it).
+func withoutCascadeKey(s CascadeScope, key string) CascadeScope {
+	switch key {
+	case "unknown":
+		s.Unknown = ""
+	case "judge.max_action":
+		s.Judge.MaxAction = ""
+	case "judge.block_needs_system_one":
+		s.Judge.BlockNeedsSystemOne = nil
+	case "judge.no_verdict":
+		s.Judge.NoVerdict = ""
+	case "system_one.allow_threshold":
+		s.SystemOne.AllowThreshold = 0
+	case "system_one.block_threshold":
+		s.SystemOne.BlockThreshold = 0
+	case "system_one.block_risk_score":
+		s.SystemOne.BlockRiskScore = 0
+	case "system_one.escalate_rule_flagged":
+		s.SystemOne.EscalateRuleFlagged = nil
+	case "system_one.on_unsure":
+		s.SystemOne.OnUnsure = ""
+	default:
+		if lane, ok := strings.CutPrefix(key, "lanes."); ok && len(s.Lanes) > 0 {
+			lanes := maps.Clone(s.Lanes)
+			delete(lanes, lane)
+			if len(lanes) == 0 {
+				lanes = nil
+			}
+			s.Lanes = lanes
+		}
+	}
+	return s
+}
+
+// withoutPolicyKey is pc without the released lockable key.
+func withoutPolicyKey(pc PerConnectorGuardrailConfig, key string) PerConnectorGuardrailConfig {
+	switch key {
+	case "mode":
+		pc.Mode = ""
+	case "block_at":
+		pc.BlockAt = ""
+	case "alert_at":
+		pc.AlertAt = ""
+	case "hilt":
+		pc.HILT = nil
+	case "rule_pack":
+		pc.RulePack, pc.RulePackDir = "", ""
+	case "rules":
+		pc.Rules = nil
+	}
+	return pc
+}
+
+// CascadeCandidateError is the guardrail.cascade error a writer refuses a
+// candidate for: the full validation of the document as written (every
+// scope, the locks, the policy module), the same check `config validate`,
+// `config set`, setup, the TUI and the Go writers run. nil when the cascade
+// is valid.
+func CascadeCandidateError(cfg *Config) error {
+	if cfg == nil || cfg.Guardrail.Cascade.candidateErr == nil {
+		return nil
+	}
+	return &V8SemanticError{
+		Path:     "$.guardrail.cascade",
+		Summary:  cfg.Guardrail.Cascade.candidateErr.Error(),
+		Expected: "a guardrail.cascade the gateway accepts",
+		Action:   "fix the named key, then retry",
+	}
 }
 
 func hasScopeCascade(g *GuardrailConfig) bool {
@@ -613,15 +889,18 @@ func validateCascadeScope(path string, s CascadeScope) error {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		value := strings.ToLower(strings.TrimSpace(s.Lanes[name]))
+		// Exact values: a typo (Shadow, " on") never silently switches a lane.
+		value := s.Lanes[name]
 		lane, ok := cascadeLane(name)
 		switch {
 		case !ok:
 			errs = append(errs, fmt.Errorf("%s.lanes.%s: no such lane in this release (lanes: %s)", path, name, cascadeLaneNames()))
+		case lane.Global && path != "guardrail.cascade":
+			errs = append(errs, fmt.Errorf("%s.lanes.%s: the %s lane is process-wide; set it at guardrail.cascade.lanes.%s only", path, name, name, name))
 		case !lane.accepts(value):
-			errs = append(errs, fmt.Errorf("%s.lanes.%s: %q is not one of %s", path, name, s.Lanes[name], lane.valueList()))
+			errs = append(errs, fmt.Errorf("%s.lanes.%s: %q is not one of %s", path, name, value, strings.Join(CascadeLaneAllowed(name), ", ")))
 		case value == CascadeLaneOn && lane.ShadowOnly != "":
-			errs = append(errs, fmt.Errorf("%s.lanes.%s: on is not available in this release: the lane ships shadow-only (%s); use shadow (record its verdict without changing the answer) or off", path, name, lane.ShadowOnly))
+			errs = append(errs, fmt.Errorf("%s.lanes.%s: on is not available in 1.0.10: the lane ships shadow-only (%s); allowed: off, shadow (shadow records its verdict without changing the answer)", path, name, lane.ShadowOnly))
 		}
 	}
 	return errors.Join(errs...)
@@ -1095,6 +1374,7 @@ func (c *Config) applyCascadeFallback(err error) {
 			if json.Unmarshal(raw, &snap) == nil && snap.Version == 1 {
 				trial := *c
 				trial.applyCascadeSnapshot(snap)
+				trial.cascadeOverlayViolations(true)
 				if trial.validateCascadeSnapshot() == nil {
 					c.applyCascadeSnapshot(snap)
 					invalid.Fallback = CascadeFallbackLastGood
@@ -1111,10 +1391,11 @@ func (c *Config) applyCascadeFallback(err error) {
 	c.Guardrail.Cascade.invalid = invalid
 }
 
-// validateCascadeSnapshot validates a restored cascade, compiling its saved
-// module source instead of reading the file.
+// validateCascadeSnapshot validates a restored top-level cascade, compiling
+// its saved module source instead of reading the file. Its narrower scopes
+// are enforced, not validated (cascadeOverlayViolations).
 func (c *Config) validateCascadeSnapshot() error {
-	if err := c.ValidateCascade(false); err != nil {
+	if err := c.validateCascadeTop(false); err != nil {
 		return err
 	}
 	src := c.Guardrail.Cascade.policySource
@@ -1128,48 +1409,138 @@ func (c *Config) validateCascadeSnapshot() error {
 }
 
 // cascadeWeaker lists what the intended (invalid) cascade asked for that the
-// fallback in c does not give: a stricter unknown tier or CRITICAL floor, a
-// policy module, a judge that may block alone, a lane switched on.
+// fallback in c does not give, at every scope: a stricter unknown tier,
+// judge role, no-verdict or on_unsure handling, a lane further on, a
+// policy module, tighter policy limits, a CRITICAL floor, locks.
 func cascadeWeaker(intended cascadeSnapshot, c *Config) []string {
+	got := c.cascadeSnapshotOf()
 	var out []string
-	want, got := intended.Top, c.Guardrail.Cascade
-	if r := CascadeActionRank(want.Unknown); r > 0 && r > CascadeActionRank(cascadeOr(got.Unknown, "")) {
-		out = append(out, fmt.Sprintf("unknown %s is not in effect", want.Unknown))
-	}
-	if r := CascadeActionRank(want.Admin.CriticalFloor); r > CascadeActionRank(cascadeOr(got.Admin.CriticalFloor, CascadeAlert)) {
+	want, have := intended.Top, c.Guardrail.Cascade
+	out = append(out, weakerScope("guardrail.cascade", want.scope(), have.scope())...)
+	if r := CascadeActionRank(want.Admin.CriticalFloor); r > CascadeActionRank(cascadeOr(have.Admin.CriticalFloor, CascadeAlert)) {
 		out = append(out, fmt.Sprintf("admin.critical_floor %s is not in effect", want.Admin.CriticalFloor))
 	}
-	if !want.Policy.Module.IsZero() && (got.Policy.Module != want.Policy.Module || len(got.policySource) == 0) {
-		out = append(out, "the Rego policy you configured is not running")
-	}
-	if len(want.Admin.Locked) > 0 && !slices.Equal(want.Admin.Locked, got.Admin.Locked) {
-		out = append(out, "your admin.locked keys are not enforced")
-	}
-	for name, value := range want.Lanes {
-		if laneRank(value) > laneRank(CascadeLaneShadow) && cascadeOr(got.Lanes[name], "") != value {
-			out = append(out, "lane "+name+" "+value+" is not in effect")
-		}
-	}
-	for path, scope := range intended.Connectors {
-		if scope != nil && CascadeActionRank(scope.Unknown) > 0 {
-			if pc, ok := c.Guardrail.Connectors[path]; !ok || pc.Cascade == nil || pc.Cascade.Unknown != scope.Unknown {
-				out = append(out, "guardrail.connectors."+path+".cascade.unknown "+scope.Unknown+" is not in effect")
+	if !want.Policy.Module.IsZero() {
+		running := have.Policy.Module == want.Policy.Module && len(have.policySource) > 0
+		if !running {
+			out = append(out, "the Rego policy you configured is not running")
+		} else {
+			if CascadeActionRank(cascadeOr(want.Policy.Lowest, CascadeAlert)) > CascadeActionRank(cascadeOr(have.Policy.Lowest, CascadeAlert)) {
+				out = append(out, "policy.lowest "+cascadeOr(want.Policy.Lowest, CascadeAlert)+" is not in effect")
+			}
+			if CascadeActionRank(cascadeOr(want.Policy.Highest, CascadeBlock)) > CascadeActionRank(cascadeOr(have.Policy.Highest, CascadeBlock)) {
+				out = append(out, "policy.highest "+cascadeOr(want.Policy.Highest, CascadeBlock)+" is not in effect")
 			}
 		}
 	}
+	for _, key := range want.Admin.Locked {
+		if !slices.Contains(have.Admin.Locked, key) && !have.Admin.locked(strings.TrimSpace(key)) {
+			out = append(out, "admin.locked "+key+" is not enforced")
+		}
+	}
+	scopes := []struct {
+		prefix, suffix string
+		want, have     map[string]*CascadeScope
+	}{
+		{"guardrail.connectors.", ".cascade", intended.Connectors, got.Connectors},
+		{"guardrail.profiles.", ".cascade", intended.Profiles, got.Profiles},
+		{"guardrail.profiles.", ".cascade", intended.ProfileConns, got.ProfileConns},
+	}
+	for _, sc := range scopes {
+		for _, name := range sortedKeys(sc.want) {
+			w := sc.want[name]
+			if w == nil {
+				continue
+			}
+			h := CascadeScope{}
+			if p := sc.have[name]; p != nil {
+				h = *p
+			}
+			path := sc.prefix + name + sc.suffix
+			if p, conn, ok := strings.Cut(name, "/"); ok {
+				path = "guardrail.profiles." + p + ".connectors." + conn + ".cascade"
+			}
+			out = append(out, weakerScope(path, *w, h)...)
+		}
+	}
 	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+// weakerScope lists the keys of one scope where have does less than want.
+// An unset value counts as its default.
+func weakerScope(path string, want, have CascadeScope) []string {
+	var out []string
+	note := func(key, value string) {
+		out = append(out, path+"."+key+" "+value+" is not in effect")
+	}
+	if u := cascadeOr(want.Unknown, ""); u != "" && meetCascadeRank(u) > meetCascadeRank(cascadeOr(have.Unknown, CascadeUnknownPack)) {
+		note("unknown", u)
+	}
+	if m := cascadeOr(want.Judge.MaxAction, ""); m != "" && CascadeActionRank(m) > CascadeActionRank(cascadeOr(have.Judge.MaxAction, CascadeBlock)) {
+		note("judge.max_action", m)
+	}
+	if want.Judge.BlockNeedsSystemOne != nil && !*want.Judge.BlockNeedsSystemOne && have.Judge.BlockNeedsSystemOne != nil && *have.Judge.BlockNeedsSystemOne {
+		note("judge.block_needs_system_one", "false")
+	}
+	if cascadeOr(want.Judge.NoVerdict, "") == CascadeNoVerdictUnknown && cascadeOr(have.Judge.NoVerdict, CascadeFromRules) != CascadeNoVerdictUnknown {
+		note("judge.no_verdict", CascadeNoVerdictUnknown)
+	}
+	onUnsure := func(v string) int {
+		switch cascadeOr(v, CascadeConfirm) {
+		case CascadeConfirm:
+			return 2
+		case CascadeAlert:
+			return 1
+		}
+		return 0
+	}
+	if o := cascadeOr(want.SystemOne.OnUnsure, ""); o != "" && onUnsure(o) > onUnsure(have.SystemOne.OnUnsure) {
+		note("system_one.on_unsure", o)
+	}
+	for _, name := range sortedKeys(want.Lanes) {
+		v := cascadeOr(want.Lanes[name], CascadeLaneOff)
+		h := ""
+		if have.Lanes != nil {
+			h = have.Lanes[name]
+		}
+		if h == "" {
+			if lane, ok := cascadeLane(name); ok {
+				h = lane.Default
+			}
+		}
+		if laneRank(v) > laneRank(cascadeOr(h, CascadeLaneOff)) {
+			note("lanes."+name, v)
+		}
+	}
 	return out
 }
 
 // loadCascade validates the cascade a load decoded, keeps the verified
-// policy module, and replaces an invalid cascade with its fallback.
+// policy module, and makes sure no narrower scope weakens the
+// administrator's cascade: a locked value or an invalid connector or
+// profile cascade is ignored and named (Ignored), and only an invalid
+// top-level cascade is replaced by its fallback. The full error of the
+// document as written is kept for the writers (CascadeCandidateError).
 func (c *Config) loadCascade() {
 	if c == nil {
 		return
 	}
-	err := c.ValidateCascade(true)
+	strict := c.ValidateCascade(true)
+	defer func() { c.Guardrail.Cascade.candidateErr = strict }()
+	if c.SecureClientIntegration() {
+		if strict != nil {
+			c.applyCascadeFallback(strict)
+		}
+		return
+	}
+	ignored := c.cascadeOverlayViolations(true)
+	var err error
+	if strict != nil {
+		err = c.validateCascadeTop(true)
+	}
 	if err == nil {
-		if ref := c.Guardrail.Cascade.Policy.Module; !ref.IsZero() && !c.SecureClientIntegration() {
+		if ref := c.Guardrail.Cascade.Policy.Module; !ref.IsZero() {
 			src, readErr := readCascadeModule(ref)
 			if readErr != nil {
 				err = fmt.Errorf("guardrail.cascade.policy.module: %v", readErr)
@@ -1180,7 +1551,14 @@ func (c *Config) loadCascade() {
 	}
 	if err != nil {
 		c.applyCascadeFallback(err)
+		// The fallback restores the scopes it saved, under its own locks.
+		for _, ig := range c.cascadeOverlayViolations(true) {
+			if !slices.Contains(ignored, ig) {
+				ignored = append(ignored, ig)
+			}
+		}
 	}
+	c.Guardrail.Cascade.ignored = ignored
 }
 
 // meetCascadeRank orders unknown-tier values for a profile meet: the pack's

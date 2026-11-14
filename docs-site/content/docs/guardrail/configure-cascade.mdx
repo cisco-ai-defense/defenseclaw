@@ -62,14 +62,15 @@ The released keys keep their meaning: `guardrail.mode`, `block_at`, `alert_at`, 
 
 ### Managed installs and locks
 
-On a managed install, config.yaml belongs to the administrator: no user command, file or environment variable can change it. Profiles are where settings are delegated to teams, and `admin.locked` keeps a key at its top-level value. A profile or connector that sets a locked key makes the cascade invalid (see below), so the lock cannot be worked around by editing a profile. The Rego limits (`policy.lowest`, `policy.highest`) and `admin.critical_floor` are top level only.
+On a managed install, config.yaml belongs to the administrator: no user command, file or environment variable can change it. Profiles are where settings are delegated to teams, and `admin.locked` keeps a key at its top-level value. Every writer refuses a profile or connector that sets a locked key. If one reaches the gateway anyway, the gateway does not apply that value: the top-level value decides, for the profile, its connectors, the identity profiles matched from it, the connector overrides, `application_protection` and the per-agent hook modes alike, and the rest of your cascade stays in force. Doctor, `cascade explain` and the audit log name each value it ignored. Editing a profile therefore cannot work around a lock, and cannot switch the cascade to a fallback either. The Rego limits (`policy.lowest`, `policy.highest`) and `admin.critical_floor` are top level only.
 
 ### When the cascade is invalid
 
-Every writer (`defenseclaw config set`, setup, the TUI) refuses an invalid `guardrail.cascade` before it lands. If one reaches the gateway anyway, for example a policy module edited under its pin:
+Every writer (`defenseclaw config set`, setup, the TUI, `defenseclaw config validate`) runs the same check as the gateway and refuses an invalid `guardrail.cascade` at any scope before it lands. If one reaches the gateway anyway, for example a policy module edited under its pin:
 
-- at start, the guardrail decides with the **last-known-good cascade** the gateway saved when it last ran a valid one, else with the **rule pack defaults** (no cascade settings);
-- on a reload, the running configuration stays, as for any invalid reload;
+- an invalid connector or profile cascade is not applied: the wider scopes decide, and the top-level cascade stays;
+- an invalid top-level cascade at start: the guardrail decides with the **last-known-good cascade** the gateway saved when it last ran a valid one, else with the **rule pack defaults** (no cascade settings);
+- an invalid top-level cascade on a reload: the reload is refused and the running configuration stays; the gateway's health reports it in `policy.last_reload_error`, and doctor fails the **Policy** row;
 - `defenseclaw doctor` fails the **Guardrail cascade** row, the gateway's health reports `policy.cascade_invalid`, and the audit log records a `guardrail-degraded` row. Each one names the key, the fix and the fallback. If the fallback is weaker than what you wrote (for example, your stricter unknown tier or your Rego policy is not running), it says so.
 
 ## See what applies
@@ -81,13 +82,16 @@ defenseclaw guardrail cascade explain --connector codex --profile contractors --
 
 It prints what each layer does for that connector and profile, the unknown tier, the lanes, the Rego policy and its limits, the locks, and the config key that set each value.
 
-To see which layer or policy rule set the final action of one decision, save its policy input (the `input` the policy receives, below) as JSON and replay it:
+To see which layer or policy rule set the final action of one decision, replay it. The gateway records every decision the policy set, failed on, or that a floor raised after it, with its policy input (no content), in `cascade-decisions.jsonl` in the data directory (owner-only, at most 1 MB, then it moves to `cascade-decisions.jsonl.1`). `--last 1` replays the latest one, `--last 2` the one before:
 
 ```bash
+defenseclaw guardrail cascade explain --last 1
 defenseclaw guardrail cascade explain --connector codex --input decision.json
 ```
 
-A live decision the policy changed also carries the finding `CASCADE-POLICY:<rule id>` in its audit row, and `CASCADE-CRITICAL-FLOOR` or `CASCADE-POLICY-ERROR` when those decided.
+`--input` replays a policy input you saved yourself (the `input` the policy receives, below, or the `input` of one recorded line).
+
+A live decision the policy changed also carries the finding `CASCADE-POLICY:<rule id>` in its audit row, and `CASCADE-UNKNOWN-FLOOR`, `CASCADE-CRITICAL-FLOOR` or `CASCADE-POLICY-ERROR` when those decided.
 
 ## The Rego policy
 
@@ -102,11 +106,11 @@ The policy receives, for each call:
 | `subject` | The verified profile (`profile`, `profiles` when several match), the group that matched, and how the person was identified. No user names or group lists. |
 | `findings` | Up to 64 rule findings: `rule_id`, `severity`, `enforceable`, `alert_only`, `confidence`, `tags`. No evidence, arguments or content. |
 | `flagged` | Whether any layer flagged the call. |
-| `truncated` | Whether the input was read only up to a limit. |
+| `truncated` | `any`: the input was read only up to a limit; `uninspected`: DefenseClaw did not read it in full (a limit that decides, or a hook payload over the size cap); `input_findings_capped`: more findings than this input holds. |
 | `layers` | `rules` (`action`, `severity`), `system_one` (`ran`, `route`, `risk`, `risk_score`, `action`), `judge` (`ran`, `failed`, `action`, `severity`, `confidence`), and the model layers' finding IDs. |
 | `cascade_action`, `unknown_action`, `limits` | The action before the policy, the unknown tier's action, and your limits. |
 
-The final action is the policy's strictest decision, held between `limits.lowest` (for a flagged call, never above the cascade's own action) and `limits.highest` (never below it), then raised to the CRITICAL floor where a proven CRITICAL finding exists.
+The final action is the policy's strictest decision, held between `limits.lowest` (for a flagged call, never above the cascade's own action) and `limits.highest` (never below it), then raised to the unknown tier (`unknown_action`) when `truncated.uninspected` or `truncated.input_findings_capped` is true, whatever `policy.lowest` says, and to the CRITICAL floor where a proven CRITICAL finding exists.
 
 ## Examples
 
@@ -191,8 +195,9 @@ With the default `policy.lowest: alert`, the second rule can turn a question int
 ## Rules that always hold
 
 - An empty `guardrail.cascade` decides exactly as the rule pack does.
-- The unknown tier is never below alert: an input DefenseClaw could not read in full is never a silent allow.
+- The unknown tier is never below alert: an input DefenseClaw could not read in full is never a silent allow. The Rego policy cannot lower it either, whatever `policy.lowest` says: on every surface the final step raises such a call back to the unknown tier.
 - A proven CRITICAL finding never ends below `admin.critical_floor`; only the top-level administrator can set it to `log`, and doctor warns when it is.
-- System One and the judge never lower the rules' verdict. The Rego policy lowers only within `policy.lowest`, and an error or timeout raises the call to the unknown tier.
+- System One and the judge never lower the rules' verdict. The Rego policy lowers only within `policy.lowest` (and never an input DefenseClaw did not read in full below the unknown tier), and an error or timeout raises the call to the unknown tier.
+- A connector or profile cannot weaken the administrator's cascade: a locked or invalid value there is ignored and named, never a reason to fall back.
 - Without a policy module, no policy input is built and nothing is evaluated.
 - Under the Cisco Secure Client integration, `guardrail.cascade` is not available.

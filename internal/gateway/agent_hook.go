@@ -1103,6 +1103,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				resp,
 				time.Since(t0),
 			)
+			// Secret flow tracking: on a successful credential-read tool
+			// result, index its secret values into the session so a later
+			// outbound call that sends them (even re-encoded) is caught. It
+			// self-gates on guardrail.cascade.lanes.secret_flow and records only keyed
+			// digests, never the raw value.
+			addSecretFlowResultValues(ctx, req)
 			// Last, once the verdict is final: a sandbox verdict carries
 			// a plain reason (rule, title, what to do instead) to the
 			// agent, the activity feed and last_blocked.
@@ -1686,6 +1692,14 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// and was written in the audit section with the connector-hook record
 	// export only (#1384); AuditPersisted is then its commit.
 	decisionInAudit := false
+	// connectorRowMissing: the audit section ran and did not commit the
+	// call's connector-hook row (its write failed, it panicked, or the row
+	// of record was abandoned), so the fail-mode decision written below may
+	// be the decision's only local hook row (rel-1-0-10:GAP-0316). The store
+	// lists it only while no connector-hook row of its event is stored: a
+	// row that is already there, or one a queued write, the failure report
+	// or pending recovery commits later, pairs it.
+	connectorRowMissing := false
 	if !replay {
 		var auditErr error
 		safeSection("audit", func() {
@@ -1753,6 +1767,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		// verdict the agent never saw. An unjournaled occurrence keeps its
 		// record IDs but nothing recovers it.
 		recoverable := req.pendingJournaled
+		connectorRowMissing = !result.AuditPersisted && !errors.Is(auditErr, errHookAuditNotConfigured)
 		if !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured) {
 			if auditErr == nil {
 				auditErr = errors.New("the audit section panicked")
@@ -1857,6 +1872,9 @@ func (a *APIServer) finalizeAgentHookAnswer(
 					decisionBaseCtx = renewed
 					defer cancel()
 				}
+			}
+			if connectorRowMissing {
+				decisionBaseCtx = audit.WithLoneHookDecisionAwaitingReport(decisionBaseCtx)
 			}
 			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(decisionBaseCtx)
 			decision := a.emitHookDecisionObservabilityV8(decisionCtx, req, resp, env, panicked)
@@ -3703,7 +3721,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	rawActionBeforeAssets := rawAction
 	caps := profile.Capabilities
 	effectiveMode := mode
-	if mode != "action" && a.provenHookActionMustEnforce(ctx, verdict) {
+	if mode != "action" && a.hookActionMustEnforce(ctx, verdict) {
 		effectiveMode = "action"
 	}
 	action, wouldBlock := mapHookActionForProfile(rawAction, effectiveMode, req.HookEventName, caps, profile, req.Payload)
@@ -4720,6 +4738,23 @@ func (a *APIServer) provenHookActionMustEnforce(ctx context.Context, verdict *To
 		}
 	}
 	return false
+}
+
+// hookActionMustEnforce is provenHookActionMustEnforce on a hook route, where
+// observe mode also enforces a call the evaluation failed on: the hook
+// recovery's failed-check answer was a block in every mode, and the
+// contained fault keeps that answer (rel-1-0-10:GAP-0486).
+//
+// The observe-mode asymmetry is deliberate (1.0.10 lead, 2026-11-14): a hook
+// route in observe mode BLOCKS a call the evaluation failed on, while
+// /api/v1/inspect/tool and ACP in observe mode answer would_block on a normal
+// 200 verdict. The hook routes already blocked such a call in every mode on
+// rel, and a fix is never weaker than rel; /inspect/tool and ACP crashed on
+// rel, so there is no block to keep and they follow observe mode like any
+// other block. Do not drop evaluationFaultMustEnforce here to make the routes
+// match: that makes the hook routes weaker than rel.
+func (a *APIServer) hookActionMustEnforce(ctx context.Context, verdict *ToolInspectVerdict) bool {
+	return a.provenHookActionMustEnforce(ctx, verdict) || a.evaluationFaultMustEnforce(ctx, verdict)
 }
 
 func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookCapability, profile connector.HookProfile, payload map[string]interface{}) (string, bool) {

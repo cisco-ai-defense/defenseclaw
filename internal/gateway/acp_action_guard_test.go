@@ -302,7 +302,7 @@ func acpGuardState(t *testing.T, kind string, input map[string]any, locations []
 	if locations != nil {
 		report["locations"] = locations
 	}
-	tracker.Commit(acpParsedFrame(t, acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": report})))
+	tracker.Commit(acpParsedFrame(t, acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": report})), false)
 	return tracker.Peek(acpParsedFrame(t, acpFrameJSON(t, 1, "session/request_permission",
 		map[string]any{"sessionId": "s", "options": []any{}, "toolCall": map[string]any{"toolCallId": "t", "title": "x"}})))
 }
@@ -441,8 +441,10 @@ func TestACPPermissionWithoutAKindIsJudgedByItsInput(t *testing.T) {
 // permission for a delete, a move (a write of the destination, a delete of the
 // source) or any kind that names no file action of its own (other, search,
 // think...) is an action on its locations, which are judged as writes
-// (GAP-0373). The locations are the fixtures' Write and Edit cases the hook
-// blocks, sent with the kind and with the paths in the input or the locations.
+// (GAP-0373), and so is a fetch that names a url: it downloads to them
+// (GAP-0422). The locations are the fixtures' Write and Edit cases the hook
+// blocks, sent with the kind and with the paths in the input or the locations,
+// with and without a url.
 func TestACPKindsOtherThanReadJudgeTheirLocationsAsWrites(t *testing.T) {
 	pairs, _ := acpParityPairs(t, loadACPParityCases(t))
 	env := newACPActionEnv(t, "default")
@@ -461,6 +463,12 @@ func TestACPKindsOtherThanReadJudgeTheirLocationsAsWrites(t *testing.T) {
 		}},
 		{"locations and input path", func(kind, path string) map[string]any {
 			return map[string]any{"toolCallId": "t", "kind": kind, "locations": []any{map[string]any{"path": path}}, "rawInput": map[string]any{"path": path}}
+		}},
+		{"url and locations", func(kind, path string) map[string]any {
+			return map[string]any{"toolCallId": "t", "kind": kind, "locations": []any{map[string]any{"path": path}}, "rawInput": map[string]any{"url": "https://example.com/a.txt"}}
+		}},
+		{"url and input path", func(kind, path string) map[string]any {
+			return map[string]any{"toolCallId": "t", "kind": kind, "rawInput": map[string]any{"url": "https://example.com/a.txt", "path": path}}
 		}},
 		{"move destination", func(kind, path string) map[string]any {
 			return map[string]any{"toolCallId": "t", "kind": kind, "rawInput": map[string]any{"source": filepath.Join(env.project, "a.txt"), "destination": path}}
@@ -517,6 +525,13 @@ func TestACPKindsOtherThanReadJudgeTheirLocationsAsWrites(t *testing.T) {
 	if clean.Action != "allow" || clean.RawAction != "allow" {
 		t.Errorf("a move inside the workspace: %+v, want a plain allow", clean)
 	}
+	// So is a download into the workspace, with the session directory known.
+	env.sessionCWD = env.project
+	download := permission(map[string]any{"toolCallId": "t", "kind": "fetch",
+		"rawInput": map[string]any{"url": "https://example.com/a.txt", "path": filepath.Join(env.project, "a.txt")}})
+	if download.Action != "allow" || download.RawAction != "allow" {
+		t.Errorf("a fetch into the workspace: %+v, want a plain allow", download)
+	}
 }
 
 // TestACPDroppedToolCallStateIsTheUnknownTier: a permission that names only the
@@ -566,7 +581,7 @@ func TestACPDroppedToolCallStateIsTheUnknownTier(t *testing.T) {
 				var tracker acp.ToolCallTracker
 				padded := command + "\n# " + strings.Repeat("x", acp.MaxToolCallStateBytes)
 				tracker.Commit(acpParsedFrame(t, acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": map[string]any{
-					"sessionUpdate": "tool_call", "toolCallId": "t", "kind": "execute", "rawInput": map[string]any{"command": padded}}})))
+					"sessionUpdate": "tool_call", "toolCallId": "t", "kind": "execute", "rawInput": map[string]any{"command": padded}}})), false)
 				state := tracker.Peek(acpParsedFrame(t, acpFrameJSON(t, 1, "session/request_permission",
 					map[string]any{"sessionId": "s", "toolCall": map[string]any{"toolCallId": "t"}})))
 				// The same cut command through the hook is what the verdict is
@@ -633,7 +648,7 @@ func TestACPUpdateWithAStatusOnlyNamesNoAction(t *testing.T) {
 // kept ones, a null does not, and a field left out of the kept state for size
 // is a cap hit.
 func TestACPMergedToolCallKeepsOwnFields(t *testing.T) {
-	merged, trunc := acpMergeToolCall(
+	merged, trunc, _ := acpMergeToolCall(
 		json.RawMessage(`{"kind":"read","title":"Read","rawInput":{"path":"/tmp/x"},"truncated":true}`),
 		json.RawMessage(`{"toolCallId":"t","kind":"edit","title":null}`))
 	var got map[string]json.RawMessage
@@ -646,7 +661,7 @@ func TestACPMergedToolCallKeepsOwnFields(t *testing.T) {
 	if !trunc.Any() {
 		t.Error("a field left out for size is not a cap hit")
 	}
-	if kept, trunc := acpMergeToolCall(nil, json.RawMessage(`{"a":1}`)); string(kept) != `{"a":1}` || trunc.Any() {
+	if kept, trunc, _ := acpMergeToolCall(nil, json.RawMessage(`{"a":1}`)); string(kept) != `{"a":1}` || trunc.Any() {
 		t.Errorf("no state: %s, %v", kept, trunc)
 	}
 }

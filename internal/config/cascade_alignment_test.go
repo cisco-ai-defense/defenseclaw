@@ -33,15 +33,30 @@ func TestCascadeAlignmentLaneLoadsItsValues(t *testing.T) {
 }
 
 // A managed admin locks lanes.alignment: a connector or profile scope that
-// sets it is refused, and the top-level value decides.
+// sets it does not decide (the top-level value applies), the value is named
+// as ignored, and writers refuse the document (GAP-0580 runtime locks).
 func TestCascadeAlignmentLaneAdminLock(t *testing.T) {
 	for _, lock := range []string{"lanes.alignment", "lanes", "*"} {
 		body := "guardrail:\n  cascade:\n    lanes:\n      alignment: block\n    admin:\n      locked: [\"" + lock + "\"]\n" +
 			"  connectors:\n    codex:\n      cascade:\n        lanes:\n          alignment: \"off\"\n"
 		cfg := loadCascadeDoc(t, body)
-		inv := cfg.Guardrail.Cascade.Invalid()
-		if inv == nil || !strings.Contains(inv.Error, "lanes.alignment") || !strings.Contains(inv.Error, "locked") {
-			t.Fatalf("lock %s: a connector override of a locked lane was accepted: %+v", lock, inv)
+		if inv := cfg.Guardrail.Cascade.Invalid(); inv != nil {
+			t.Fatalf("lock %s: the whole cascade fell back: %s", lock, inv.Message())
+		}
+		if CascadeCandidateError(cfg) == nil {
+			t.Fatalf("lock %s: writers would accept a connector override of a locked lane", lock)
+		}
+		found := false
+		for _, ig := range cfg.Guardrail.Cascade.Ignored() {
+			if ig.Path == "guardrail.connectors.codex.cascade.lanes.alignment" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("lock %s: the override is not named as ignored: %+v", lock, cfg.Guardrail.Cascade.Ignored())
+		}
+		if got := cfg.ResolveCascade("codex").LaneMode(CascadeLaneAlignment); got != CascadeLaneBlock {
+			t.Fatalf("lock %s: codex = %q, want the locked top-level block", lock, got)
 		}
 	}
 	// The same document without the lock is valid and the connector scope wins.

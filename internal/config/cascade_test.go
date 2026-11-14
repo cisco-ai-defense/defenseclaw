@@ -160,14 +160,13 @@ func TestCascadeValidation(t *testing.T) {
 		{"policy limits without module", "  cascade:\n    policy:\n      lowest: allow\n", "need a module"},
 		{"policy lowest above highest", "  cascade:\n    policy:\n      module: {path: /x.rego, digest: \"sha256:" + strings.Repeat("0", 64) + "\"}\n      lowest: confirm\n      highest: alert\n", "lowest \"confirm\" is above highest \"alert\""},
 		{"module missing", "  cascade:\n    policy:\n      module: {path: /nonexistent/cascade.rego, digest: \"sha256:" + strings.Repeat("0", 64) + "\"}\n", "guardrail.cascade.policy.module"},
-		{"locked at connector", "  cascade:\n    admin:\n      locked: [unknown]\n  connectors:\n    codex:\n      cascade:\n        unknown: block\n", "guardrail.connectors.codex.cascade.unknown: \"unknown\" is locked"},
-		{"locked released key in profile", "  cascade:\n    admin:\n      locked: [block_at]\n  profiles:\n    p1:\n      block_at: CRITICAL\n", "guardrail.profiles.p1.block_at: \"block_at\" is locked"},
-		{"lock group", "  cascade:\n    admin:\n      locked: [judge]\n  connectors:\n    codex:\n      cascade:\n        judge:\n          no_verdict: unknown\n", "\"judge.no_verdict\" is locked"},
-		{"lock all", "  cascade:\n    admin:\n      locked: [\"*\"]\n  connectors:\n    codex:\n      cascade:\n        lanes:\n          test_live: off\n", "\"lanes.test_live\" is locked"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := loadCascadeDoc(t, "guardrail:\n  enabled: true\n"+tt.body)
+			if err := CascadeCandidateError(cfg); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("writer check = %v, want %q", err, tt.want)
+			}
 			inv := cfg.Guardrail.Cascade.Invalid()
 			if inv == nil {
 				t.Fatalf("cascade accepted, want an error containing %q", tt.want)
@@ -185,6 +184,39 @@ func TestCascadeValidation(t *testing.T) {
 			}
 			if !strings.Contains(inv.Message(), "the rule pack defaults") {
 				t.Fatalf("message = %q", inv.Message())
+			}
+		})
+	}
+}
+
+// A lock violation below the top level is ignored on its own (GAP-0580): the
+// writer refuses it with the same message, the gateway keeps the
+// administrator's cascade and names the ignored value.
+func TestCascadeNarrowerLockViolations(t *testing.T) {
+	tests := []struct {
+		name, body, want string
+	}{
+		{"locked at connector", "  cascade:\n    unknown: block\n    admin:\n      locked: [unknown]\n  connectors:\n    codex:\n      cascade:\n        unknown: alert\n", "guardrail.connectors.codex.cascade.unknown: \"unknown\" is locked"},
+		{"locked released key in profile", "  cascade:\n    unknown: block\n    admin:\n      locked: [block_at]\n  profiles:\n    p1:\n      block_at: CRITICAL\n", "guardrail.profiles.p1.block_at: \"block_at\" is locked"},
+		{"lock group", "  cascade:\n    unknown: block\n    admin:\n      locked: [judge]\n  connectors:\n    codex:\n      cascade:\n        judge:\n          no_verdict: unknown\n", "guardrail.connectors.codex.cascade.judge.no_verdict: \"judge.no_verdict\" is locked"},
+		{"lock all", "  cascade:\n    unknown: block\n    admin:\n      locked: [\"*\"]\n  connectors:\n    codex:\n      cascade:\n        lanes:\n          test_live: off\n", "guardrail.connectors.codex.cascade.lanes.test_live: \"lanes.test_live\" is locked"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := loadCascadeDoc(t, "guardrail:\n  enabled: true\n"+tt.body)
+			if err := CascadeCandidateError(cfg); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("writer check = %v, want %q", err, tt.want)
+			}
+			if inv := cfg.Guardrail.Cascade.Invalid(); inv != nil {
+				t.Fatalf("fell back: %s", inv.Message())
+			}
+			if msg := cfg.Guardrail.Cascade.IgnoredMessage(); !strings.Contains(msg, strings.SplitN(tt.want, ":", 2)[0]) {
+				t.Fatalf("ignored = %q", msg)
+			}
+			for _, connector := range []string{"", "codex"} {
+				if e := cfg.ResolveCascade(connector); e.Unknown != CascadeBlock {
+					t.Fatalf("admin cascade lost at %q: %+v", connector, e)
+				}
 			}
 		})
 	}

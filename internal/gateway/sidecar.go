@@ -2189,6 +2189,14 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		!config.CurrentSchemaVersion(newCfg.ConfigVersion) {
 		return fmt.Errorf("config reload: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
+	// An invalid top-level guardrail.cascade is refused: the running
+	// generation (and its cascade) stays, instead of publishing the
+	// candidate's fallback. policy.last_reload_error and doctor name it.
+	if inv := newCfg.Guardrail.Cascade.Invalid(); inv != nil {
+		err := fmt.Errorf("config reload refused: guardrail.cascade is invalid: %s; the running configuration stays until it is fixed (defenseclaw guardrail cascade explain)", inv.Error)
+		recordGenerationBuildError(err)
+		return err
+	}
 	v8PlanChanged := false
 	if strings.TrimSpace(source.sourceName) == "" || len(source.raw) == 0 ||
 		source.compiledV8 == nil || source.compiledV8.Plan == nil {
@@ -8331,6 +8339,7 @@ func (s *Sidecar) removeRemovedConnectorLeftovers(ctx context.Context, registry 
 			s.auditDroppedConnectorState(name, "lock-only")
 		}
 	}
+	s.reclaimUnguardedConnectorHooks(ctx, registry)
 }
 
 // retiredConnectorOpts is retiredConnectorOpts for the current config.

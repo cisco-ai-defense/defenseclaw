@@ -103,7 +103,7 @@ func profileClassFloor(findings []RuleFinding, secureClient bool) string {
 		if !finding.contributesToEnforcement() {
 			continue
 		}
-		if selfProtectionRules[canonicalTrustedRuleID(finding.RuleID)] {
+		if selfProtectionRules[canonicalTrustedRuleID(finding.RuleID)] || finding.evaluationFault {
 			floor = guardrailActionBlock
 		} else if finding.shellProtectedFile {
 			floor = strongerGuardrailAction(floor, guardrailActionAlert)
@@ -142,7 +142,8 @@ func withoutEnforcingEvaluationLimit(findings []RuleFinding) ([]RuleFinding, boo
 // operand), which the profile maps by tier.
 func profileMappedLimitFinding(finding RuleFinding) bool {
 	id := canonicalTrustedRuleID(finding.RuleID)
-	return !finding.omittedOperand && (id == evaluationLimitRuleID || id == canonicalTrustedRuleID(parseFailureRuleID))
+	return !finding.omittedOperand && !finding.evaluationFault &&
+		(id == evaluationLimitRuleID || id == canonicalTrustedRuleID(parseFailureRuleID))
 }
 
 // guardrailActionForProfile maps findings to the action of the profile: the

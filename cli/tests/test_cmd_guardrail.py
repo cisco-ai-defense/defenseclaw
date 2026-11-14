@@ -2332,6 +2332,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "rule",
                 "suppress",
                 "use-pack",
+                "secret-flow",
                 "validate-pack",
             },
         )
