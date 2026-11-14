@@ -102,3 +102,17 @@ func TestProcessPrunesWhenFull(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessCallCountSumsEverySession(t *testing.T) {
+	p, _ := newTestProcess(Limits{MaxSessions: 4, MaxPrior: 4, TTL: time.Hour})
+	ctx := context.Background()
+	if n := p.CallCount(); n != 0 {
+		t.Fatalf("empty store counts %d calls", n)
+	}
+	_, _ = p.AppendToolCall(ctx, "a", ToolCall{Tool: "Bash", Args: "1"})
+	_, _ = p.AppendToolCall(ctx, "a", ToolCall{Tool: "Bash", Args: "2"})
+	_, _ = p.AppendToolCall(ctx, "b", ToolCall{Tool: "Read", Args: "3"})
+	if n := p.CallCount(); n != 3 {
+		t.Fatalf("CallCount = %d, want 3 across two sessions", n)
+	}
+}

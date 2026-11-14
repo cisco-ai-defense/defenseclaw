@@ -137,6 +137,18 @@ func (p *Process) Peek(key string) (Snapshot, bool) {
 	return Snapshot{UserIntent: entry.userIntent, Prior: append([]ToolCall(nil), entry.events...)}, ok
 }
 
+// CallCount returns how many tool calls the store holds across every
+// session key (tests and diagnostics, like Peek).
+func (p *Process) CallCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, entry := range p.sessions {
+		n += len(entry.events)
+	}
+	return n
+}
+
 // roomLocked makes the map and, when it is full, prunes it: the keys idle
 // for TTL first, then the least recently used until one is free.
 func (p *Process) roomLocked(now time.Time) {
