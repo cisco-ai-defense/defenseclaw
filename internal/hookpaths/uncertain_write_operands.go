@@ -63,16 +63,23 @@ func forEachWriteOperand(command, cwd, home string, startup ShellStartup, visit 
 	if home == "" || !filepath.IsAbs(cwd) || actionWindowsHome(home) {
 		return false
 	}
-	return walkWriteOperands(command, cwd, home, startup, 0, visit)
+	return walkWriteOperands(command, cwd, home, startup, 0, false, visit)
 }
 
-func walkWriteOperands(command, cwd, home string, startup ShellStartup, depth int, visit func(resolvedWord) bool) bool {
+// capsOnly reads the operands of the calls the effects model classifies as
+// writers (capWriters) and no redirect: the walk that judges a possible write
+// also reads an operand of a program the model does not classify.
+func walkWriteOperands(command, cwd, home string, startup ShellStartup, depth int, capsOnly bool, visit func(resolvedWord) bool) bool {
 	file, parsed := parseShell(command)
 	if !parsed {
 		return false
 	}
 	options := shellGlobOptionsForCall(command, startup)
 	_, harmless := callPrograms(command, cwd, home)
+	var capWriters map[string]bool
+	if capsOnly {
+		capWriters = capWriterPrograms(command, cwd, home)
+	}
 	values := actionValues{"HOME": home, "PWD": cwd}
 	stop := false
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -86,7 +93,7 @@ func walkWriteOperands(command, cwd, home string, startup ShellStartup, depth in
 		values["PWD"] = cwd
 		actionUpdateValues(stmt, values, cwd, home)
 		for _, redirect := range stmt.Redirs {
-			if redirect.Word != nil && actionOutputRedirect(redirect.Op) &&
+			if !capsOnly && redirect.Word != nil && actionOutputRedirect(redirect.Op) &&
 				visit(resolveWriteWord(redirect.Word, values, cwd, options)) {
 				stop = true
 				return false
@@ -105,14 +112,14 @@ func walkWriteOperands(command, cwd, home string, startup ShellStartup, depth in
 			for i := 1; i+1 < len(call.Args); i++ {
 				if flag, fixed := StaticWord(call.Args[i], home); fixed && flag == "-c" {
 					if body, fixed := StaticWord(call.Args[i+1], home); fixed &&
-						walkWriteOperands(body, cwd, home, startup, depth+1, visit) {
+						walkWriteOperands(body, cwd, home, startup, depth+1, capsOnly, visit) {
 						stop = true
 						return false
 					}
 				}
 			}
 		}
-		if harmless[name] {
+		if harmless[name] || capsOnly && !capWriters[name] {
 			return true
 		}
 		for _, word := range call.Args[1:] {
@@ -263,16 +270,48 @@ const UnprovenBoundedPaths = "bounded-paths"
 // operands of command (bounded.Paths: a word expanded to more than
 // MaxResolvedCandidates paths). A call that hit one is truncated: the caller
 // judges what was read as before and the bound rule floors it to the unknown
-// tier of the pack (internal/guardrail/bounded). A command without a
-// character the shell expands cannot hit one and is not read.
+// tier of the pack (internal/guardrail/bounded). Only an operand of a call the
+// effects model classifies as a writer is read (capWriterPrograms): a read, a
+// listing or a search with a wide glob, and a program the model does not
+// classify, is not a write the bound could hide a protected file from. A
+// command without a character the shell expands cannot hit one.
 func WriteOperandCaps(command, cwd, home string) bounded.CapSet {
 	var set bounded.CapSet
 	if !commandMayExpand(command) {
 		return set
 	}
-	forEachWriteOperand(command, cwd, home, CurrentShellStartup(), func(resolved resolvedWord) bool {
+	if home == "" || !filepath.IsAbs(cwd) || actionWindowsHome(home) {
+		return set
+	}
+	walkWriteOperands(command, cwd, home, CurrentShellStartup(), 0, true, func(resolved resolvedWord) bool {
 		set = set.Union(resolved.caps)
 		return false
 	})
 	return set
+}
+
+// capWriterPrograms are the programs of command the effects model reads as a
+// write that is the program's own: a permission or attribute change, a copy, a
+// move, a disk write, a delete, or a write or append that no redirect of the
+// call explains (a redirect makes the model read any program as a writer).
+func capWriterPrograms(command, cwd, home string) map[string]bool {
+	facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home})
+	out := map[string]bool{}
+	for _, fact := range facts.Commands {
+		writes := false
+		for _, operation := range fact.Operations {
+			switch operation {
+			case actionfacts.OperationPermissionChange, actionfacts.OperationCopy, actionfacts.OperationMove,
+				actionfacts.OperationDiskWrite, actionfacts.OperationDelete:
+				writes = true
+			case actionfacts.OperationWrite, actionfacts.OperationAppend:
+				writes = writes || len(fact.Redirects) == 0
+			}
+		}
+		if writes {
+			out[programBase(fact.Program)] = true
+			out[programBase(fact.Executable)] = true
+		}
+	}
+	return out
 }

@@ -40,7 +40,12 @@ func TestGAP0438ResolverCapReachesTheCallDecision(t *testing.T) {
 		{"at the bound", "touch fan256/*", false},
 		{"past the bound", "touch fan257/*", true},
 		{"past the bound in a nested shell", "bash -c 'touch fan257/*'", true},
-		{"past the bound, redirect", "echo x > fan257/*", true},
+		{"past the bound, delete", "rm fan257/*", true},
+		{"past the bound, permission change", "chmod 600 fan257/*", true},
+		{"a redirect is not a glob operand", "echo x > fan257/*", false},
+		{"a read of a wide glob is not a write", "cat fan257/*", false},
+		{"a listing of a wide glob is not a write", "ls fan257/* 2>/dev/null", false},
+		{"a search with a wide glob and a redirect", "find fan257/* -name x 2>/dev/null | head -9", false},
 		{"text without an expansion is not read", "touch fan257", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
