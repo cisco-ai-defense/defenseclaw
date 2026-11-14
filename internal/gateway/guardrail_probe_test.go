@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -185,6 +186,37 @@ func TestPassthroughCoverageProbeProperty(t *testing.T) {
 					t.Errorf("a probe part with a benign part was blocked (%d upstream hits)", up.count())
 				}
 			})
+		}
+	}
+}
+
+// canonicalProbeSentence is the regexp of one canonical sentence: its words
+// verbatim, any whitespace between them.
+func canonicalProbeSentence(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		words[i] = regexp.QuoteMeta(w)
+	}
+	return strings.Join(words, `\s+`)
+}
+
+// The probe sentence constants are canonicalProbeSentence of the sentences
+// OpenClaw sends.
+func TestCanonicalProbeSentenceConstants(t *testing.T) {
+	for want, s := range map[string]string{
+		probeFollowStrictly:  "Follow it strictly.",
+		probeNoOldTasks:      "Do not infer or repeat old tasks from prior chats.",
+		probeReplyOK:         "If nothing needs attention, reply HEARTBEAT_OK",
+		probeStartupSequence: "Execute your Session Startup sequence now - read the required files before responding to the user.",
+		probeBootstrapFirst:  "If BOOTSTRAP.md exists in the provided Project Context, read it and follow its instructions first.",
+		probeGreet:           "Then greet the user in your configured persona, if one is provided.",
+		probeBeYourself:      "Be yourself - use your defined voice, mannerisms, and mood.",
+		probeKeepShort:       "Keep it to 1-3 sentences and ask what they want to do.",
+		probeDefaultModel:    "If the runtime model differs from default_model in the system prompt, mention the default model.",
+		probeNoInternals:     "Do not mention internal steps, files, tools, or reasoning.",
+	} {
+		if got := canonicalProbeSentence(s); got != want {
+			t.Errorf("%q: constant %q, want %q", s, want, got)
 		}
 	}
 }
