@@ -75,6 +75,19 @@ const (
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
+// AwkFilesKey is the hook client's answer for an awk call that names a
+// program file (-f, --file, -E, --exec, -W exec): "1" when it read every file
+// as the user and every command they start is known, listed in this map and
+// judged like the command typed directly; "0" when one is not. A managed
+// gateway behind ProtectHome cannot open the user's files, so it answers the
+// call at the unknown tier unless this key is "1" (rel-1-0-10:GAP-0652).
+const AwkFilesKey = "\x00awk-files"
+
+// ReadProgramFile reads the program file of an awk call as the hook client
+// does: the file the system opens for the name, as the user, up to the size
+// bound of a script body.
+func ReadProgramFile(name, cwd string) (string, bool) { return readActionScript(name, cwd) }
+
 // PatchCompleteKey is positive hook-side proof that every apply_patch (or
 // Hermes V4A patch) directive was parsed and each target was resolved in the
 // user's filesystem view. The gateway may be unable to repeat that walk
@@ -1926,6 +1939,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	opaqueFacts := map[string]string{}
 	var globFacts, walkFacts map[string]string
 	var twinReadings []string
+	var awkFiles string
 	var unprovenReason string
 	protectedDecision := hermesV4AProtected
 	var noDereferenceTouchSafe bool
@@ -2205,7 +2219,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					// as the hook would run them directly; the gateway judges
 					// that reading, and behind ProtectHome reads its targets
 					// only from this map (GAP-0499).
-					awkTwin := actionfacts.AwkCommandTwin(command)
+					awkTwin := actionfacts.AwkCommandTwinFiles(command, func(name string) (string, bool) {
+						return readActionScript(name, cwd)
+					})
 					// An awk call that is the whole command and starts one touch -h of
 					// a link itself is as safe as the plain call: the plain call lists
 					// its entry and the safe mark, and a gateway that reads the awk
@@ -2217,7 +2233,16 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 							protectedDecision = protectedDecision || clientProtectedDecision(body, cwd, home)
 						}
 					}
-					truncated = truncated || awkTwin.Truncated.Any()
+					// A program file the client cannot read is code the map does
+					// not list: the map is incomplete (the one bound rule).
+					truncated = truncated || awkTwin.Truncated.Any() || awkTwin.FilesUnknown
+					if awkTwin.ProgramFiles {
+						if awkTwin.FilesUnknown || awkFiles == "0" {
+							awkFiles = "0"
+						} else {
+							awkFiles = "1"
+						}
+					}
 					// A cp, mv, install, ln, dd or tee call with a
 					// runtime-expanded operand word ($(true), `true`, $SRC)
 					// has a partial argv. The gateway judges its static
@@ -2829,6 +2854,16 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 		targets[InstructionIdentityKey] = identity
 		size += entry
+	}
+	if awkFiles != "" {
+		entry := len(jsonString(AwkFilesKey)) + 1 + len(jsonString(awkFiles)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+4 {
+			// A gateway that cannot read the files cannot place them.
+			truncated = true
+		} else {
+			targets[AwkFilesKey] = awkFiles
+			size += entry
+		}
 	}
 	if len(fileIdentities) > 0 {
 		value := strings.Join(fileIdentities, ",")

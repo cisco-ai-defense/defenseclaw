@@ -805,21 +805,24 @@ func awkUnprovenOutput(code, cwd, home string) bool {
 func awkOutputProof(code, cwd, home string) (output, unsafe bool, literals []string) {
 	printing := false
 	previous := byte('{')
+	var slash awkprog.Slash
 	for i := 0; i < len(code); i++ {
 		c := code[i]
 		if awkprog.Blank(code, &i) {
 			continue
 		}
-		if end, found, ok := awkprog.DataEnd(code, i, previous); found {
+		if end, found, ok := awkprog.DataEnd(code, i, slash.RegexOK()); found {
 			if !ok {
 				return output, true, literals
 			}
 			if c != '#' {
 				previous = code[end]
+				slash.Data()
 			}
 			i = end
 			continue
 		}
+		slash.Feed(code, i)
 		before := previous
 		previous = c
 		if c == '\n' && strings.IndexByte(",&|", before) >= 0 {

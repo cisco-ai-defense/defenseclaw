@@ -6,7 +6,7 @@ package gateway
 import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // awkCommandTwinRequest returns the request for actionfacts.AwkCommandTwin of
@@ -16,19 +16,41 @@ import (
 // same reading (hookpaths). Only a block of that reading counts; the
 // findings of the call as written stand. caps is what the reading could not
 // read (an awk program in shell STRINGs nested past the bound).
-func awkCommandTwinRequest(request trustedActionRequest) (twin trustedActionRequest, caps bounded.CapSet, ok bool) {
+func awkCommandTwinRequest(request trustedActionRequest) (twin trustedActionRequest, reading actionfacts.AwkTwin, ok bool) {
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
-		return trustedActionRequest{}, bounded.CapSet{}, false
+		return trustedActionRequest{}, actionfacts.AwkTwin{}, false
 	}
 	command, known := trustedBashCommandInput(request.Input)
 	if !known {
-		return trustedActionRequest{}, bounded.CapSet{}, false
+		return trustedActionRequest{}, actionfacts.AwkTwin{}, false
 	}
-	reading := actionfacts.AwkCommandTwin(command)
+	reading = actionfacts.AwkCommandTwinFiles(command, awkProgramFileReader(request))
 	if reading.Text == "" || reading.Text == command {
-		return trustedActionRequest{}, reading.Truncated, false
+		return trustedActionRequest{}, reading, false
 	}
-	return bashReadingRequest(request, command, reading.Text), reading.Truncated, true
+	return bashReadingRequest(request, command, reading.Text), reading, true
+}
+
+// awkProgramFileReader reads the program files of an awk call for the reach
+// this gateway has: a per-user gateway runs as the user and opens them as the
+// hook client does; a managed gateway behind ProtectHome cannot, and the hook
+// client's answer (hookpaths.AwkFilesKey) stands for it.
+func awkProgramFileReader(request trustedActionRequest) awkprog.FileReader {
+	if request.ProtectedHomeHook {
+		return func(string) (string, bool) { return "", false }
+	}
+	cwd := request.Input.CWD
+	return func(name string) (string, bool) { return hookpaths.ReadProgramFile(name, cwd) }
+}
+
+// awkProgramFilesUnknown reports an awk call whose program file this gateway
+// could not read or whose commands are computed, and that the hook client did
+// not vouch for: the call is unknown, never an allow.
+func awkProgramFilesUnknown(request trustedActionRequest, reading actionfacts.AwkTwin) bool {
+	if !reading.ProgramFiles || !reading.FilesUnknown {
+		return false
+	}
+	return !(request.ProtectedHomeHook && request.ResolvedWriteTargets[hookpaths.AwkFilesKey] == "1")
 }
 
 // awkDynamicTitle is the ship-authored title of the finding; the reason
@@ -39,14 +61,8 @@ const awkDynamicTitle = "Awk program runs a command it cannot read, judged as un
 // that runs a command not fully known.
 func awkCommandDynamic(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
-		if !command.ArgvComplete || len(command.Argv) < 2 {
-			continue
-		}
-		switch command.Program {
-		case "awk", "gawk", "mawk", "nawk":
-			if _, dynamic := awkprog.ArgvShell(command.Argv); dynamic {
-				return true
-			}
+		if actionfacts.IsAwkCall(command) && actionfacts.AwkCall(command).Read().Dynamic {
+			return true
 		}
 	}
 	return false

@@ -5,6 +5,7 @@ package awkprog
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -126,7 +127,7 @@ func TestArgvPrograms(t *testing.T) {
 		{"none", []string{"awk"}, nil, false},
 	}
 	for _, tc := range cases {
-		got, dynamic := ProgramsCommands(ArgvPrograms(tc.argv))
+		got, dynamic := commandsOf(Call{Words: tc.argv})
 		if !reflect.DeepEqual(got, tc.want) || dynamic != tc.dynamic {
 			t.Errorf("%s: %q %v, want %q %v", tc.name, got, dynamic, tc.want, tc.dynamic)
 		}
@@ -156,11 +157,141 @@ func TestShellBody(t *testing.T) {
 	}
 }
 
-func TestArgvShellIsDynamicForAnUnreadableCommand(t *testing.T) {
-	if _, dynamic := ArgvShell([]string{"awk", `BEGIN{system("echo (")}`}); !dynamic {
+func TestReadIsDynamicForAnUnreadableCommand(t *testing.T) {
+	if reading := (Call{Words: []string{"awk", `BEGIN{system("echo (")}`}}).Read(); !reading.Dynamic {
 		t.Error("a command the shell reader cannot parse is read as fully known")
 	}
-	if body, dynamic := ArgvShell([]string{"awk", `BEGIN{system("true")}`}); body != "true" || dynamic {
-		t.Errorf("literal command: %q %v", body, dynamic)
+	if reading := (Call{Words: []string{"awk", `BEGIN{system("true")}`}}).Read(); reading.Body != "true" || reading.Dynamic {
+		t.Errorf("literal command: %+v", reading)
+	}
+}
+
+// commandsOf is the static commands the programs of a call run, and whether
+// the call runs a command or a program it cannot read.
+func commandsOf(call Call) (commands []string, dynamic bool) {
+	commands, reading := call.commands()
+	return commands, reading.Dynamic
+}
+
+// rel-1-0-10:GAP-0654: awk tells a regular expression from a division by the
+// previous significant token. The scan must agree, or a regular expression
+// literal with a quote in it hides the command that follows, or a division
+// swallows one.
+func TestSlashIsReadByThePreviousToken(t *testing.T) {
+	regexAfter := []string{"+", "-", "*", "%", "^", "<", ">", "==", "!=", "<=", ">=", "&&", "||", "!", "~", "!~", "?", ":", ",", "=", "+=", "(", "{", ";", "|", "&"}
+	for _, operator := range regexAfter {
+		program := `BEGIN{ y = 1 ` + operator + ` /"/; system("a"); y = 1 ` + operator + ` /"/ }`
+		if got, _ := commandsOf(Call{Words: []string{"awk", program}}); !reflect.DeepEqual(got, []string{"a"}) {
+			t.Errorf("a regular expression after %q: commands %q, want [a]", operator, got)
+		}
+	}
+	programs := map[string]string{
+		"if header":                     `BEGIN{ if (1) /"/; system("a"); if (1) /"/ }`,
+		"while header":                  `BEGIN{ while (0) /"/; system("a"); while (0) /"/ }`,
+		"for header":                    `BEGIN{ for (;0;) /"/; system("a"); for (;0;) /"/ }`,
+		"newline":                       "BEGIN{ x = 1\n/\"/ ; system(\"a\") ; y\n/\"/ }",
+		"division by a name":            `BEGIN{ x = a / 2; y = b / 3; system("a") }`,
+		"division by a number":          `BEGIN{ x = 4 / 2; y = 6 / 3; system("a") }`,
+		"division after a paren":        `BEGIN{ x = (a) / 2; y = (b) / 3; system("a") }`,
+		"division after a call":         `BEGIN{ x = length(a) / 2; y = length(b) / 3; system("a") }`,
+		"division after a bracket":      `BEGIN{ x = a[1] / 2; y = b[1] / 3; system("a") }`,
+		"division after postfix":        `BEGIN{ x = i++ / 2; y = j++ / 3; system("a") }`,
+		"division after a string":       `BEGIN{ x = "a" / 2; y = "b" / 3; system("a") }`,
+		"division after a field":        `{ x = $1 / 2; y = $2 / 3; system("a") }`,
+		"regex after print":             `{ print /"/; system("a"); print /"/ }`,
+		"regex after a header, newline": "{ if (1)\n/\"/; system(\"a\"); if (1)\n/\"/ }",
+	}
+	for name, program := range programs {
+		if got, _ := commandsOf(Call{Words: []string{"awk", program}}); !reflect.DeepEqual(got, []string{"a"}) {
+			t.Errorf("%s: commands %q, want [a]", name, got)
+		}
+	}
+}
+
+func TestCallReadsProgramFilesAndComputedWords(t *testing.T) {
+	files := map[string]string{
+		"p.awk":    `BEGIN{system("a")}`,
+		"pipe.awk": `{print | "b"}`,
+		"dyn.awk":  `{system($1)}`,
+		"none.awk": `{print $1}`,
+	}
+	read := func(name string) (string, bool) { text, ok := files[name]; return text, ok }
+	type tc struct {
+		name    string
+		words   []string
+		dynamic []bool
+		prefix  []string
+		holed   []string
+		files   FileReader
+		want    []string
+		unknown bool
+		unread  bool
+	}
+	cases := []tc{
+		{name: "-f", words: []string{"awk", "-f", "p.awk", "in"}, files: read, want: []string{"a"}},
+		{name: "-f attached", words: []string{"awk", "-fp.awk"}, files: read, want: []string{"a"}},
+		{name: "--file=", words: []string{"gawk", "--file=p.awk"}, files: read, want: []string{"a"}},
+		{name: "-E", words: []string{"gawk", "-E", "p.awk", "x"}, files: read, want: []string{"a"}},
+		{name: "--exec", words: []string{"gawk", "--exec", "p.awk"}, files: read, want: []string{"a"}},
+		{name: "--exec=", words: []string{"gawk", "--exec=p.awk"}, files: read, want: []string{"a"}},
+		{name: "-W exec", words: []string{"mawk", "-W", "exec", "p.awk"}, files: read, want: []string{"a"}},
+		{name: "-Wexec", words: []string{"mawk", "-Wexec", "p.awk"}, files: read, want: []string{"a"}},
+		{name: "two files", words: []string{"awk", "-f", "p.awk", "-f", "pipe.awk"}, files: read, want: []string{"a", "b"}},
+		{name: "file and operand", words: []string{"awk", "-f", "none.awk", "p.awk"}, files: read},
+		{name: "a file with a computed command", words: []string{"awk", "-f", "dyn.awk"}, files: read, unknown: true},
+		{name: "a file that cannot be read", words: []string{"awk", "-f", "missing.awk"}, files: read, unknown: true, unread: true},
+		{name: "stdin as the file", words: []string{"awk", "-f", "-"}, files: read, unknown: true, unread: true},
+		{name: "a computed file name", words: []string{"awk", "-f", ""}, dynamic: []bool{false, false, true}, files: read, unknown: true, unread: true},
+		{name: "no reach is not unknown", words: []string{"awk", "-f", "p.awk"}},
+		{name: "-W other", words: []string{"mawk", "-W", "version", `BEGIN{system("c")}`}, files: read, want: []string{"c"}},
+		{name: "computed program", words: []string{"awk", ""}, dynamic: []bool{false, true}, unknown: true},
+		{name: "computed program with a command in its text", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", `BEGIN{system("d"); x = ` + Hole + `}`}, want: []string{"d"}, unknown: true},
+		{name: "computed program, a command with a hole", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", `BEGIN{system("touch ` + Hole + `")}`}, unknown: true},
+		{name: "computed program with no command text", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", Hole + `==3 || ` + Hole + `==4 {print}`}},
+		{name: "computed program, one hole", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", Hole}, unknown: true},
+		{name: "computed program, a pipe", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", `{print ` + Hole + ` | "sort"}`}, want: []string{"sort"}, unknown: true},
+		{name: "computed input operand", words: []string{"awk", `{print $1}`, ""}, dynamic: []bool{false, false, true}},
+		{name: "computed -v value", words: []string{"awk", "-v", "", `BEGIN{system(c)}`}, dynamic: []bool{false, false, true, false}, unknown: true},
+		{name: "computed -F value", words: []string{"awk", "-F", "", `{print $1}`}, dynamic: []bool{false, false, true, false}},
+		{name: "computed attached -F", words: []string{"awk", "-F", `{print $1}`}, dynamic: []bool{false, true, false}, prefix: []string{"", "-F"}},
+		{name: "computed attached -f", words: []string{"awk", ""}, dynamic: []bool{false, true}, prefix: []string{"", "-f"}, files: read, unknown: true, unread: true},
+		{name: "computed -e", words: []string{"awk", "-e", ""}, dynamic: []bool{false, false, true}, unknown: true},
+		{name: "computed option", words: []string{"awk", "", `{print}`}, dynamic: []bool{false, true, false}, unknown: true},
+		{name: "static program with a computed operand", words: []string{"awk", `BEGIN{system("a")}`, ""}, dynamic: []bool{false, false, true}, want: []string{"a"}},
+		{name: "program with a computed command", words: []string{"awk", `BEGIN{system(c)}`}, unknown: true},
+	}
+	for _, tc := range cases {
+		call := Call{Words: tc.words, Dynamic: tc.dynamic, Prefix: tc.prefix, Holed: tc.holed, Files: tc.files}
+		got, dynamic := commandsOf(call)
+		if !reflect.DeepEqual(got, tc.want) || dynamic != tc.unknown {
+			t.Errorf("%s: commands %q unknown %v, want %q %v", tc.name, got, dynamic, tc.want, tc.unknown)
+		}
+		if reading := call.Read(); reading.Unread != tc.unread || reading.Dynamic != tc.unknown {
+			t.Errorf("%s: Read %+v, want unread %v dynamic %v", tc.name, reading, tc.unread, tc.unknown)
+		}
+	}
+}
+
+// The one bound rule: a program past MaxProgramBytes is read to the cap and
+// reported Truncated, so a flood of tokens costs a bounded scan and is never
+// an allow.
+func TestParseCutsAProgramPastTheByteCap(t *testing.T) {
+	flood := strings.Repeat("print ", 100000)
+	program := Parse(flood)
+	if !program.Truncated || !program.RunsCommand() {
+		t.Fatalf("a %d byte program is not truncated: %+v", len(flood), program.Truncated)
+	}
+	if _, dynamic := program.Commands(); !dynamic {
+		t.Error("a truncated program is read as fully known")
+	}
+	if Parse(`BEGIN{system("a")}`+strings.Repeat(" ", MaxProgramBytes)).Truncated == false {
+		t.Error("a program with trailing blanks past the cap is not truncated")
+	}
+	// What is read before the cap still decides.
+	if got, _ := Parse(`BEGIN{system("a")}` + strings.Repeat("x", MaxProgramBytes)).Commands(); !reflect.DeepEqual(got, []string{"a"}) {
+		t.Errorf("the command before the cap was lost: %q", got)
+	}
+	if reading := (Call{Words: []string{"awk", flood}}).Read(); !reading.Truncated || !reading.Dynamic {
+		t.Errorf("Read of a truncated program: %+v", reading)
 	}
 }

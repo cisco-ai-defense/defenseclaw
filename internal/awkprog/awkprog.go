@@ -72,6 +72,10 @@ type Program struct {
 	// Directive reports a gawk @ directive (@include, @load): more code the
 	// scan does not read.
 	Directive bool
+	// Truncated reports a program longer than MaxProgramBytes: the scan read
+	// the text before the cap and nothing after it, so the program counts as
+	// one that runs a command it cannot read (the one bound rule).
+	Truncated bool
 	// Malformed reports a string or regular expression literal with no end
 	// awk accepts, so the program does not run as this scan reads it. Every
 	// awk refuses such a program at its syntax check and runs nothing; the
@@ -86,7 +90,7 @@ type Program struct {
 // RunsCommand reports a program with a command channel, a directive that
 // loads more code, or text the scan cannot read to its end.
 func (p Program) RunsCommand() bool {
-	return len(p.Channels) > 0 || p.Directive || p.Malformed
+	return len(p.Channels) > 0 || p.Directive || p.Malformed || p.Truncated
 }
 
 // Commands are the static command texts of every channel, and whether some
@@ -96,7 +100,7 @@ func (p Program) Commands() (commands []string, dynamic bool) {
 		commands = append(commands, c.Commands...)
 		dynamic = dynamic || c.Dynamic
 	}
-	return commands, dynamic || p.Directive || p.Malformed && p.channelText
+	return commands, dynamic || p.Directive || p.Truncated || p.Malformed && p.channelText
 }
 
 type tokenKind uint8
@@ -114,9 +118,17 @@ type token struct {
 	text string
 }
 
+// MaxProgramBytes bounds the program text one scan reads. The scan is linear
+// in the text for ordinary programs and worse for a flood of tokens with no
+// delimiter, so a longer program is cut here and reported Truncated.
+const MaxProgramBytes = 64 << 10
+
 // Parse scans the program text for its command channels.
 func Parse(code string) Program {
 	var p Program
+	if len(code) > MaxProgramBytes {
+		code, p.Truncated = code[:MaxProgramBytes], true
+	}
 	p.channelText = strings.ContainsAny(code, "|@") || strings.Contains(code, "system") || strings.Contains(code, "getline")
 	tokens := tokenize(code, &p)
 	match := matchParens(tokens)
@@ -178,12 +190,13 @@ func Blank(code string, i *int) bool {
 }
 
 // DataEnd finds the awk data that starts at code[i]: a string, a regular
-// expression literal (a slash where awk cannot divide, after the previous
-// significant byte) or a comment. It returns the index of the data's last
-// byte; a comment ends before its newline, which still ends the statement.
-// found is false when code[i] starts no data. ok is false when the data has
-// no end awk accepts, so the program does not run as this scan reads it.
-func DataEnd(code string, i int, previous byte) (end int, found, ok bool) {
+// expression literal (a slash where regexOK says awk cannot divide, from the
+// Slash state of the tokens before it) or a comment. It returns the index of
+// the data's last byte; a comment ends before its newline, which still ends
+// the statement. found is false when code[i] starts no data. ok is false when
+// the data has no end awk accepts, so the program does not run as this scan
+// reads it.
+func DataEnd(code string, i int, regexOK bool) (end int, found, ok bool) {
 	switch c := code[i]; {
 	case c == '"':
 		for j := i + 1; j < len(code); j++ {
@@ -200,7 +213,7 @@ func DataEnd(code string, i int, previous byte) (end int, found, ok bool) {
 			return i + newline - 1, true, true
 		}
 		return len(code) - 1, true, true
-	case c == '/' && strings.IndexByte("(,{};!~&|\n?:=}", previous) >= 0:
+	case c == '/' && regexOK:
 		end, ok := regexEnd(code, i)
 		return end, true, ok
 	}
@@ -253,22 +266,98 @@ var regexKeywords = map[string]bool{
 	"print": true, "printf": true, "return": true, "in": true, "case": true, "do": true, "else": true,
 }
 
+// Slash tells whether a "/" divides or opens a regular expression literal.
+// POSIX awk lexers decide it by the previous significant token: a slash after
+// an operand (a name, a number, a string, a regular expression, a closing
+// bracket, a closing parenthesis that does not end an if, while or for header,
+// or a postfix ++ or --) divides, and after anything else (an operator, a
+// delimiter, a keyword that takes an expression, a header's closing
+// parenthesis) it opens a regular expression. A scan that reads a regular
+// expression as a division, or the reverse, reads a different program than
+// awk runs, so every scanner of program text feeds one Slash. The zero value
+// is the start of a program.
+type Slash struct {
+	operand bool
+	header  bool
+	headers []bool
+}
+
+// RegexOK reports that a slash here opens a regular expression literal.
+func (s *Slash) RegexOK() bool { return !s.operand }
+
+// Word notes a name, keyword, builtin or number.
+func (s *Slash) Word(word string) {
+	s.operand = !regexKeywords[word]
+	s.header = word == "if" || word == "while" || word == "for"
+}
+
+// Data notes a string or a regular expression literal.
+func (s *Slash) Data() {
+	s.operand = true
+	s.header = false
+}
+
+// Punct notes an operator or delimiter ("\n" for a newline).
+func (s *Slash) Punct(text string) {
+	switch text {
+	case "(":
+		s.headers = append(s.headers, s.header)
+		s.operand = false
+	case ")":
+		header := false
+		if n := len(s.headers); n > 0 {
+			header = s.headers[n-1]
+			s.headers = s.headers[:n-1]
+		}
+		s.operand = !header
+	case "]":
+		s.operand = true
+	case "++", "--":
+		// Postfix after an operand, prefix otherwise: either way the state
+		// stays.
+	default:
+		s.operand = false
+	}
+	s.header = false
+}
+
+// Feed notes the token that starts at code[i] for a scanner that walks the
+// bytes itself: it must call Feed once at the first byte of a word and once
+// at each other byte that is not part of a string, regular expression or
+// comment, and note those with Data.
+func (s *Slash) Feed(code string, i int) {
+	c := code[i]
+	switch {
+	case WordByte(c):
+		if i > 0 && WordByte(code[i-1]) {
+			return
+		}
+		j := i + 1
+		for j < len(code) && WordByte(code[j]) {
+			j++
+		}
+		s.Word(code[i:j])
+	case (c == '+' || c == '-') && i+1 < len(code) && code[i+1] == c:
+		s.Punct(code[i : i+2])
+	case (c == '+' || c == '-') && i > 0 && code[i-1] == c && (i < 2 || code[i-2] != c):
+		// The second byte of a ++ or -- Feed already noted.
+	default:
+		s.Punct(string(c))
+	}
+}
+
 var punct3 = []string{"**=", "..."}
 var punct2 = []string{"||", "&&", "|&", "++", "--", "+=", "-=", "*=", "/=", "%=", "^=", "**", "==", "!=", "<=", ">=", "!~", ">>"}
 
 func tokenize(code string, p *Program) []token {
 	var tokens []token
-	previous := byte('{')
+	var slash Slash
 	for i := 0; i < len(code); i++ {
 		c := code[i]
 		if Blank(code, &i) {
 			continue
 		}
-		hint := previous
-		if n := len(tokens); n > 0 && tokens[n-1].kind == tokWord && regexKeywords[tokens[n-1].text] {
-			hint = '{'
-		}
-		if end, found, ok := DataEnd(code, i, hint); found {
+		if end, found, ok := DataEnd(code, i, slash.RegexOK()); found {
 			if !ok {
 				p.Malformed = true
 				return tokens
@@ -276,10 +365,10 @@ func tokenize(code string, p *Program) []token {
 			switch c {
 			case '"':
 				tokens = append(tokens, token{tokString, awkString(code[i+1 : end])})
-				previous = '"'
+				slash.Data()
 			case '/':
 				tokens = append(tokens, token{tokRegex, ""})
-				previous = '/'
+				slash.Data()
 			}
 			i = end
 			continue
@@ -287,17 +376,17 @@ func tokenize(code string, p *Program) []token {
 		switch {
 		case c == '\n':
 			tokens = append(tokens, token{kind: tokNewline})
-			previous = '\n'
+			slash.Punct("\n")
 		case c == '@':
 			p.Directive = true
-			previous = c
+			slash.Punct("@")
 		case WordByte(c):
 			start := i
 			for i+1 < len(code) && WordByte(code[i+1]) {
 				i++
 			}
 			tokens = append(tokens, token{tokWord, code[start : i+1]})
-			previous = code[i]
+			slash.Word(code[start : i+1])
 		default:
 			text := string(c)
 			for _, candidates := range [][]string{punct3, punct2} {
@@ -313,7 +402,7 @@ func tokenize(code string, p *Program) []token {
 			}
 			i += len(text) - 1
 			tokens = append(tokens, token{tokPunct, text})
-			previous = code[i]
+			slash.Punct(text)
 		}
 	}
 	return tokens

@@ -617,10 +617,18 @@ func dispatchTrustedAction(
 	// | getline, written as string literals, are run by the shell as the
 	// hook would run them directly (GAP-0499): that reading is judged too,
 	// and only its block counts.
-	twin, awkCaps, awkTwin := awkCommandTwinRequest(request)
+	twin, awkReading, awkTwin := awkCommandTwinRequest(request)
+	awkCaps := awkReading.Truncated
 	if awkTwin {
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	if awkProgramFilesUnknown(request, awkReading) {
+		// A program file the call runs could not be read, or starts a command
+		// built at run time: the call is unknown (GAP-0499, GAP-0652).
+		defer func() {
+			findings = withAwkDynamicCommand(findings, request.EnforcementCapable)
 		}()
 	}
 	if awkCaps.Any() {
