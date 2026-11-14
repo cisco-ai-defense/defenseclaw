@@ -642,10 +642,11 @@ SECTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "Trusted Paths",
             "OpenShell Sandboxes",
             "Watch",
+            "Routing",
         ),
     ),
     ("Hooks (read-only)", ("Agent Hooks", "Connector Hooks")),
-    ("Observability", ("Observability", "Webhooks", "Notifications", "AI Discovery")),
+    ("Observability", ("Observability", "Tokenomics", "Webhooks", "Notifications", "AI Discovery")),
     # claw.mode is the single-agent setting from before connectors; on a
     # multi-connector install it read as "Which agent framework DefenseClaw
     # defends" (GAP-2253).
