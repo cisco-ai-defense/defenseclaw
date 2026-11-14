@@ -108,9 +108,8 @@ var serveFlags struct {
 	calloutPeerIDs    []string
 	controllerPeerIDs []string
 	// Chain state (lane A13).
-	chainKeyFile      string
-	chainEgressAction string
-	chainRetention    time.Duration
+	chainKeyFile   string
+	chainRetention time.Duration
 }
 
 // sidecarSubstrateBuild, when set, makes runSidecar serve the Substrate
@@ -170,9 +169,6 @@ func init() {
 	f.BoolVar(&serveFlags.actorPlainHTTP, "actor-plain-http", false,
 		"serve the actor listener as plain HTTP (egress reaches it on an http rule; the actor JWT authenticates); the admin listener and the leader RPC keep TLS")
 	f.StringVar(&serveFlags.chainKeyFile, "chain-key-file", "/var/run/secrets/defenseclaw-chain-key/key", "value lineage key every gateway replica shares (gateway)")
-	// Deprecated alias of config substrate.chain_egress_action (GAP-0250),
-	// kept until the 1.0.10 cut: the chart never sets it.
-	f.StringVar(&serveFlags.chainEgressAction, "chain-egress-action", "", "deprecated: set config substrate.chain_egress_action (block or alert); wins when set (leader)")
 	f.DurationVar(&serveFlags.chainRetention, "chain-retention", chainstate.DefaultRetention, "how long a suspended actor's chain windows count as live (leader)")
 	rootCmd.AddCommand(serveCmd)
 }
@@ -681,7 +677,7 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	asks.Serve(srv, askStore)
 	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
 	chainOpts := substrateChainRegistrations(store)
-	action, source := substrateChainEgressAction(cfg, serveFlags.chainEgressAction)
+	action, source := substrateChainEgressAction(cfg)
 	fmt.Fprintf(os.Stderr, "[substrate] leader: chain egress action %s (%s): a request after a secret read is %s at the egress callout\n",
 		action, source, map[string]string{chainstate.EgressBlock: "refused", chainstate.EgressAlert: "allowed with an alert"}[action])
 	chainOpts.Dir, chainOpts.EgressAction, chainOpts.Retention = serveFlags.storeDir, action, serveFlags.chainRetention
@@ -971,13 +967,10 @@ func substrateChainRegistrations(store registry.Store) chainstate.Options {
 }
 
 // substrateChainEgressAction is the leader's chain egress action and where
-// it came from (GAP-0250): config substrate.chain_egress_action, which the
-// gateway and the leader read from the same ConfigMap (default block). The
-// deprecated --chain-egress-action flag wins when set, until the 1.0.10 cut.
-func substrateChainEgressAction(c *config.Config, flag string) (action, source string) {
-	if f := strings.ToLower(strings.TrimSpace(flag)); f != "" {
-		return f, "--chain-egress-action, a deprecated alias of config substrate.chain_egress_action"
-	}
+// it came from (GAP-0250): config substrate.chain_egress_action, the one
+// source, which the gateway and the leader read from the same ConfigMap
+// (default block).
+func substrateChainEgressAction(c *config.Config) (action, source string) {
 	if c == nil || strings.TrimSpace(c.Substrate.ChainEgressAction) == "" {
 		return chainstate.EgressBlock, "default"
 	}
