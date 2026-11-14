@@ -96,7 +96,9 @@ func TestUnprovenProtectedWriteRecoveringParseHangIsAFault(t *testing.T) {
 	}
 }
 
-// fuzzCorpusString reads the string of a "go test fuzz v1" corpus entry.
+// fuzzCorpusString reads the string of a "go test fuzz v1" corpus entry. A
+// line may end in \r (a Windows checkout with core.autocrlf=true, as hosted
+// CI makes it); go test's own corpus reader trims it, so this one does too.
 func fuzzCorpusString(t *testing.T, target, name string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", "fuzz", target, name))
@@ -104,6 +106,7 @@ func fuzzCorpusString(t *testing.T, target, name string) string {
 		t.Fatal(err)
 	}
 	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSuffix(line, "\r")
 		if rest, ok := strings.CutPrefix(line, "string("); ok {
 			value, err := strconv.Unquote(strings.TrimSuffix(rest, ")"))
 			if err != nil {
