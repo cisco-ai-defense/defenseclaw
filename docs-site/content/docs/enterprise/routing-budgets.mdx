@@ -150,10 +150,20 @@ More:
 
 ## Check it
 
+On a managed computer the `defenseclaw` launcher reads routing; it does not write it or run a dry run:
+
 ```bash
-defenseclaw routing rules list      # rules and notes on rules that do less than they look
+defenseclaw routing status          # your routing, recent decisions and budgets
+defenseclaw routing rules list      # the routing rules: all of them for an administrator, none for a standard account
 defenseclaw routing budgets list    # spend this period, and whether it is the fleet or this device only
-defenseclaw routing test "write a parser" --as-user DCLAB\\alice   # administrators: which model, which rule
+defenseclaw routing explain REQUEST_ID
 ```
 
-On a managed device a standard user runs the same `status`, `budgets list` and `explain` commands and sees only their own decisions and budgets: the gateway answers on its hook socket (Linux, macOS) or its service pipe (Windows) for the account that asks. `routing.admin.visibility.users_see: none` turns that off. `routing test` is for administrators on a managed device.
+A routing command that changes the config (`enable`, `models add`, `rules add`, `budgets add`, `pricing set`) or a dry run (`routing test`) answers with the key the administrator config owns and exits 3; nothing is changed. To dry-run a rule, run it on a workstation with the per-user install and the same admin config:
+
+```bash
+defenseclaw routing test "write a parser" --as-user DCLAB\\alice   # which model, which rule
+defenseclaw routing rules list      # rules and notes on rules that do less than they look
+```
+
+On a managed device a standard user runs `status`, `budgets list` and `explain` and sees only their own decisions and budgets: the gateway answers on its hook socket (Linux, macOS) or its service pipe (Windows) for the account that asks. `routing.admin.visibility.users_see: none` turns that off.
