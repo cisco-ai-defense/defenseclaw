@@ -86,7 +86,17 @@ func withCapFloor(parent context.Context, request trustedActionRequest, findings
 	if request.capFloor == nil {
 		return findings
 	}
-	if analyzed.Any() && capFloorMayNameProtected(request) {
+	// names is asked once, and only for a call a cap or a fed here-document
+	// reaches: a call whose text names no protected target or state has no
+	// piece worth judging (one pass over its text, no cut).
+	named, asked := false, false
+	names := func() bool {
+		if !asked {
+			named, asked = capFloorMayNameProtected(request), true
+		}
+		return named
+	}
+	if analyzed.Any() && names() {
 		findings = withBoundedTruncation(findings, analyzed, request)
 	}
 	if request.capFloorDepth > capFloorMaxDepth ||
@@ -100,7 +110,7 @@ func withCapFloor(parent context.Context, request trustedActionRequest, findings
 	}
 	cwd, home := request.Input.CWD, request.Input.ActiveHome
 	capped := boundedLimitIndex(findings) >= 0
-	if !capped && !strings.Contains(command, "<<") {
+	if !capped && !strings.Contains(command, "<<") || !names() {
 		return findings
 	}
 	head, tail := capFloorPieces(command)
