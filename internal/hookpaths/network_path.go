@@ -562,6 +562,10 @@ func Lstat(name string) (os.FileInfo, error) { return pathLstat(name) }
 // Stat is os.Stat for a path a hook call names, read as pathStat reads it.
 func Stat(name string) (os.FileInfo, error) { return pathStat(name) }
 
+// EvalSymlinks is filepath.EvalSymlinks bounded like the other readers: the
+// gateway reads a link chain of a path a hook call names through it.
+func EvalSymlinks(name string) (string, error) { return pathEvalSymlinks(name) }
+
 // ReadDir is os.ReadDir for a directory a hook call names, read as pathReadDir reads it.
 func ReadDir(name string) ([]os.DirEntry, error) { return pathReadDir(name) }
 

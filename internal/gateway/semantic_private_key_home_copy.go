@@ -4,7 +4,6 @@
 package gateway
 
 import (
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -384,19 +383,19 @@ func ownSSHFolderPrivateDestination(destination, cwd, home string) bool {
 	// itself may be absent): there is no link to follow, the name is all there is.
 	existing := value
 	for existing != home && pathWithin(existing, home) {
-		if _, err := os.Lstat(existing); err == nil {
+		if _, err := hookpaths.Lstat(existing); err == nil {
 			break
 		}
 		existing = path.Dir(existing)
 	}
-	if _, err := os.Lstat(existing); err != nil {
+	if _, err := hookpaths.Lstat(existing); err != nil {
 		return true
 	}
-	realHome, err := filepath.EvalSymlinks(home)
+	realHome, err := hookpaths.EvalSymlinks(home)
 	if err != nil {
 		return false
 	}
-	resolved, err := filepath.EvalSymlinks(existing)
+	resolved, err := hookpaths.EvalSymlinks(existing)
 	if err != nil {
 		return false
 	}
