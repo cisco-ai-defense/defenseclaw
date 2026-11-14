@@ -414,7 +414,11 @@ func (s *stubConnector) VerifyClean(connector.SetupOpts) error { return nil }
 //   - skip the bind for openclaw (breaking every existing OpenClaw
 //     install on upgrade, since openclaw's data path goes through
 //     /v1/chat/completions on the proxy port).
+//
+// The matrix is the Linux/macOS topology; native Windows OpenClaw runs its
+// plugin hooks only and binds no proxy (checked at the end).
 func TestProxyShouldBindForConnector(t *testing.T) {
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cases := []struct {
 		name       string
 		conn       connector.Connector
@@ -449,9 +453,18 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("openclaw_native_windows", func(t *testing.T) {
+		defer connector.PinOpenClawHooksGOOSForTest("windows")()
+		if proxyShouldBindForConnector(&stubConnector{name: "openclaw"}, &config.GuardrailConfig{}) {
+			t.Error("proxyShouldBindForConnector(openclaw) on native Windows = true, want false (hooks only, no proxy)")
+		}
+	})
 }
 
 func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
+	// Linux/macOS topology; the native Windows OpenClaw answer is at the end.
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cases := []struct {
 		name      string
 		connector string
@@ -486,6 +499,14 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 	if got := proxyShouldBindForConfiguredConnector(&config.Config{}); got {
 		t.Errorf("proxyShouldBindForConfiguredConnector(zero config) = %v, want false", got)
 	}
+
+	t.Run("openclaw_native_windows", func(t *testing.T) {
+		defer connector.PinOpenClawHooksGOOSForTest("windows")()
+		cfg := &config.Config{Guardrail: config.GuardrailConfig{Connector: "openclaw"}}
+		if proxyShouldBindForConfiguredConnector(cfg) {
+			t.Error("proxyShouldBindForConfiguredConnector(openclaw) on native Windows = true, want false (hooks only, no proxy)")
+		}
+	})
 }
 
 // TestIsLoopbackGatewayHost pins the host-classification helper used
@@ -892,6 +913,9 @@ func TestSidecarFleetRPCsEnabled(t *testing.T) {
 }
 
 func TestShouldRunProviderProbeForConnector(t *testing.T) {
+	// The OpenClaw rows probe the providers behind the Linux/macOS proxy;
+	// native Windows OpenClaw has no proxy and no probe (checked at the end).
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cases := []struct {
 		name string
 		conn connector.Connector
@@ -934,6 +958,14 @@ func TestShouldRunProviderProbeForConnector(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("openclaw_native_windows_skips_probe", func(t *testing.T) {
+		defer connector.PinOpenClawHooksGOOSForTest("windows")()
+		gc := config.GuardrailConfig{Connector: "openclaw"}
+		if shouldRunProviderProbeForConnector(&stubConnector{name: "openclaw"}, &gc) {
+			t.Error("shouldRunProviderProbeForConnector(openclaw) on native Windows = true, want false (no proxy upstream to probe)")
+		}
+	})
 }
 
 type rollbackConnector struct {
