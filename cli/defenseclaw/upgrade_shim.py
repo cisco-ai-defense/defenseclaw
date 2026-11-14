@@ -1421,12 +1421,9 @@ def _tls_context() -> ssl.SSLContext:
 def _download(url: str, destination: str) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "defenseclaw-upgrade"})
     try:
-        with (
-            urllib.request.urlopen(request, timeout=_TIMEOUT, context=_tls_context()) as response,
-            open(  # noqa: S310
-                destination, "wb"
-            ) as out,
-        ):
+        with urllib.request.urlopen(request, timeout=_TIMEOUT, context=_tls_context()) as response, open(  # noqa: S310
+            destination, "wb"
+        ) as out:
             shutil.copyfileobj(response, out)
     except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
         raise ShimError(f"could not download {url}: {exc}") from None
@@ -1456,7 +1453,9 @@ def latest_version(repo: str | None = None, *, timeout: float = _TIMEOUT) -> str
 
 
 def _latest_from_redirect(repo: str, method: str, timeout: float) -> str | None:
-    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=_tls_context()))
+    opener = urllib.request.build_opener(
+        _NoRedirect, urllib.request.HTTPSHandler(context=_tls_context())
+    )
     request = urllib.request.Request(
         f"{_source_url(repo)}/releases/latest",
         method=method,
