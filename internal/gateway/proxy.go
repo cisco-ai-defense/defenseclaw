@@ -3494,8 +3494,6 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		p.recordProxyStreamV8(terminalCtx, streamMetricRuntime, sseRoute, "close", sseMetricOutcome, elapsed, bytes)
 	}()
 
-	const maxBufferedTCBytes = 10 << 20 // 10 MiB cap on buffered tool-call data
-
 	var tcAcc toolCallAccumulator
 	var bufferedTCChunks [][]byte // tool-call chunks held until post-stream inspection
 	bufferedTCSize := 0
@@ -3563,7 +3561,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				blockStream(verdict)
 				return
 			}
-			if bufferedTCSize > maxBufferedTCBytes {
+			if bufferedTCSize > streamMaxToolBytes {
 				// Past the bound the calls are judged as read: the pack's
 				// unknown tier blocks (strict) or alerts, and the rest of
 				// the stream is no longer held (one bound rule).
@@ -3575,11 +3573,17 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 					blockStream(verdict)
 					return
 				}
+				// The buffered chunks go out through the guard, released only
+				// once the text pushed before them has been checked (GAP-0431).
 				toolsCapped = true
 				for _, buffered := range bufferedTCChunks {
-					fmt.Fprintf(w, "data: %s\n\n", buffered)
+					units, verdict := guard.Hold([]byte("data: " + string(buffered) + "\n\n"))
+					if verdict != nil {
+						blockStream(verdict)
+						return
+					}
+					writeStreamUnits(w, flusher, units)
 				}
-				flusher.Flush()
 				bufferedTCChunks, bufferedTCSize = nil, 0
 			}
 			return
@@ -5911,7 +5915,6 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		return
 	}
 
-	const maxBufferedTCBytes = 10 << 20
 	// Every frame reaches the client only after the guardrail checked its
 	// text (completionStreamGuard, rel-1-0-10:GAP-0212).
 	guard := p.newProxyStreamGuard(llmCtx, r, req.Model, mode)
@@ -6086,7 +6089,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 				blockText(verdict)
 				return false
 			}
-			if bufferedTCSize > maxBufferedTCBytes {
+			if bufferedTCSize > streamMaxToolBytes {
 				// Past the bound the calls are judged as read: the pack's
 				// unknown tier blocks (strict) or alerts, and the rest of the
 				// stream is no longer held (one bound rule).
@@ -6097,8 +6100,18 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 				if !inspectBufferedToolCalls() {
 					return false
 				}
+				// The buffered frames go out through the guard, released only
+				// once the text pushed before them has been checked (GAP-0431).
 				toolsCapped = true
-				flushBufferedToolCalls()
+				for _, frame := range bufferedTCFrames {
+					units, verdict := guard.Hold(frame)
+					if verdict != nil {
+						blockText(verdict)
+						return false
+					}
+					writeStreamUnits(w, flusher, units)
+				}
+				bufferedTCFrames, bufferedTCSize = nil, 0
 			}
 			return true
 		}

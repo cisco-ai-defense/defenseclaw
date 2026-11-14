@@ -39,3 +39,17 @@ func OpenPrivateKeyPEMStart(text string) int {
 	}
 	return start
 }
+
+// PrivateKeyHeaderLabel is the label of a complete private-key PEM header
+// line ("-----BEGIN RSA PRIVATE KEY-----" gives "RSA PRIVATE KEY"), and false
+// for any other line. The line is given without its line separator.
+func PrivateKeyHeaderLabel(line string) (string, bool) {
+	if !strings.HasPrefix(line, "-----BEGIN ") || !strings.HasSuffix(line, "-----") || len(line) > 80 {
+		return "", false
+	}
+	label := strings.TrimSuffix(strings.TrimPrefix(line, "-----BEGIN "), "-----")
+	if !allowedPrivateKeyLabel(label) {
+		return "", false
+	}
+	return label, true
+}

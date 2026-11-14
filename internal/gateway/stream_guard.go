@@ -69,18 +69,21 @@ type completionStreamGuard struct {
 	laneIndex map[int]int
 	units     []streamGuardUnit
 	scans     int
+	pemWork   int // bytes the private-key tracker searched (linear in the text)
 	blocked   *ScanVerdict
 	truncated bounded.Truncated
 }
 
 type streamGuardLane struct {
 	text        strings.Builder
-	checkedEnd  int // text[:checkedEnd] was covered by a clean check
-	cloudEnd    int // text[:cloudEnd] was covered by a clean cloud check
-	releasedEnd int // text[:releasedEnd] has been released
-	pemStart    int // offset of an open private-key block, or -1
-	pemScanned  int // text[:pemScanned] has been searched for a PEM header or footer
-	pemFooter   int // offset of a candidate footer line of the open block, or -1
+	checkedEnd  int    // text[:checkedEnd] was covered by a clean check
+	cloudEnd    int    // text[:cloudEnd] was covered by a clean cloud check
+	releasedEnd int    // text[:releasedEnd] has been released
+	pemStart    int    // offset of an open private-key block, or -1
+	pemLabel    string // the label of the open block ("RSA PRIVATE KEY")
+	beginHold   int    // offset of a BEGIN line (any label) not yet complete, or -1
+	pemScanned  int    // text[:pemScanned] has been searched for a BEGIN line
+	endScanned  int    // text[:endScanned] has been searched for the open block's END line
 }
 
 type streamGuardUnit struct {
@@ -165,6 +168,22 @@ func (g *completionStreamGuard) PushLane(lane int, text string, data []byte) ([]
 	return g.release(), nil
 }
 
+// Hold adds an output unit that carries no new text (a buffered tool-call
+// chunk sent at its bound): it is released once every lane has released the
+// text pushed before it.
+func (g *completionStreamGuard) Hold(data []byte) ([][]byte, *ScanVerdict) {
+	return g.PushLane(g.lastLane(), "", data)
+}
+
+func (g *completionStreamGuard) lastLane() int {
+	for id, i := range g.laneIndex {
+		if i == len(g.lanes)-1 {
+			return id
+		}
+	}
+	return 0
+}
+
 // Truncate records that a cap cut the reading of the stream short (an SSE
 // line past its bound). It returns the blocking verdict when the pack's
 // unknown tier blocks a truncated input; then nothing more is released.
@@ -201,6 +220,7 @@ func (g *completionStreamGuard) Finish() ([][]byte, *ScanVerdict) {
 				}
 				l.pemStart = -1
 			}
+			l.beginHold = -1
 			if l.text.Len() > l.releasedEnd || l.text.Len() > l.checkedEnd {
 				if v := g.runCheck(l, g.windowStart(l), false); v != nil {
 					return nil, v
@@ -252,7 +272,7 @@ func (g *completionStreamGuard) lane(id int) *streamGuardLane {
 	if i, ok := g.laneIndex[id]; ok {
 		return g.lanes[i]
 	}
-	l := &streamGuardLane{pemStart: -1, pemFooter: -1}
+	l := &streamGuardLane{pemStart: -1, beginHold: -1}
 	g.laneIndex[id] = len(g.lanes)
 	g.lanes = append(g.lanes, l)
 	return l
@@ -279,70 +299,146 @@ func (g *completionStreamGuard) checkLane(l *streamGuardLane, final bool) *ScanV
 	return nil
 }
 
-// trackPEM follows a private-key block in lane l, searching only text not yet
-// searched: it opens on a header, checks the block once from its header when
-// the footer arrives, and checks it once as read, as a truncated input, past
-// the PEM bound (rel-1-0-10:GAP-0369).
+// trackPEM follows private-key blocks in lane l (rel-1-0-10:GAP-0369,
+// GAP-0428, GAP-0429). Every search starts where the last one stopped and
+// only moves forward, so the work is linear in the text (pemWork counts it):
+//
+//   - A BEGIN line of any label whose line is not complete yet holds the
+//     text from it on (beginHold), so a decoy header cannot hide a key
+//     header that follows it. A complete BEGIN line that is not a
+//     private-key header is passed and the search goes on after it.
+//   - A private-key header opens a block, held from its header on. The block
+//     is closed by its own END line (same label); an END line of another
+//     label is passed. The closed block is checked once from its header.
+//   - A block past the 64 KiB PEM bound is checked once as read and counts
+//     as truncated (the pack decides).
 func (g *completionStreamGuard) trackPEM(l *streamGuardLane) *ScanVerdict {
 	text := l.text.String()
-	from := l.pemScanned
-	l.pemScanned = len(text)
-	if l.pemStart < 0 {
-		// A header may straddle the previous push.
-		start := max(0, from-len("-----BEGIN ENCRYPTED PRIVATE KEY-----"))
-		at := strings.Index(text[start:], "-----BEGIN ")
-		for at >= 0 {
-			header := start + at
-			if open := secretshape.OpenPrivateKeyPEMStart(text[header:]); open == 0 {
-				l.pemStart = header
-				return nil
+	for {
+		if l.pemStart >= 0 {
+			done, v := g.trackPEMFooter(l, text)
+			if v != nil || done {
+				return v
 			}
-			start = header + 1
-			at = strings.Index(text[start:], "-----BEGIN ")
+			continue
 		}
-		return nil
-	}
-	block := text[l.pemStart:]
-	if nl := strings.IndexAny(block, "\r\n"); nl < 0 || l.pemStart+nl >= from {
-		// The header line was still open at the last push: is it a key?
-		if secretshape.OpenPrivateKeyPEMStart(block) != 0 {
-			l.pemStart = -1
+		at := strings.Index(text[l.pemScanned:], pemBeginToken)
+		g.pemWork += searched(len(text)-l.pemScanned, at, len(pemBeginToken))
+		if at < 0 {
+			// A BEGIN token may be arriving: hold from the earliest suffix
+			// of the text that starts it.
+			l.beginHold = pemTokenPrefixStart(text, pemBeginToken)
+			l.pemScanned = max(l.pemScanned, len(text)-len(pemBeginToken)+1)
 			return nil
 		}
-	}
-	closed := false
-	for !closed {
-		if l.pemFooter < 0 {
-			search := max(l.pemStart, from-len("-----END "))
-			at := strings.Index(text[search:], "-----END ")
-			if at < 0 {
-				break
+		begin := l.pemScanned + at
+		end, complete := pemLineEnd(text, begin)
+		g.pemWork += min(len(text)-begin, pemMaxHeaderLine+4)
+		if !complete {
+			if len(text)-begin > pemMaxHeaderLine {
+				l.pemScanned = begin + 1 // too long for a header line
+				continue
 			}
-			l.pemFooter = search + at
+			l.beginHold, l.pemScanned = begin, begin
+			return nil
 		}
-		// The block is closed by its own footer line (secretshape decides),
-		// read once the candidate line is there; another END line is skipped.
-		if secretshape.OpenPrivateKeyPEMStart(text[l.pemStart:]) != 0 {
-			closed = true
-			break
+		l.beginHold = -1
+		label, key := secretshape.PrivateKeyHeaderLabel(strings.TrimRight(text[begin:end], "\r"))
+		if !key {
+			l.pemScanned = begin + 1
+			continue
 		}
-		if nl := strings.IndexAny(text[l.pemFooter:], "\r\n"); nl < 0 {
-			break // the footer line is still being written
-		}
-		from = l.pemFooter + 1
-		l.pemFooter = -1
+		l.pemStart, l.pemLabel, l.endScanned = begin, label, end
 	}
-	if !closed && len(text)-l.pemStart <= streamGuardPEMBound {
-		return nil
-	}
-	start := l.pemStart
-	l.pemStart, l.pemFooter = -1, -1
-	if !closed {
+}
+
+// trackPEMFooter searches the open block of lane l for its own END line. It
+// reports done when the caller must stop (the block is still open, or the
+// check blocked); false when the block closed and the BEGIN search goes on.
+func (g *completionStreamGuard) trackPEMFooter(l *streamGuardLane, text string) (bool, *ScanVerdict) {
+	for {
+		at := strings.Index(text[l.endScanned:], pemEndToken)
+		g.pemWork += searched(len(text)-l.endScanned, at, len(pemEndToken))
+		footer := l.endScanned + at
+		if at >= 0 {
+			end, complete := pemLineEnd(text, footer)
+			g.pemWork += min(len(text)-footer, pemMaxHeaderLine+4)
+			switch {
+			case complete && strings.Contains(text[footer:end], pemEndToken+l.pemLabel+"-----"):
+				start := l.pemStart
+				l.pemStart, l.pemLabel, l.pemScanned = -1, "", end
+				if v := g.runCheck(l, start, false); v != nil {
+					return true, v
+				}
+				return false, nil
+			case complete || len(text)-footer > pemMaxHeaderLine:
+				// Another label's END line, or not a line: pass it.
+				l.endScanned = max(end, footer+1)
+				continue
+			}
+			// The END line is still being written: wait at its start.
+			l.endScanned = footer
+		} else {
+			l.endScanned = max(l.endScanned, len(text)-len(pemEndToken)+1)
+		}
+		if len(text)-l.pemStart <= streamGuardPEMBound {
+			return true, nil
+		}
+		start := l.pemStart
+		l.pemStart, l.pemLabel, l.pemScanned = -1, "", len(text)
 		if v := g.Truncate(bounded.Bytes); v != nil {
-			return v
+			return true, v
+		}
+		if v := g.runCheck(l, start, false); v != nil {
+			return true, v
+		}
+		return false, nil
+	}
+}
+
+const (
+	pemBeginToken    = "-----BEGIN "
+	pemEndToken      = "-----END "
+	pemMaxHeaderLine = 80
+)
+
+// searched is the number of bytes a search of n bytes read: up to the end of
+// the match at offset at, or all n when there was none.
+func searched(n, at, token int) int {
+	if at < 0 {
+		return n
+	}
+	return at + token
+}
+
+// pemLineEnd is the end of the line that starts at start: the first line
+// separator (a newline, or the two-character JSON escape of one, as
+// secretshape reads them), looked for within a header line's length. False
+// when the line is not complete yet.
+func pemLineEnd(text string, start int) (int, bool) {
+	limit := min(len(text), start+pemMaxHeaderLine+4)
+	window := text[start:limit]
+	end := -1
+	for _, sep := range []string{"\n", `\n`} {
+		if i := strings.Index(window, sep); i >= 0 && (end < 0 || i < end) {
+			end = i
 		}
 	}
-	return g.runCheck(l, start, false)
+	if end < 0 {
+		return 0, false
+	}
+	return start + end, true
+}
+
+// pemTokenPrefixStart is the offset of the longest suffix of text that is a
+// proper prefix of token, or -1.
+func pemTokenPrefixStart(text, token string) int {
+	for k := min(len(token)-1, len(text)); k > 0; k-- {
+		if strings.HasSuffix(text, token[:k]) {
+			return len(text) - k
+		}
+	}
+	return -1
 }
 
 // windowStart is where the next local check of lane l starts: all text not
@@ -410,6 +506,9 @@ func (g *completionStreamGuard) safeEnd(l *streamGuardLane) int {
 	}
 	if l.pemStart >= 0 && l.pemStart < end {
 		end = l.pemStart
+	}
+	if l.beginHold >= 0 && l.beginHold < end {
+		end = l.beginHold
 	}
 	if g.cloud != nil && l.cloudEnd < end-streamGuardCloudEvery {
 		// The cloud lane may still find something in text it has not read.
@@ -481,7 +580,7 @@ func (p *GuardrailProxy) streamGuardCheck(ctx context.Context, r *http.Request, 
 	if mode != "action" {
 		return nil
 	}
-	confirm := p.streamConfirmOnce(ctx, r, model, mode)
+	confirm := p.streamConfirmOnce(r, model, mode)
 	return func(window string) *ScanVerdict {
 		return confirm(p.inspector.InspectMidStream(ctx, "completion", window, nil, model, mode))
 	}
@@ -498,7 +597,7 @@ func (p *GuardrailProxy) streamGuardCloud(ctx context.Context, r *http.Request, 
 		// A test double or an inspector with no cloud lane: local checks only.
 		return nil
 	}
-	confirm := p.streamConfirmOnce(ctx, r, model, mode)
+	confirm := p.streamConfirmOnce(r, model, mode)
 	return func(window string) *ScanVerdict {
 		return confirm(p.inspector.InspectMidStream(ctx, "completion", window,
 			[]ChatMessage{{Role: "assistant", Content: window}}, model, mode))
@@ -508,7 +607,7 @@ func (p *GuardrailProxy) streamGuardCloud(ctx context.Context, r *http.Request, 
 // streamConfirmOnce resolves a confirm verdict of one response once: the
 // first is asked (resolveConfirm), and every later confirm of the same
 // response takes that answer instead of asking again.
-func (p *GuardrailProxy) streamConfirmOnce(_ context.Context, r *http.Request, model, mode string) func(*ScanVerdict) *ScanVerdict {
+func (p *GuardrailProxy) streamConfirmOnce(r *http.Request, model, mode string) func(*ScanVerdict) *ScanVerdict {
 	return confirmOnce(func(verdict *ScanVerdict) {
 		p.resolveConfirm(r.Context(), r, verdict, "completion", model, mode)
 	})

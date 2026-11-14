@@ -33,9 +33,10 @@ const (
 	// passthroughMaxLineBytes bounds one SSE line the reader holds before its
 	// end arrives; past it the line is judged as read (TRUNCATED).
 	passthroughMaxLineBytes = 1 << 20
-	// passthroughMaxToolBytes bounds the reply bytes held behind an open tool
-	// call; past it the calls are checked as read (TRUNCATED).
-	passthroughMaxToolBytes = 10 << 20
+	// streamMaxToolBytes bounds the reply bytes a stream holds behind an open
+	// tool call (passthrough, /llm and raw forward); past it the calls are
+	// checked as read (TRUNCATED).
+	streamMaxToolBytes = 10 << 20
 )
 
 // streamLaneText is model text of one lane (a choice index) in a stream event.
@@ -517,12 +518,19 @@ func (p *GuardrailProxy) streamPassthroughReply(w http.ResponseWriter, r *http.R
 				for s.blocked == nil {
 					i := bytes.IndexByte(line, '\n')
 					if longLine {
-						// The rest of a line past the bound: judged as read.
+						// The rest of a line past the bound: judged as read. A
+						// rune or a JSON escape split by the read waits in line
+						// for the next read, so the checked text is always the
+						// text of the bytes sent (GAP-0430).
 						end := len(line)
 						if i >= 0 {
 							end = i + 1
+						} else {
+							end = textSafeCut(line)
 						}
-						s.push(laneTexts(0, jsonEscapesRead(validUTF8Prefix(line[:end]))), append([]byte(nil), line[:end]...))
+						if end > 0 {
+							s.push(laneTexts(0, jsonEscapesRead(string(line[:end]))), append([]byte(nil), line[:end]...))
+						}
 						line = line[end:]
 						if i < 0 {
 							break
@@ -544,8 +552,9 @@ func (p *GuardrailProxy) streamPassthroughReply(w http.ResponseWriter, r *http.R
 						break
 					}
 					longLine = true
-					s.push(laneTexts(0, jsonEscapesRead(validUTF8Prefix(line))), append([]byte(nil), line...))
-					line = nil
+					cut := textSafeCut(line)
+					s.push(laneTexts(0, jsonEscapesRead(string(line[:cut]))), append([]byte(nil), line[:cut]...))
+					line = append([]byte(nil), line[cut:]...)
 				}
 			}
 		}
@@ -568,6 +577,11 @@ func (p *GuardrailProxy) streamPassthroughReply(w http.ResponseWriter, r *http.R
 		}
 	}
 	if s.blocked == nil {
+		// The calls are checked whole at the end, also when the bound sent
+		// them on as read (as /llm does), so a finding past it is recorded.
+		if s.toolsCapped {
+			s.toolsDone = false
+		}
 		s.checkTools()
 	}
 	if s.blocked != nil {
@@ -614,7 +628,7 @@ func (s *passthroughStream) route(units [][]byte) {
 		s.held = append(s.held, u)
 		s.heldBytes += len(u)
 	}
-	if s.heldBytes <= passthroughMaxToolBytes {
+	if s.heldBytes <= streamMaxToolBytes {
 		return
 	}
 	// Past the tool-call bound: check the calls as read; the pack decides
@@ -708,14 +722,33 @@ func writePassthroughStreamNotice(w http.ResponseWriter, flusher http.Flusher, p
 	}
 }
 
-// validUTF8Prefix is b as a string, cut before a rune split at its end.
-func validUTF8Prefix(b []byte) string {
-	end := len(b)
-	for i := 0; i < utf8.UTFMax && end > 0; i++ {
-		if utf8.Valid(b[:end]) {
+// textSafeCut is the longest prefix of b that ends neither inside a UTF-8
+// rune nor inside a JSON escape (a trailing backslash, or a \u with fewer
+// than four hex digits): the bytes after it wait for the next read.
+func textSafeCut(b []byte) int {
+	cut := len(b)
+	for i := 1; i <= utf8.UTFMax && i <= len(b); i++ {
+		if utf8.RuneStart(b[len(b)-i]) {
+			if !utf8.FullRune(b[len(b)-i:]) {
+				cut = len(b) - i
+			}
 			break
 		}
-		end--
 	}
-	return string(b[:end])
+	k := bytes.LastIndexByte(b[max(0, cut-6):cut], '\\')
+	if k < 0 {
+		return cut
+	}
+	k += max(0, cut-6)
+	run := 0
+	for j := k; j >= 0 && b[j] == '\\'; j-- {
+		run++
+	}
+	if run%2 == 0 {
+		return cut // an escaped backslash: complete
+	}
+	if k+1 == cut || (b[k+1] == 'u' && cut-k < 6) {
+		return k
+	}
+	return cut
 }
