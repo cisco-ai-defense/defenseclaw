@@ -67,3 +67,24 @@ func TestPowerShellOnlyGrammar(t *testing.T) {
 		}
 	}
 }
+
+func TestPosixLauncherRequotedBody(t *testing.T) {
+	for _, test := range []struct {
+		name, source, want string
+		ok                 bool
+	}{
+		{"path with a blank among separate words", `powershell -NoProfile -Command Add-Content -Path "C:\work dir\f" -Value k`, `Add-Content -Path "C:\work dir\f" -Value k`, true},
+		{"one word is the script", `powershell -Command "Get-ChildItem ~/.ssh"`, ``, false},
+		{"no blank to keep", `pwsh -Command Get-ChildItem -Force x`, ``, false},
+		{"a variable word", `pwsh -Command Add-Content -Path "$HOME/a b" -Value k`, ``, false},
+		{"encoded command", `powershell -EncodedCommand QQBBAA==`, ``, false},
+		{"not a launcher", `echo powershell -Command a "b c"`, ``, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, _, ok := posixLauncherRequotedBody(test.source)
+			if ok != test.ok || got != test.want {
+				t.Fatalf("posixLauncherRequotedBody(%q) = %q, %v; want %q, %v", test.source, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}

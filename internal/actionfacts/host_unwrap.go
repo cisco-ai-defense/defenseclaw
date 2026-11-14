@@ -699,6 +699,87 @@ func rawCMDLauncherLine(source string) (string, Dialect, bool) {
 	return "", DialectNone, false
 }
 
+// posixLauncherRequotedBody is the -Command script of a POSIX call to a
+// PowerShell host whose words psparse will not resolve to one script because
+// a word holds a blank: PowerShell joins the words after -Command with single
+// blanks, so `-Command Add-Content -Path "C:\Users\a b\f" -Value x` runs with
+// the path split in two, or, as its author meant it and as PowerShell 7 reads
+// a quoted argument, with the path whole. This reading is the author's: each
+// word with a blank is quoted again. It is a second reading beside the call as
+// written, so it only adds what that spelling does.
+func posixLauncherRequotedBody(source string) (string, Dialect, bool) {
+	lower := strings.ToLower(source)
+	if !strings.Contains(lower, "powershell") && !strings.Contains(lower, "pwsh") {
+		return "", DialectNone, false
+	}
+	out := parsePOSIX(source, 1, 0)
+	var top []CommandFact
+	for _, command := range out.commands {
+		if command.ParentCommandID == 0 {
+			top = append(top, command)
+		}
+	}
+	if len(top) != 1 {
+		return "", DialectNone, false
+	}
+	command := top[0]
+	if command.PipelineID != 0 || command.ControlFlowUncertain || command.Background ||
+		len(command.Redirects) != 0 || len(command.Wrappers) != 0 || !command.ArgvComplete ||
+		len(command.Argv) < 3 || len(command.Arguments) != len(command.Argv) {
+		return "", DialectNone, false
+	}
+	for _, argument := range command.Arguments {
+		if argument.Expands || argument.StaticGlob != "" {
+			return "", DialectNone, false
+		}
+	}
+	program := commandProgram(command.Executable)
+	if !hostLauncherIdentity(command.Argv[0], strings.TrimSuffix(program, ".exe")) ||
+		!slices.Contains([]string{"powershell", "powershell.exe", "pwsh", "pwsh.exe"}, program) {
+		return "", DialectNone, false
+	}
+	argv := command.Argv
+	index := 1
+	for ; index < len(argv); index++ {
+		word := strings.ToLower(argv[index])
+		switch {
+		case len(word) >= 2 && word[0] == '-' && strings.HasPrefix("command", word[1:]):
+			index++
+			goto found
+		case word == "-executionpolicy" || word == "-ep" || word == "-windowstyle" || word == "-w":
+			index++
+		case word == "-noprofile" || word == "-nop" || word == "-noninteractive" || word == "-noni" ||
+			word == "-nologo" || word == "-nol":
+		default:
+			return "", DialectNone, false
+		}
+	}
+	return "", DialectNone, false
+found:
+	if len(argv)-index < 2 {
+		// One word is the script itself, not words PowerShell joins.
+		return "", DialectNone, false
+	}
+	parts := make([]string, 0, len(argv)-index)
+	spaced := false
+	for _, word := range argv[index:] {
+		switch {
+		case word == "" || strings.ContainsAny(word, "\"'`$\r\n"):
+			return "", DialectNone, false
+		case strings.ContainsAny(word, " \t"):
+			spaced = true
+			parts = append(parts, `"`+word+`"`)
+		default:
+			parts = append(parts, word)
+		}
+	}
+	if !spaced {
+		// No blank to preserve: psparse's own reading of the call is the one.
+		return "", DialectNone, false
+	}
+	return strings.Join(parts, " "), DialectPowerShell, true
+}
+
 // posixOnlySyntax reports a text that holds a here-document operator (<<): no
 // PowerShell statement has one, so the text is a POSIX script whose body lines
 // (a note, a README, a script it writes) are not PowerShell statements and are
@@ -735,12 +816,11 @@ type HostScriptReading struct {
 	Caps bounded.CapSet
 }
 
-// HostScriptTwin is HostScriptReadings for one reading at depth 0: the one
-// twin when the call has exactly one, for callers that want the script of a
-// launcher.
+// HostScriptTwin is HostScriptReadings at depth 0: the first twin, which is the
+// script of a launcher, for callers that want that one script.
 func HostScriptTwin(input Input, facts Facts) (Input, bool) {
 	reading := HostScriptReadings(input, facts, 0, false)
-	if len(reading.Twins) != 1 {
+	if len(reading.Twins) == 0 {
 		return Input{}, false
 	}
 	return reading.Twins[0], true
@@ -799,6 +879,9 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 			if !ok {
 				body, bodyDialect, ok = posixSoleHostCallSource(source)
 			}
+			if !ok {
+				body, bodyDialect, ok = posixLauncherRequotedBody(source)
+			}
 			if !ok && powerShellOnlyGrammar(source) {
 				body, bodyDialect, ok = source, DialectPowerShell, true
 			}
@@ -826,6 +909,17 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 		}
 		twin.DialectHint = unwrapped.dialect
 		reading.Twins = append(reading.Twins, twin)
+		// A launcher word that holds a blank has two readings: the words
+		// joined as PowerShell 5.1 joins them (psparse's), and quoted as its
+		// author wrote them. The second is judged too.
+		if len(input.Argv) == 0 && layers == 1 && unwrapped.layers == 0 {
+			if requoted, requotedDialect, ok := posixLauncherRequotedBody(shellCommandText(input)); ok &&
+				requoted != unwrapped.source {
+				second := twin
+				second.Command, second.DialectHint = requoted, requotedDialect
+				reading.Twins = append(reading.Twins, second)
+			}
+		}
 		// The twin is a script: its own list of statements is read when the
 		// twin is read in turn, with the depth carried.
 		return reading

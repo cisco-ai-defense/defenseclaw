@@ -128,6 +128,7 @@ func TestWindowsProfilePathWithASpaceIsAProtectedKeyFile(t *testing.T) {
 		{"native", "PowerShell", `Add-Content -Path "` + key + `" -Value k`},
 		{"redirect", "PowerShell", `echo k >> "` + key + `"`},
 		{"launcher in a POSIX tool", "Bash", `powershell -NoProfile -Command Add-Content -Path "` + key + `" -Value k`},
+		{"foreign profile with a space, launcher words in a POSIX tool", "Bash", `powershell -NoProfile -Command Add-Content -Path "C:\Users\other sp\.ssh\authorized_keys" -Value k`},
 		{"launcher with quoted body", "PowerShell", `powershell -NoProfile -Command "Add-Content -Path '` + key + `' -Value k"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
