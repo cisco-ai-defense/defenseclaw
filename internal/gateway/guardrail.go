@@ -2824,11 +2824,6 @@ func currentTurnUserMessages(messages []ChatMessage) []ChatMessage {
 	return turn
 }
 
-// currentTurnUserText joins the text of currentTurnUserMessages.
-func currentTurnUserText(messages []ChatMessage) string {
-	return joinMessageText(currentTurnUserMessages(messages))
-}
-
 func joinMessageText(messages []ChatMessage) string {
 	parts := make([]string, len(messages))
 	for i, msg := range messages {
