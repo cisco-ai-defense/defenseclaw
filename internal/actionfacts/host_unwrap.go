@@ -693,28 +693,32 @@ func plainHostLauncherLine(source string) bool {
 }
 
 // TruncatedHostCall reports a call the tokenizer stopped reading at its input
-// bound that is a Windows host call whatever its tool label, or one whose
-// command was not read at all: a PowerShell or cmd tool label, a command text
-// that is one plain powershell or pwsh launcher line (plainHostLauncherLine,
-// read from the arguments as given up to their size limit), or a shell
-// command whose arguments are past that limit. Such a call is judged as
-// truncated, never a clean allow (rel-1-0-10:GAP-0345). The caller asks only
-// for a call past the input bound.
+// bound that holds a Windows host script the script reading would have read:
+// a command text that is one plain powershell or pwsh launcher line
+// (plainHostLauncherLine) under any tool label, or a PowerShell or cmd call
+// (by its tool label or dialect hint) that names a launcher, a call block or
+// Invoke-Expression (overSizeHostScriptMention). The text is read from the
+// arguments as given, up to their size limit. Such a call is judged as
+// truncated, never a clean allow (rel-1-0-10:GAP-0345); one long ordinary
+// statement past the bound stays as the readers left it (GAP-0318). The
+// caller asks only for a call past the input bound.
 func TruncatedHostCall(input Input) bool {
 	if len(input.Argv) != 0 {
 		return false
 	}
+	windows := input.DialectHint == DialectPowerShell || input.DialectHint == DialectCMD
 	switch strings.ToLower(input.Tool) {
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
-		return true
+		windows = true
 	}
 	text := input.Command
 	if text == "" {
 		if len(input.Args) == 0 || !argsExecutionTool(input.Tool) {
 			return false
 		}
-		if len(input.Args) > maxArgsJSONBytes {
-			return true
+		if len(input.Args) > maxTruncatedHostCallArgsBytes {
+			// Too large to screen: a Windows call is truncated unread.
+			return windows
 		}
 		var args struct {
 			Command string `json:"command"`
@@ -724,7 +728,40 @@ func TruncatedHostCall(input Input) bool {
 		}
 		text = args.Command
 	}
-	return plainHostLauncherLine(text)
+	return plainHostLauncherLine(text) || windows && overSizeHostScriptMention(text)
+}
+
+// maxTruncatedHostCallArgsBytes bounds the arguments TruncatedHostCall
+// screens (four times the analysis bound, the hook body size).
+const maxTruncatedHostCallArgsBytes = 4 * maxArgsJSONBytes
+
+// overSizeHostScriptMention reports a text that names what the script
+// reading reads: a powershell or pwsh launcher, a call block or
+// Invoke-Expression (its iex alias as a word). One pass, no parse.
+func overSizeHostScriptMention(text string) bool {
+	lower := strings.ToLower(text)
+	for _, word := range []string{"powershell", "pwsh", "invoke-expression", "& {", "&{"} {
+		if strings.Contains(lower, word) {
+			return true
+		}
+	}
+	for index := strings.Index(lower, "iex"); index >= 0; {
+		before := index == 0 || !isWordByte(lower[index-1])
+		after := index+3 >= len(lower) || !isWordByte(lower[index+3])
+		if before && after {
+			return true
+		}
+		next := strings.Index(lower[index+3:], "iex")
+		if next < 0 {
+			break
+		}
+		index += 3 + next
+	}
+	return false
+}
+
+func isWordByte(c byte) bool {
+	return 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '_' || c == '-'
 }
 
 // powerShellVariableAssignment is a statement that starts with $name = ...:
