@@ -81,7 +81,11 @@ type capFloorState struct {
 // syntax-tree depth: 30 terms of a pipe or && list reach it, and the owner
 // traces hold benign scripts of that depth that name the DefenseClaw tree in a
 // read or a print; they keep the verdict of the readers that did read them.
-func withCapFloor(parent context.Context, request trustedActionRequest, findings []RuleFinding, analyzed bounded.CapSet) []RuleFinding {
+//
+// statementsOnly (a call past the nested-body bound, decided at once by the
+// owner rule of GAP-0677) judges only the statements, never a shell body: a
+// body is what took the readers seconds there.
+func withCapFloor(parent context.Context, request trustedActionRequest, findings []RuleFinding, analyzed bounded.CapSet, statementsOnly bool) []RuleFinding {
 	if request.capFloor == nil {
 		return findings
 	}
@@ -106,6 +110,9 @@ func withCapFloor(parent context.Context, request trustedActionRequest, findings
 		return findings
 	}
 	head, tail := capFloorPieces(command)
+	if statementsOnly {
+		head, tail = slices.DeleteFunc(head, capFloorPiece.isBody), slices.DeleteFunc(tail, capFloorPiece.isBody)
+	}
 	if !capped {
 		// No cap: only a here-document fed to a shell is judged as the
 		// script it is.

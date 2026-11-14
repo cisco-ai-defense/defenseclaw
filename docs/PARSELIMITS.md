@@ -113,6 +113,11 @@ A here-document fed to a shell is that shell's script whether or not a cap is
 hit; its body is judged as a piece of every such call (GAP-0532: a state write
 in it was allowed at any size).
 
+A call past the nested-body bound is decided at once (the owner rule of
+GAP-0677): the floor judges only its statements of at most 4 KiB there, never
+a shell body, so a protected write beside the bodies still keeps its block
+(GAP-0381) and the decision stays inside the hook window.
+
 The floor has bounds of its own, each of which leaves the call at the unknown
 tier it already has: 16 pieces per hook call (half from the start of the call,
 half from its end, bodies included), a statement of at most 4 KiB, a shell

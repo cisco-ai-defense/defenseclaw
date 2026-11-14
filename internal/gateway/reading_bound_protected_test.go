@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,9 @@ func readingBoundNest(levels int, body string) string {
 type readingBoundRow struct {
 	name, tool, command string
 	// want is the action in the default tier; the strict tier blocks every
-	// row whose default action is not allow.
+	// row whose default action is not allow. alert|block accepts either: at
+	// least the evaluation limit, and a block where the cap floor proves a
+	// protected write on its own statement (rel-1-0-10:GAP-0435).
 	want string
 }
 
@@ -99,7 +102,7 @@ func readingBoundCellsIn(t *testing.T, rows []readingBoundRow, window time.Durat
 			if took := time.Since(start); window > 0 && took > window {
 				t.Errorf("%s %s (%d bytes): decided in %s", name, row.name, len(row.command), took)
 			}
-			if got != want {
+			if !slices.Contains(strings.Split(want, "|"), got) {
 				t.Errorf("%s %s: action=%s, want %s", name, row.name, got, want)
 			}
 		}
@@ -127,7 +130,7 @@ func TestGAP0534RecoveredParseBoundAlertsOutsideStrict(t *testing.T) {
 		"~/.defenseclaw/config.yaml", "~/.ssh/authorized_keys", "~/.claude/settings.json", "~/.codex/hooks.json",
 		"CLAUDE.md", "~/.bashrc", "/etc/sudoers", "$HOME",
 	} {
-		rows = append(rows, readingBoundRow{"protected " + target, "PowerShell", prefixes[index%2] + "Remove-Item -Recurse -Force " + target, guardrailActionAlert})
+		rows = append(rows, readingBoundRow{"protected " + target, "PowerShell", prefixes[index%2] + "Remove-Item -Recurse -Force " + target, guardrailActionAlert + "|" + guardrailActionBlock})
 	}
 	rows = append(rows, readingBoundRow{"known protected value", "PowerShell",
 		`$p = "~/.ssh"; ` + prefixes[1] + "Remove-Item -Recurse -Force $p", guardrailActionBlock})

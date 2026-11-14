@@ -87,7 +87,9 @@ func TestGAP0568StatementBudgetWork(t *testing.T) {
 		{gap0568Assignments(129), 129, []string{limit}},
 		{gap0568Assignments(1100), 1100, []string{limit}},
 		{gap0568Assignments(3000), 3000, []string{limit}},
-		{gap0568Assignments(600) + "; echo k >> ~/.ssh/authorized_keys", 601, []string{limit}},
+		// The keys write after the budget is judged on its own statement
+		// (the cap floor, rel-1-0-10:GAP-0435) and keeps its rule.
+		{gap0568Assignments(600) + "; echo k >> ~/.ssh/authorized_keys", 601, []string{limit, "persistence.ssh_authorized_keys_command"}},
 		{strings.Repeat("echo x | ", 200) + "cat", 201, []string{limit}},
 		{gap0568Assignments(200) + stateTail, 201, []string{limit, tamper}},
 		{gap0568Assignments(3000) + stateTail, 3001, []string{limit, tamper}},

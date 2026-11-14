@@ -431,6 +431,10 @@ func dispatchTrustedAction(
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
 	// analyzedCaps: the caps the action analysis below stopped at.
 	var analyzedCaps bounded.CapSet
+	// nestedBodies: the call is past the nested-body bound, which the owner
+	// ruled is decided at once (GAP-0677): the cap floor judges only its
+	// statements of at most capFloorPieceBytes, never its bodies.
+	var nestedBodies bool
 	if !request.capFloorSeen {
 		// After every path below, the budget and limit paths included: a
 		// block proven on a statement the cap did not take still decides
@@ -441,9 +445,10 @@ func dispatchTrustedAction(
 			request.capFloor = &capFloorState{}
 		}
 		floorRequest := request
-		defer func() { findings = withCapFloor(parent, floorRequest, findings, analyzedCaps) }()
+		defer func() { findings = withCapFloor(parent, floorRequest, findings, analyzedCaps, nestedBodies) }()
 	}
 	bound := trustedActionCommandBound(request.Input)
+	nestedBodies = bound == shellReadingNestedBodies
 	if bound == shellReadingBudget {
 		// Past the reading budget (shellparse.BudgetExceeded): no reader
 		// below parses it, and the call is opaque to them. It takes the

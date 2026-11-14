@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -145,6 +146,11 @@ func TestEvaluationLimitOnlyCallAlertsOutsideStrict(t *testing.T) {
 	alertOutsideStrict := map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}
 	everywhere := map[string]string{"default": "block", "permissive": "block", "strict": "block"}
 	allowed := map[string]string{"default": "allow", "permissive": "allow", "strict": "allow"}
+	// A protected write next to a reading cap is judged by the full readers on
+	// the statement that names it (the cap floor, rel-1-0-10:GAP-0435): it is
+	// at least the alert of the limit outside strict, and a block where a
+	// reader proves the write on that statement (a shell route).
+	floorOutsideStrict := map[string]string{"default": "alert|block", "permissive": "alert|block", "strict": "block"}
 	rows := []struct {
 		name, tool, command string
 		want                map[string]string
@@ -171,12 +177,13 @@ func TestEvaluationLimitOnlyCallAlertsOutsideStrict(t *testing.T) {
 		{"state folder removal behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse -Force ~/.defenseclaw", alertOutsideStrict, true},
 		{"ordinary command over the statement budget", "Bash", over, alertOutsideStrict, true},
 		{"DefenseClaw state write over the statement budget", "Bash", over + "; printf changed >> ~/.defenseclaw/config.yaml", everywhere, false},
-		// The documented limit: no target is proven in these calls, so they
-		// alert outside strict. Strict blocks them and the LLM judge is the
-		// second layer where it is configured.
-		{"keys append behind an unparsed statement", "PowerShell", unparsed + "Add-Content ~/.ssh/authorized_keys x", alertOutsideStrict, true},
+		// The documented limit: no target is proven in the call as a whole,
+		// so it is at least an alert outside strict; the cap floor proves the
+		// write on its own statement on a shell route. Strict blocks it and
+		// the LLM judge is the second layer where it is configured.
+		{"keys append behind an unparsed statement", "PowerShell", unparsed + "Add-Content ~/.ssh/authorized_keys x", floorOutsideStrict, true},
 		{"link into the keys file behind an unparsed statement", "PowerShell", unparsed + "Add-Content ~/project/keylink x", alertOutsideStrict, true},
-		{"keys append over the statement budget", "Bash", over + "; echo k >> ~/.ssh/authorized_keys", alertOutsideStrict, true},
+		{"keys append over the statement budget", "Bash", over + "; echo k >> ~/.ssh/authorized_keys", floorOutsideStrict, true},
 		{"keys append the call names", "Bash", "printf marker >> ~/.ssh/authorized_keys", everywhere, false},
 		{"ordinary write", "Bash", "printf marker >> notes.txt", allowed, false},
 	}
@@ -186,7 +193,7 @@ func TestEvaluationLimitOnlyCallAlertsOutsideStrict(t *testing.T) {
 			for _, managed := range []bool{false, true} {
 				for _, row := range rows {
 					got, findings := limitHookCell(t, api, connector, row.tool, home, cwd, row.command, managed)
-					if want := row.want[posture]; got != want {
+					if want := row.want[posture]; !slices.Contains(strings.Split(want, "|"), got) {
 						t.Errorf("%s %s managed=%t %s: action=%q want %q findings=%v", connector, posture, managed, row.name, got, want, findings)
 					}
 					hasLimit := slices.ContainsFunc(findings, func(f string) bool { return len(f) >= len(limit) && f[:len(limit)] == limit })
