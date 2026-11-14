@@ -684,6 +684,32 @@ func (w *walker) str(key, val string) {
 		return
 	}
 
+	// A value under a path key that joins several paths in one string
+	// ("paths": "/a/x,/b/y", one per line) names each of them.
+	if t.pathWrite[key] || t.inputKey[key] || t.pathRead[key] || t.pathKeySuffix(key) {
+		var over bool
+		if parts := pathList(val, &over); parts != nil {
+			if over {
+				w.trunc.Hit(bounded.Items)
+			}
+			kind := w.pathKind()
+			switch {
+			case t.pathWrite[key]:
+				kind = KindWrite
+			case t.inputKey[key]:
+				kind = KindRead
+			}
+			for _, part := range parts {
+				w.path(kind, key, part)
+			}
+			// Which reading the server applies is not known: a path whose name
+			// holds the separator is still judged whole.
+			if looksPath(val) {
+				w.path(kind, key, val)
+			}
+			return
+		}
+	}
 	switch {
 	case t.pathWrite[key] && looksPath(val):
 		w.path(KindWrite, key, val)
@@ -696,6 +722,46 @@ func (w *walker) str(key, val string) {
 	case !t.urlKey[key] && !t.redirectKey[key] && !t.recipientKey[key] && absolutePath(val):
 		w.path(w.pathKind(), key, val)
 	}
+}
+
+// pathList splits a value that joins several paths in one string on the
+// separator the value uses: a line break, else a comma, else a semicolon. It
+// returns nil unless there are at least two parts and every part is itself
+// path-shaped, so a single path with a comma in a name ("/data/a,b.txt") and
+// text that is not a list stay one value. Past maxItems parts it stops and
+// sets over.
+func pathList(v string, over *bool) []string {
+	var sep string
+	switch {
+	case strings.ContainsAny(v, "\r\n"):
+		v, sep = strings.ReplaceAll(v, "\r\n", "\n"), "\n"
+		v = strings.ReplaceAll(v, "\r", "\n")
+	case strings.Contains(v, ","):
+		sep = ","
+	case strings.Contains(v, ";"):
+		sep = ";"
+	default:
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(v, sep) {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if !looksPath(part) {
+			return nil
+		}
+		if len(out) >= maxItems {
+			*over = true
+			break
+		}
+		out = append(out, part)
+	}
+	if len(out) < 2 {
+		return nil
+	}
+	return out
 }
 
 // addressList splits an address field on commas and semicolons (at most 64
