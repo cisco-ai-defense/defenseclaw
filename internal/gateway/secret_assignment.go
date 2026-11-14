@@ -217,7 +217,7 @@ func secretAssignmentRejection(raw string) string {
 	if strings.ContainsAny(value, "_-.") {
 		letters, wordLetters := 0, 0
 		for _, run := range strings.FieldsFunc(value, func(r rune) bool {
-			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+			return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
 		}) {
 			letters += len(run)
 			wordLetters += secretAssignmentWordLettersMin(run, 3)
