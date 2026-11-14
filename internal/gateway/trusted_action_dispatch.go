@@ -383,6 +383,16 @@ func dispatchTrustedAction(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	// A call judged as the twin of its data word leaves a detection-only
+	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
+	// other defer, so a limit finding any of them raises is kept as it is and
+	// the record never stands in for it.
+	var unreadDataWord bool
+	defer func() {
+		if unreadDataWord {
+			findings = withPosixDataWordRecord(findings)
+		}
+	}()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	defer recoverTrustedActionFault(request, &findings)
 	if trustedActionFaultHook != nil {
@@ -627,6 +637,16 @@ func dispatchTrustedAction(
 	if set := posixParseTruncation(request, facts); set.Any() {
 		defer func() {
 			findings = withBoundedTruncation(findings, set, request)
+		}()
+	}
+	// A word past the bound that the local shell only passes on (a big script
+	// handed to dcx or ssh) is data: the call is judged as its twin with the
+	// word shortened, and the word leaves a detection-only record
+	// (rel-1-0-10:GAP-0382).
+	if twin, ok := posixDataWordTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+			unreadDataWord = true
 		}()
 	}
 	// Only the Git hook rule uses the hook client's bounded directory. Parse

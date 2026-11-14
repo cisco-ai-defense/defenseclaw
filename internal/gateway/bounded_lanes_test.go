@@ -175,7 +175,7 @@ func init() {
 }
 
 // boundedOneWord is one literal word of size bytes.
-func boundedOneWord(size int) string { return "echo " + strings.Repeat("a", size) }
+func boundedOneWord(size int) string { return "eval " + strings.Repeat("a", size) }
 
 // boundedWordThenStatements is the multi-cap shape of the input bytes lane:
 // the oversize word comes first, because the analysis stops at the first
