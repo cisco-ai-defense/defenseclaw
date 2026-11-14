@@ -17,9 +17,10 @@ import (
 // the output of a config-file userPromptSubmitted hook. Its mutation-only
 // userPromptTransformed event can replace the content the model receives, so
 // the gateway answers that event with DefenseClaw's notice in place of the
-// prompt. The verdict accounting is unchanged (raw block, effective allow,
-// would_block), Copilot's timeline still shows the user's prompt, and every
-// other profile keeps the no-modification contract.
+// prompt. That successful replacement is the enforcement mechanism, so the
+// effective verdict is block (not would-block). Copilot's timeline still
+// shows the user's prompt, and every other profile keeps the no-modification
+// contract.
 
 // copilotSecureClientPromptRewriteActive reports a gateway serving the
 // Secure Client profile. Replaced in tests.
@@ -33,6 +34,19 @@ func copilotSecureClientPromptRewriteOS(goos string) bool {
 	return goos == "windows" || goos == "darwin"
 }
 
+// copilotSecureClientPromptRewrite reports whether this decision will replace
+// the prompt Copilot sends to the model. Callers use the same predicate for
+// the returned vendor payload and the effective audit/telemetry outcome.
+func (a *APIServer) copilotSecureClientPromptRewrite(
+	ctx context.Context,
+	req agentHookRequest,
+	mode, rawAction string,
+) bool {
+	return req.ConnectorName == "copilot" && canonicalEvent(req.HookEventName) == "userprompttransformed" &&
+		mode == "action" && normalizeCodexAction(rawAction) == "block" &&
+		copilotSecureClientPromptRewriteActive(a.decisionConfig(ctx))
+}
+
 // copilotSecureClientPromptOutput returns the hook output for req: the
 // rewrite of a blocked Copilot prompt on Secure Client, otherwise output.
 func (a *APIServer) copilotSecureClientPromptOutput(
@@ -42,9 +56,7 @@ func (a *APIServer) copilotSecureClientPromptOutput(
 	findings []string,
 	output map[string]interface{},
 ) map[string]interface{} {
-	if req.ConnectorName != "copilot" || canonicalEvent(req.HookEventName) != "userprompttransformed" ||
-		mode != "action" || normalizeCodexAction(rawAction) != "block" ||
-		!copilotSecureClientPromptRewriteActive(a.decisionConfig(ctx)) {
+	if !a.copilotSecureClientPromptRewrite(ctx, req, mode, rawAction) {
 		return output
 	}
 	return map[string]interface{}{"modifiedTransformedPrompt": copilotBlockedPromptText(findings)}

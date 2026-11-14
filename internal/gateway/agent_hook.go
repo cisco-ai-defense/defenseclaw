@@ -3808,6 +3808,15 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		}
 	}
 
+	// Copilot's native prompt events cannot deny a prompt, but Secure Client
+	// enforces an action-mode block by replacing userPromptTransformed before
+	// the model sees it. Record that completed replacement as the effective
+	// block; observe mode and every non-rewrite path keep their mapped outcome.
+	if a.copilotSecureClientPromptRewrite(ctx, req, mode, rawAction) {
+		action, wouldBlock = "block", false
+		aiDefenseEnforced = verdict.aiDefenseBlock
+	}
+
 	// Emit per-rule findings before finalization so the eventual notification,
 	// audit row, and HTTP response share the same evaluation_id + rule_ids.
 	evalCtx := a.emitHookRuleFindings(ctx, req.ConnectorName, req.HookEventName, verdict,
