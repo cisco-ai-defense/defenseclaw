@@ -40,6 +40,7 @@ import (
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
 // Profile selects how much egress a sandbox gets.
@@ -121,7 +122,7 @@ const (
 	// of a sandbox without an ingress provider (Input.IngressRule).
 	IngressRuleName = "defenseclaw_ingress"
 	// EgressHost is how the workload reaches host loopback.
-	EgressHost = "host.openshell.internal"
+	EgressHost = sandboxruntime.OpenShellHostAlias
 	// SandboxHome is the workload HOME in the community base image.
 	SandboxHome = "/sandbox"
 	// AnyBinary matches every executable in the workload.

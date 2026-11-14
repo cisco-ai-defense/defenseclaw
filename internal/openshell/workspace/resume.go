@@ -343,6 +343,11 @@ func removeRemoteCopy(ctx context.Context, ex Execer, name string, recs ...*Copy
 		if rec.Kind == CopyPlain {
 			targets = append(targets, rec.RemoteGitDir)
 		}
+		// A state directory the copy had to itself goes with it; the
+		// shared default stays, as it always has.
+		if rec.privateState() {
+			targets = append(targets, rec.StateDir)
+		}
 		for _, t := range targets {
 			clean := path.Clean(t)
 			if clean != t || !strings.HasPrefix(clean, "/sandbox/") || strings.Count(clean, "/") < 3 {

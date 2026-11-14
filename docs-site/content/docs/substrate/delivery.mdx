@@ -1,0 +1,103 @@
+---
+title: Delivery and fleet management
+description: How DefenseClaw, its config, its policy and the agent kit reach an Agent Substrate cluster without MDM, how updates roll out, how drift is caught, and how a fleet of clusters and agents is managed.
+keywords:
+  - Agent Substrate Helm
+  - DefenseClaw GitOps
+  - policy rollout Kubernetes
+  - fleet management agents
+---
+
+{/* Commands checked against sub/a6 77468de3d5 and the chart README (sub/a8). */}
+
+On laptops, an MDM (Intune, Jamf) delivers DefenseClaw, its config and its policy, and keeps them in place. Kubernetes has no MDM. Its equivalents are a package manager (Helm), a source of truth in git (GitOps with Argo CD or Flux), and Kubernetes access control. DefenseClaw uses those, and keeps the trust model it already has: **signed artifacts, verified by DefenseClaw itself.**
+
+## What gets delivered
+
+| Item | Laptop (MDM) | Cluster |
+|---|---|---|
+| DefenseClaw | Signed package (pkg, msi, rpm, deb) | Signed container image (one binary for gateway, leader, controller and callout) |
+| How it's installed | MDM pushes the package | Signed Helm chart from an OCI registry |
+| Config (`config.yaml`) | MDM profile or file | Helm values (`config:`), rendered into one ConfigMap that every component reads |
+| Policy (rule packs, admission, profiles, sandbox packs) | Signed policy delivered by the MDM | Helm values and profiles, applied by Helm or GitOps; the same policy files and rules |
+| Trust anchors (who may sign policy) | Installed by MDM | Set at install, held in a Secret only platform admins can change |
+| Keys (model providers, AI Defense, LLM judge) | Protected credential on each laptop | Kubernetes Secrets, or Substrate's credential provider (Vault, cloud secret managers) |
+| What runs in the agent | Hooks written into each agent's config | The DefenseClaw kit, built into the agent template with `template build`, as signed per-connector kit images pinned by digest |
+
+## Install
+
+<Tabs items={['Helm', 'GitOps']}>
+
+<Tab value="Helm">
+
+```bash
+helm install defenseclaw oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate \
+  --version 1.0.10 -n defenseclaw-system -f defenseclaw-values.yaml
+defenseclaw substrate setup
+```
+
+`setup` writes the `SubstrateInstall` overlay: it registers the egress callout, and sets the route timeouts that long model streams need. When your Substrate version supports it, it also opts the callout in to reading bodies. It refuses when another callout is registered.
+
+Check the signatures before installing, the same way as release downloads:
+
+```bash
+cosign verify ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10 ...
+```
+
+</Tab>
+
+<Tab value="GitOps">
+
+Commit the chart reference and `defenseclaw-values.yaml` to the repo Argo CD or Flux watches. Changes go through review like any other cluster change. DefenseClaw needs nothing beyond what the chart installs. Run `defenseclaw substrate setup` once, and again after a Substrate upgrade.
+
+</Tab>
+
+</Tabs>
+
+## Rolling out policy
+
+Policy lives in the chart values (`config:`) and in the profiles. Change them the way you change any cluster setting: `helm upgrade`, or a commit that Argo CD or Flux applies.
+
+- **The change is checked first.** `helm upgrade` checks the new config and refuses one that does not load.
+- **Running agents.** The controller rewrites their allow lists. Suspended agents get the new policy before they resume.
+- **Rollback.** `helm rollback`, or revert the commit. Nothing on a laptop needs to change.
+- **Trust anchors.** Who may sign policy for the cluster is set at install and held in a Secret only platform admins can change. Staged, signed rollouts per atespace are for administrators and are described in the management documentation, not here.
+
+## Upgrades
+
+- **DefenseClaw.** `helm upgrade` checks the new config, refuses to skip a minor version, and rolls the gateway under its disruption budget, so hooks keep being answered. The leader migrates its store at start, after a backup. `helm rollback` to a release with an older store schema is refused, and the message names the backup.
+- **The agent kit.** Each gateway accepts the kit from its own release and the one before. An older kit gets a refusal with a `migrate` hint (`defenseclaw substrate migrate <name>` moves an actor to a rebuilt template). The fleet view lists templates with an older kit. Rebuild them with `template build`, ideally in the CI pipeline that builds your agent images.
+- **Agent Substrate.** Each DefenseClaw release names the Substrate versions it was tested with (`>=1.0.0 <1.1.0` for 1.0.10). `verify` warns on any other. Upgrade Substrate with the upstream runbook, then run `setup` and `verify`.
+
+## Keeping it in place
+
+On laptops, tamper protection keeps users from removing DefenseClaw. In a cluster the threats differ, and so does the protection:
+
+| What could happen | What stops it |
+|---|---|
+| Someone edits DefenseClaw's config or Deployments | Kubernetes access control. Only platform admins can write `defenseclaw-system`. Changes made outside the chart show as drift in the fleet view |
+| Someone loosens an agent's allow list with `kubectl ate update egress-policy` | The controller sees the change, puts DefenseClaw's list back, and records who made it and what they changed. After three reverts in ten minutes the controller stops, marks the actor `policy_conflict` and raises an alert, so two writers don't fight forever. It never adds access while reverting |
+| Someone starts an agent in a team atespace without DefenseClaw | Substrate access policy lets only DefenseClaw create agents there |
+| Someone builds a template without the kit | Its agents get no network, and the template is reported |
+| An agent tries to change its own hooks | The hook config is root-owned in the image. The agent runs as an ordinary user |
+| Someone creates an atespace like `eng-evil` that matches a team pattern | Only Substrate global owners create atespaces, and patterns match only atespaces DefenseClaw created or you list |
+
+## Uninstall
+
+`helm uninstall` first removes every egress policy DefenseClaw wrote, so agents fall back to deny-all, and the credential provider grant. It fails while any remain, and prints the snapshot purge steps. Then run `defenseclaw substrate setup --remove` to take the callout out of the overlay. **Nothing is left open.** The store volume is kept unless you delete it. Delete the agents, or give them allow lists of your own. On a cluster where people sign in with Kubernetes credentials, the uninstall also removes the gateway's `system:auth-delegator` ClusterRoleBinding and names it in its log.
+
+## Fleet management
+
+A fleet here is **clusters, then atespaces (teams), then agents, then the people who start them.** Each cluster has one DefenseClaw install that reports for all of its agents.
+
+**What each install reports**
+- **Health:** gateway replicas ready, which replica is the leader, controller lag (agent created to allow list written), callout answering and whether it reads bodies, the Substrate version.
+- **Policy:** the policy generation per atespace, and allow lists changed outside DefenseClaw (drift and conflicts).
+- **Inventory:** templates with their agent, version, kit version and scan result; agents running and suspended; who started each.
+- **Activity:** checks, blocks and asks per team and per agent; sites refused; unattested templates; spend; batches.
+
+**How to read it**
+- The output of `defenseclaw substrate status --cluster --json` and `defenseclaw substrate verify --json` follows the same machine-readable contract as the [managed-laptop commands](/docs/enterprise/managed-commands). A management agent, a GitOps pipeline or a script can read health the same way for clusters and laptops.
+- The OpenTelemetry stream carries all of it, so the Grafana dashboards, Splunk or any OTLP backend show the fleet next to your laptops. Every record carries `k8s.cluster.name`.
+
+**Many clusters.** Install DefenseClaw once per cluster, with the same values and trust anchors, and a unique actor-token issuer per cluster. One dashboard covers all of them.

@@ -1,0 +1,971 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package extproc
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+)
+
+// Categories the callout adds to the egress Decider's (egress.Category).
+// The set is closed: it labels telemetry.
+const (
+	CategoryUnattributed    = "unattributed"
+	CategoryActorNotLive    = "actor_not_live"
+	CategoryURLRule         = "url_rule"
+	CategoryPathAmbiguous   = "path_ambiguous"
+	CategoryChainEgress     = "chain_egress"
+	CategoryChainUnchecked  = "chain_unchecked"
+	CategoryAskDenied       = "ask_denied"
+	CategoryAskPending      = "ask_pending"
+	CategoryMCPToolBlocked  = "mcp_tool_blocked"
+	CategoryBodyUninspected = "body_uninspectable"
+	CategoryCalloutError    = "callout_error"
+	CategoryInternalHost    = "defenseclaw_internal"
+)
+
+// Decision sources the callout adds to egress.Source.
+const (
+	sourceIdentity = "identity"
+	sourceProfile  = "profile"
+	sourceDLP      = "dlp"
+	sourceChain    = "chain"
+	sourceAsk      = "ask"
+	sourceTool     = "tool_rules"
+	sourceCallout  = "callout"
+	sourceOwnHost  = "defenseclaw"
+)
+
+// Header is one request header, its name in lower case.
+type Header struct {
+	Name  string
+	Value string
+}
+
+// Request is the part of a request the Engine decides on.
+type Request struct {
+	// ID names the request in its event and in the tool verdict call.
+	ID          string
+	Actor       ActorRef
+	IdentityErr error
+	Method      string
+	Scheme      string
+	Authority   string
+	// Path is :path, query included.
+	Path string
+	// Host is the normalized :authority host; empty when invalid.
+	Host    string
+	Headers []Header
+	// ContentLength is -1 when the request did not say.
+	ContentLength int64
+	ContentType   string
+	Accept        string
+	// EndOfStream marks a request with no body.
+	EndOfStream bool
+	Start       time.Time
+}
+
+func (r *Request) header(name string) string {
+	for _, h := range r.Headers {
+		if h.Name == name {
+			return h.Value
+		}
+	}
+	return ""
+}
+
+// headerList joins every line of a list-valued header with commas, as an
+// origin that merges repeated lines reads it (RFC 9110 5.3): a second
+// Content-Encoding line is never ignored.
+func (r *Request) headerList(name string) string {
+	var vals []string
+	for _, h := range r.Headers {
+		if h.Name == name {
+			vals = append(vals, h.Value)
+		}
+	}
+	return strings.Join(vals, ",")
+}
+
+// Verdict is the Engine's decision for a request.
+type Verdict struct {
+	Allow bool
+	// Alert marks an allowed request with findings worth an alert.
+	Alert bool
+	// OwnHost marks a DefenseClaw host: no mutation, no chain step.
+	OwnHost     bool
+	Category    string
+	Source      string
+	Rule        string
+	Reason      string
+	Feed        string
+	FeedVersion string
+	// AdminRule is the organization's list that refused (egress_block,
+	// egress_allow_only), for the managed refusal text.
+	AdminRule string
+	Profile   string
+	AskID     string
+	Findings  []string
+	// Retryable refusals (the callout could not decide) answer 503.
+	Retryable bool
+	// formRules marks a POST whose body may name another method (_method)
+	// where a deny or ask rule covers its host and path (GAP-0046):
+	// DecideBody decides it again on every method the body names.
+	formRules bool
+	// asked is the ask keys already raised for this request, so the body
+	// stage raises only the asks its methods add.
+	asked []string
+	// WantBody asks the server to switch the request to buffered body mode.
+	WantBody      bool
+	BodyInspected bool
+	BodyOverCap   bool
+}
+
+// Options configure an Engine. Nil interfaces get the interim behaviour:
+// no UID resolution, no asks (an ask-required host is refused, D12), no
+// chain state, no tool judge (MCP bodies get the DLP scans only).
+type Options struct {
+	Config       *Config
+	Policies     PolicySource
+	UIDs         UIDResolver
+	Asks         AskSink
+	ChainSink    ChainSink
+	ChainChecker ChainChecker
+	Judge        ToolJudge
+	Events       EventSink
+	Now          func() time.Time
+}
+
+// Engine decides requests. It is safe for concurrent use.
+type Engine struct {
+	cfg        *Config
+	policies   PolicySource
+	uids       *UIDCache
+	asks       AskSink
+	chain      *chainQueue
+	checker    ChainChecker
+	judge      ToolJudge
+	events     EventSink
+	red        *Redactor
+	secrets    *secretValues
+	dcHosts    *hostMatcher
+	internal   *hostMatcher
+	mcpHosts   *hostMatcher
+	bodyHosts  *hostMatcher
+	mcpNames   map[string]string
+	bindings   []binding
+	body       *bodyMode
+	chainLimit chainLimiter
+	now        func() time.Time
+}
+
+// NewEngine builds an Engine and starts its chain worker; Close stops it.
+func NewEngine(o Options) (*Engine, error) {
+	cfg := o.Config
+	if cfg == nil {
+		cfg = &Config{}
+	}
+	if err := cfg.normalize(); err != nil {
+		return nil, err
+	}
+	e := &Engine{cfg: cfg, policies: o.Policies, asks: o.Asks, checker: o.ChainChecker, judge: o.Judge,
+		events: o.Events, now: o.Now, mcpNames: map[string]string{}}
+	if e.now == nil {
+		e.now = time.Now
+	}
+	if e.policies == nil {
+		sp, err := NewStaticPolicies(cfg)
+		if err != nil {
+			return nil, err
+		}
+		e.policies = sp
+	}
+	e.uids = NewUIDCache(o.UIDs, cfg.UID.CacheTTL, cfg.UID.StaleMax)
+	e.uids.now = e.now
+	if cfg.Chain.CheckBudget > 0 {
+		e.uids.refreshBudget = cfg.Chain.CheckBudget
+	}
+	e.secrets = newSecretValues(cfg.ActorSecretsDir)
+	e.secrets.now = e.now
+	e.red = newRedactor(cfg, e.secrets)
+	e.dcHosts = mustHostMatcher(cfg.DefenseClawHosts)
+	e.internal = mustHostMatcher(cfg.InternalHosts)
+	e.mcpHosts = mustHostMatcher(mcpHostNames(cfg.MCPHosts))
+	e.bodyHosts = mustHostMatcher(cfg.BodyHosts)
+	for _, entry := range cfg.MCPHosts {
+		h, name, _ := strings.Cut(entry, "=")
+		if nh, _, err := normalizeHost(h); err == nil && strings.TrimSpace(name) != "" {
+			e.mcpNames[nh] = strings.TrimSpace(name)
+		}
+	}
+	e.bindings = compileBindings(cfg.Secrets)
+	e.body = newBodyMode(cfg.BodyInspection)
+	e.chain = newChainQueue(o.ChainSink, cfg.Chain.QueueSize)
+	return e, nil
+}
+
+// Close stops the chain worker after it drains.
+func (e *Engine) Close() { e.chain.close() }
+
+// Redactor returns the engine's redactor.
+func (e *Engine) Redactor() *Redactor { return e.red }
+
+// BodyModeStatus is the body-mode detection state (for readiness and
+// doctor): off, unknown or supported.
+func (e *Engine) BodyModeStatus() string { return e.body.status() }
+
+// Degraded names what the callout can't do now, for readiness and doctor:
+// "mcp_refused_until_body_support" while closed-mode auto refuses MCP
+// requests to listed hosts (GAP-0146); "mcp_bodies_not_inspected" for a
+// managed callout whose admin set body_inspection off, which records every
+// MCP request to a listed host but never reads its body (GAP-0146
+// residual); "" otherwise.
+func (e *Engine) Degraded() string {
+	switch {
+	case e.closedAuto() && len(e.cfg.MCPHosts) > 0 && !e.body.confirmed():
+		return "mcp_refused_until_body_support"
+	case e.cfg.Managed && e.cfg.BodyInspection == BodyOff && len(e.cfg.MCPHosts) > 0:
+		return "mcp_bodies_not_inspected"
+	}
+	return ""
+}
+
+// closedAuto is a managed enterprise callout that fails closed with
+// body_inspection auto: it may not forward an MCP body it was never shown
+// it can read (GAP-0146). OSS installs ask for the body and alert when it
+// does not come (balanced defaults).
+func (e *Engine) closedAuto() bool {
+	return e.cfg.Managed && e.cfg.FailureMode == FailureClosed && e.cfg.BodyInspection == BodyAuto
+}
+
+// ChainDropped is how many observed_egress steps the full queue dropped.
+func (e *Engine) ChainDropped() uint64 { return e.chain.droppedCount() }
+
+func deny(v Verdict, category, source, rule, reason string) Verdict {
+	v.Allow, v.Alert = false, false
+	v.Category, v.Source, v.Rule, v.Reason = category, source, rule, reason
+	v.WantBody = false
+	return v
+}
+
+// failure applies the failure mode to a request the callout could not
+// decide: refused (retryable) when closed, allowed with an alert when open.
+func (e *Engine) failure(v Verdict, category, reason string) Verdict {
+	if e.cfg.FailureMode == FailureOpen {
+		v.Allow, v.Alert = true, true
+		v.Findings = append(v.Findings, category)
+		return v
+	}
+	v = deny(v, category, sourceCallout, "", reason)
+	v.Retryable = true
+	return v
+}
+
+// DecideHeaders decides a request on its headers, within MessageBudget.
+func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
+	ctx, cancel := context.WithTimeout(ctx, MessageBudget)
+	defer cancel()
+	defer func() {
+		if r := recover(); r != nil {
+			v = e.failure(Verdict{}, CategoryCalloutError, "The DefenseClaw egress callout hit an internal error.")
+		}
+	}()
+	begin := e.now()
+	var p pass
+	v = e.decideHeaders(ctx, req, &p)
+	switch {
+	case p.stale:
+		// The cache entry is dropped: the name is resolved again.
+		p = pass{last: true}
+		v = e.decideHeaders(ctx, req, &p)
+	case !p.confirmed:
+		switch e.uids.Refresh(ctx, req.Actor, policyRefusal(v), begin) {
+		case RefreshChanged:
+			p = pass{last: true, refreshed: true}
+			v = e.decideHeaders(ctx, req, &p)
+		case RefreshSame:
+			p.confirmed = true
+		case RefreshUnreachable:
+			// The leader can't be reached: nobody can say the actor was
+			// deleted or recreated, the same limit as a lookup outage. The
+			// pass stands as chain.failure_mode decided it (GAP-0090,
+			// GAP-0188, GAP-0245).
+			p.confirmed = true
+			if v.Allow {
+				v.Alert = true
+				v.Findings = append(v.Findings, "registration_unavailable")
+			}
+		}
+	}
+	if !p.confirmed && !policyRefusal(v) {
+		// Not even a refusal of the policy stages to stand on: an unchecked
+		// step or a cached delete, and the leader did not confirm the
+		// incarnation in time. Never chain.failure_mode's allow (GAP-0243).
+		v = deny(v, CategoryChainUnchecked, sourceIdentity, uncheckedUnconfirmed,
+			"DefenseClaw could not confirm this actor's registration in time.")
+		v.Retryable = true
+	}
+	return v
+}
+
+// policyRefusal is a refusal that does not need the incarnation confirmed
+// to stand: not an allow, an unchecked step or a delete (GAP-0243).
+func policyRefusal(v Verdict) bool {
+	return !v.Allow && v.Category != CategoryChainUnchecked && v.Category != CategoryActorNotLive
+}
+
+// pass is one decideHeaders pass over a request.
+//
+// The UID cache gets no lifecycle events, so a cached entry can name an
+// incarnation that was deleted, or replaced by a same-name actor created
+// again (GAP-0234). No decision stands on such an entry: a pass is
+// confirmed when the leader confirmed the incarnation during it (the
+// name was resolved now, or the chain check, which the leader answers only
+// for the name's live incarnation, came back clear or hit), or when the
+// decision did not use the registration. An unconfirmed pass (a refusal
+// by the host, URL or DLP stages, or an unchecked chain step, on a cached
+// entry) resolves the name again, and a changed registration decides the
+// request again; a stale chain answer drops the entry and decides it
+// again. So a recreated actor is decided under its own profile and UID,
+// never its predecessor's (GAP-0237). The last pass decides as it is.
+//
+// A refresh is bounded (GAP-0243): one lookup per name in flight, and a
+// request waits a short budget for it. Unconfirmed, a refusal of the policy
+// stages stands (it is a refusal), and only such a refusal may stand on a
+// refresh made within refusalReuse.
+//
+// An unreachable leader has one rule (GAP-0245): when the lookup gets no
+// answer from the leader (a transport error or a timeout), nobody can say
+// the actor was deleted, so chain.failure_mode decides, from the first
+// request of the outage, as it does once the entry ages out (an alert on an
+// attended OSS install; refused on a managed install or for an unattended
+// actor). While the leader is reachable, an unchecked step or a cached
+// delete needs its answer: one that misses this request's budget is
+// refused, retryable (registration_unconfirmed), and a stale or not-live
+// answer refuses.
+type pass struct {
+	last bool
+	// refreshed: the entry was resolved by Refresh for this request.
+	refreshed bool
+	confirmed bool
+	stale     bool
+}
+
+// decideHeaders is one pass of DecideHeaders under its budget.
+func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Verdict) {
+	// Nothing before the registration lookup uses it.
+	p.confirmed = true
+	if req.IdentityErr != nil {
+		return deny(v, CategoryUnattributed, sourceIdentity, "",
+			"The request carries no actor identity from the Substrate egress gateway, so DefenseClaw can't tell whose it is.")
+	}
+	if req.Host == "" {
+		return deny(v, string(egress.CategoryInvalidDestination), string(egress.SourceGuard), "", egress.CategoryInvalidDestination.Reason())
+	}
+	if _, ok := e.internal.match(req.Host); ok {
+		// D15: the admin listener is never reachable from an actor, even
+		// if a policy or a looser NetworkPolicy would let it through.
+		return deny(v, CategoryInternalHost, sourceOwnHost, "",
+			"Actors can't reach this DefenseClaw service; it is for people and DefenseClaw itself.")
+	}
+	if _, ok := e.dcHosts.match(req.Host); ok {
+		// The actor listener: the gateway verifies the JWT and inspects the
+		// hook or model call itself. Never buffered (model streams).
+		return Verdict{Allow: true, OwnHost: true, Source: sourceOwnHost}
+	}
+	// The registration names the actor's UID (its chain window), profile and
+	// attendance (GAP-0090). A lookup outage (the leader, past the stale
+	// window) does not stop the actor's traffic: the actor is matched by
+	// atespace, and only its chain check is missing, which
+	// chain.failure_mode decides (refused on a managed install). The
+	// actor's last known registration still names its profile and
+	// attendance; with none, nobody can say a person watches the actor, so
+	// it counts as unattended, and under auto its unchecked egress is
+	// refused, retryable (D8, GAP-0188).
+	rec, src, err := e.uids.Resolve(ctx, req.Actor)
+	// A cached entry is confirmed by the chain check below, or resolved
+	// again. Nothing is learned from a second lookup during an outage, and
+	// an entry with no registration lives uidMissTTL only.
+	p.confirmed = p.refreshed || src != fromCache || (err == nil && rec.UID == "")
+	lookupDown := false
+	switch {
+	case errors.Is(err, ErrActorNotLive):
+		return deny(v, CategoryActorNotLive, sourceIdentity, "",
+			"DefenseClaw's registrations say this actor was deleted.")
+	case err != nil:
+		lookupDown = true
+		v.Alert = true
+		v.Findings = append(v.Findings, "registration_unavailable")
+		var le *LookupError
+		if errors.As(err, &le) && le.Known {
+			rec = ActorRecord{Profile: le.Last.Profile, Unattended: le.Last.Unattended}
+		} else {
+			rec = ActorRecord{Unattended: true}
+			v.Findings = append(v.Findings, "attendance_unknown")
+		}
+	}
+	req.Actor.UID, req.Actor.Profile, req.Actor.Unattended = rec.UID, rec.Profile, rec.Unattended
+	pol, err := e.policies.PolicyFor(ctx, req.Actor)
+	if err != nil || pol == nil {
+		return e.failure(v, CategoryCalloutError, "DefenseClaw could not load this actor's policy.")
+	}
+	v.Profile = pol.Name
+
+	d := pol.decider.DecideHost(egress.Principal{SandboxName: req.Actor.Name}, req.Host)
+	if !d.Allowed {
+		v = deny(v, string(d.Category), string(d.Source), d.Rule, d.Reason)
+		v.Feed, v.FeedVersion, v.AdminRule = d.Feed, d.FeedVersion, egress.AdminRule(d.Category)
+		return v
+	}
+
+	// URL rules match the canonical path (GAP-0046): an equivalent
+	// spelling (/./admin, /%61dmin, //admin) matches like the plain one, and
+	// a path an origin could read another way is refused where a path rule
+	// applies. Every method the request can stand for counts: its own and
+	// every one an override header or query parameter names (override.go).
+	methods := requestMethods(req)
+	refusal, asks, refused := e.urlRuleVerdict(v, req, pol, methods)
+	if refused {
+		return refusal
+	}
+	// A POST read as a form can name its method in the body (_method).
+	// Where a deny or ask rule covers the host and path under any method,
+	// the body decides; a body the callout can't read follows the failure
+	// mode (GAP-0046). The asks wait for the body once the egress filter
+	// has shown it sends bodies; until then they are raised now as well, in
+	// case the body never comes.
+	deferAsks := false
+	// A JSON POST can name it too (Laravel, Express's req.body getter): held
+	// only where a deny or ask rule names a method other than POST.
+	if (bodyOverridable(req) && pol.rulesOnPath(req)) || (jsonBody(req) && pol.rulesNameAnotherMethod(req)) {
+		if why := e.overrideBodyUnreadable(req); why != "" {
+			if v, refused = e.overrideUnchecked(v, req, why); refused {
+				return v
+			}
+		} else {
+			v.formRules = true
+			deferAsks = e.body.confirmed()
+		}
+	}
+
+	for _, f := range append(e.scanURL(req, pol), e.scanHeaders(req, pol)...) {
+		if f.deny {
+			return deny(v, f.kind, sourceDLP, f.where, dlpReason(f))
+		}
+		v.Alert = true
+		v.Findings = append(v.Findings, f.String())
+	}
+
+	cv, outcome, chainWhy := e.checkChain(ctx, ChainStep{Kind: StepObservedEgress, Actor: req.Actor, Host: req.Host,
+		Method: req.Method, Allowed: true, Time: e.now()})
+	if lookupDown && e.checker != nil {
+		outcome, chainWhy = chainUnchecked, uncheckedLookup
+	}
+	switch outcome {
+	case chainClear, chainHit:
+		if e.checker != nil && req.Actor.UID != "" {
+			p.confirmed = true
+		}
+	case chainStale:
+		// The leader, which keeps the registrations, says the cached UID is
+		// no longer the actor's.
+		e.uids.Invalidate(req.Actor.Atespace, req.Actor.Name)
+		if !p.last {
+			p.stale = true
+			return v
+		}
+		// Stale again under the name's fresh registration: it changed again
+		// meanwhile. A new actor's UID comes from its registration and is
+		// never stale, so refusing loses nothing (GAP-0234).
+		v = deny(v, CategoryChainUnchecked, sourceChain, uncheckedStale,
+			"DefenseClaw's registrations for this actor changed while the request was checked.")
+		v.Retryable = true
+		return v
+	}
+	switch outcome {
+	case chainClear:
+		if len(cv.Detected) > 0 {
+			v.Alert = true
+			for _, id := range cv.Detected {
+				v.Findings = append(v.Findings, "chain_detected:"+id)
+			}
+		}
+	case chainHit:
+		reason := cv.Reason
+		if reason == "" {
+			reason = "Earlier in this session the actor read a secret; DefenseClaw blocks sending data off the cluster after that."
+		}
+		return deny(v, CategoryChainEgress, sourceChain, cv.Rule, clip(reason, 320))
+	case chainUnchecked:
+		// The step still reaches the window through the observed_egress
+		// queue (Finish); only this request's check is missing.
+		if e.chainFailClosed(pol) {
+			v = deny(v, CategoryChainUnchecked, sourceChain, chainWhy,
+				"DefenseClaw could not check this request against the actor's earlier tool calls in time, and this actor's policy refuses unchecked egress.")
+			v.Retryable = true
+			return v
+		}
+		v.Alert = true
+		v.Findings = append(v.Findings, "chain_unchecked:"+chainWhy)
+	}
+
+	if !deferAsks {
+		if v, refused = e.askStage(ctx, v, req, pol, asks, methods); refused {
+			return v
+		}
+	}
+
+	v.Allow = true
+	if v.Source == "" {
+		v.Source = string(d.Source)
+	}
+	var why string
+	v.WantBody, why = e.wantBody(req)
+	if v.formRules {
+		v.WantBody = true
+	}
+	return e.uninspected(v, why)
+}
+
+// askStage raises the asks a request standing for methods needs: every
+// url rule ask that applies, each naming the methods it covers, and each
+// must be approved; with none, the host's ask_hosts ask. An ask this
+// request already raised (v.asked) is not raised again. refused is set
+// when an ask was not approved.
+func (e *Engine) askStage(ctx context.Context, v Verdict, req *Request, pol *Policy, asks []*urlRule, methods []string) (Verdict, bool) {
+	var targets []askTarget
+	for _, r := range asks {
+		targets = append(targets, askFor(r, req, methods))
+	}
+	if len(targets) == 0 {
+		if pat, ok := pol.askHosts.match(req.Host); ok {
+			targets = append(targets, askTarget{rule: "ask_hosts:" + pat})
+		}
+	}
+	for _, t := range targets {
+		if slices.Contains(v.asked, t.rule) {
+			continue
+		}
+		if v = e.ask(ctx, v, req, pol, t); !v.Allow {
+			return v, true
+		}
+		v.asked = append(v.asked, t.rule)
+	}
+	return v, false
+}
+
+// urlRuleVerdict applies pol's URL rules to the request under methods:
+// a refusal (deny, or an ambiguous path where a path rule applies) with
+// refused true, else every ask rule that applies. URL rules only tighten,
+// by strength and not by order (GAP-0171): every rule that applies counts,
+// substrate.admin's and the profile's, and the strictest wins (deny, then
+// ask). An approval of an ask never lifts a deny, since the deny is
+// decided first.
+func (e *Engine) urlRuleVerdict(v Verdict, req *Request, pol *Policy, methods []string) (Verdict, []*urlRule, bool) {
+	reqPath, pathErr := canonicalPath(pathOnly(req.Path))
+	var asks []*urlRule
+	for i := range pol.urlRules {
+		r := &pol.urlRules[i]
+		if !r.appliesTo(req.Host, methods) {
+			continue
+		}
+		if r.pathPrefix != "" {
+			if pathErr != nil {
+				return deny(v, CategoryPathAmbiguous, sourceProfile, r.name,
+					"The request path uses an ambiguous encoding (an encoded slash, backslash, semicolon, percent sign or control character, or a dot segment), so DefenseClaw can't check it against this profile's path rules for "+req.Host+"."), nil, true
+			}
+			if !r.matchesPath(reqPath) {
+				continue
+			}
+		}
+		switch r.action {
+		case "deny":
+			return deny(v, CategoryURLRule, sourceProfile, r.name,
+				"This actor's profile does not allow "+strings.Join(methods, " or ")+" requests to this path on "+req.Host+"."), nil, true
+		case "ask":
+			asks = append(asks, r)
+		}
+	}
+	return v, asks, false
+}
+
+// overrideBodyUnreadable is why the body of a POST that may name another
+// method can't be read, or "": a multipart body is never buffered (D9), a
+// stated length over the cap, body inspection off, or a callout that fails
+// closed with body_inspection auto to which the egress filter has not yet
+// sent a body (stock Agent Substrate v1.0.0 never does, and forwards the
+// body unread).
+func (e *Engine) overrideBodyUnreadable(req *Request) string {
+	switch {
+	case multipartBody(req):
+		return whyMultipart
+	case req.ContentLength > e.cfg.BodyMaxBytes:
+		return whyOverCap
+	case !e.body.want():
+		return whyInspectOff
+	case e.cfg.FailureMode == FailureClosed && e.cfg.BodyInspection == BodyAuto && !e.body.confirmed():
+		return whyUnavailable
+	}
+	return ""
+}
+
+// overrideUnchecked applies the failure mode to a POST whose body may name
+// a method a url rule refuses or asks about and can't be read (GAP-0046):
+// refused when closed (managed installs, and the chart default), allowed
+// with an alert when open. refused is set for a refusal.
+func (e *Engine) overrideUnchecked(v Verdict, req *Request, why string) (Verdict, bool) {
+	if e.cfg.FailureMode != FailureClosed {
+		v.Alert = true
+		v.Findings = append(v.Findings, "method_override_unchecked:"+why)
+		return v, false
+	}
+	var because string
+	switch why {
+	case whyMultipart:
+		because = "DefenseClaw does not read multipart bodies"
+	case whyOverCap:
+		because = "the body is over the inspection limit"
+	case whyInspectOff:
+		because = "body inspection is off (substrate.extproc.body_inspection)"
+	case whyUnavailable:
+		because = "this cluster's egress has not shown that it sends request bodies to the check; an administrator sets substrate.extproc.body_inspection to on with the Agent Substrate body opt-in"
+	default:
+		because = "its Content-Encoding or charset can't be decoded"
+	}
+	return deny(v, CategoryBodyUninspected, sourceProfile, "method_override",
+		"This POST may name another method in its body (_method), and DefenseClaw can't read the body to check it against this profile's url rules for "+req.Host+": "+because+"."), true
+}
+
+// checkFormOverride decides a POST again on every method its body names
+// (formRules), then raises the asks those methods add. refused is set for
+// a refusal.
+func (e *Engine) checkFormOverride(ctx context.Context, req *Request, pol *Policy, v Verdict, raw []byte) (Verdict, bool) {
+	if int64(len(raw)) > e.cfg.BodyMaxBytes {
+		// A body sent without a length, larger than the cap.
+		return e.overrideUnchecked(v, req, whyOverCap)
+	}
+	named, why := bodyMethods(raw, req, e.cfg.BodyMaxBytes)
+	methods := appendMethods(requestMethods(req), strings.Join(named, ","))
+	refusal, asks, refused := e.urlRuleVerdict(v, req, pol, methods)
+	if refused {
+		return refusal, true
+	}
+	if why != "" {
+		if v, refused = e.overrideUnchecked(v, req, why); refused {
+			return v, true
+		}
+	}
+	return e.askStage(ctx, v, req, pol, asks, methods)
+}
+
+// askTarget is what an ask names: the rule that raised it, and for an url
+// rule the methods it asks about and its path prefix. An approval binds to
+// exactly what the person saw (GAP-0177, STEER 03:40Z): host, rule id,
+// method and path prefix. The gateway keys approvals by host and rule, so
+// the methods are part of an url rule ask's rule key.
+type askTarget struct {
+	rule   string
+	method string
+	path   string
+}
+
+// askFor is the ask of url rule r for a request standing for methods (its
+// own and every override it names): the methods r lists among them, sorted
+// (all of them for a rule without methods).
+func askFor(r *urlRule, req *Request, methods []string) askTarget {
+	var ms []string
+	for _, m := range methods {
+		if (len(r.methods) == 0 || r.methods[m]) && !slices.Contains(ms, m) {
+			ms = append(ms, m)
+		}
+	}
+	if len(ms) == 0 {
+		ms = []string{strings.ToUpper(req.Method)}
+	}
+	slices.Sort(ms)
+	method := strings.Join(ms, ",")
+	t := askTarget{rule: "url_rules:" + r.name + " " + method, method: method, path: r.pathPrefix}
+	if t.path == "" {
+		t.path = "/"
+	}
+	return t
+}
+
+// Why an inspected host's body is not inspected. The first two are framing
+// the actor chose; the others are the deployment's.
+const (
+	whyOverCap    = "over_cap"
+	whyStreaming  = "streaming_content_type"
+	whyInspectOff = "body_inspection_off"
+	// whyUnavailable: a managed closed callout, body_inspection auto and no
+	// body has reached the callout yet (GAP-0146).
+	whyUnavailable = "body_inspection_unavailable"
+)
+
+// uninspected applies GAP-0044 to a request on an MCP or admin-listed host
+// whose body won't be inspected: inspect or refuse, never allow silently.
+// Framing the actor controls (a body over the cap, a streaming content
+// type) is refused when the failure mode is closed and an alert when open.
+// body_inspection off is recorded; a filter that ignores the override is
+// an alert when the stream ends without the body (Server.end).
+func (e *Engine) uninspected(v Verdict, why string) Verdict {
+	switch why {
+	case "":
+		return v
+	case whyUnavailable:
+		return deny(v, CategoryBodyUninspected, sourceCallout, why,
+			"DefenseClaw checks the requests sent to this MCP server, and this cluster's egress has not shown that it sends request bodies to the check, so the request can't be inspected. An administrator sets substrate.extproc.body_inspection to on (Agent Substrate with the body opt-in) or off (headers only).")
+	case whyOverCap, whyStreaming:
+		v.BodyOverCap = why == whyOverCap
+		if e.cfg.FailureMode == FailureClosed {
+			reason := "DefenseClaw inspects the requests sent to this host, and this one's body is over the inspection limit, so it can't be checked."
+			if why == whyStreaming {
+				reason = "DefenseClaw inspects the requests sent to this host, and this one's body is a stream (event stream, gRPC or multipart), so it can't be checked."
+			}
+			return deny(v, CategoryBodyUninspected, sourceCallout, why, reason)
+		}
+		v.Alert = true
+	}
+	if why == whyOverCap {
+		v.Findings = append(v.Findings, "body_over_cap")
+	}
+	v.Findings = append(v.Findings, "body_not_inspected:"+why)
+	return v
+}
+
+func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, t askTarget) Verdict {
+	rule := t.rule
+	if e.asks == nil {
+		// No approvals service yet: an unanswerable ask is a denial (D12).
+		return deny(v, CategoryAskDenied, sourceAsk, rule, "This host needs an approval, and no approvals service is configured.")
+	}
+	actx, cancel := context.WithTimeout(ctx, e.cfg.Ask.Hold)
+	defer cancel()
+	method := t.method
+	if method == "" {
+		method = req.Method
+	}
+	res, err := e.asks.Ask(actx, AskRequest{Actor: req.Actor, Profile: pol.Name, Host: req.Host, Method: method,
+		Rule: rule, PathPrefix: t.path, UnattendedAsks: pol.UnattendedAsks})
+	v.AskID = res.ID
+	switch {
+	case err != nil && !errors.Is(err, context.DeadlineExceeded):
+		return e.failure(v, CategoryCalloutError, "DefenseClaw could not raise the approval this host needs.")
+	case res.Outcome == AskApproved:
+		v.Allow, v.Source = true, sourceAsk
+		return v
+	case res.Outcome == AskDenied:
+		reason := "The approval this host needs was denied."
+		if res.Reason != "" {
+			reason = clip(res.Reason, 320)
+		}
+		return deny(v, CategoryAskDenied, sourceAsk, rule, reason)
+	}
+	return deny(v, CategoryAskPending, sourceAsk, rule, "This host needs an approval that has not been given yet.")
+}
+
+// wantBody reports whether to buffer the request's body (D9), or why a body
+// on an inspected host can't be. MCP and admin-listed hosts only. Every
+// request with a body counts, whatever its method or content type and
+// whether or not it states a length (GAP-0044: framing is the actor's
+// choice): a request without Content-Length is buffered too, bounded by
+// the egress filter's buffer and then by the cap in DecideBody. A stated
+// length over the cap, and event-stream, gRPC and multipart bodies (never
+// buffered, D9), can't be inspected.
+func (e *Engine) wantBody(req *Request) (bool, string) {
+	_, mcp := e.mcpHosts.match(req.Host)
+	_, listed := e.bodyHosts.match(req.Host)
+	if (!mcp && !listed) || req.EndOfStream {
+		// No body: Envoy marks end of stream on the headers. A stated
+		// Content-Length of 0 is not trusted on its own.
+		return false, ""
+	}
+	ct := strings.ToLower(req.ContentType)
+	if strings.Contains(ct, "text/event-stream") || strings.HasPrefix(ct, "application/grpc") ||
+		strings.HasPrefix(ct, "multipart/") {
+		return false, whyStreaming
+	}
+	if req.ContentLength > e.cfg.BodyMaxBytes {
+		return false, whyOverCap
+	}
+	if !e.body.want() {
+		return false, whyInspectOff
+	}
+	if mcp && e.closedAuto() && !e.body.confirmed() {
+		// A stock egress filter would send this request on with its body
+		// unread; nothing has shown that this one sends bodies (GAP-0146).
+		return false, whyUnavailable
+	}
+	return true, ""
+}
+
+// DecideBody decides a request again on its buffered body; v is its headers
+// verdict. Every tools/call of a batch is judged within one MessageBudget:
+// a batch that does not fit follows the failure mode.
+func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body []byte) (out Verdict) {
+	ctx, cancel := context.WithTimeout(ctx, MessageBudget)
+	defer cancel()
+	defer func() {
+		if r := recover(); r != nil {
+			out = e.failure(v, CategoryCalloutError, "The DefenseClaw egress callout hit an internal error.")
+		}
+	}()
+	v.WantBody = false
+	pol, err := e.policies.PolicyFor(ctx, req.Actor)
+	if err != nil || pol == nil {
+		return e.failure(v, CategoryCalloutError, "DefenseClaw could not load this actor's policy.")
+	}
+	if v.formRules {
+		// The method override is read from the body as sent, before the
+		// GAP-0044 decoding below, which refuses what an origin may still
+		// read (GAP-0046).
+		refused := false
+		if v, refused = e.checkFormOverride(ctx, req, pol, v, body); refused {
+			return v
+		}
+		v.BodyInspected = true
+		_, mcp := e.mcpHosts.match(req.Host)
+		_, listed := e.bodyHosts.match(req.Host)
+		if !mcp && !listed {
+			// The body was read for the override only: no DLP on a host
+			// that is not inspected (D9).
+			return v
+		}
+	}
+	if int64(len(body)) > e.cfg.BodyMaxBytes {
+		// A body sent without a length, larger than the cap.
+		return e.uninspected(v, whyOverCap)
+	}
+	// Inspect what the origin reads (GAP-0044): a gzip body or a UTF-8 BOM
+	// is decoded, and a body that can't be is refused or alerted, never
+	// passed as "no tool call".
+	body, why := decodeBody(body, req.headerList("content-encoding"), req.ContentType, e.cfg.BodyMaxBytes)
+	switch why {
+	case "":
+	case whyOverCap:
+		return e.uninspected(v, whyOverCap)
+	default:
+		return e.unreadable(v, why)
+	}
+	v.BodyInspected = true
+	for _, f := range e.scanBody(req, pol, body) {
+		if f.deny {
+			return deny(v, f.kind, sourceDLP, f.where, dlpReason(f))
+		}
+		v.Alert = true
+		v.Findings = append(v.Findings, f.String())
+	}
+	if _, mcp := e.mcpHosts.match(req.Host); !mcp {
+		return v
+	}
+	// The DLP scans ran on the decoded text; a tool call needs JSON the
+	// callout can parse as the server will.
+	if why := jsonRPCReadable(body); why != "" {
+		return e.unreadable(v, why)
+	}
+	calls, err := parseToolCalls(body)
+	if err != nil {
+		return deny(v, CategoryMCPToolBlocked, sourceTool, "jsonrpc", clip(refusalReason(err), 320))
+	}
+	if len(calls) == 0 {
+		return v
+	}
+	if e.judge == nil {
+		// No rule path (callout.judge.tokenSecret turned off): the tool
+		// rules can't run, so the call is never a silent allow
+		// (GAP-0015). A managed install refuses it.
+		if e.cfg.Managed {
+			return deny(v, CategoryMCPToolBlocked, sourceTool, "tool_rules_not_configured",
+				"DefenseClaw can't check this MCP tool call: the tool rules are not configured for the egress callout.")
+		}
+		v.Alert = true
+		v.Findings = append(v.Findings, "tool_rules_not_configured")
+		return v
+	}
+	server := e.mcpNames[req.Host]
+	if server == "" {
+		server = req.Host
+	}
+	// The verdict route matches MCP asset rules on the URL (scheme, host and
+	// path, never the query) and ties its findings to the session and to
+	// this request's event (GAP-0015).
+	scheme := strings.ToLower(req.Scheme)
+	if scheme == "" {
+		scheme = "https"
+	}
+	callURL := scheme + "://" + req.Host + pathOnly(req.Path)
+	session := clip(req.header("mcp-session-id"), 128)
+	for _, c := range calls {
+		jctx, cancel := context.WithTimeout(ctx, e.cfg.Judge.Timeout)
+		tv, err := e.judge.JudgeToolCall(jctx, ToolCall{Actor: req.Actor, Server: server, Host: req.Host, URL: callURL,
+			Tool: c.name, Args: c.args, SessionID: session, RequestID: req.ID})
+		cancel()
+		if err != nil {
+			return e.failure(v, CategoryCalloutError, "DefenseClaw could not check this MCP tool call against its tool rules.")
+		}
+		if tv.Block {
+			reason := "DefenseClaw's tool rules refused the MCP tool call " + strconv.Quote(clip(c.name, 64)) + "."
+			if tv.Reason != "" {
+				reason += " " + clip(tv.Reason, 240)
+			}
+			return deny(v, CategoryMCPToolBlocked, sourceTool, "tools/call:"+clip(c.name, 64), reason)
+		}
+		if tv.Alert {
+			// The hooks' alert action: allowed, recorded.
+			v.Alert = true
+			v.Findings = append(v.Findings, "tool_rules_alert:"+clip(c.name, 64))
+		}
+	}
+	return v
+}
+
+func dlpReason(f finding) string {
+	switch f.kind {
+	case findSecretInURL:
+		return fmt.Sprintf("The URL carries a secret-shaped value (%s).", f.label)
+	case findSecretInHeader, findSecretInCredential:
+		return fmt.Sprintf("A request header carries a secret-shaped value (%s).", f.label)
+	case findSecretInBody:
+		return fmt.Sprintf("The request body carries a secret-shaped value (%s).", f.label)
+	case findActorSecret:
+		return fmt.Sprintf("The request carries the value of the actor secret %s, which must not leave the cluster.", f.label)
+	}
+	return "The request carries data DefenseClaw does not let leave the cluster."
+}
+
+// clip bounds s for a reason: printable characters only, at most n bytes.
+func clip(s string, n int) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+			r = ' '
+		}
+		if b.Len()+len(string(r)) > n {
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}

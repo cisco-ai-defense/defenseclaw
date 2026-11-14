@@ -122,6 +122,9 @@ RULES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
         ("packaging/windows/", "scripts/*.ps1", "scripts/*.psm1", "scripts/*.cs", "scripts/*windows*"),
         frozenset({"windows", "pwsh"}),
     ),
+    # The Agent Substrate chart and images: the chart goldens are Go tests
+    # (internal/substrate/setup, CI job substrate-chart).
+    (("deploy/",), frozenset({"go"})),
     (("packaging/",), frozenset({"packaging"})),
     ((".goreleaser.yaml", "release/"), frozenset({"packaging", "windows"})),
     # The Unix connector harness: connector-live-e2e.yml selects its full

@@ -323,7 +323,48 @@ function defenseclawGatewayJSON(text) {
   return value;
 }
 
-{{if .Sandbox}}async function defenseclawToken() {
+{{if .Sandbox}}{{if .SandboxSubstrate}}// Agent Substrate actor variant: the plugin holds no token and opens no
+// connection of its own. Each post goes through the actor kit's hook-post
+// command (stdin {path, headers, body}, stdout {status, body}), which sends it
+// in the kit envelope with the actor header placeholder (Substrate egress
+// swaps in the actor JWT) over the kit's kept-alive transport, retries once
+// and carries the idempotency key. No answer means a non-zero exit, which
+// the callers below treat as a transport failure and fail closed.
+const DC_HOOK_POST_BINARY = "{{.SandboxHookPostBinary}}";
+
+async function defenseclawToken() {
+  return "";
+}
+
+async function defenseclawFetch(headers, body) {
+  return await new Promise((resolve, reject) => {
+    const child = execFile(DC_HOOK_POST_BINARY, ["hook-post"], {
+      timeout: DC_TIMEOUT_MS + DC_RETRY_TIMEOUT_MS,
+      maxBuffer: 4 << 20,
+      windowsHide: true,
+    }, (err, stdout) => {
+      if (err) return reject(err);
+      let out;
+      try {
+        out = JSON.parse(String(stdout));
+      } catch (_) {
+        return reject(new Error("hook-post answered something that is not JSON"));
+      }
+      const status = Number(out && out.status);
+      if (!Number.isInteger(status) || status < 100 || status > 599) return reject(new Error("hook-post answered no status"));
+      const text = String(out.body == null ? "" : out.body);
+      resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        headers: { get: () => null },
+        text: async () => text,
+      });
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end(JSON.stringify({ path: "/api/v1/opencode/hook", headers: headers || {}, body }));
+  });
+}
+{{else}}async function defenseclawToken() {
   const token = String(process.env.DEFENSECLAW_SANDBOX_TOKEN || "");
   if (!DC_TOKEN_PATTERN.test(token)) throw new Error("missing or malformed sandbox binding token");
   return token;
@@ -360,7 +401,7 @@ async function defenseclawFetch(headers, body) {
   if (last instanceof Error) throw last;
   return last;
 }
-{{else}}async function defenseclawToken() {
+{{end}}{{else}}async function defenseclawToken() {
   const file = await open(DC_TOKEN_FILE, "r");
   try {
     const raw = new Uint8Array(DC_MAX_TOKEN_FILE_BYTES + 1);

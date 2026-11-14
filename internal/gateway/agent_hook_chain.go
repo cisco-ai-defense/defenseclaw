@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"os"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -32,6 +33,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -254,12 +256,12 @@ func hasUnplacedRelativePath(facts actionfacts.Facts) bool {
 }
 
 type toolChainHookFinalization struct {
-	repository   *audit.ToolChainRepository
+	repository   toolChainStore
 	receiptIDs   []string
 	evaluationID string
 	// rootRepository and rootReceiptIDs are the root scope's receipts
-	// (issue #1391), kept in the root-scope tables.
-	rootRepository *audit.ToolChainRepository
+	// (issue #1391, or a Substrate actor's window), kept in the root tables.
+	rootRepository toolChainStore
 	rootReceiptIDs []string
 }
 
@@ -313,12 +315,15 @@ func (a *APIServer) applyAgentHookToolChains(
 	resp agentHookResponse,
 	latency time.Duration,
 	panicState *toolChainHookPanicState,
-) (agentHookResponse, toolChainHookFinalization) {
+) (hookResp agentHookResponse, hookFinalization toolChainHookFinalization) {
 	var finalization toolChainHookFinalization
 	// Managed enterprise policy is authoritative on hook content. Keep the
 	// local semantic/chain lane disabled with the rest of the local scanners
 	// so one request cannot produce competing local and managed decisions.
-	if a == nil || ManagedEnterpriseActive() || req.toolChain == nil {
+	// The switch is the host daemon's: a verified Substrate actor's steps
+	// always feed its actor window on the leader, which the callout's egress
+	// check reads, in every tier (GAP-0211).
+	if a == nil || (ManagedEnterpriseActive() && !isSubstrateActorRequest(ctx)) || req.toolChain == nil {
 		return resp, finalization
 	}
 
@@ -331,6 +336,22 @@ func (a *APIServer) applyAgentHookToolChains(
 	lifecycleEligible := profile.ExperimentalToolLifecycleEligible()
 	projectionEligible := lifecycleEligible &&
 		(structuredAction || stateTransition || pairedResult)
+	// A verified Substrate actor's tool step must reach its actor window on
+	// the leader: the callout's egress check reads it (GAP-0201). A step
+	// that can't is reported, never skipped silently: rootMissed says why.
+	_, substrateActor := substrateActorFrom(ctx)
+	substrateStep := substrateActor &&
+		(structuredAction || route == connector.ToolEventRouteResultContent)
+	rootMissed := ""
+	if substrateStep && !lifecycleEligible {
+		rootMissed = "the hook contract is not one this gateway reviewed for the actor's agent version (" +
+			profile.CompatibilityReason + ")"
+	}
+	defer func() {
+		if substrateStep && rootMissed != "" {
+			hookResp = a.substrateChainUnrecorded(ctx, profile, req, hookResp, latency, rootMissed)
+		}
+	}()
 	var projection guardrail.ToolChainProjection
 	var typedFindings []RuleFinding
 	if projectionEligible {
@@ -387,17 +408,24 @@ func (a *APIServer) applyAgentHookToolChains(
 
 	if a.store == nil || req.SemanticEventID == "" ||
 		req.ConnectorInstanceID == "" {
-		return resp, finalization
-	}
-	repository, err := a.store.ToolChainRepository()
-	if err != nil {
+		if lifecycleEligible {
+			rootMissed = "the hook event has no correlation on this gateway replica"
+		}
 		return resp, finalization
 	}
 	// Root scope (issue #1391): nil unless guardrail.chains.root_scope is on
 	// and a trusted connector's root_session_id was honoured. Session ends and
 	// turn boundaries reset only the session scope: the root scope follows
-	// the work across them, bounded by the same event and time windows.
-	rootRepository := a.toolChainRootRepository(ctx, req)
+	// the work across them, bounded by the same event and time windows. A
+	// verified Substrate actor's session and actor windows are on the leader
+	// (toolChainStores).
+	repository, rootRepository, ok := a.toolChainStores(ctx, req)
+	if !ok {
+		if lifecycleEligible {
+			rootMissed = "this gateway replica has no binding to the leader's chain state"
+		}
+		return resp, finalization
+	}
 	rawFingerprint := sha256.Sum256(rawBody)
 	inputFingerprint := hex.EncodeToString(rawFingerprint[:])
 	if !lifecycleEligible {
@@ -448,12 +476,15 @@ func (a *APIServer) applyAgentHookToolChains(
 	if !projectionEligible {
 		return resp, finalization
 	}
-	rulesetFingerprint, err := activeToolChainRulesetFingerprint(
+	rulesetFingerprint, err := toolChainRulesetFingerprint(
 		ctx,
 		req.ConnectorName,
 		profile,
 	)
 	if err != nil {
+		// No fingerprint, no observation: an actor's step is reported, not
+		// dropped (GAP-0201 residual).
+		rootMissed = "the active tool chain ruleset could not be fingerprinted: " + err.Error()
 		return resp, finalization
 	}
 
@@ -524,10 +555,14 @@ func (a *APIServer) applyAgentHookToolChains(
 		if rootRepository != nil {
 			// The root scope promotes its own copy of the proposal; a failure
 			// there leaves the session verdict as it is.
-			if rootResolved, rootErr := rootRepository.ResolvePending(ctx, resolveInput); rootErr == nil &&
+			rootResolved, rootErr := rootRepository.ResolvePending(ctx, resolveInput)
+			if rootErr == nil &&
 				outcome == connector.ToolLifecycleOutcomeSuccess &&
 				rootResolved.Status == audit.ToolChainPendingResolved {
 				rootResult, rootResolvedSuccess = rootResolved.Observation, true
+			}
+			if rootErr != nil {
+				rootMissed = "the leader did not take the step: " + rootErr.Error()
 			}
 		}
 		if resolveErr != nil {
@@ -625,12 +660,17 @@ func (a *APIServer) applyAgentHookToolChains(
 	if !resolvedSuccess && toolChainProjectionHasSteps(observationProjection) {
 		result, err = repository.Observe(ctx, observeInput)
 		if err != nil {
+			if rootRepository != nil && !rootResolvedSuccess {
+				rootMissed = "the leader did not take the step: " + err.Error()
+			}
 			return resp, finalization
 		}
 	}
 	if rootRepository != nil && !rootResolvedSuccess && toolChainProjectionHasSteps(observationProjection) {
 		if observed, rootErr := rootRepository.Observe(ctx, observeInput); rootErr == nil {
 			rootResult = observed
+		} else {
+			rootMissed = "the leader did not take the step: " + rootErr.Error()
 		}
 	}
 	rootAdded := rootToolChainAdded(profile, req, resp, rootRepository, rootResult, result, panicState)
@@ -657,7 +697,7 @@ func (a *APIServer) applyAgentHookToolChains(
 	if result.Status == audit.ToolChainObserveFresh &&
 		len(result.DetectedChainIDs) != 0 {
 		chainFindings := toolChainRuleFindings(result)
-		intent := toolChainHookIntent(
+		intent := substrateChainEgressIntent(ctx, toolChainHookIntent(
 			guardrailActionForConnector(
 				a.decisionConfig(ctx),
 				req.ConnectorName,
@@ -666,7 +706,7 @@ func (a *APIServer) applyAgentHookToolChains(
 			),
 			denyEligible,
 			result,
-		)
+		), result)
 		resp = mergeAgentHookFindings(profile, req, resp, chainFindings, intent)
 		eval := a.emitHookRuleFindings(
 			ctx,
@@ -698,7 +738,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		// Exact transport replays reproduce the durable decision but do not
 		// create duplicate finding telemetry.
 		chainFindings := toolChainRuleFindings(result)
-		intent := toolChainHookIntent(
+		intent := substrateChainEgressIntent(ctx, toolChainHookIntent(
 			guardrailActionForConnector(
 				a.decisionConfig(ctx),
 				req.ConnectorName,
@@ -707,7 +747,7 @@ func (a *APIServer) applyAgentHookToolChains(
 			),
 			denyEligible,
 			result,
-		)
+		), result)
 		resp = mergeAgentHookFindings(profile, req, resp, chainFindings, intent)
 		resp.RuleIDs = mergeBoundedRuleIDs(
 			8,
@@ -749,7 +789,9 @@ func (a *APIServer) applyAgentHookToolChains(
 		}
 		if rootRepository != nil {
 			// Additive: a root-scope persistence failure changes nothing here.
-			_, _ = rootRepository.PreparePending(ctx, prepareInput)
+			if _, rootErr := rootRepository.PreparePending(ctx, prepareInput); rootErr != nil {
+				rootMissed = "the leader did not take the step: " + rootErr.Error()
+			}
 		}
 		if _, prepareErr := repository.PreparePending(ctx, prepareInput); prepareErr != nil {
 			// Pending state is an additive experimental lane. A persistence
@@ -758,6 +800,48 @@ func (a *APIServer) applyAgentHookToolChains(
 		}
 	}
 	return resp, finalization
+}
+
+// substrateChainUnrecordedRule is the finding of a Substrate actor's tool
+// step that did not reach its actor window (GAP-0201).
+const substrateChainUnrecordedRule = "SUBSTRATE-CHAIN-UNRECORDED"
+
+// substrateChainWarned bounds the gateway log warning to one per actor and
+// reason.
+var substrateChainWarned sync.Map
+
+// substrateChainUnrecorded answers a verified Substrate actor's tool step
+// that can't reach the leader's actor window. The callout's egress check
+// would not see it, so a secret read followed by an upload to an allowed
+// host would pass: an alert finding on the hook, a warning in the gateway
+// log, and a block when the connector's rule pack is strict (GAP-0201).
+func (a *APIServer) substrateChainUnrecorded(ctx context.Context, profile connector.HookProfile, req agentHookRequest,
+	resp agentHookResponse, latency time.Duration, why string) agentHookResponse {
+	actor, ok := substrateActorFrom(ctx)
+	if !ok {
+		return resp
+	}
+	if _, seen := substrateChainWarned.LoadOrStore(actor.Atespace+"/"+actor.UID+"\x00"+why, true); !seen {
+		fmt.Fprintf(os.Stderr, "[substrate] warning: %s/%s: a tool step is not in the actor's chain window, so the egress check can't link it: %s\n",
+			actor.Atespace, actor.Name, why)
+	}
+	intent := guardrailActionAlert
+	if strictPackPosture(a.decisionConfig(ctx), req.ConnectorName) {
+		intent = guardrailActionBlock
+	}
+	findings := []RuleFinding{{
+		RuleID: substrateChainUnrecordedRule, Severity: "HIGH", Confidence: 1,
+		Title:    "DefenseClaw could not record this tool call in the actor's chain window, so a later upload can't be checked against it",
+		Evidence: why, Tags: []string{"substrate", "tool_call_chain"},
+	}}
+	resp = mergeAgentHookFindings(profile, req, resp, findings, intent)
+	if !req.SuppressCorrelationEmit {
+		eval := a.emitHookRuleFindings(ctx, req.ConnectorName, req.HookEventName, &ToolInspectVerdict{
+			Action: resp.Action, Severity: "HIGH", Findings: FindingStrings(findings), DetailedFindings: findings,
+		}, "tool_call_chain", latency)
+		resp.RuleIDs = mergeBoundedRuleIDs(8, eval.RuleIDs, resp.RuleIDs)
+	}
+	return resp
 }
 
 // toolChainProjectionForPolicyPosture keeps useful but proximity-only chain
@@ -3101,6 +3185,10 @@ var toolChainRelevantRuleIDs = []string{
 	"secrets.cloud_secret_manager_read",
 	"secrets.workload_identity_token_read",
 }
+
+// toolChainRulesetFingerprint is activeToolChainRulesetFingerprint; a test
+// replaces it to prove what a failed read does.
+var toolChainRulesetFingerprint = activeToolChainRulesetFingerprint
 
 func activeToolChainRulesetFingerprint(
 	ctx context.Context,

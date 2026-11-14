@@ -233,6 +233,9 @@
     },
     "connectors": {
       "$ref": "#/$defs/connectors"
+    },
+    "substrate": {
+      "$ref": "#/$defs/substrate"
     }
   },
   "$defs": {
@@ -1444,6 +1447,113 @@
             "docker",
             "none"
           ]
+        },
+        "runtimes": {
+          "description": "The sandbox runtimes the subject's agents may use: openshell (a sandbox on the computer) and substrate (an Agent Substrate actor). Unset allows both; profiles intersect it. With required_for, [substrate] points a refused host run to defenseclaw substrate run and refuses an OpenShell sandbox.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "openshell",
+              "substrate"
+            ]
+          }
+        },
+        "sandbox_class": {
+          "description": "Agent Substrate only: the weakest isolation an actor may run in (gvisor or microvm; microvm wins). Unset takes substrate.default_sandbox_class.",
+          "type": "string",
+          "enum": [
+            "",
+            "gvisor",
+            "microvm"
+          ]
+        },
+        "idle_suspend_after": {
+          "description": "Agent Substrate only: suspend an idle actor after this Go duration (at least 1m), instead of substrate.idle_suspend_after. The shortest wins.",
+          "type": "string",
+          "pattern": "^(|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$"
+        },
+        "unattended_asks": {
+          "description": "Agent Substrate only: what an ask of an unattended (--task, --batch) actor does: deny, or queue it for a person (a timeout denies). Deny wins; unset takes substrate.unattended.asks.",
+          "type": "string",
+          "enum": [
+            "",
+            "deny",
+            "queue"
+          ]
+        },
+        "ask_timeout": {
+          "description": "Agent Substrate only: how long a queued ask waits before it is denied (a Go duration, 1m to 24h), instead of substrate.unattended.ask_timeout. The shortest wins.",
+          "type": "string",
+          "pattern": "^(|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$"
+        },
+        "actor_secrets": {
+          "description": "Agent Substrate only: the values a program inside the actor may read, keys of the callout's actor-secrets Secret. Each is marked exposed and matched by exact value on prompts and egress. Unset exposes none; profiles intersect it.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$"
+          }
+        },
+        "ask_hosts": {
+          "description": "Agent Substrate only: allowed hosts an actor reaches only after a person approves; the egress callout raises the ask. A host name or \"*.<host>\". They never open a host the actor's egress policy does not allow. Profiles add to them.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 253,
+            "pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+          }
+        },
+        "url_rules": {
+          "description": "Agent Substrate only: requests to a host the egress callout refuses (deny) or asks a person about (ask), by method and path prefix. Profiles add to them; substrate.admin's come first.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hosts", "action"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+              },
+              "hosts": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+                }
+              },
+              "methods": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Z]{3,10}$"
+                }
+              },
+              "path_prefix": {
+                "type": "string",
+                "maxLength": 512,
+                "pattern": "^(/[!-~]*)?$"
+              },
+              "action": {
+                "type": "string",
+                "pattern": "^(?i:deny|ask)$"
+              }
+            }
+          }
         }
       }
     },
@@ -2022,6 +2132,47 @@
       "minProperties": 1,
       "description": "Subjects an assignment selects. Keys combine with AND, the values of one key with OR. Only verified identity facts are compared; headers, hook payloads and claimed facts never select a profile.",
       "properties": {
+        "substrate": {
+            "type": "object",
+            "additionalProperties": false,
+            "minProperties": 1,
+            "description": "Agent Substrate actors: atespaces (an atespace glob matches only atespaces DefenseClaw created or lists), templates (<atespace>/<template>) and verified workload principals. Never selects a host subject.",
+            "properties": {
+              "atespaces": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4096,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 63,
+                  "pattern": "^[a-z0-9*?\\[\\]-]{1,63}$"
+                }
+              },
+              "templates": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4096,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[a-z0-9*?\\[\\]-]{1,63}/[a-z0-9*?\\[\\]-]{1,63}$"
+                }
+              },
+              "workloads": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4096,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^(?:[^*]+|[^*]*[:/][^*]+[:/]\\*)$"
+                }
+              }
+            }
+          },
         "groups": {
           "type": "array",
           "minItems": 1,
@@ -2131,6 +2282,12 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 1073741824
+        },
+        "max_body_values": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000000,
+          "description": "Most JSON values the guardrail proxy reads in one request body or reply event. A larger body is refused on managed and strict installs and forwarded with an alert otherwise. 0 means 400000."
         },
         "rule_pack_dir": {
           "$ref": "#/$defs/boundedString",
@@ -7236,6 +7393,704 @@
               }
             },
             "install_policy": {"type": "string", "enum": ["auto", "on", "off"], "default": "auto", "description": "Register DefenseClaw as OpenClaw security.installPolicy (OpenClaw 2026.8.35 and later), so OpenClaw asks DefenseClaw admission before a skill or plugin install or update. auto: on in the strict tier and on managed installs, off in the default and permissive tiers."}
+          }
+        }
+      }
+    },
+    "substrate": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "DefenseClaw on Agent Substrate (cluster only; off by default).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "api": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "address": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "default": "api.ate-system.svc:443"
+            },
+            "server_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            },
+            "ca_file": {
+              "$ref": "#/$defs/pathString"
+            },
+            "auth": {
+              "type": "string",
+              "enum": [
+                "serviceaccount",
+                "mtls"
+              ],
+              "default": "serviceaccount"
+            },
+            "token_file": {
+              "$ref": "#/$defs/pathString"
+            },
+            "credential_bundle": {
+              "$ref": "#/$defs/pathString"
+            }
+          }
+        },
+        "supported_versions": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "default": ">=1.0.0 <1.1.0"
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "issuer": {
+              "type": "string",
+              "pattern": "^https://",
+              "maxLength": 2048
+            },
+            "audience": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "default": "defenseclaw"
+            },
+            "token_lifetime_seconds": {
+              "type": "integer",
+              "minimum": 300,
+              "maximum": 300,
+              "default": 300
+            },
+            "actor_cert_oid": {
+              "type": "string",
+              "pattern": "^[0-2](\\.(0|[1-9][0-9]*))+$",
+              "default": "1.3.6.1.4.1.11129.2.12.2"
+            },
+            "keys_url": {
+              "type": "string",
+              "pattern": "^https://[^?#]+$",
+              "maxLength": 2048
+            },
+            "keys_ca_file": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "oidc": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "issuer": {
+                  "type": "string",
+                  "pattern": "^https://",
+                  "maxLength": 2048
+                },
+                "client_id": {
+                  "$ref": "#/$defs/boundedString"
+                },
+                "groups_claim": {
+                  "$ref": "#/$defs/boundedString"
+                }
+              }
+            },
+            "admin_groups": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "workload_oidc": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "issuer",
+                  "audience"
+                ],
+                "properties": {
+                  "issuer": {
+                    "type": "string",
+                    "pattern": "^https://",
+                    "maxLength": 2048
+                  },
+                  "audience": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "subject": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "pattern": "^(?:[^*]+|[^*]*[:/][^*]+[:/]\\*)$"
+                  },
+                  "claims": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "maxProperties": 16,
+                    "additionalProperties": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    }
+                  }
+                },
+                "anyOf": [
+                  {
+                    "required": [
+                      "subject"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "claims"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "services": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            },
+            "admin": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            }
+          }
+        },
+        "launcher_atespaces": {
+          "type": "object",
+          "maxProperties": 1024,
+          "additionalProperties": {
+            "type": "array",
+            "maxItems": 1024,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+              "maxLength": 63
+            }
+          }
+        },
+        "require_attested_templates": {
+          "type": "boolean",
+          "default": true
+        },
+        "templates": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "trust_anchors": {
+              "type": "string",
+              "default": "/etc/defenseclaw/substrate/template-anchors/anchors.pem"
+            },
+            "min_policy_generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_age": {
+              "$ref": "#/$defs/duration"
+            },
+            "allow_unverified_base": {
+              "type": "boolean",
+              "default": false
+            },
+            "allowed_images": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "profile_images": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "volume_images": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "plain_http_registries": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "revoked_digests": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              }
+            },
+            "registry_auth": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "docker_config": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "ecr_hosts": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[0-9]{12}\\.dkr\\.ecr(-fips)?\\.[a-z]{2}(-[a-z]+)+-[0-9]+\\.amazonaws\\.com(\\.cn)?$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "default_sandbox_class": {
+          "type": "string",
+          "enum": [
+            "gvisor",
+            "microvm"
+          ],
+          "default": "gvisor"
+        },
+        "idle_suspend_after": {
+          "$ref": "#/$defs/duration"
+        },
+        "chain_egress_action": {
+          "description": "What a request that leaves the cluster after a secret read gets at the egress callout: block (default, every mode) or alert (opt-in). The leader answers the callout's chain check with it (GAP-0250).",
+          "type": "string",
+          "enum": [
+            "block",
+            "alert"
+          ],
+          "default": "block"
+        },
+        "workspace_max_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 68719476736
+        },
+        "unattended": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "asks": {
+              "type": "string",
+              "enum": [
+                "deny",
+                "queue"
+              ],
+              "default": "deny"
+            },
+            "ask_timeout": {
+              "$ref": "#/$defs/duration"
+            },
+            "telemetry_sampling": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 1.0
+            }
+          }
+        },
+        "rate_limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "per_actor_rps": {
+              "type": "number",
+              "minimum": 0,
+              "default": 20
+            },
+            "per_atespace_rps": {
+              "type": "number",
+              "minimum": 0,
+              "default": 500
+            }
+          }
+        },
+        "extproc": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "failure_mode": {
+              "type": "string",
+              "enum": [
+                "closed",
+                "open"
+              ],
+              "default": "closed"
+            },
+            "body_inspection": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "on",
+                "off"
+              ],
+              "default": "auto"
+            },
+            "body_max_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1048576,
+              "default": 1048576
+            },
+            "mcp_hosts": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "body_hosts": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
+            },
+            "cluster_domains": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
+            },
+            "actor_trust_domain": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            },
+            "egress_peers": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "pattern": "^spiffe://",
+                "maxLength": 2048
+              }
+            },
+            "request_access": {
+              "$ref": "#/$defs/boundedString"
+            },
+            "log_headers": {
+              "type": "boolean",
+              "default": false
+            },
+            "redact_headers": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "blocklist_files": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "$ref": "#/$defs/pathString"
+              }
+            },
+            "actor_secrets_dir": {
+              "$ref": "#/$defs/pathString"
+            },
+            "uid": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cache_ttl": {
+                  "$ref": "#/$defs/duration"
+                },
+                "stale_max": {
+                  "$ref": "#/$defs/duration"
+                }
+              }
+            },
+            "chain": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "check_budget": {
+                  "$ref": "#/$defs/duration"
+                },
+                "queue_size": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1048576,
+                  "default": 4096
+                },
+                "failure_mode": {
+                  "type": "string",
+                  "enum": ["auto", "closed", "open"],
+                  "default": "auto"
+                }
+              }
+            },
+            "ask": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "hold": {
+                  "$ref": "#/$defs/duration"
+                }
+              }
+            },
+            "judge": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "pattern": "^https://",
+                  "maxLength": 2048
+                },
+                "token_file": {
+                  "$ref": "#/$defs/pathString"
+                },
+                "ca_file": {
+                  "$ref": "#/$defs/pathString"
+                },
+                "timeout": {
+                  "$ref": "#/$defs/duration"
+                }
+              }
+            },
+            "dlp": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "credential_headers": {
+                  "type": "string",
+                  "enum": [
+                    "alert",
+                    "deny"
+                  ],
+                  "default": "alert"
+                }
+              }
+            }
+          }
+        },
+        "llm": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "providers": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "credential": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "provider_uri": {
+                  "type": "string",
+                  "pattern": "^ate-secret://",
+                  "maxLength": 2048
+                }
+              }
+            },
+            "bedrock_models": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+              }
+            }
+          }
+        },
+        "egress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
+            },
+            "ecosystem_packs": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "crates",
+                  "go",
+                  "npm",
+                  "pypi"
+                ]
+              }
+            },
+            "registries": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
+            }
+          }
+        },
+        "secrets": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "source",
+              "inject",
+              "profiles"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              },
+              "source": {
+                "type": "string",
+                "pattern": "^ate-secret://",
+                "maxLength": 2048
+              },
+              "inject": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "hosts",
+                  "header"
+                ],
+                "properties": {
+                  "hosts": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 256,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 253
+                    }
+                  },
+                  "header": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "prefix": {
+                    "type": "string",
+                    "maxLength": 256
+                  },
+                  "placeholder": {
+                    "type": "string",
+                    "pattern": "^[A-Z_][A-Z0-9_]*$"
+                  }
+                }
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "shared",
+                  "per_person"
+                ],
+                "default": "shared"
+              },
+              "profiles": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              }
+            }
+          }
+        },
+        "allow_passthrough_for": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          }
+        },
+        "admin": {
+          "$ref": "#/$defs/openShellAdmin"
+        },
+        "bundles": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "anchors_file": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "default": "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json"
+            },
+            "inbox": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253,
+              "default": "defenseclaw-bundle-inbox"
+            },
+            "refresh_interval": {
+              "$ref": "#/$defs/duration"
+            }
           }
         }
       }

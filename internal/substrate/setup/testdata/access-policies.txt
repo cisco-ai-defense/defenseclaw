@@ -1,0 +1,32 @@
+# DefenseClaw access policies for Agent Substrate. Apply as a global owner.
+# 1. Global: add DefenseClaw as viewer (inventory, live actor checks).
+#    kubectl ate get access-policy --global -o yaml > global.yaml
+#    add these members to its viewer binding, then: kubectl ate update access-policy --global -f global.yaml
+#      - user:system:serviceaccount:dc:defenseclaw-gateway
+#      - user:system:serviceaccount:dc:defenseclaw-controller
+---
+# Launcher atespace eng-payments: only DefenseClaw edits (create, fork, suspend, resume).
+#   kubectl ate create atespace eng-payments   (if it does not exist)
+#   kubectl ate create access-policy -a eng-payments -f this-document.yaml
+metadata:
+  name: default
+bindings:
+  - role: editor
+    members:
+      - user:system:serviceaccount:dc:defenseclaw-controller
+      - user:system:serviceaccount:dc:defenseclaw-gateway
+---
+# Launcher atespace eng-web: only DefenseClaw edits (create, fork, suspend, resume).
+#   kubectl ate create atespace eng-web   (if it does not exist)
+#   kubectl ate create access-policy -a eng-web -f this-document.yaml
+metadata:
+  name: default
+bindings:
+  - role: editor
+    members:
+      - user:system:serviceaccount:dc:defenseclaw-controller
+      - user:system:serviceaccount:dc:defenseclaw-gateway
+---
+# Managed atespace data-team: add DefenseClaw to the editor binding of its current policy.
+#      - user:system:serviceaccount:dc:defenseclaw-gateway
+#      - user:system:serviceaccount:dc:defenseclaw-controller

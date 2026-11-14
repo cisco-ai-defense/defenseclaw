@@ -1,0 +1,387 @@
+# DefenseClaw on Agent Substrate. Every value is described in README.md and
+# checked by values.schema.json.
+
+image:
+  repository: ghcr.io/cisco-ai-defense/defenseclaw-gateway
+  # Empty means the chart's appVersion.
+  tag: ""
+  # A digest (sha256:...) pins the image and wins over the tag. The release
+  # chart sets it to the signed image's digest.
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Where Agent Substrate runs and how DefenseClaw reaches it.
+substrate:
+  namespace: ate-system
+  # The ate-api-server Service, and the audience its ServiceAccount tokens
+  # must carry.
+  apiAddress: api.ate-system.svc:443
+  apiAudience: api.ate-system.svc
+  # The SPIFFE ID atenet-egress presents to the callout, and the label the
+  # NetworkPolicy admits it by.
+  egressSpiffeId: spiffe://cluster.local/ns/ate-system/sa/atenet-egress
+  egressPodLabels:
+    app: atenet-egress
+  # Container ports of the Substrate pods DefenseClaw calls (Substrate
+  # v1.0.0: ate-api-server 443 and 8445, ate-idp-server 8443). The egress
+  # NetworkPolicies match pod ports, not Service ports.
+  podPorts: [443, 8443, 8445]
+  # The atenet router's CONNECT-TLS listener, through which the gateway's
+  # attach route reaches an actor's relay for launchers (run, connect,
+  # pull, logs; GAP-0157). The gateway presents its pod identity; the router
+  # admits it only when its SPIFFE ID is in Substrate's cluster-global
+  # ingressAllowedSPIFFEIDs (`defenseclaw substrate setup` adds it; `substrate
+  # doctor --cluster` checks it). address empty: atenet-router.<namespace>.svc:8444.
+  # serverName empty: the address host. caFile: the servicedns trust bundle
+  # the gateway pod mounts. podPort is the router's container port, for the
+  # gateway's egress NetworkPolicy. enabled false turns attach off.
+  router:
+    enabled: true
+    address: ""
+    serverName: ""
+    caFile: /run/servicedns.podcert.ate.dev/trust-bundle.pem
+    podPort: 8444
+    # The relay port inside the actor (the kit's relay).
+    relayPort: 8080
+  # The key set the gateway verifies actor tokens with (GAP-0194). The
+  # gateway compares a token's iss with config.substrate.identity.issuer as a
+  # string and reads the keys from this URL, never from the issuer's host, so
+  # a unique per-cluster issuer (setup --issuer) need not resolve. url empty:
+  # the idp Service, https://idp.<substrate namespace>.svc/openid/v1/jwks
+  # (config.substrate.identity.keys_url). caConfigMap: a ConfigMap in this
+  # namespace whose key ca.crt is the PEM CA of the url's certificate,
+  # mounted on the gateway; empty: the servicedns trust bundle, which signs
+  # the idp Service certificate. A url on another in-cluster Service or a
+  # private address may need a change to networkPolicy.egress.
+  actorKeys:
+    url: ""
+    caConfigMap: ""
+  # The upstream Kubernetes credential provider. The bootstrap Job grants the
+  # launcher atespaces the secrets namespace below in its namespace policy,
+  # and the pre-delete Job removes the grant.
+  credentialProvider:
+    grant: true
+    policyConfigMap: k8s-credential-provider-namespace-policy
+    deployment: k8s-credential-provider
+    # The namespace holding the Secrets egress injects into actors (never
+    # this release's namespace: DefenseClaw's own Secrets stay here).
+    secretsNamespace: defenseclaw-actor-secrets
+
+# Sets config.deployment_mode. managed_enterprise mounts config.yaml as one
+# read-only file and gives each pod a data volume owned by the gateway
+# account (0700, through an init container), as the managed trust checks
+# require (GAP-0135).
+deploymentMode: ""
+managed:
+  # The account of the gateway UID in the image (distroless: nonroot).
+  serviceAccountName: nonroot
+  dataSizeLimit: 512Mi
+
+# DefenseClaw config.yaml, rendered as is into the defenseclaw-config
+# ConfigMap: the single source of the gateway, controller and callout config.
+# The chart fills substrate.enabled, substrate.services and substrate.api when
+# they are not set here. Keys and defaults: docs/SUBSTRATE.md and the config
+# reference (substrate section).
+config:
+  config_version: 9
+  substrate:
+    enabled: true
+    supported_versions: ">=1.0.0 <1.1.0"
+    identity:
+      # Unique per cluster (E13): doctor fails when two clusters share one.
+      issuer: https://idp.ate-system.svc
+      audience: defenseclaw
+      token_lifetime_seconds: 300
+    launcher_atespaces: {}
+    require_attested_templates: true
+    default_sandbox_class: gvisor
+    idle_suspend_after: 30m
+    unattended:
+      asks: deny
+      ask_timeout: 30m
+    extproc:
+      enabled: true
+      failure_mode: closed
+      body_inspection: auto
+      body_max_bytes: 1048576
+
+# Atespaces outside launcher_atespaces that DefenseClaw writes egress policy
+# in (editor grant). Launcher atespaces are always included.
+managedAtespaces: []
+
+# Kubernetes pod certificates (PodCertificateRequest) for the servicedns
+# serving certificates the callout and the gateway listeners present, and the
+# podidentity client certificates for ate-api. Substrate itself needs them.
+podCertificates:
+  enabled: true
+
+gateway:
+  replicas: 2
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    minAvailable: 1
+  ports:
+    # The actor listener, plain HTTP: atenet-egress reaches it on an http
+    # rule (an https rule cannot verify an in-cluster certificate; see
+    # README, Known limits). The NetworkPolicy admits only atenet-egress.
+    actor: 8080
+    admin: 9443
+    metrics: 9464
+  # Secrets the gateway and leader mount when they exist (optional): the
+  # relay session signing key (keys private.pem, public.pem), the provider
+  # keys for /llm (one file per provider), and the callout judge token
+  # (callout.judge.tokenSecret, shared with the callout).
+  # The relay session key Secret (private.pem signs attach tokens; images
+  # are built with public.pem): the relay-session hook creates it when
+  # absent and never replaces it; uninstall keeps it.
+  relaySessionSecret: defenseclaw-relay-session
+  llmCredentialsSecret: defenseclaw-llm
+  # The chart's one cluster-wide grant: with no OIDC issuer (people sign in
+  # with Kubernetes credentials, not on a managed install), a
+  # ClusterRoleBinding of this ServiceAccount to system:auth-delegator, so the
+  # gateway can make TokenReviews. Never rendered with an OIDC issuer. Its
+  # name; "" is defenseclaw-auth-delegator-<namespace>-<release>.
+  authDelegatorBinding: ""
+  # Flags appended to the gateway's serve flags (GAP-0191), for example
+  # [--chain-retention=48h]. The chain egress action is config, not a flag:
+  # config.substrate.chain_egress_action (block or alert), which the gateway
+  # and the leader read (GAP-0250).
+  extraArgs: []
+  # OIDC groups whose members are DefenseClaw administrators (--admin-groups;
+  # config.substrate.identity.admin_groups is the same list in config).
+  adminGroups: []
+  # The trust bundle of a private OIDC issuer: a key of a ConfigMap or of a
+  # Secret (the Secret wins when both are set), mounted read-only, and
+  # --oidc-ca-file set to it ("" uses the system roots).
+  oidcCA:
+    configMap: ""
+    secret: ""
+    key: ca.crt
+  # Extra environment, volumes and mounts of the gateway container.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  # Replaces the whole container argument list, `serve --substrate ...`
+  # included; for an added flag use extraArgs.
+  args: []
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 1Gi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# The gateway leader: one replica that holds the lease and the store volume
+# and serves the stateful RPCs (tool chains, intent, asks, registrations).
+leader:
+  leaseName: defenseclaw-gateway-leader
+  port: 7443
+  store:
+    size: 10Gi
+    storageClassName: ""
+    # Keep the store when the release is uninstalled; delete the PVC by hand.
+    keepOnUninstall: true
+  args: []
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {memory: 2Gi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+controller:
+  # One replica (no Lease client in the controller yet).
+  # The admin-only Secret with the template signing keys (key anchors.pem),
+  # mounted read-only in the controller and the gateway (its create path
+  # admits launcher actors the same way, GAP-0154) for
+  # substrate.templates.trust_anchors. Without it every template
+  # is refused (require_attested_templates).
+  templateAnchorsSecret: defenseclaw-template-anchors
+  # A kubernetes.io/dockerconfigjson Secret (key .dockerconfigjson) with
+  # logins for private template registries, mounted read-only in the
+  # controller and the gateway (both read attestations, GAP-0190). Each login
+  # goes only to its own registry host. Sets
+  # config.substrate.templates.registry_auth.docker_config. On EKS, prefer
+  # config.substrate.templates.registry_auth.ecr_hosts with an IRSA role on
+  # serviceAccounts.componentAnnotations (no stored password). "" reads
+  # registries anonymously.
+  templateRegistrySecret: ""
+  args: []
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Signed policy bundles (substrate.bundles): profiles and match.substrate
+# assignments for a stage of atespaces, verified against trust anchors. An
+# administrator creates the anchors Secret (bundle-anchors.json) before
+# enabling this; the controller and the gateway mount it read-only.
+bundles:
+  enabled: false
+  anchorsSecret: defenseclaw-bundle-anchors
+  # The GitOps inbox ConfigMap: <stage>.dcbundle and <stage>.atespaces.
+  inbox: defenseclaw-bundle-inbox
+
+# The atenet-egress ext_proc callout.
+callout:
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  replicas: 2
+  pdb:
+    minAvailable: 1
+  port: 9443
+  ports:
+    # Plain HTTP /healthz and /readyz (with the detected body mode).
+    health: 9444
+  # The callout asks the gateway for MCP tools/call verdicts (the hook path's
+  # MCP asset policy and tool rules) on the admin Service. Name a Secret with
+  # the bearer token in key "token" to turn it on; without it the callout
+  # applies only its own MCP rules.
+  # The callout's token for the MCP tool verdict route on the admin
+  # Service (GAP-0015): the chain-key hook creates this Secret when it is
+  # absent, so the tool rules run at egress by default. "" turns the route
+  # off (tools/call is then an alert on OSS and refused on managed).
+  judge:
+    tokenSecret: defenseclaw-callout-judge
+  # A Secret whose keys are the exposed actor_secrets values (one file per
+  # name), for exact-value DLP on egress (the callout) and on /llm (the
+  # gateway). Mounted read-only in those two only, never into actors or the
+  # leader; the chart sets config.substrate.extproc.actor_secrets_dir.
+  actorSecrets:
+    secretName: ""
+  args: []
+  resources:
+    requests: {cpu: 250m, memory: 128Mi}
+    limits: {memory: 512Mi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+serviceAccounts:
+  # Token audience and lifetime of the projected ate-api tokens.
+  apiTokenExpirationSeconds: 3600
+  # Annotations on every DefenseClaw ServiceAccount.
+  annotations: {}
+  # Annotations on one component's ServiceAccount (gateway, controller,
+  # callout), merged over annotations. On EKS, an IRSA role for the ECR
+  # template logins goes on gateway and controller only, for example
+  #   gateway: {eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/dc-ecr-read}
+  componentAnnotations: {}
+
+networkPolicy:
+  enabled: true
+  # Peers that may reach the admin Service (launcher, fleet): the release
+  # namespace always may. Add the ingress controller here, for example
+  #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress-nginx}}
+  adminFrom: []
+  # Peers that may scrape the metrics ports.
+  metricsFrom: []
+  # Egress limits for the pods that hold keys (gateway, leader, callout):
+  # DNS, the Kubernetes and Substrate APIs, the release's own Services,
+  # OTLP, and (gateway and leader only) model providers on 443.
+  egress:
+    enabled: true
+    # Ports of the OTLP collector(s) the pods export to.
+    otlpPorts: [4317, 4318]
+    # Extra egress rules (NetworkPolicyEgressRule) for every key-holding pod.
+    extra: []
+
+# How launchers on laptops reach the admin listener (TLS). The actor
+# listener is never exposed outside the cluster.
+admin:
+  expose:
+    # ClusterIP (in-cluster only), LoadBalancer or Ingress.
+    type: ClusterIP
+    loadBalancer:
+      # Required for LoadBalancer: the client ranges allowed (also put in
+      # the NetworkPolicy; the Service keeps client addresses).
+      sourceRanges: []
+      annotations: {}
+    ingress:
+      className: ""
+      host: ""
+      # Required for Ingress: the TLS Secret the ingress serves. The ingress
+      # must re-encrypt to the admin listener (HTTPS backend), for example
+      # nginx.ingress.kubernetes.io/backend-protocol: HTTPS.
+      tlsSecretName: ""
+      annotations: {}
+  # The https URL laptops use for the admin listener, published in the
+  # ConfigMap defenseclaw-launcher-endpoint (the only URL login --kube sends
+  # a Kubernetes credential to). Default: the Ingress host, or the in-cluster
+  # admin Service; required for LoadBalancer.
+  url: ""
+  # A kubernetes.io/tls Secret with a certificate for the external name
+  # (LoadBalancer). Without it the admin listener presents its in-cluster
+  # serving certificate, which laptops do not trust for other names.
+  tlsSecretName: ""
+
+# OpenFGA bootstrap (post-install and post-upgrade Job). It creates the
+# launcher atespaces, writes their access policies (only DefenseClaw's
+# ServiceAccounts are editors: create, fork, suspend, resume), grants
+# DefenseClaw global viewer, and grants the credential provider namespace.
+# Writing them needs a Substrate global owner: name a Secret with a token of
+# one in key "token". Without it the Job does not run, and
+# `defenseclaw substrate setup` prints the policies for an admin to apply.
+bootstrap:
+  ownerTokenSecret: ""
+  # Remove the owner token Secret once the bootstrap succeeded.
+  deleteTokenAfterUse: true
+  backoffLimit: 2
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
+# Pre-upgrade and pre-rollback checks (config validate, kit and Substrate
+# skew, store schema), and the pre-delete cleanup of DefenseClaw-written
+# egress policies.
+hooks:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
+metrics:
+  prometheusRule:
+    enabled: false
+    labels: {}
+
+# A local OpenTelemetry collector for trying the chart out. Point
+# config.otel at a real backend in production.
+observability:
+  local:
+    enabled: false
+    image: otel/opentelemetry-collector-contrib:0.139.0
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {memory: 512Mi}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+# The memory emptyDir that holds DEFENSECLAW_HOME (the audit database and
+# local state) in every DefenseClaw pod; it counts against the pod's memory.
+homeSizeLimit: 256Mi
+
+podAnnotations: {}
+podLabels: {}

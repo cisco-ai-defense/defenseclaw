@@ -1361,6 +1361,10 @@ type ManagedExplain struct {
 	// WhenUnavailable is refuse or alert.
 	RequiredFor     []string `json:"required_for,omitempty"`
 	WhenUnavailable string   `json:"when_unavailable,omitempty"`
+	// Runtimes is the floor's runtimes, unset when it allows both:
+	// [substrate] runs the required agents on Agent Substrate
+	// (`defenseclaw substrate run`), never on this computer.
+	Runtimes []string `json:"runtimes,omitempty"`
 	// HostRunGate is the managed gateway's require-sandbox gate for this
 	// caller's required agents: "refused" or "exempt". The gateway derives
 	// it with requireSandboxHostGate, the same rule used for hook calls.

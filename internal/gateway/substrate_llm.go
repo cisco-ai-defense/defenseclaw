@@ -1,0 +1,472 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"strings"
+)
+
+// Model traffic of actors (D2): every model call goes through the
+// DefenseClaw guardrail proxy at /llm/<provider>/<provider path> on the
+// actor listener. The caller is the verified actor (its JWT) and the
+// person bound to it; X-User-Id and every identity header the actor sends
+// are dropped. The provider credential never enters the actor: the actor
+// holds a placeholder, and the gateway replaces whatever credential header
+// arrives with the key it reads from its own Secret, per request (so a
+// rotation needs no restart). Provider hosts are never in an actor's egress
+// allow list, so this is the only way to a model.
+//
+// Request bodies are inspected and responses forwarded by the proxy's
+// passthrough path, which keeps Bedrock's eventstream framing unchanged.
+//
+// Routing (1.0.10 stream 1) and usage (stream 10) run inside the proxy
+// (handleChatCompletion and handlePassthrough) for this call as for any
+// other, on the verified caller the actor listener attached
+// (substrate_identity.go); /llm adds neither.
+
+// SubstrateLLMProvider is one model provider the actor listener serves.
+type SubstrateLLMProvider struct {
+	// Origin is the upstream scheme://host[:port], no path.
+	Origin string
+	// CredentialFile holds the provider key (re-read per request).
+	CredentialFile string
+	// AuthHeader is where the key goes: "authorization" (Bearer, default),
+	// "x-api-key" (Anthropic) or "api-key" (Azure).
+	AuthHeader string
+}
+
+// SubstrateLLMConfig configures /llm.
+type SubstrateLLMConfig struct {
+	Providers map[string]SubstrateLLMProvider
+	// BedrockModels are the Bedrock model IDs actors may call
+	// (substrate.llm.bedrock_models); a call for another model is sent to
+	// the first one. Empty serves the model the call names.
+	BedrockModels []string
+	// Proxy serves the call (GuardrailProxy.SubstrateHandler).
+	Proxy http.Handler
+	// ExposedValues, when set, returns the actor_secrets values of a
+	// profile (SubstrateExposedValues): a request body that carries one is
+	// refused before it reaches the proxy (PLAN §7.2, exact-value DLP).
+	ExposedValues func(profile string) map[string]string
+}
+
+// substrateLLMMaxDLPBody bounds the body /llm reads to look for an exposed
+// value; a larger body of an actor with exposed values is refused.
+const substrateLLMMaxDLPBody = 32 << 20
+
+var substrateProviderRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+// substrateModelPaths are the provider paths /llm serves: the model APIs
+// and nothing else. The proxy's own routes (provider registry and reload,
+// egress events, health, models) and every other provider path answer 404
+// (D15; GAP-0041). A provider with no entry serves nothing.
+var substrateModelPaths = map[string][]*regexp.Regexp{
+	"bedrock": {
+		regexp.MustCompile(`^/model/[^/]+/(invoke|invoke-with-response-stream|converse|converse-stream)$`),
+		// Bedrock Runtime's OpenAI-compatible API on the same host and
+		// credential: the OpenAI-family models (GPT-5.6 Luna) under their
+		// inference-profile IDs, for Codex, OpenCode, Copilot CLI and
+		// Hermes (GAP-0187).
+		substrateBedrockOpenAIPathRE,
+	},
+	"anthropic": {
+		regexp.MustCompile(`^/v1/messages$`),
+		regexp.MustCompile(`^/v1/messages/count_tokens$`),
+	},
+	"openai": {
+		regexp.MustCompile(`^/v1/chat/completions$`),
+		regexp.MustCompile(`^/v1/responses$`),
+	},
+	"gemini": {regexp.MustCompile(`^/v1(beta|alpha)?/models/[^/:]+:(generateContent|streamGenerateContent|countTokens)$`)},
+}
+
+func substrateModelPath(provider, p string) bool {
+	for _, re := range substrateModelPaths[provider] {
+		if re.MatchString(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultSubstrateLLMProviders returns the upstreams of the providers the
+// proxy serves, with their keys under credDir/<provider>.
+func DefaultSubstrateLLMProviders(credDir, bedrockRegion string) map[string]SubstrateLLMProvider {
+	if bedrockRegion == "" {
+		bedrockRegion = "us-east-1"
+	}
+	key := func(p string) string { return filepath.Join(credDir, p) }
+	return map[string]SubstrateLLMProvider{
+		"anthropic": {Origin: "https://api.anthropic.com", CredentialFile: key("anthropic"), AuthHeader: "x-api-key"},
+		"openai":    {Origin: "https://api.openai.com", CredentialFile: key("openai")},
+		"bedrock":   {Origin: "https://bedrock-runtime." + bedrockRegion + ".amazonaws.com", CredentialFile: key("bedrock")},
+		"gemini":    {Origin: "https://generativelanguage.googleapis.com", CredentialFile: key("gemini"), AuthHeader: "x-goog-api-key"},
+	}
+}
+
+// NewSubstrateLLMHandler validates cfg and returns the /llm handler.
+func NewSubstrateLLMHandler(cfg SubstrateLLMConfig) (http.Handler, error) {
+	if cfg.Proxy == nil {
+		return nil, errors.New("substrate llm: no guardrail proxy")
+	}
+	for name, p := range cfg.Providers {
+		u, err := url.Parse(p.Origin)
+		if !substrateProviderRE.MatchString(name) || err != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") {
+			return nil, fmt.Errorf("substrate llm: provider %q needs an https origin", name)
+		}
+		if p.CredentialFile == "" {
+			return nil, fmt.Errorf("substrate llm: provider %q has no credential file", name)
+		}
+	}
+	return &substrateLLM{cfg: cfg}, nil
+}
+
+type substrateLLM struct{ cfg SubstrateLLMConfig }
+
+// substrateCredentialHeaders are the credential headers an actor may send
+// (placeholders); all are removed before the gateway sets its own.
+var substrateCredentialHeaders = []string{
+	"Authorization", "X-Api-Key", "Api-Key", "X-Goog-Api-Key", "X-AI-Auth", "X-DC-Auth", "X-DC-Target-URL",
+	"X-Amz-Security-Token", "X-Amz-Date", "X-Amz-Content-Sha256",
+}
+
+func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if _, ok := substrateActorFrom(r.Context()); !ok {
+		writeSubstrateRefusal(w, http.StatusUnauthorized, "missing_token")
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, substrateLLMPrefix)
+	provider, upstreamPath, _ := strings.Cut(rest, "/")
+	p, known := s.cfg.Providers[provider]
+	if !known {
+		writeSubstrateRefusal(w, http.StatusNotFound, "provider_not_served")
+		return
+	}
+	upstream := "/" + upstreamPath
+	// A Bedrock ARN model ID (application inference profile, provisioned
+	// throughput) carries an escaped slash; it is forwarded escaped, and
+	// accepted only when that segment is a Bedrock ARN (GAP-0129).
+	rawUpstream := ""
+	if provider == "bedrock" {
+		if esc, ok := strings.CutPrefix(r.URL.EscapedPath(), substrateLLMPrefix+provider); ok {
+			if dec, ok := substrateBedrockARNPath(esc); ok && dec == upstream {
+				rawUpstream = esc
+			}
+		}
+	}
+	if rawUpstream == "" && (path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") || !substrateModelPath(provider, upstream)) {
+		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
+		return
+	}
+	// Every model API call is a POST; a GET of a model path is a probe.
+	if r.Method != http.MethodPost {
+		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if !substrateBodyKeysUnique(w, r) {
+		return
+	}
+	if !s.exposedValueCheck(w, r) {
+		return
+	}
+	modelRouted := false
+	if provider == "bedrock" && substrateBedrockOpenAIPathRE.MatchString(upstream) {
+		var ok bool
+		if modelRouted, ok = s.bedrockOpenAIModel(w, r); !ok {
+			return
+		}
+	}
+	key, err := os.ReadFile(p.CredentialFile)
+	if err != nil || strings.TrimSpace(string(key)) == "" {
+		fmt.Fprintf(os.Stderr, "[substrate] llm: provider %s has no readable credential (%s)\n", provider, p.CredentialFile)
+		writeSubstrateRefusal(w, http.StatusServiceUnavailable, "provider_credential_unavailable")
+		return
+	}
+	secret := strings.TrimSpace(string(key))
+	r2 := r.Clone(r.Context())
+	for _, h := range substrateCredentialHeaders {
+		r2.Header.Del(h)
+	}
+	r2.Header.Set("X-DC-Target-URL", p.Origin)
+	r2.Header.Set("X-AI-Auth", "Bearer "+secret)
+	switch strings.ToLower(p.AuthHeader) {
+	case "x-api-key":
+		r2.Header.Set("x-api-key", secret)
+	case "api-key":
+		r2.Header.Set("api-key", secret)
+	case "x-goog-api-key":
+		r2.Header.Set("x-goog-api-key", secret)
+	default:
+		r2.Header.Set("Authorization", "Bearer "+secret)
+	}
+	if modelRouted {
+		r2.Header.Set("X-DefenseClaw-Model-Routed", "1")
+	}
+	if provider == "bedrock" {
+		if routed, ok := substrateBedrockRoute(upstream, s.cfg.BedrockModels); ok {
+			// Claude Code probes models the profile does not offer at start
+			// (GAP-0008): the call goes to the allowed model, through the
+			// same guardrails, never to the model it named.
+			r2.Header.Set("X-DefenseClaw-Model-Routed", "1")
+			upstream, rawUpstream = routed, ""
+		}
+	}
+	u := *r.URL
+	u.Path, u.RawPath = upstream, rawUpstream
+	r2.URL = &u
+	r2.RequestURI = ""
+	s.cfg.Proxy.ServeHTTP(w, r2)
+}
+
+// exposedValueCheck refuses a model call whose body carries one of the
+// actor's exposed values (its profile's actor_secrets), and puts the body
+// back otherwise. A body it cannot read whole (too large, compressed) is
+// refused for an actor that has exposed values: the check fails closed.
+// The refusal names the secret, never its value.
+func (s *substrateLLM) exposedValueCheck(w http.ResponseWriter, r *http.Request) bool {
+	if s.cfg.ExposedValues == nil {
+		return true
+	}
+	reg, ok := substrateRegistrationFrom(r.Context())
+	if !ok {
+		return true
+	}
+	values := s.cfg.ExposedValues(reg.Profile)
+	if len(values) == 0 {
+		return true
+	}
+	if enc := strings.TrimSpace(r.Header.Get("Content-Encoding")); enc != "" && !strings.EqualFold(enc, "identity") {
+		writeSubstrateRefusal(w, http.StatusUnsupportedMediaType, "exposed_value_check_needs_plain_body")
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, substrateLLMMaxDLPBody+1))
+	if err != nil || len(body) > substrateLLMMaxDLPBody {
+		writeSubstrateRefusal(w, http.StatusRequestEntityTooLarge, "body_too_large")
+		return false
+	}
+	_ = r.Body.Close()
+	if name, hit := substrateExposedValueIn(body, values); hit {
+		fmt.Fprintf(os.Stderr, "[substrate] llm: refused a model call of %s/%s carrying the exposed value %s (actor_secrets)\n",
+			reg.Atespace, reg.Name, name)
+		writeSubstrateRefusal(w, http.StatusForbidden, "exposed_secret_in_request")
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	return true
+}
+
+// substrateRouterAnswerNarrows reports a semantic-router answer an Agent
+// Substrate actor's chat call may take (GAP-0104): the router brings no key
+// of its own and keeps the upstream origin /llm set from the provider
+// table, so it can pick another model of the same provider but never send
+// the call elsewhere (another provider, a loopback backend) or with another
+// credential. Which models a profile allows is stream 1 (routing overlay),
+// which narrows inside this.
+func substrateRouterAnswerNarrows(target string, d *ModelRouterDecision) bool {
+	if d == nil {
+		return true
+	}
+	if d.APIKeyOverride {
+		return false
+	}
+	if !d.TargetURLOverride {
+		return true
+	}
+	from, err1 := url.Parse(strings.TrimSpace(target))
+	to, err2 := url.Parse(strings.TrimSpace(d.TargetURL))
+	if err1 != nil || err2 != nil || from.Host == "" || to.User != nil {
+		return false
+	}
+	return strings.EqualFold(from.Scheme, to.Scheme) && strings.EqualFold(from.Host, to.Host)
+}
+
+var (
+	substrateBedrockRawPathRE = regexp.MustCompile(`^/model/([^/]+)/(invoke|invoke-with-response-stream|converse|converse-stream)$`)
+	substrateBedrockARNRE     = regexp.MustCompile(`^arn:aws(-[a-z]+)*:bedrock:[a-z0-9-]+:[0-9]{12}:` +
+		`(application-inference-profile|inference-profile|provisioned-model|custom-model|imported-model|foundation-model)/[A-Za-z0-9._:-]+$`)
+)
+
+// substrateBedrockARNPath reads an escaped Bedrock model path whose model
+// segment is an ARN: one segment on the wire, a Bedrock ARN with exactly
+// one slash once unescaped. It returns the decoded path.
+func substrateBedrockARNPath(escaped string) (string, bool) {
+	m := substrateBedrockRawPathRE.FindStringSubmatch(escaped)
+	if m == nil {
+		return "", false
+	}
+	id, err := url.PathUnescape(m[1])
+	if err != nil || strings.Count(id, "/") != 1 || !substrateBedrockARNRE.MatchString(id) {
+		return "", false
+	}
+	return "/model/" + id + "/" + m[2], true
+}
+
+// substrateBedrockOpenAIPathRE is Bedrock Runtime's OpenAI-compatible API
+// (/openai/v1/responses and /openai/v1/chat/completions), where the model is
+// named in the body, not the path.
+var substrateBedrockOpenAIPathRE = regexp.MustCompile(`^/openai/v1/(responses|chat/completions)$`)
+
+// bedrockOpenAIModel holds the body model of a call to Bedrock's
+// OpenAI-compatible API to substrate.llm.bedrock_models, as
+// substrateBedrockRoute does for /model/<id>: a model that is not listed is
+// replaced by the first listed one. With no list the body is not read. A
+// body that cannot be read as a JSON object with a string model is refused
+// (the check fails closed). routed reports a replaced model; ok is false
+// when the call was refused.
+func (s *substrateLLM) bedrockOpenAIModel(w http.ResponseWriter, r *http.Request) (routed, ok bool) {
+	allowed := s.cfg.BedrockModels
+	if len(allowed) == 0 {
+		return false, true
+	}
+	if enc := strings.TrimSpace(r.Header.Get("Content-Encoding")); enc != "" && !strings.EqualFold(enc, "identity") {
+		writeSubstrateRefusal(w, http.StatusUnsupportedMediaType, "model_check_needs_plain_body")
+		return false, false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, substrateLLMMaxDLPBody+1))
+	if err != nil || len(body) > substrateLLMMaxDLPBody {
+		writeSubstrateRefusal(w, http.StatusRequestEntityTooLarge, "body_too_large")
+		return false, false
+	}
+	_ = r.Body.Close()
+	var doc map[string]json.RawMessage
+	var model string
+	if _, dup := substrateDuplicateBodyKey(body); dup || json.Unmarshal(body, &doc) != nil || json.Unmarshal(doc["model"], &model) != nil {
+		writeSubstrateRefusal(w, http.StatusBadRequest, "model_unreadable")
+		return false, false
+	}
+	listed := false
+	for _, m := range allowed {
+		listed = listed || strings.EqualFold(model, m)
+	}
+	if !listed {
+		doc["model"], _ = json.Marshal(allowed[0])
+	}
+	// The checked document is what goes upstream, never the original
+	// bytes (TST-0478).
+	if body, err = json.Marshal(doc); err != nil {
+		writeSubstrateRefusal(w, http.StatusBadRequest, "model_unreadable")
+		return false, false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	return !listed, true
+}
+
+// substrateCheckedBodyKeys are the top-level body fields /llm and the proxy
+// read to decide (the model allowlist, the prompt inspection). Two of them
+// that fold to the same name are refused: JSON parsers disagree on which
+// value wins (Go keeps the last, others the first or match keys
+// case-insensitively), so the checked value and the one the provider runs
+// could differ (GAP-0187 residual, TST-0478).
+var substrateCheckedBodyKeys = map[string]bool{"model": true, "input": true, "messages": true,
+	"instructions": true, "system": true, "prompt": true, "contents": true, "tools": true}
+
+// substrateDuplicateBodyKey reports the first checked top-level key of a
+// JSON object body that appears twice, or in another spelling, folded as
+// encoding/json matches keys
+// (Unicode simple folding: "meſſages" is "messages"). A body that is not a
+// JSON object has none.
+func substrateDuplicateBodyKey(body []byte) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return "", false
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		key, _ := t.(string)
+		for k := range substrateCheckedBodyKeys {
+			if !strings.EqualFold(key, k) {
+				continue
+			}
+			// Another spelling of a checked name (Model, meſſages, the
+			// Kelvin sign) is refused even alone: some decoders take it
+			// for the field and others do not.
+			if seen[k] || key != k {
+				return k, true
+			}
+			seen[k] = true
+		}
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// substrateBodyKeysUnique refuses a model call whose body repeats a checked
+// key (substrateDuplicateBodyKey), in every mode, and one whose body is
+// compressed: neither /llm nor the proxy can read that body, so its prompt
+// and model would pass unchecked. The body is put back otherwise.
+func substrateBodyKeysUnique(w http.ResponseWriter, r *http.Request) bool {
+	if enc := strings.TrimSpace(r.Header.Get("Content-Encoding")); enc != "" && !strings.EqualFold(enc, "identity") {
+		writeSubstrateRefusal(w, http.StatusUnsupportedMediaType, "request_body_encoded")
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, substrateLLMMaxDLPBody+1))
+	if err != nil || len(body) > substrateLLMMaxDLPBody {
+		writeSubstrateRefusal(w, http.StatusRequestEntityTooLarge, "body_too_large")
+		return false
+	}
+	_ = r.Body.Close()
+	if key, dup := substrateDuplicateBodyKey(body); dup {
+		fmt.Fprintf(os.Stderr, "[substrate] llm: refused a model call whose body repeats the key %q\n", key)
+		writeSubstrateRefusal(w, http.StatusBadRequest, "duplicate_body_key")
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	return true
+}
+
+// substrateBedrockRoute rewrites /model/<id>/<action> to the first allowed
+// model when <id> is not allowed. ok is false when nothing changes.
+func substrateBedrockRoute(upstream string, allowed []string) (string, bool) {
+	if len(allowed) == 0 {
+		return "", false
+	}
+	rest, found := strings.CutPrefix(upstream, "/model/")
+	if !found {
+		return "", false
+	}
+	id, action, found := strings.Cut(rest, "/")
+	if !found {
+		return "", false
+	}
+	for _, m := range allowed {
+		if strings.EqualFold(id, m) {
+			return "", false
+		}
+	}
+	return "/model/" + allowed[0] + "/" + action, true
+}

@@ -24,11 +24,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
-
-// sandboxHostAlias is how a sandbox names this machine; a decision about it
-// is a host-port ask, any other host a network-rule ask.
-const sandboxHostAlias = "host.openshell.internal"
 
 // sandboxAskReasonFloorDenied is the registered reason of a decision the
 // administrator's floor refused (log.sandbox.ask.decided).
@@ -60,7 +57,9 @@ func sandboxAskDecidedEvent(reg sandboxreg.Registration, req sandboxrelay.Decisi
 		// (GAP-0659): one the record can't carry is left out.
 		ev.ApprovalID = ""
 	}
-	if strings.EqualFold(req.Host, sandboxHostAlias) {
+	// The OpenShell host alias names this machine: a decision about it is a
+	// host-port ask, any other host a network-rule ask.
+	if strings.EqualFold(req.Host, sandboxruntime.OpenShellHostAlias) {
 		ev.Kind = audit.SandboxApprovalHostPort
 	}
 	switch {

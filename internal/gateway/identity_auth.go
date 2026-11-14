@@ -47,14 +47,7 @@ func attachVerifiedSubject(ctx context.Context, emitter sidecarRuntimeEmitter, u
 		Directory: facts,
 		Source:    source,
 	}
-	ctx = withVerifiedSubject(ctx, subject)
-	// The correlation middleware ran before authentication and took the
-	// user from the loopback X-DefenseClaw-User-* headers, which any local
-	// caller holding the token can set. The verified subject replaces that
-	// claim, so audit and telemetry name the account that was proved.
-	id := AgentIdentityFromContext(ctx)
-	id.UserID, id.UserIDKind, id.UserName = subject.UserID, subject.IDKind, subject.UserName
-	ctx = ContextWithAgentIdentity(ctx, id)
+	ctx = bindVerifiedSubject(ctx, subject)
 	var session useridentity.SessionFacts
 	if subject.IDKind == useridentity.KindPOSIXUID {
 		if claimed, ok := claimedSessionFromContext(ctx); ok {
@@ -71,6 +64,33 @@ func attachVerifiedSubject(ctx context.Context, emitter sidecarRuntimeEmitter, u
 	}
 	observeIdentity(ctx, emitter, subject, session)
 	return ctx
+}
+
+// attachVerifiedSubjectFacts is attachVerifiedSubject for an identity whose
+// facts the authentication point already holds rather than an OS account
+// to look up: an Agent Substrate actor's person, verified by OIDC at sign-in
+// with the groups the identity provider asserted (substrate_identity.go).
+// There is no login session to confirm.
+func attachVerifiedSubjectFacts(ctx context.Context, emitter sidecarRuntimeEmitter, userID, idKind, name, source string, facts useridentity.DirectoryFacts) context.Context {
+	if ctx == nil || userID == "" || !identityFactsEnabled.Load() {
+		return ctx
+	}
+	subject := VerifiedSubject{UserID: userID, IDKind: idKind, UserName: name, Directory: facts, Source: source}
+	ctx = bindVerifiedSubject(ctx, subject)
+	observeIdentity(ctx, emitter, subject, useridentity.SessionFacts{})
+	return ctx
+}
+
+// bindVerifiedSubject attaches subject and makes it the request's user.
+func bindVerifiedSubject(ctx context.Context, subject VerifiedSubject) context.Context {
+	ctx = withVerifiedSubject(ctx, subject)
+	// The correlation middleware ran before authentication and took the
+	// user from the loopback X-DefenseClaw-User-* headers, which any local
+	// caller holding the token can set. The verified subject replaces that
+	// claim, so audit and telemetry name the account that was proved.
+	id := AgentIdentityFromContext(ctx)
+	id.UserID, id.UserIDKind, id.UserName = subject.UserID, subject.IDKind, subject.UserName
+	return ContextWithAgentIdentity(ctx, id)
 }
 
 // verifiedAccountName preserves a Windows SID's literal account spelling.

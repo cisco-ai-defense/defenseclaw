@@ -1,0 +1,15 @@
+# managed_enterprise (GAP-0135): config.yaml as one read-only file, a data
+# volume per pod owned by the gateway account (0700), attested templates
+# from named registries, OIDC sign-in.
+deploymentMode: managed_enterprise
+config:
+  substrate:
+    identity:
+      issuer: https://idp.cluster-m.example
+      oidc:
+        issuer: https://login.example.com
+        client_id: defenseclaw-launcher
+    launcher_atespaces:
+      engineering: [eng-web]
+    templates:
+      allowed_images: ["registry.example.com/defenseclaw/*"]

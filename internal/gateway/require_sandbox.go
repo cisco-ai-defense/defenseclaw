@@ -49,8 +49,9 @@ import (
 // hooks never read those variables and a hook-socket request carries no
 // bearer the gateway honours. The only hook it lets through is one whose
 // context the managed gateway rebuilt from a live sandbox registration
-// (relayedSandboxRequest). The surface a hook names (app, extension) only
-// words the refusal.
+// (relayedSandboxRequest), or that the actor listener verified as an Agent
+// Substrate actor's (isSubstrateActorRequest). The surface a hook names
+// (app, extension) only words the refusal.
 //
 // It is a policy control on the agents whose hooks the machine owns
 // (Claude Code, Codex, Cursor, Copilot), not an exec deny: an agent whose
@@ -134,6 +135,13 @@ var requireSandboxFloor = func(cfg *config.Config, profile string) (config.OpenS
 // relay-verified marker): the one hook the gate never refuses.
 // It is isRelayedSandboxRequest (sandbox_relay.go); tests replace it.
 var relayedSandboxRequest = isRelayedSandboxRequest
+
+// sandboxedHookRequest reports a hook that runs in a sandbox the gateway
+// verified, which the gate never refuses: a relayed OpenShell call
+// (relayedSandboxRequest) or a verified Agent Substrate actor's call.
+func sandboxedHookRequest(ctx context.Context) bool {
+	return relayedSandboxRequest(ctx) || isSubstrateActorRequest(ctx)
+}
 
 // requireSandboxRecord is one gate decision for the managed sandbox
 // telemetry (spec §2.10 and change log 3): log.sandbox.host_run_refused for
@@ -371,7 +379,7 @@ func requireSandboxCaller(ctx context.Context) (id, name string) {
 // connector's ability to block the event is considered.
 func (a *APIServer) requireSandboxDecision(ctx context.Context, connectorName, event, cwd, surface string) requireSandboxOutcome {
 	cfg := a.liveBaseConfig(ctx)
-	if cfg == nil || !cfg.StandaloneEnterprise() || !requireSandboxEvent(event) || relayedSandboxRequest(ctx) {
+	if cfg == nil || !cfg.StandaloneEnterprise() || !requireSandboxEvent(event) || sandboxedHookRequest(ctx) {
 		return requireSandboxOutcome{}
 	}
 	connectorName = config.NormalizeConnectorName(connectorName)
@@ -403,6 +411,13 @@ func (a *APIServer) requireSandboxDecision(ctx context.Context, connectorName, e
 			return sandboxapi.ProvisionalRefusal(message)
 		}
 		return message
+	}
+	// runtimes: [substrate] (E26): the agent runs in an Agent Substrate
+	// actor, which the launcher starts; whether OpenShell could run here
+	// does not matter, so the refusal points to `defenseclaw substrate run`.
+	if floor.SubstrateOnly() {
+		return requireSandboxOutcome{Outcome: requireSandboxRefused, Code: requireSandboxReasonRequired, Profile: decision,
+			Message: word(sandboxapi.HostRunRefusedSubstrate(connectorName, surface, profile, floor.RequestAccess))}
 	}
 	uid, known := requestPeerUID(ctx)
 	if avail := defaultSandboxAvailability.check(cfg, uid, known, floor); !avail.Available {
@@ -489,7 +504,7 @@ func (a *APIServer) requireSandboxGateFailed(
 		}
 	}()
 	cfg := a.requireSandboxFallbackConfig(ctx)
-	if cfg == nil || !cfg.StandaloneEnterprise() || !requireSandboxEvent(req.HookEventName) || relayedSandboxRequest(ctx) ||
+	if cfg == nil || !cfg.StandaloneEnterprise() || !requireSandboxEvent(req.HookEventName) || sandboxedHookRequest(ctx) ||
 		!requiredAnywhere(cfg, config.NormalizeConnectorName(connectorName)) {
 		return requireSandboxOutcome{}, agentHookResponse{}, false
 	}

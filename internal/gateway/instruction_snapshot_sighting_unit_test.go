@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A directory with a recorded directory's file system identity keeps that
@@ -34,6 +35,7 @@ func TestInstructionSnapshotAliasesDirectoryIdentity(t *testing.T) {
 // Every instruction file name the snapshot records, OpenClaw's config file
 // included, is read back from the saved record after a gateway restart.
 func TestInstructionStartupRecordKeepsEveryInstructionName(t *testing.T) {
+	testenv.IsolateAccount(t)
 	for _, name := range hookpaths.InstructionFileNames {
 		t.Run(name, func(t *testing.T) {
 			api := instructionProtectionTestAPI(t, "openclaw", "action", "HIGH")

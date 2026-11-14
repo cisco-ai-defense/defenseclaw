@@ -1,0 +1,2688 @@
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
+# Deny every ingress to this release's pods; the policies below open only
+# what each listener needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-default-deny
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/name: defenseclaw-substrate
+  policyTypes: [Ingress]
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
+# The pods that hold keys or dial out (gateway, leader: provider keys and the
+# store; controller: template registries on 443, GAP-0131;
+# callout: actor_secrets) may connect only where they need to (GAP-0084).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-gateway-egress
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: gateway
+  policyTypes: [Egress]
+  egress:
+  # DNS.
+  - ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  # This release's pods (leader RPC, admin listener for the callout judge).
+  - to:
+    -
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: dc
+          app.kubernetes.io/name: defenseclaw-substrate
+  # The Substrate namespace (ate-api-server, the actor JWT issuer's JWKS).
+  # A NetworkPolicy matches the pod port after the Service is resolved,
+  # so these are the pods' container ports (GAP-0139: idp serves 8443
+  # behind Service port 443).
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ate-system
+    ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 8443}
+    - {protocol: TCP, port: 8445}
+    # The router's CONNECT-TLS listener (attach, GAP-0157).
+    - {protocol: TCP, port: 8444}
+  # Model providers (/llm) and template registries (controller), the
+  # Kubernetes API (leader Lease, store state, resets;
+  # 6443 is its usual endpoint port). The callout needs neither.
+  - ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 6443}
+  # OTLP export.
+  - ports:
+    - {protocol: TCP, port: 4317}
+    - {protocol: TCP, port: 4318}
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-leader-egress
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: leader
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: leader
+  policyTypes: [Egress]
+  egress:
+  # DNS.
+  - ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  # This release's pods (leader RPC, admin listener for the callout judge).
+  - to:
+    -
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: dc
+          app.kubernetes.io/name: defenseclaw-substrate
+  # The Substrate namespace (ate-api-server, the actor JWT issuer's JWKS).
+  # A NetworkPolicy matches the pod port after the Service is resolved,
+  # so these are the pods' container ports (GAP-0139: idp serves 8443
+  # behind Service port 443).
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ate-system
+    ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 8443}
+    - {protocol: TCP, port: 8445}
+  # Model providers (/llm) and template registries (controller), the
+  # Kubernetes API (leader Lease, store state, resets;
+  # 6443 is its usual endpoint port). The callout needs neither.
+  - ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 6443}
+  # OTLP export.
+  - ports:
+    - {protocol: TCP, port: 4317}
+    - {protocol: TCP, port: 4318}
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-callout-egress
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: callout
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: callout
+  policyTypes: [Egress]
+  egress:
+  # DNS.
+  - ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  # This release's pods (leader RPC, admin listener for the callout judge).
+  - to:
+    -
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: dc
+          app.kubernetes.io/name: defenseclaw-substrate
+  # The Substrate namespace (ate-api-server, the actor JWT issuer's JWKS).
+  # A NetworkPolicy matches the pod port after the Service is resolved,
+  # so these are the pods' container ports (GAP-0139: idp serves 8443
+  # behind Service port 443).
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ate-system
+    ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 8443}
+    - {protocol: TCP, port: 8445}
+  # OTLP export.
+  - ports:
+    - {protocol: TCP, port: 4317}
+    - {protocol: TCP, port: 4318}
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-controller-egress
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: controller
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: controller
+  policyTypes: [Egress]
+  egress:
+  # DNS.
+  - ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  # This release's pods (leader RPC, admin listener for the callout judge).
+  - to:
+    -
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: dc
+          app.kubernetes.io/name: defenseclaw-substrate
+  # The Substrate namespace (ate-api-server, the actor JWT issuer's JWKS).
+  # A NetworkPolicy matches the pod port after the Service is resolved,
+  # so these are the pods' container ports (GAP-0139: idp serves 8443
+  # behind Service port 443).
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ate-system
+    ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 8443}
+    - {protocol: TCP, port: 8445}
+  # Model providers (/llm) and template registries (controller), the
+  # Kubernetes API (leader Lease, store state, resets;
+  # 6443 is its usual endpoint port). The callout needs neither.
+  - ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 6443}
+  # OTLP export.
+  - ports:
+    - {protocol: TCP, port: 4317}
+    - {protocol: TCP, port: 4318}
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
+# Gateway: the actor listener (plain HTTP) only from atenet-egress (actors
+# reach it only through egress, with the injected actor JWT); the admin listener only from
+# this namespace and adminFrom (launcher ingress, fleet).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: gateway
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    -
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ate-system
+      podSelector:
+        matchLabels:
+          app: atenet-egress
+    ports:
+    - protocol: TCP
+      port: 8080
+  - from:
+    # This namespace's pods, never a Substrate worker pod (which hosts
+    # actors) even if worker pools share the namespace.
+    - podSelector:
+        matchExpressions:
+        - {key: ate.dev/worker-pool, operator: DoesNotExist}
+    ports:
+    - protocol: TCP
+      port: 9443
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
+# Callout: only atenet-egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-callout
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: callout
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: callout
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    -
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ate-system
+      podSelector:
+        matchLabels:
+          app: atenet-egress
+    ports:
+    - protocol: TCP
+      port: 9443
+---
+# Source: defenseclaw-substrate/templates/networkpolicy.yaml
+# Leader: only this release's pods (followers, controller, callout).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-leader
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: leader
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: leader
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    -
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: dc
+          app.kubernetes.io/name: defenseclaw-substrate
+    ports:
+    - protocol: TCP
+      port: 7443
+---
+# Source: defenseclaw-substrate/templates/callout.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: defenseclaw-callout
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: callout
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: callout
+---
+# Source: defenseclaw-substrate/templates/gateway.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: gateway
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+# The chart hook Jobs: read the store state, and in the Substrate namespace
+# merge and remove DefenseClaw's entries of the credential provider namespace
+# policy and restart the provider (it reads the policy at start only).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: defenseclaw-hooks
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+automountServiceAccountToken: false
+---
+# Source: defenseclaw-substrate/templates/serviceaccounts.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+automountServiceAccountToken: false
+---
+# Source: defenseclaw-substrate/templates/serviceaccounts.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: defenseclaw-controller
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: controller
+automountServiceAccountToken: false
+---
+# Source: defenseclaw-substrate/templates/serviceaccounts.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: defenseclaw-callout
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: callout
+automountServiceAccountToken: false
+---
+# Source: defenseclaw-substrate/templates/callout-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-callout
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: callout
+data:
+  callout.yaml: |
+    body_inspection: auto
+    body_max_bytes: 1048576
+    defenseclaw_hosts:
+    - defenseclaw-actor.defenseclaw-system.svc.cluster.local
+    - defenseclaw-actor.defenseclaw-system.svc
+    egress_peers:
+    - spiffe://cluster.local/ns/ate-system/sa/atenet-egress
+    failure_mode: closed
+    internal_hosts:
+    - defenseclaw-admin.defenseclaw-system.svc.cluster.local
+    - defenseclaw-admin.defenseclaw-system.svc
+    - defenseclaw-admin.defenseclaw-system
+    - defenseclaw-admin
+    judge:
+      ca_file: /var/run/ate/ca.crt
+      token_file: /var/run/secrets/defenseclaw-callout-judge/token
+      url: https://defenseclaw-admin.defenseclaw-system.svc/api/v1/substrate/callout/verdict
+---
+# Source: defenseclaw-substrate/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-config
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+data:
+  config.yaml: |
+    config_version: 9
+    substrate:
+      api:
+        address: api.ate-system.svc:443
+        auth: serviceaccount
+        ca_file: /var/run/ate/ca.crt
+        server_name: api.ate-system.svc
+        token_file: /var/run/ate/token
+      default_sandbox_class: gvisor
+      enabled: true
+      extproc:
+        body_inspection: auto
+        body_max_bytes: 1048576
+        enabled: true
+        failure_mode: closed
+      identity:
+        audience: defenseclaw
+        issuer: https://idp.ate-system.svc
+        token_lifetime_seconds: 300
+      idle_suspend_after: 30m
+      launcher_atespaces: {}
+      require_attested_templates: true
+      services:
+        actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local
+        admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local
+      supported_versions: '>=1.0.0 <1.1.0'
+      unattended:
+        ask_timeout: 30m
+        asks: deny
+---
+# Source: defenseclaw-substrate/templates/launcher-endpoint.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-launcher-endpoint
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+data:
+  admin_url: "https://defenseclaw.example.com"
+---
+# Source: defenseclaw-substrate/templates/leader.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: defenseclaw-store
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: leader
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+# The chart's one cluster-wide grant (lead ruling, STEER 2026-11-13 00:32Z):
+# the Kubernetes sign-in (no OIDC issuer, not managed) verifies a person's
+# token with a TokenReview, which is cluster-scoped, so the gateway
+# ServiceAccount is bound to system:auth-delegator (tokenreviews create,
+# subjectaccessreviews come with it). Never rendered with an OIDC issuer.
+# Named by gateway.authDelegatorBinding; helm removes it on uninstall.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: defenseclaw-auth-delegator-defenseclaw-system-dc
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-hooks
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-store-state]
+  verbs: [get]
+---
+# Source: defenseclaw-substrate/templates/launcher-endpoint.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-launcher-endpoint-read
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-launcher-endpoint]
+  verbs: [get]
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+# The gateway leader and the controller hold a Lease each; the leader records
+# the store schema in defenseclaw-store-state (read by the rollback check).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+rules:
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [create]
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  resourceNames: ["defenseclaw-gateway-leader"]
+  verbs: [get, update]
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [create]
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-store-state, defenseclaw-policy-resets]
+  verbs: [get, update, patch]
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+# The controller reads and clears admin policy_conflict resets (the gateway
+# admin route writes them into defenseclaw-policy-resets).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-controller
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: controller
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-policy-resets]
+  verbs: [get, update]
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-hooks
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-hooks
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-hooks
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/launcher-endpoint.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-launcher-endpoint-read
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-launcher-endpoint-read
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:authenticated
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-gateway
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-controller
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-controller
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-controller
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/callout.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: defenseclaw-callout
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: callout
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/component: callout
+  ports:
+  - name: grpc
+    port: 9443
+    targetPort: extproc
+  - name: health
+    port: 9444
+    targetPort: health
+---
+# Source: defenseclaw-substrate/templates/gateway.yaml
+# The actor Service: the only DefenseClaw host in rendered egress policies,
+# as an http rule on port 80 to defenseclaw-actor.<ns>.svc.cluster.local
+# (GAP-0023: egress trusts only public CAs upstream, and actors resolve only
+# the exact names in their policy). It exposes the actor listener and nothing
+# else (D15); the actor JWT egress injects is the authentication.
+apiVersion: v1
+kind: Service
+metadata:
+  name: defenseclaw-actor
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+    defenseclaw.cisco.com/listener: actor
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/component: gateway
+  ports:
+  - name: http
+    port: 80
+    targetPort: actor
+---
+# Source: defenseclaw-substrate/templates/gateway.yaml
+# The admin Service: launcher, fleet and bundle APIs. Never in an egress
+# policy; the NetworkPolicy admits only this namespace and adminFrom.
+apiVersion: v1
+kind: Service
+metadata:
+  name: defenseclaw-admin
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+    defenseclaw.cisco.com/listener: admin
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/component: gateway
+  ports:
+  - name: https
+    port: 443
+    targetPort: admin
+---
+# Source: defenseclaw-substrate/templates/gateway.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: defenseclaw-gateway-metrics
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/component: gateway
+  ports:
+  - name: metrics
+    port: 9464
+    targetPort: metrics
+---
+# Source: defenseclaw-substrate/templates/leader.yaml
+# Internal: followers forward stateful RPCs here (mTLS between pods).
+apiVersion: v1
+kind: Service
+metadata:
+  name: defenseclaw-leader
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: leader
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/component: leader
+  ports:
+  - name: leader
+    port: 7443
+    targetPort: leader
+  - name: metrics
+    port: 9464
+    targetPort: metrics
+---
+# Source: defenseclaw-substrate/templates/callout.yaml
+# The atenet-egress ext_proc callout. It serves TLS 1.3 with the servicedns
+# pod certificate for defenseclaw-callout.<namespace>.svc, which Envoy checks,
+# and accepts only the atenet-egress client certificate.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: defenseclaw-callout
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: callout
+spec:
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: callout
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defenseclaw-substrate
+        app.kubernetes.io/instance: dc
+        app.kubernetes.io/component: callout
+      annotations:
+        checksum/config: ed8182da7be94dc0b471e6d3f44ae8f5e55aecffffd9a9a27054e52dbfa8becb
+        checksum/callout: f7cdb658cdfbf042caf6a3a3f30615a583619ffba264322d362a0247c2a5b49a
+    spec:
+      
+      serviceAccountName: defenseclaw-callout
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: defenseclaw-substrate
+            app.kubernetes.io/instance: dc
+            app.kubernetes.io/component: callout
+      
+      containers:
+      - name: callout
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        imagePullPolicy: IfNotPresent
+        args:
+        - substrate-extproc
+        - --config=/etc/defenseclaw-callout/callout.yaml
+        - --listen=:9443
+        - --health-listen=:9444
+        - --tls-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem
+        - --client-ca=/var/run/ate/podidentity-ca.crt
+        # The egress chain check (a secret read followed by egress) on the
+        # leader, over mTLS with this pod's identity (A13; ChainEgress only).
+        - --leader-address=defenseclaw-leader.defenseclaw-system.svc.cluster.local:7443
+        - --leader-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        - --peer-bundle=/var/run/ate/credential-bundle.pem
+        - --peer-trust=/var/run/ate/podidentity-ca.crt
+        env:
+        - name: DEFENSECLAW_CONFIG
+          value: /etc/defenseclaw/config.yaml
+        - name: DEFENSECLAW_HOME
+          value: /var/lib/defenseclaw/run/home
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        ports:
+        - name: extproc
+          containerPort: 9443
+        - name: health
+          containerPort: 9444
+        readinessProbe:
+          httpGet: {path: /readyz, port: health}
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: {path: /healthz, port: health}
+          periodSeconds: 10
+          failureThreshold: 6
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 250m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        
+        - name: config
+          mountPath: /etc/defenseclaw
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        - name: run
+          mountPath: /var/lib/defenseclaw/run
+        - name: ate
+          mountPath: /var/run/ate
+          readOnly: true
+        - name: servicedns
+          mountPath: /run/servicedns.podcert.ate.dev
+          readOnly: true
+        - name: callout-config
+          mountPath: /etc/defenseclaw-callout
+          readOnly: true
+        - name: callout-judge
+          mountPath: /var/run/secrets/defenseclaw-callout-judge
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: defenseclaw-config
+          # Read-only for everyone (managed: the config trust check wants an
+          # admin-owned file nobody else can write).
+          defaultMode: 0444
+      - name: tmp
+        emptyDir: {}
+      # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
+      # sticky (3777), which the audit store's directory trust check accepts; a
+      # disk emptyDir (2777) or a PVC root (0777 or 2775) is refused.
+      - name: run
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
+      - name: ate
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 3600
+              path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: podidentity-ca.crt
+      - name: servicedns
+        projected:
+          sources:
+          - podCertificate:
+              signerName: servicedns.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+      - name: callout-config
+        configMap:
+          name: defenseclaw-callout
+      - name: callout-judge
+        secret:
+          secretName: defenseclaw-callout-judge
+          items:
+          - {key: token, path: token}
+---
+# Source: defenseclaw-substrate/templates/controller.yaml
+# One replica, Recreate: policies, admission, idle suspend, drift and
+# inventory. The controller has no Lease client yet (A3), so two would both
+# act; when it gets one this becomes two replicas with a PDB.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: defenseclaw-controller
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defenseclaw-substrate
+        app.kubernetes.io/instance: dc
+        app.kubernetes.io/component: controller
+      annotations:
+        checksum/config: ed8182da7be94dc0b471e6d3f44ae8f5e55aecffffd9a9a27054e52dbfa8becb
+    spec:
+      
+      serviceAccountName: defenseclaw-controller
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      
+      containers:
+      - name: controller
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        imagePullPolicy: IfNotPresent
+        args:
+        - substrate-controller
+        - --config=/etc/defenseclaw/config.yaml
+        # Registrations live on the gateway leader (GAP-0125), over mTLS.
+        - --leader-address=defenseclaw-leader.defenseclaw-system.svc.cluster.local:7443
+        - --leader-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        env:
+        - name: DEFENSECLAW_CONFIG
+          value: /etc/defenseclaw/config.yaml
+        - name: DEFENSECLAW_HOME
+          value: /var/lib/defenseclaw/run/home
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        
+        - name: config
+          mountPath: /etc/defenseclaw
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        - name: run
+          mountPath: /var/lib/defenseclaw/run
+        - name: ate
+          mountPath: /var/run/ate
+          readOnly: true
+        # Reads admin policy_conflict resets (defenseclaw-policy-resets).
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+        - name: template-anchors
+          mountPath: /etc/defenseclaw/substrate/template-anchors
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: defenseclaw-config
+          # Read-only for everyone (managed: the config trust check wants an
+          # admin-owned file nobody else can write).
+          defaultMode: 0444
+      - name: tmp
+        emptyDir: {}
+      # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
+      # sticky (3777), which the audit store's directory trust check accepts; a
+      # disk emptyDir (2777) or a PVC root (0777 or 2775) is refused.
+      - name: run
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
+      - name: ate
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 3600
+              path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: podidentity-ca.crt
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
+      - name: template-anchors
+        secret:
+          secretName: defenseclaw-template-anchors
+          optional: true
+          defaultMode: 0440
+          items:
+          - {key: anchors.pem, path: anchors.pem}
+---
+# Source: defenseclaw-substrate/templates/gateway.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+spec:
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defenseclaw-substrate
+        app.kubernetes.io/instance: dc
+        app.kubernetes.io/component: gateway
+      annotations:
+        checksum/config: ed8182da7be94dc0b471e6d3f44ae8f5e55aecffffd9a9a27054e52dbfa8becb
+    spec:
+      
+      serviceAccountName: defenseclaw-gateway
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: defenseclaw-substrate
+            app.kubernetes.io/instance: dc
+            app.kubernetes.io/component: gateway
+      
+      containers:
+      - name: gateway
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        imagePullPolicy: IfNotPresent
+        args:
+        - serve
+        - --substrate
+        - --substrate-role=gateway
+        - --actor-listen=:8080
+        # Egress reaches the actor listener on an http rule, port 80 (GAP-0023):
+        # it serves plain HTTP; the admin listener keeps TLS (GAP-0143).
+        - --actor-plain-http
+        - --admin-listen=:9443
+        - --metrics-listen=:9464
+        - --leader-address=defenseclaw-leader.defenseclaw-system.svc.cluster.local:7443
+        - --leader-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        - --router-address=atenet-router.ate-system.svc:8444
+        - --router-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
+        - --relay-port=8080
+        - --peer-bundle=/var/run/ate/credential-bundle.pem
+        - --peer-trust=/var/run/ate/podidentity-ca.crt
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        - --callout-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
+        - --controller-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
+        env:
+        - name: DEFENSECLAW_CONFIG
+          value: /etc/defenseclaw/config.yaml
+        - name: DEFENSECLAW_HOME
+          value: /var/lib/defenseclaw/run/home
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        ports:
+        - name: actor
+          containerPort: 8080
+        - name: admin
+          containerPort: 9443
+        - name: metrics
+          containerPort: 9464
+        readinessProbe:
+          httpGet: {path: /readyz, port: metrics}
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: {path: /healthz, port: metrics}
+          periodSeconds: 10
+          failureThreshold: 6
+        resources:
+          limits:
+            memory: 1Gi
+          requests:
+            cpu: 250m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        
+        - name: config
+          mountPath: /etc/defenseclaw
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        - name: run
+          mountPath: /var/lib/defenseclaw/run
+        - name: ate
+          mountPath: /var/run/ate
+          readOnly: true
+        - name: servicedns
+          mountPath: /run/servicedns.podcert.ate.dev
+          readOnly: true
+        # The value-lineage key every replica shares (the chain-key hook creates it).
+        - name: chain-key
+          mountPath: /var/run/secrets/defenseclaw-chain-key
+          readOnly: true
+        - name: relay-session
+          mountPath: /var/run/secrets/defenseclaw-relay-session
+          readOnly: true
+        - name: llm-credentials
+          mountPath: /var/run/secrets/defenseclaw-llm
+          readOnly: true
+        - name: callout-judge
+          mountPath: /var/run/secrets/defenseclaw-callout-judge
+          readOnly: true
+        # The create path admits a launcher actor with the controller's own
+        # attestation check (GAP-0154), so it reads the same anchors.
+        - name: template-anchors
+          mountPath: /etc/defenseclaw/substrate/template-anchors
+          readOnly: true
+        # The admin route writes policy_conflict resets for the controller.
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: defenseclaw-config
+          # Read-only for everyone (managed: the config trust check wants an
+          # admin-owned file nobody else can write).
+          defaultMode: 0444
+      - name: tmp
+        emptyDir: {}
+      # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
+      # sticky (3777), which the audit store's directory trust check accepts; a
+      # disk emptyDir (2777) or a PVC root (0777 or 2775) is refused.
+      - name: run
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
+      - name: ate
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 3600
+              path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: podidentity-ca.crt
+      - name: servicedns
+        projected:
+          sources:
+          - podCertificate:
+              signerName: servicedns.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+      - name: chain-key
+        secret:
+          secretName: defenseclaw-chain-key
+          optional: true
+          defaultMode: 0440
+          items:
+          - {key: key, path: key}
+      - name: relay-session
+        secret:
+          secretName: defenseclaw-relay-session
+          optional: true
+          defaultMode: 0440
+      - name: llm-credentials
+        secret:
+          secretName: defenseclaw-llm
+          optional: true
+          defaultMode: 0440
+      - name: callout-judge
+        secret:
+          secretName: defenseclaw-callout-judge
+          defaultMode: 0440
+          items:
+          - {key: token, path: token}
+      - name: template-anchors
+        secret:
+          secretName: defenseclaw-template-anchors
+          optional: true
+          defaultMode: 0440
+          items:
+          - {key: anchors.pem, path: anchors.pem}
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
+---
+# Source: defenseclaw-substrate/templates/leader.yaml
+# The gateway leader: one replica holding the lease and the RWO store. Recreate,
+# so the old pod releases the volume before the new one mounts it; failover
+# is the lease moving and the volume reattaching (about 30 s).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: defenseclaw-gateway-leader
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: leader
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw-substrate
+      app.kubernetes.io/instance: dc
+      app.kubernetes.io/component: leader
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defenseclaw-substrate
+        app.kubernetes.io/instance: dc
+        app.kubernetes.io/component: leader
+      annotations:
+        checksum/config: ed8182da7be94dc0b471e6d3f44ae8f5e55aecffffd9a9a27054e52dbfa8becb
+    spec:
+      
+      serviceAccountName: defenseclaw-gateway
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      
+      containers:
+      - name: leader
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        imagePullPolicy: IfNotPresent
+        args:
+        - serve
+        - --substrate
+        - --substrate-role=leader
+        - --leader-listen=:7443
+        - --metrics-listen=:9464
+        - --lease=defenseclaw-gateway-leader
+        - --store-dir=/var/lib/defenseclaw/store
+        - --store-state-configmap=defenseclaw-store-state
+        - --peer-bundle=/var/run/ate/credential-bundle.pem
+        - --peer-trust=/var/run/ate/podidentity-ca.crt
+        - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        - --callout-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
+        - --controller-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
+        env:
+        - name: DEFENSECLAW_CONFIG
+          value: /etc/defenseclaw/config.yaml
+        - name: DEFENSECLAW_HOME
+          value: /var/lib/defenseclaw/run/home
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        ports:
+        - name: leader
+          containerPort: 7443
+        - name: metrics
+          containerPort: 9464
+        readinessProbe:
+          httpGet: {path: /readyz, port: metrics}
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: {path: /healthz, port: metrics}
+          periodSeconds: 10
+          failureThreshold: 6
+        resources:
+          limits:
+            memory: 2Gi
+          requests:
+            cpu: 250m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        
+        - name: config
+          mountPath: /etc/defenseclaw
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        - name: run
+          mountPath: /var/lib/defenseclaw/run
+        - name: ate
+          mountPath: /var/run/ate
+          readOnly: true
+        - name: servicedns
+          mountPath: /run/servicedns.podcert.ate.dev
+          readOnly: true
+        # The value-lineage key every replica shares (the chain-key hook creates it).
+        - name: chain-key
+          mountPath: /var/run/secrets/defenseclaw-chain-key
+          readOnly: true
+        - name: relay-session
+          mountPath: /var/run/secrets/defenseclaw-relay-session
+          readOnly: true
+        - name: llm-credentials
+          mountPath: /var/run/secrets/defenseclaw-llm
+          readOnly: true
+        - name: callout-judge
+          mountPath: /var/run/secrets/defenseclaw-callout-judge
+          readOnly: true
+        - name: store
+          mountPath: /var/lib/defenseclaw/store
+        # The Kubernetes API token for the leader Lease and the store state
+        # ConfigMap (the gateway's automount stays off).
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: defenseclaw-config
+          # Read-only for everyone (managed: the config trust check wants an
+          # admin-owned file nobody else can write).
+          defaultMode: 0444
+      - name: tmp
+        emptyDir: {}
+      # DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
+      # sticky (3777), which the audit store's directory trust check accepts; a
+      # disk emptyDir (2777) or a PVC root (0777 or 2775) is refused.
+      - name: run
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
+      - name: ate
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 3600
+              path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: podidentity-ca.crt
+      - name: servicedns
+        projected:
+          sources:
+          - podCertificate:
+              signerName: servicedns.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+      - name: chain-key
+        secret:
+          secretName: defenseclaw-chain-key
+          optional: true
+          defaultMode: 0440
+          items:
+          - {key: key, path: key}
+      - name: relay-session
+        secret:
+          secretName: defenseclaw-relay-session
+          optional: true
+          defaultMode: 0440
+      - name: llm-credentials
+        secret:
+          secretName: defenseclaw-llm
+          optional: true
+          defaultMode: 0440
+      - name: callout-judge
+        secret:
+          secretName: defenseclaw-callout-judge
+          defaultMode: 0440
+          items:
+          - {key: token, path: token}
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
+      - name: store
+        persistentVolumeClaim:
+          claimName: defenseclaw-store
+---
+# Source: defenseclaw-substrate/templates/callout.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: defenseclaw-callout
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: callout
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: defenseclaw-callout
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+---
+# Source: defenseclaw-substrate/templates/gateway.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: defenseclaw-gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+---
+# Source: defenseclaw-substrate/templates/ingress.yaml
+# Launchers reach the admin listener through this ingress (TLS); the actor
+# listener is never exposed.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: defenseclaw-admin
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts: ["defenseclaw.example.com"]
+    secretName: defenseclaw-admin-tls
+  rules:
+  - host: "defenseclaw.example.com"
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: defenseclaw-admin
+            port:
+              name: https
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+# The chain-key hook runs before install creates the release's resources
+# (defenseclaw-hooks among them), so it has its own ServiceAccount, which
+# exists only while the hook runs.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: defenseclaw-chain-key
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+automountServiceAccountToken: false
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+# The relay-session hook runs before install too, with its own
+# ServiceAccount, which exists only while the hook runs: it creates the
+# relay session key Secret when it is absent and never replaces it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: defenseclaw-relay-key
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+automountServiceAccountToken: false
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+# Only while the chain-key hook runs: create the shared chain key Secret
+# and the callout token Secret when they are absent (create cannot be
+# limited to one name; get can).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-hooks-chain-key
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: [defenseclaw-chain-key, defenseclaw-callout-judge]
+  verbs: [get]
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [create]
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-hooks-relay-key
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: ["defenseclaw-relay-session"]
+  verbs: [get]
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [create]
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+# Only while the pre-delete hook runs: stop the controller before the
+# policies are removed (GAP-0056). A hook resource, so no standing grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-hooks-uninstall
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+# Read the controller's selector; scale it through the scale subresource
+# only (no patch of the Deployment itself).
+- apiGroups: [apps]
+  resources: [deployments]
+  resourceNames: [defenseclaw-controller]
+  verbs: [get]
+- apiGroups: [apps]
+  resources: [deployments/scale]
+  resourceNames: [defenseclaw-controller]
+  verbs: [get, patch]
+# Count its pods, terminating ones included (list cannot be limited by name).
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [list]
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-defenseclaw-system-hooks
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: ["k8s-credential-provider-namespace-policy"]
+  verbs: [get, update]
+- apiGroups: [apps]
+  resources: [deployments]
+  resourceNames: ["k8s-credential-provider"]
+  verbs: [get, patch]
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-hooks-chain-key
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-hooks-chain-key
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-chain-key
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-hooks-relay-key
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-hooks-relay-key
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-relay-key
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-hooks-uninstall
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-hooks-uninstall
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-hooks
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/hooks/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-defenseclaw-system-hooks
+  namespace: ate-system
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-defenseclaw-system-hooks
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-hooks
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/hooks/jobs.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: defenseclaw-chain-key
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defenseclaw-substrate
+        app.kubernetes.io/instance: dc
+        app.kubernetes.io/component: hooks
+    spec:
+      restartPolicy: Never
+      
+      serviceAccountName: defenseclaw-chain-key
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: chain-key
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        imagePullPolicy: IfNotPresent
+        args:
+        - substrate-chart
+        - chain-key
+        - --plan=env:DEFENSECLAW_CHART_PLAN
+        - --config=env:DEFENSECLAW_CHART_CONFIG
+        env:
+        # The plan and config ride in the Job itself: a hook ConfigMap would
+        # outlive the release (Helm keeps hook resources), and each hook
+        # must see its own release's plan (the target one in a rollback).
+        - name: DEFENSECLAW_CHART_PLAN
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
+        - name: DEFENSECLAW_CHART_CONFIG
+          value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+        - name: DEFENSECLAW_HOME
+          value: /tmp/defenseclaw
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: ate
+          mountPath: /var/run/ate
+          readOnly: true
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: ate
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 600
+              path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+      # The Kubernetes API token for the configmap and rollout steps.
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
+---
+# Source: defenseclaw-substrate/templates/hooks/jobs.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: defenseclaw-relay-session
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defenseclaw-substrate
+        app.kubernetes.io/instance: dc
+        app.kubernetes.io/component: hooks
+    spec:
+      restartPolicy: Never
+      
+      serviceAccountName: defenseclaw-relay-key
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: relay-session
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        imagePullPolicy: IfNotPresent
+        args:
+        - substrate-chart
+        - relay-session
+        - --plan=env:DEFENSECLAW_CHART_PLAN
+        - --config=env:DEFENSECLAW_CHART_CONFIG
+        env:
+        # The plan and config ride in the Job itself: a hook ConfigMap would
+        # outlive the release (Helm keeps hook resources), and each hook
+        # must see its own release's plan (the target one in a rollback).
+        - name: DEFENSECLAW_CHART_PLAN
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
+        - name: DEFENSECLAW_CHART_CONFIG
+          value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+        - name: DEFENSECLAW_HOME
+          value: /tmp/defenseclaw
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: ate
+          mountPath: /var/run/ate
+          readOnly: true
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: ate
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 600
+              path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+      # The Kubernetes API token for the configmap and rollout steps.
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
+---
+# Source: defenseclaw-substrate/templates/hooks/jobs.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: defenseclaw-pre-upgrade
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defenseclaw-substrate
+        app.kubernetes.io/instance: dc
+        app.kubernetes.io/component: hooks
+    spec:
+      restartPolicy: Never
+      
+      serviceAccountName: defenseclaw-hooks
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: pre-upgrade
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        imagePullPolicy: IfNotPresent
+        args:
+        - substrate-chart
+        - pre-upgrade
+        - --plan=env:DEFENSECLAW_CHART_PLAN
+        - --config=env:DEFENSECLAW_CHART_CONFIG
+        env:
+        # The plan and config ride in the Job itself: a hook ConfigMap would
+        # outlive the release (Helm keeps hook resources), and each hook
+        # must see its own release's plan (the target one in a rollback).
+        - name: DEFENSECLAW_CHART_PLAN
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
+        - name: DEFENSECLAW_CHART_CONFIG
+          value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+        - name: DEFENSECLAW_HOME
+          value: /tmp/defenseclaw
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: ate
+          mountPath: /var/run/ate
+          readOnly: true
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: ate
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 600
+              path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+      # The Kubernetes API token for the configmap and rollout steps.
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
+---
+# Source: defenseclaw-substrate/templates/hooks/jobs.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: defenseclaw-pre-rollback
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-rollback
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defenseclaw-substrate
+        app.kubernetes.io/instance: dc
+        app.kubernetes.io/component: hooks
+    spec:
+      restartPolicy: Never
+      
+      serviceAccountName: defenseclaw-hooks
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: pre-rollback
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        imagePullPolicy: IfNotPresent
+        args:
+        - substrate-chart
+        - pre-rollback
+        - --plan=env:DEFENSECLAW_CHART_PLAN
+        - --config=env:DEFENSECLAW_CHART_CONFIG
+        env:
+        # The plan and config ride in the Job itself: a hook ConfigMap would
+        # outlive the release (Helm keeps hook resources), and each hook
+        # must see its own release's plan (the target one in a rollback).
+        - name: DEFENSECLAW_CHART_PLAN
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
+        - name: DEFENSECLAW_CHART_CONFIG
+          value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+        - name: DEFENSECLAW_HOME
+          value: /tmp/defenseclaw
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: ate
+          mountPath: /var/run/ate
+          readOnly: true
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: ate
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 600
+              path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+      # The Kubernetes API token for the configmap and rollout steps.
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}
+---
+# Source: defenseclaw-substrate/templates/hooks/jobs.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: defenseclaw-pre-delete
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: hooks
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defenseclaw-substrate
+        app.kubernetes.io/instance: dc
+        app.kubernetes.io/component: hooks
+    spec:
+      restartPolicy: Never
+      
+      serviceAccountName: defenseclaw-hooks
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: pre-delete
+        image: ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10
+        imagePullPolicy: IfNotPresent
+        args:
+        - substrate-chart
+        - pre-delete
+        - --plan=env:DEFENSECLAW_CHART_PLAN
+        - --config=env:DEFENSECLAW_CHART_CONFIG
+        env:
+        # The plan and config ride in the Job itself: a hook ConfigMap would
+        # outlive the release (Helm keeps hook resources), and each hook
+        # must see its own release's plan (the target one in a rollback).
+        - name: DEFENSECLAW_CHART_PLAN
+          value: "{\n  \"actor_host\": \"defenseclaw-actor.defenseclaw-system.svc.cluster.local\",\n  \"api\": {\n    \"address\": \"api.ate-system.svc:443\",\n    \"audience\": \"api.ate-system.svc\"\n  },\n  \"app_version\": \"1.0.10\",\n  \"auth_delegator_binding\": \"defenseclaw-auth-delegator-defenseclaw-system-dc\",\n  \"chart_version\": \"1.0.10\",\n  \"controller_deployment\": \"defenseclaw-controller\",\n  \"credential_provider\": {\n    \"config_map\": \"k8s-credential-provider-namespace-policy\",\n    \"deployment\": \"k8s-credential-provider\",\n    \"grant\": true,\n    \"secrets_namespace\": \"defenseclaw-actor-secrets\"\n  },\n  \"delete_owner_token\": true,\n  \"editors\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"global_viewers\": [\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-gateway\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-controller\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-callout\",\n    \"system:serviceaccount:defenseclaw-system:defenseclaw-hooks\"\n  ],\n  \"launcher_atespaces\": [],\n  \"namespace\": \"defenseclaw-system\",\n  \"owner_token_secret\": \"\",\n  \"relay_session_secret\": \"defenseclaw-relay-session\",\n  \"release\": \"dc\",\n  \"schema\": 1,\n  \"store_schema\": 1,\n  \"store_state_config_map\": \"defenseclaw-store-state\",\n  \"substrate_namespace\": \"ate-system\",\n  \"supported_versions\": \"\\u003e=1.0.0 \\u003c1.1.0\",\n  \"writable_atespaces\": []\n}"
+        - name: DEFENSECLAW_CHART_CONFIG
+          value: "config_version: 9\nsubstrate:\n  api:\n    address: api.ate-system.svc:443\n    auth: serviceaccount\n    ca_file: /var/run/ate/ca.crt\n    server_name: api.ate-system.svc\n    token_file: /var/run/ate/token\n  default_sandbox_class: gvisor\n  enabled: true\n  extproc:\n    body_inspection: auto\n    body_max_bytes: 1048576\n    enabled: true\n    failure_mode: closed\n  identity:\n    audience: defenseclaw\n    issuer: https://idp.ate-system.svc\n    token_lifetime_seconds: 300\n  idle_suspend_after: 30m\n  launcher_atespaces: {}\n  require_attested_templates: true\n  services:\n    actor: defenseclaw-actor.defenseclaw-system.svc.cluster.local\n    admin: defenseclaw-admin.defenseclaw-system.svc.cluster.local\n  supported_versions: '>=1.0.0 <1.1.0'\n  unattended:\n    ask_timeout: 30m\n    asks: deny"
+        - name: DEFENSECLAW_HOME
+          value: /tmp/defenseclaw
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: ate
+          mountPath: /var/run/ate
+          readOnly: true
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: ate
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 600
+              path: token
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+      # The Kubernetes API token for the configmap and rollout steps.
+      - name: kube-api-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - {key: ca.crt, path: ca.crt}
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef: {fieldPath: metadata.namespace}

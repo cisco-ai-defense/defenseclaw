@@ -189,6 +189,7 @@ from defenseclaw.tui.services.read_repository import (
 )
 from defenseclaw.tui.services.routing_state import RoutingPanelModel, routing_help_rows
 from defenseclaw.tui.services.setup_state import credential_reload_summary, validate_config_field
+from defenseclaw.tui.services.substrate_state import substrate_needs_terminal
 from defenseclaw.tui.services.tui_state import TUIState, TUIStateStore
 from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, severity_color, state_color
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
@@ -14842,6 +14843,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             self._set_status("Command cancelled.")
             self._release_cancelled_wizard(parsed.binary, parsed.args)
             return None
+        if parsed.binary == "defenseclaw" and substrate_needs_terminal(parsed.args):
+            # Sign-in, a new agent, connect and pull ask questions or take
+            # the screen: they run on this terminal, as the Sandboxes panel's rows do.
+            handed_over = self._run_substrate_in_terminal(parsed)
+            if handed_over is not None:
+                return handed_over
         # Any command that needed a preview is non-read-only (setup,
         # mutation, destructive, …) — most of them are interactive
         # wizards. The user just confirmed they want to run it, so jump
