@@ -72,17 +72,16 @@ var (
 
 // RefusesEgressJoin reports whether a detected chain is refused when the
 // egress action is block: a secret read, or a secret-manager read, followed
-// by external egress (egressDenyChains), whose result bit is
-// clear in fileUnknownJoinMask (guardrail.ToolChainMatches.FileUnknownJoinMask).
-// A chain that joined only through the file-unknown marker (the read named
-// no one file) alerts instead. The callout (egressMemo.verdict) and the
-// gateway's hook (substrateChainEgressIntent) both decide with it.
-func RefusesEgressJoin(chainID string, fileUnknownJoinMask uint32) bool {
-	if !egressDenyChains[chainID] {
-		return false
-	}
-	bit, ok := guardrail.ToolChainResultMask(chainID)
-	return ok && fileUnknownJoinMask&bit == 0
+// by external egress (egressDenyChains). A chain that joined only through
+// the file-unknown marker (its bit in the second argument,
+// guardrail.ToolChainMatches.FileUnknownJoinMask) is refused the same way
+// (1.0.10 lead ruling 2026-11-14): the actor chooses the form of its read,
+// and a read of two files, a cd first or a copy would otherwise turn a
+// refusal into an alert. The mask stays in the result and the audit record;
+// only the opt-in alert action alerts. The callout (egressMemo.verdict) and
+// the gateway's hook (substrateChainEgressIntent) both decide with it.
+func RefusesEgressJoin(chainID string, _ uint32) bool {
+	return egressDenyChains[chainID]
 }
 
 // Options configure a Service.

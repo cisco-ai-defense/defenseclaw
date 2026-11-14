@@ -23,13 +23,12 @@ import (
 // read (cfg.Substrate.EffectiveChainEgressAction, GAP-0250). Host and
 // OpenShell hooks keep the pack's disposition: an alert in the default pack.
 //
-// Only a resolved chain refuses: one with a first step whose read names an
-// exact file, or carries no file identity at all. A
-// chain that joined only through the file-unknown marker (a read of several
-// files, a read in a call that also writes, a relative path in a call not
-// proven to keep its directory) alerts, on the hook and at the callout
-// (chainstate.RefusesEgressJoin on audit.ToolChainObserveResult's
-// FileUnknownJoinMask). A result without the mask reads as resolved.
+// A chain that joined only through the file-unknown marker (a read of
+// several files, a read in a call that also writes, a relative path in a
+// call not proven to keep its directory) is refused the same way, on the
+// hook and at the callout (chainstate.RefusesEgressJoin, 1.0.10 lead ruling
+// 2026-11-14): the actor chooses the form of its read. Its
+// FileUnknownJoinMask bit is kept in the result and the audit record.
 
 // substrateChainEgressAlert is true only after the gateway role read
 // substrate.chain_egress_action=alert. Unset is block.
@@ -51,8 +50,8 @@ func SetSubstrateChainEgressAction(action string) error {
 }
 
 // substrateChainEgressIntent is the hook intent of a chain result: block for
-// a verified Substrate actor whose result detects a resolved chain the
-// callout refuses, unless the operator chose alert; intent otherwise. The hook
+// a verified Substrate actor whose result detects a chain the callout
+// refuses, unless the operator chose alert; intent otherwise. The hook
 // profile still maps a block to what the event and mode allow (a would-block
 // in observe mode, an alert on an event that cannot block).
 func substrateChainEgressIntent(

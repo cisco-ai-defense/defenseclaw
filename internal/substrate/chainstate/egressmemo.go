@@ -225,9 +225,9 @@ func (m *egressMemo) verdict(now time.Time, action string) (EgressVerdict, bool)
 		if !egressDenyChains[d.ID] {
 			continue
 		}
-		// A chain that joined only through the file-unknown marker only
-		// alerts; a resolved one refuses while the action is block. The
-		// verdict names a refusing chain before an alerting one.
+		// Every egress-deny chain refuses while the action is block, a
+		// marker-only one too (RefusesEgressJoin). The verdict names a
+		// refusing chain before an alerting one.
 		refuse := action == EgressBlock && RefusesEgressJoin(d.ID, fileUnknown)
 		if v.Rule == "" || refuse && !v.Deny {
 			v.Rule = d.ID
