@@ -25,6 +25,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -1438,6 +1439,21 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				return
 			}
 			child = parseCommandAs(nested, dialect, out.nextID, wrapperDepth+1)
+		case "awk", "gawk", "mawk", "nawk":
+			// An awk program starts a shell command through system(),
+			// print | and | getline; a command written as string literals
+			// is judged as the hook running it directly (GAP-0499). One
+			// built from anything else is answered by the gateway at the
+			// unknown tier (awkprog.DynamicReason).
+			body, _ := awkprog.ArgvShell(command.Argv)
+			if body == "" {
+				continue
+			}
+			if wrapperDepth >= maxWrapperDepth {
+				out.markLimit(IssueWrapperLimit)
+				return
+			}
+			child = parsePOSIX(body, out.nextID, wrapperDepth+1)
 		case "sudo", "exec", "env", "command", "builtin", "nsenter", "chroot":
 			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(command.Argv, program)
 			if uncertain {

@@ -798,6 +798,10 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		code, ok := actionInterpreterInlineCode(words, 0)
 		return ok && actionInterpreterReadsPrivateKey(code, kind)
 	}
+	if shell, _ := awkCommandShell(words, cwd, false); shell != nil &&
+		actionPrivateKeyReadWords(shell, cwd, home, mode, depth+1) {
+		return true // A command an awk program starts reads the key.
+	}
 	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) {
 		return true
 	}
@@ -1427,6 +1431,13 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home, false) {
 		if protectedReachPath(target, protected, ssh) {
 			return "dynamic-argument"
+		}
+	}
+	if shell, _ := awkCommandShell(words, cwd, false); shell != nil {
+		// An awk program's string-literal commands are judged as the hook
+		// running them directly (GAP-0499).
+		if class := actionChildDecision(shell, stmt, cwd, home, depth+1); class != "" {
+			return class
 		}
 	}
 	if program == "sort" {

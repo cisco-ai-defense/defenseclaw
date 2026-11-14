@@ -554,6 +554,47 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 	return called
 }
 
+// clientProtectedDecision is the protected-target decision the hook client
+// reaches for a plain shell command (the one an awk program starts too): a concrete write to a protected file, a
+// variable write a per-user gateway resolves through the user's links, a loop
+// copy destination that is protected, or a no-dereference touch that is not
+// safe.
+func clientProtectedDecision(command, cwd, home string) bool {
+	var concrete actionConcreteOperands
+	decision := actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concrete)
+	if decision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
+		decision = false
+	}
+	if !decision && actionClientVariableWriteCandidate(command, home) {
+		decision = ActionCommandDecision(command, cwd, home) != "" &&
+			!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
+			!actionClientProvedOverwrittenRedirect(command, cwd, home)
+	}
+	if !decision {
+		decision = actionClientLoopCopyDestinationProtected(command, cwd, home)
+	}
+	if !decision && NoDereferenceTouchShape(command, cwd, home) {
+		_, decision = noDereferenceTouchStatus(command, cwd, home)
+	}
+	return decision
+}
+
+// mergeFacts is the facts of both maps; an entry of first stays.
+func mergeFacts(first, second map[string]string) map[string]string {
+	if len(second) == 0 {
+		return first
+	}
+	if first == nil {
+		first = make(map[string]string, len(second))
+	}
+	for key, value := range second {
+		if _, found := first[key]; !found {
+			first[key] = value
+		}
+	}
+	return first
+}
+
 // OperandPath is actionfacts.OperandPath: the client keys its path answers by
 // it, and the gateway asks for them by the same function.
 func OperandPath(name, cwd string) string {
@@ -1873,6 +1914,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	var safeRedirects []RedirectOccurrence
 	opaqueFacts := map[string]string{}
 	var globFacts, walkFacts map[string]string
+	var twinReadings []string
 	var unprovenReason string
 	protectedDecision := hermesV4AProtected
 	var noDereferenceTouchSafe bool
@@ -2105,20 +2147,68 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// the map also lists the targets of that reading (GAP-2563).
 				if !isApplyPatchToolName(tool) {
 					readings := []string{command}
-					if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(command); isTwin && wrapped != command {
-						readings = append(readings, wrapped)
+					// addReading lists the targets of a second reading of the
+					// command that the gateway judges too; full adds every
+					// operand reading the command itself gets.
+					addReading := func(reading string, full bool) {
+						readings = append(readings, reading)
+						if full {
+							twinReadings = append(twinReadings, reading)
+						}
 						twinInput := fallback
-						twinInput.Command = wrapped
+						twinInput.Command = reading
 						twinFacts := actionfacts.Analyze(twinInput)
 						facts.Paths = append(facts.Paths, twinFacts.Paths...)
 						truncated = truncated || twinFacts.Parse.Status == actionfacts.StatusLimitExceeded
-						twinOperands, _, _ := ShellWriteOperands(wrapped, cwd, home)
+						twinOperands, _, _ := ShellWriteOperands(reading, cwd, home)
 						operands = append(operands, twinOperands...)
-						literalOperands = append(literalOperands, LiteralWriteOperands(wrapped, cwd, home)...)
-						twinDirectories, twinUnknown := ShellDirectoryWriteOperands(wrapped, cwd, home, sourceFacts, true, false)
+						literalOperands = append(literalOperands, LiteralWriteOperands(reading, cwd, home)...)
+						twinDirectories, twinUnknown := ShellDirectoryWriteOperands(reading, cwd, home, sourceFacts, true, false)
 						directoryOperands = append(directoryOperands, twinDirectories...)
 						truncated = truncated || twinUnknown
+						if !full {
+							return
+						}
+						if strings.Contains(reading, ">") {
+							assignedOperands = append(assignedOperands, AdjacentAssignedWriteOperands(reading, cwd, home)...)
+							assignedOperands = append(assignedOperands, DeclaredRedirectWriteOperands(reading, cwd, home)...)
+							boundedTwin, _ := BoundedShellWriteOperands(reading, cwd, home)
+							literalOperands = append(literalOperands, boundedTwin...)
+						}
+						literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(reading, cwd, home)...)
+						literalOperands = append(literalOperands, quotedGlobNameWriteOperands(reading, cwd, home, twinFacts.Paths)...)
+						literalOperands = append(literalOperands, BoundedLoopCopyDestinations(reading, cwd, home)...)
+						literalOperands = append(literalOperands, CopySourceGlobDestinations(reading, cwd, home, nil)...)
+						literalOperands = append(literalOperands, BoundedGlobLoopCopyDestinations(reading, cwd, home, nil)...)
+						// A link text the reading cannot place leaves its map
+						// incomplete, as it does for the command itself.
+						if inner := commandLinksWithFacts(reading, cwd, home, sourceFacts, true); inner.opaque {
+							truncated = true
+						}
 					}
+					if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(command); isTwin && wrapped != command {
+						addReading(wrapped, false)
+					}
+					// The commands an awk program starts through system(),
+					// print | and | getline, written as string literals, run
+					// as the hook would run them directly; the gateway judges
+					// that reading, and behind ProtectHome reads its targets
+					// only from this map (GAP-0499).
+					awkTwin := actionfacts.AwkCommandTwin(command)
+					if awkTwin.Text != "" && awkTwin.Text != command {
+						addReading(awkTwin.Text, true)
+						for _, body := range awkTwin.Bodies {
+							protectedDecision = protectedDecision || clientProtectedDecision(body, cwd, home)
+						}
+						// An awk call that is the whole command and starts one
+						// command is that command: a touch -h of a link itself
+						// is as safe as the plain call (GAP-0499).
+						if !protectedDecision && !noDereferenceTouchSafe && len(awkTwin.Bodies) == 1 &&
+							awkTwin.Text == awkTwin.Bodies[0] && NoDereferenceTouchShape(awkTwin.Text, cwd, home) {
+							noDereferenceTouchSafe, protectedDecision = noDereferenceTouchStatus(awkTwin.Text, cwd, home)
+						}
+					}
+					truncated = truncated || awkTwin.Truncated.Any()
 					// A cp, mv, install, ln, dd or tee call with a
 					// runtime-expanded operand word ($(true), `true`, $SRC)
 					// has a partial argv. The gateway judges its static
@@ -2183,9 +2273,18 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					}
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
 					globFacts = actionGlobFacts(command, cwd, home)
+					// The reading of an awk program's commands is judged by the
+					// gateway too: the pattern and link walk facts of its text
+					// are listed beside those of the command.
+					for _, reading := range twinReadings {
+						globFacts = mergeFacts(globFacts, actionGlobFacts(reading, cwd, home))
+					}
 					// Where each link-walk spelling of the command lies, for a
 					// gateway that cannot walk the home itself (GAP-2569).
 					walkFacts = LinkWalkFacts(command, cwd, home)
+					for _, reading := range twinReadings {
+						walkFacts = mergeFacts(walkFacts, LinkWalkFacts(reading, cwd, home))
+					}
 					// An unresolved program word alone does not make a
 					// concrete write operand or its link walk incomplete.
 					truncated = truncated || links.opaque
