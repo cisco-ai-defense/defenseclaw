@@ -158,7 +158,7 @@ func TestEveryCredentialTableRowThenEgressOnTheHookPathGAP0550(t *testing.T) {
 			if slices.Contains(home.RuleIDs, guardrail.ToolChainSecretReadThenEgress) != wantChain {
 				t.Fatalf("home control: chain on egress want %t: %+v", wantChain, home)
 			}
-			for index, probe := range credentialStoreProbes() {
+			for _, probe := range credentialStoreProbes() {
 				for _, root := range credentialStoreRoots[:2] {
 					file := path.Join(root, probe)
 					for _, tool := range []string{"Bash", "Read"} {
@@ -166,7 +166,7 @@ func TestEveryCredentialTableRowThenEgressOnTheHookPathGAP0550(t *testing.T) {
 						if tool == "Bash" {
 							value = "cat " + file
 						}
-						session := strings.Join([]string{setup.name, tool, root, probe, string(rune(a + index%26))}, "-")
+						session := strings.Join([]string{setup.name, tool, root, probe}, "-")
 						got := run(session, tool, value)
 						if slices.Contains(got.RuleIDs, guardrail.ToolChainSecretReadThenEgress) != wantChain {
 							t.Errorf("%s: chain on egress after %s %q want %t: %+v", setup.name, tool, value, wantChain, got)
