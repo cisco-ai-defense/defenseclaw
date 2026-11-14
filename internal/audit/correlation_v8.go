@@ -1703,6 +1703,42 @@ func (tx *CorrelationTx) PutRelationshipEvidence(
 	return id, nil
 }
 
+// PutRelationshipFirstSourceEvidence records evidence for a relationship
+// that holds none yet, as PutRelationshipEvidence does, and records nothing
+// for one that already has evidence; stored says which. It is for the edges
+// of a session that every hook of the session reports again (its agent or
+// turn membership, its reported lineage): one source row per hook made the
+// edge evidence, and RelationshipEvidenceCount inside the hook correlation
+// transaction, grow with the length of the session, and the rows kept every
+// event of a live session from retention (S8 GW1, rel-1-0-10 GAP-0621). The
+// first source stays the edge proof; a hook whose edge lost its evidence to
+// retention records its own. A Secure Client store keeps main: every call
+// records its evidence.
+func (tx *CorrelationTx) PutRelationshipFirstSourceEvidence(
+	ctx context.Context,
+	evidence CorrelationRelationshipEvidence,
+) (id string, stored bool, err error) {
+	if err := tx.usable(ctx); err != nil {
+		return "", false, err
+	}
+	if !tx.repo.store.secureClientSchema {
+		var one int
+		switch err := tx.tx.QueryRowContext(ctx, correlationEvidenceAnySQL, evidence.RelationshipID).Scan(&one); {
+		case err == nil:
+			return "", false, nil
+		case !errors.Is(err, sql.ErrNoRows):
+			return "", false, fmt.Errorf("audit: read correlation relationship evidence: %w", err)
+		}
+	}
+	id, err = tx.PutRelationshipEvidence(ctx, evidence)
+	return id, err == nil, err
+}
+
+// correlationEvidenceAnySQL finds whether a relationship has any evidence
+// row, from idx_correlation_evidence_relationship alone.
+const correlationEvidenceAnySQL = `SELECT 1
+	FROM correlation_relationship_evidence WHERE relationship_id = ? LIMIT 1`
+
 // RelationshipEvidenceCount returns the durable number of distinct evidence
 // rows supporting a relationship inside the caller-owned transaction. Export
 // callers use this after PutRelationshipEvidence so remote relationship-change

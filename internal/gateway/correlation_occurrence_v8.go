@@ -1631,13 +1631,34 @@ func putCorrelationRelationshipEvidence(
 	semantic audit.SemanticEventID,
 	now time.Time,
 ) error {
+	return putCorrelationRelationshipEvidenceOf(ctx, tx, relationship, semantic, now, false)
+}
+
+// putCorrelationRelationshipEvidenceOf is putCorrelationRelationshipEvidence;
+// with firstSource the occurrence is recorded only as the first source of an
+// edge that has none (audit PutRelationshipFirstSourceEvidence).
+func putCorrelationRelationshipEvidenceOf(
+	ctx context.Context,
+	tx *audit.CorrelationTx,
+	relationship *audit.CorrelationRelationship,
+	semantic audit.SemanticEventID,
+	now time.Time,
+	firstSource bool,
+) error {
 	if relationship == nil {
 		return fmt.Errorf("correlation relationship evidence requires relationship")
 	}
-	if _, err := tx.PutRelationshipEvidence(ctx, audit.CorrelationRelationshipEvidence{
+	evidence := audit.CorrelationRelationshipEvidence{
 		RelationshipID: relationship.RelationshipID, SemanticEventID: semantic,
 		Role: audit.CorrelationEvidenceSource, Integrity: audit.CorrelationIntegrityVerified, CreatedAt: now,
-	}); err != nil {
+	}
+	var err error
+	if firstSource {
+		_, _, err = tx.PutRelationshipFirstSourceEvidence(ctx, evidence)
+	} else {
+		_, err = tx.PutRelationshipEvidence(ctx, evidence)
+	}
+	if err != nil {
 		return err
 	}
 	evidenceCount, err := tx.RelationshipEvidenceCount(ctx, relationship.RelationshipID)
@@ -1702,6 +1723,22 @@ type hookIdentityRelationshipFact struct {
 	toTarget   connector.CorrelationTarget
 	typeName   audit.CorrelationRelationshipType
 	ruleID     string
+}
+
+// hookSessionScopedRelationshipRules are the identity edges of a session
+// that every hook of the session reports again: its turn and agent
+// membership and its reported lineage. Their first hook is their source
+// evidence; later hooks refresh the edge (last seen) without a row each, so
+// the evidence of an edge, its exported evidence count and the writer time
+// of a hook no longer grow with the session (S8 GW1, rel-1-0-10 GAP-0621).
+// Edges of one tool call or model request keep one row per hook (a start and
+// an end).
+var hookSessionScopedRelationshipRules = map[string]bool{
+	"turn-session-membership":   true,
+	"agent-session-membership":  true,
+	"reported-session-lineage":  true,
+	"reported-agent-lineage":    true,
+	"reported-agent-delegation": true,
 }
 
 // putHookIdentityRelationships materializes only relationships supported by
@@ -1816,8 +1853,8 @@ func putHookIdentityRelationships(
 		if err != nil {
 			return nil, err
 		}
-		if err := putCorrelationRelationshipEvidence(
-			ctx, tx, &relationship, semantic, now,
+		if err := putCorrelationRelationshipEvidenceOf(
+			ctx, tx, &relationship, semantic, now, hookSessionScopedRelationshipRules[fact.ruleID],
 		); err != nil {
 			return nil, err
 		}
