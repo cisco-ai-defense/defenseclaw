@@ -34,9 +34,13 @@ type routeOnlyReadiness struct {
 	Custody    bool                       `json:"custody"`
 	Credential string                     `json:"credential"`
 	Signing    *routeOnlySigningReadiness `json:"signing,omitempty"`
-	Ready      bool                       `json:"ready"`
-	Problem    string                     `json:"problem,omitempty"`
-	Fix        string                     `json:"fix,omitempty"`
+	// EnrolledUsers counts the enrolled accounts of a managed host whose
+	// route credential the gateway accepts (one per protected ledger row);
+	// nil off managed hosts.
+	EnrolledUsers *int   `json:"enrolled_users,omitempty"`
+	Ready         bool   `json:"ready"`
+	Problem       string `json:"problem,omitempty"`
+	Fix           string `json:"fix,omitempty"`
 }
 
 // routeOnlySigningReadiness is the gateway Bedrock signing check.
@@ -66,7 +70,7 @@ func readinessError(err error) string {
 // of cfg (none when routing is off). Signing is checked with one bounded
 // credential fetch through signers (the cache the listener signs with).
 // It is published only while the route-only listener is mounted.
-func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSigners) []routeOnlyReadiness {
+func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSigners, enrolled func(connector string) (int, bool)) []routeOnlyReadiness {
 	names := routeOnlyConnectorsOf(cfg)
 	if len(names) == 0 {
 		return nil
@@ -109,6 +113,18 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 			r.Fix = "set routing.models[].credential for " + r.Provider + " (base_url " + r.Upstream + ") in the policy bundle"
 		default:
 			r.Credential, r.Ready = routeCredentialAgent, true
+		}
+		if managedHost && enrolled != nil {
+			if n, ok := enrolled(name); ok {
+				r.EnrolledUsers = &n
+				if n == 0 && r.Problem == "" {
+					// Nothing is routed until the guardian renders an
+					// enrolled account (rel-1-0-10 GAP-0568: this was silent).
+					r.Ready = false
+					r.Problem = "no enrolled account has a route-only render for " + name + " yet, so no call is routed"
+					r.Fix = "enroll users (enterprise.enrollment), wait for the hook guardian pass (about 2 minutes) and restart the agent; enterprise verify lists route_config_drift for an account whose render is missing"
+				}
+			}
 		}
 		out = append(out, r)
 	}
@@ -196,7 +212,7 @@ func (s *Sidecar) runRouteOnlyReadiness(ctx context.Context, ro *routeOnlyServer
 	defer tick.Stop()
 	for {
 		if cfg := s.currentConfig(); cfg != last || time.Since(lastAt) >= routeOnlyReadinessEvery {
-			s.health.SetRouteOnlyReadiness(routeOnlyReadinessFor(cfg, ro.goos, &ro.signers))
+			s.health.SetRouteOnlyReadiness(routeOnlyReadinessFor(cfg, ro.goos, &ro.signers, ro.enrolledRouteUsers))
 			last, lastAt = cfg, time.Now()
 		}
 		select {

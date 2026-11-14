@@ -160,7 +160,10 @@ type UnixEnumerateOptions struct {
 	// directory; nil means they may.
 	DirectoryConfigured func() bool
 	// MachinePolicyConnectors come from the runtime descriptor; they get
-	// per-user rows only when enrollment.unenrolled_users is "deny".
+	// per-user rows only when enrollment.unenrolled_users is "deny", or
+	// when route-only routes them on a standalone managed host (the row
+	// carries the account's own route render and the route credential the
+	// gateway verifies, rel-1-0-10 GAP-0568).
 	MachinePolicyConnectors []string
 	// OwnershipOffConnectors are machine-policy connectors whose machine
 	// policy the administrator leaves alone (ownership: "off"). They get
@@ -348,7 +351,8 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			continue
 		}
 		if _, isMachine := machinePolicy[name]; isMachine &&
-			!strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny) {
+			!strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny) &&
+			!MachinePolicyRouteOnly(cfg, name) {
 			continue
 		}
 		perUser = append(perUser, name)
