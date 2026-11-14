@@ -287,6 +287,11 @@ type SetupOpts struct {
 	// Hermes command originally registered. Ordinary per-user setup leaves this
 	// empty and resolves the packaged launcher through installed-state.
 	HookExecutable string
+	// RollbackTargetVersion is the release a rollback returns to (connector
+	// prepare-rollback --to-version). The rollback converters write the hook
+	// form that release owns (rel-1-0-10:GAP-0275); "" means unknown, which
+	// gets the form every 1.0.x release owns.
+	RollbackTargetVersion string
 
 	// ClaudeSettingsOverride is the exact file path or inline JSON supplied to
 	// Claude Code through --settings for the invocation being inspected. An
