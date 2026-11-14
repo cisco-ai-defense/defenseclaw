@@ -265,3 +265,75 @@ func TestWindowsEncodedLauncherUnderAPOSIXToolIsReadAsUnderPowerShell(t *testing
 		}
 	}
 }
+
+// TestWindowsCmdLauncherOnThePowerShellToolIsReadAsItsLine
+// (rel-1-0-10:GAP-0552): a cmd.exe call run from the PowerShell tool (cmd /c,
+// cmd.exe /c, the system's cmd.exe, & cmd, cmd /s /c, cmd /r) is judged as the
+// line cmd.exe runs, with the cmd rules, in every tier: each toolcall corpus
+// CMD attack fixture (by id) that the Bash tool's cmd /c spelling catches, and
+// the same fixture joined to an inert command by an unquoted &, which
+// PowerShell would split. A benign line stays allowed.
+func TestWindowsCmdLauncherOnThePowerShellToolIsReadAsItsLine(t *testing.T) {
+	type tier struct {
+		name, pack      string
+		strict, managed bool
+	}
+	tiers := []tier{{"default", "default", false, false}, {"permissive", "permissive", false, false},
+		{"strict", "strict", true, false}, {"managed", "default", false, true}, {"managed-strict", "strict", true, true}}
+	run := func(t *testing.T, tr tier, tool, command string) []RuleFinding {
+		t.Helper()
+		args, err := json.Marshal(map[string]string{"command": command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input:      actionfacts.Input{Tool: tool, Args: args, CWD: `C:\Users\alice\work`, ActiveHome: `C:\Users\alice`},
+			LegacyText: string(args), Connector: "windows-bounds", EnforcementCapable: true,
+			StrictPolicy: tr.strict, ManagedInstall: tr.managed,
+		})
+	}
+	var fixtures []toolCallCorpusCase
+	for _, test := range readJSONL[toolCallCorpusCase](t, "toolcall", "corpus.jsonl") {
+		if test.IsAttack && test.Dialect == actionfacts.DialectCMD && test.Command != "" && len(test.OSOverrides) == 0 &&
+			!strings.ContainsAny(test.Command, "\"\r\n") {
+			fixtures = append(fixtures, test)
+		}
+	}
+	if len(fixtures) == 0 {
+		t.Fatal("no CMD attack fixture in the toolcall corpus")
+	}
+	read := 0
+	for _, tr := range tiers {
+		installToolCallCorpusPackDirConnector(t, "windows-bounds", filepath.Join(guardrailPoliciesRoot(t), tr.pack))
+		for _, test := range fixtures {
+			if test.ProfilePosture == toolCallCorpusStrictOnlyPosture && !tr.strict {
+				continue
+			}
+			if windowsBoundsAllowed(run(t, tr, "Bash", "cmd /c "+test.Command)) {
+				continue // the Bash tool's spelling is the reference
+			}
+			read++
+			for _, spelling := range []string{
+				"cmd /c " + test.Command,
+				`C:\Windows\System32\cmd.exe /c ` + test.Command,
+				"& cmd.exe /c " + test.Command,
+				`cmd /s /c "` + test.Command + `"`,
+				"cmd /r " + test.Command,
+				"cmd.exe /c ver & " + test.Command,
+			} {
+				if findings := run(t, tr, "PowerShell", spelling); windowsBoundsAllowed(findings) {
+					t.Errorf("%s %s: the PowerShell tool's spelling %d of the cmd fixture is a clean allow: %v",
+						tr.name, test.ID, len(spelling)-len(test.Command), FindingStrings(findings))
+				}
+			}
+		}
+		for _, benign := range []string{"cmd /c ver & hostname", "cmd.exe /c dir & echo done", `cmd /s /c "type README.md"`} {
+			if findings := run(t, tr, "PowerShell", benign); !windowsBoundsAllowed(findings) {
+				t.Errorf("%s: a benign cmd line is not allowed: %v", tr.name, FindingStrings(findings))
+			}
+		}
+	}
+	if read == 0 {
+		t.Fatal("no CMD fixture is caught in the Bash tool's cmd /c spelling: the test checks nothing")
+	}
+}

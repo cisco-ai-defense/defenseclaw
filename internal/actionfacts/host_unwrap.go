@@ -794,9 +794,7 @@ func rawCMDLauncherLine(source string) (string, Dialect, bool) {
 		text = strings.TrimLeft(text[end:], " \t")
 		return first
 	}
-	switch strings.ToLower(word()) {
-	case "cmd", "cmd.exe":
-	default:
+	if launcher := strings.Trim(word(), `"`); !hostLauncherIdentity(launcher, "cmd") {
 		return "", DialectNone, false
 	}
 	for text != "" {
@@ -806,7 +804,9 @@ func rawCMDLauncherLine(source string) (string, Dialect, bool) {
 			switchWord = switchWord[1:]
 		}
 		switch switchWord {
-		case "/c":
+		case "/c", "/r":
+			// /r is /c. /k (the shell stays open) is not modeled: the call
+			// stays partial, as the Windows marker tests pin (GAP-0364).
 			line := text
 			if len(line) >= 2 && (line[0] == '"' && line[len(line)-1] == '"' ||
 				line[0] == '\'' && line[len(line)-1] == '\'') {
@@ -820,6 +820,24 @@ func rawCMDLauncherLine(source string) (string, Dialect, bool) {
 		}
 	}
 	return "", DialectNone, false
+}
+
+// powerShellCmdLauncherLine is the line a PowerShell call that is a cmd
+// launcher (cmd, cmd.exe or the system's cmd.exe, bare or after the &
+// call operator) hands to cmd.exe, read as its author wrote it
+// (rawCMDLauncherLine). PowerShell's own reading of the words may differ: an
+// unquoted & or | is its own operator, and Windows PowerShell 5.1 re-quotes a
+// native argv, so psparse leaves the line non-static; the author means the
+// line as cmd.exe reads it, and the Bash tool's spelling of the same call is
+// read that way. It is a second reading beside the call as written: it only
+// adds (rel-1-0-10:GAP-0552).
+func powerShellCmdLauncherLine(source string) (string, bool) {
+	text := strings.TrimSpace(source)
+	if rest, ok := strings.CutPrefix(text, "&"); ok {
+		text = strings.TrimSpace(rest)
+	}
+	line, dialect, ok := rawCMDLauncherLine(text)
+	return line, ok && dialect == DialectCMD
 }
 
 // posixLauncherRequotedBody is the -Command script of a POSIX call to a
@@ -1023,6 +1041,20 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 	unwrapped, _ := unwrapHostSource(source, dialect, depth+layers)
 	reading.Caps = unwrapped.caps
 	reading.Depth = depth + layers + unwrapped.layers
+	// A PowerShell call that is a cmd launcher is also read as the cmd.exe
+	// line its author wrote (powerShellCmdLauncherLine).
+	var cmdLine *Input
+	if dialect == DialectPowerShell {
+		if line, ok := powerShellCmdLauncherLine(source); ok && !(unwrapped.layers > 0 && unwrapped.source == line) {
+			twin := input
+			twin.Args, twin.Argv = nil, nil
+			twin.Command, twin.DialectHint = line, DialectCMD
+			cmdLine = &twin
+			if reading.Depth == depth+layers {
+				reading.Depth++
+			}
+		}
+	}
 	if unwrapped.layers > 0 || layers > 0 {
 		twin := input
 		twin.Args, twin.Argv = nil, nil
@@ -1043,9 +1075,16 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 				reading.Twins = append(reading.Twins, second)
 			}
 		}
+		if cmdLine != nil {
+			reading.Twins = append(reading.Twins, *cmdLine)
+		}
 		// The twin is a script: its own list of statements is read when the
 		// twin is read in turn, with the depth carried.
 		return reading
+	}
+	if cmdLine != nil {
+		reading.Twins = append(reading.Twins, *cmdLine)
+		reading.Listed = append(reading.Listed, false)
 	}
 	if dialect != DialectPowerShell || listed {
 		return reading
@@ -1058,11 +1097,9 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 		twin.Command = text
 		twin.DialectHint = DialectPowerShell
 		reading.Twins = append(reading.Twins, twin)
-	}
-	reading.Depth = depth + 1
-	for range reading.Twins {
 		reading.Listed = append(reading.Listed, true)
 	}
+	reading.Depth = depth + 1
 	// Launchers, call blocks and evaluated literals anywhere in the tree (in a
 	// branch, a loop, a try, a function, a pipeline stage, an assignment or a
 	// sub-expression), each read as the script it runs.
