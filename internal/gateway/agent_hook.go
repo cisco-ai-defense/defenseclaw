@@ -3715,7 +3715,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// toast honor it (managed_enterprise only; no-op otherwise).
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
 	verdict = a.applyCascadeFinal(ctx, req.ConnectorName, hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
-	verdict = a.applyAlignmentLane(ctx, req.ConnectorName, req.HookEventName, req.ToolName, string(req.ToolArgs), req.CWD, verdict)
+	verdict = a.applyAlignmentLane(ctx, req.ConnectorName, req.HookEventName, req.ToolName, req.ToolInvocationID, string(req.ToolArgs), req.CWD, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction

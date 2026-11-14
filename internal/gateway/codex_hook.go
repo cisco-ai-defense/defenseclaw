@@ -371,7 +371,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	// directive.
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
 	verdict = a.applyCascadeFinal(ctx, "codex", hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
-	verdict = a.applyAlignmentLane(ctx, "codex", req.HookEventName, req.ToolName, codexAlignmentArgs(req.ToolInput), req.CWD, verdict)
+	verdict = a.applyAlignmentLane(ctx, "codex", req.HookEventName, req.ToolName, req.ToolUseID, codexAlignmentArgs(req.ToolInput), req.CWD, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction

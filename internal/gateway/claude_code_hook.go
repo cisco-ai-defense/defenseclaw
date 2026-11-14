@@ -339,7 +339,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	verdict = a.applyCascadeFinal(ctx, "claudecode", hookCascadeSurface(req.HookEventName), req.HookEventName, claudeCodeToolName(req), verdict)
 	// The alignment check adds its own finding after the pipeline decided
 	// (cascade lane alignment, off by default).
-	verdict = a.applyAlignmentLane(ctx, "claudecode", req.HookEventName, claudeCodeToolName(req), string(claudeCodeToolArgs(req)), req.CWD, verdict)
+	verdict = a.applyAlignmentLane(ctx, "claudecode", req.HookEventName, claudeCodeToolName(req), req.ToolUseID, string(claudeCodeToolArgs(req)), req.CWD, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction

@@ -54,7 +54,7 @@ func TestAlignmentSideEffectingUsesTheEffects(t *testing.T) {
 		{"mcp__bench__GmailSendEmail", `{"to":"a@example.com"}`, true},
 		{"mcp__bench__GitHubGetUserDetails", `{"username":"x"}`, false},
 	} {
-		if got := alignmentSideEffecting(ctx, "claudecode", tc.tool, tc.args, cwd); got != tc.want {
+		if got, _ := alignmentSideEffecting(ctx, "claudecode", tc.tool, tc.args, cwd); got != tc.want {
 			t.Errorf("alignmentSideEffecting(%s %s) = %v, want %v", tc.tool, tc.args, got, tc.want)
 		}
 	}
@@ -96,7 +96,7 @@ func TestAlignmentLaneOffDoesNoWork(t *testing.T) {
 	ctx := ContextWithSessionID(context.Background(), "s-align-off")
 	api.observeAlignmentTurn(ctx, "claudecode", "pay the rent")
 	v := &ToolInspectVerdict{Action: "allow", Severity: "NONE"}
-	if out := api.applyAlignmentLane(ctx, "claudecode", "PreToolUse", "send_money", `{"amount":1}`, "/w", v); out != v {
+	if out := api.applyAlignmentLane(ctx, "claudecode", "PreToolUse", "send_money", "toolu_1", `{"amount":1}`, "/w", v); out != v {
 		t.Fatal("the lane changed a verdict while off")
 	}
 	if len(api.alignment.sessions) != 0 {

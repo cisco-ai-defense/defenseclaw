@@ -259,6 +259,10 @@ func main() {
 	}
 	if *alignmentLane != "" {
 		cfg.Guardrail.Cascade.Lanes = map[string]string{"alignment": *alignmentLane}
+		// The lane asks only for connectors whose hooks the judge is on for
+		// (guardrail.judge.hook_connectors, GAP-0680); -connector auto
+		// drives every connector.
+		cfg.Guardrail.Judge.HookConnectors = []string{"*"}
 	}
 	promptFromContent = *promptFromContentFlag
 	engine, err := gateway.S7NewEngine(cfg, "claudecode")

@@ -276,12 +276,32 @@ func localJudgeEndpoint(endpoint string) bool {
 // ahead of prompt judging, so a pending tool call is not queued behind a
 // turn's prompt checks on a slow local model (#1395). The wait counts
 // against ctx, the call's own deadline.
-func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (*ChatResponse, error) {
-	release, err := j.calls.acquire(ctx, judgeCallClassOf(kind))
-	if err != nil {
-		return nil, fmt.Errorf("judge call waited for a free slot (guardrail.judge.max_parallel) past its deadline: %w", err)
+//
+// An alignment call (judgeCallAlignment) never waits for a slot: with none
+// free it fails with errJudgeSlotBusy, and it gives its slot up (failing
+// with errJudgeSlotPreempted) as soon as another judge call has to wait.
+func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (resp *ChatResponse, err error) {
+	var release func()
+	yielding := judgeCallClassOf(kind) == judgeCallAlignment
+	if yielding {
+		ctx, release, err = j.calls.acquireYielding(ctx)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		release, err = j.calls.acquire(ctx, judgeCallClassOf(kind))
+		if err != nil {
+			return nil, fmt.Errorf("judge call waited for a free slot (guardrail.judge.max_parallel) past its deadline: %w", err)
+		}
 	}
 	defer release()
+	if yielding {
+		defer func() {
+			if errors.Is(context.Cause(ctx), errJudgeSlotPreempted) {
+				err = errJudgeSlotPreempted
+			}
+		}()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -289,7 +309,7 @@ func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (*Ch
 		return nil, context.Canceled
 	}
 	call := j.beginJudgeUsage(ctx, kind)
-	resp, err := j.provider.ChatCompletion(ctx, req)
+	resp, err = j.provider.ChatCompletion(ctx, req)
 	finishJudgeUsage(call, resp, err)
 	return resp, err
 }
