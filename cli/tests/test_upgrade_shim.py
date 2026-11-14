@@ -1707,9 +1707,34 @@ def _schema_key_paths(schema: dict) -> set[str]:
     return out
 
 
+_SCHEMA_1_0_9 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.9.schema.json"
+
+
+def _missing_from_newer_config_keys(new_paths: set[str], old_paths: set[str]) -> list[str]:
+    """Keys in the new schema, absent from 1.0.9, that NEWER_CONFIG_KEYS (a key or a block above it) does not list."""
+
+    listed = [key for key, since in upgrade_shim.NEWER_CONFIG_KEYS if since > (1, 0, 9)]
+    return sorted(
+        path
+        for path in new_paths - old_paths
+        if not any(path == key or path.startswith(key + ".") for key in listed)
+    )
+
+
+def test_the_frozen_1_0_9_key_list_is_the_published_1_0_9_schema() -> None:
+    # fixtures/config_keys/1.0.9.txt is not typed by hand: it is _schema_key_paths of
+    # fixtures/config_keys/1.0.9.schema.json, a byte copy of the schema 1.0.9 published:
+    #   git show 1.0.9:schemas/config/v8/defenseclaw-config.schema.json > 1.0.9.schema.json
+    # This test regenerates the list from that copy and requires the two to match, so a
+    # hand edit of either one fails here.
+    schema = json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8"))
+    regenerated = sorted(_schema_key_paths(schema))
+    assert regenerated == _CONFIG_KEYS_1_0_9.read_text(encoding="utf-8").split()
+    assert "guardrail.mode" in regenerated
+    assert not {"guardrail.cascade", "guardrail.secret_flow", "routing"} & set(regenerated)
+
+
 def test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade() -> None:
-    # fixtures/config_keys/1.0.9.txt is _schema_key_paths of the published
-    # 1.0.9 schema (git show 1.0.9:schemas/config/v8/defenseclaw-config.schema.json).
     # A key the schema adds after 1.0.9 is refused by 1.0.9, so it must be in
     # NEWER_CONFIG_KEYS (itself or a block that holds it), or a downgrade
     # leaves a config.yaml 1.0.9 does not start with.
@@ -1717,14 +1742,19 @@ def test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade() -> None:
     schema = json.loads(
         (_REPO_ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json").read_text(encoding="utf-8")
     )
-    listed = [key for key, since in upgrade_shim.NEWER_CONFIG_KEYS if since > (1, 0, 9)]
-    missing = sorted(
-        path
-        for path in _schema_key_paths(schema) - old
-        if not any(path == key or path.startswith(key + ".") for key in listed)
-    )
+    new = _schema_key_paths(schema)
+    missing = _missing_from_newer_config_keys(new, old)
     assert missing == [], f"add these to upgrade_shim.NEWER_CONFIG_KEYS: {missing}"
 
+
+def test_the_downgrade_guard_fails_on_a_key_the_list_does_not_cover() -> None:
+    # The guard above would pass on an empty diff; prove it bites: a key that is in the
+    # 1.0.10 schema, not in the frozen 1.0.9 list and not in NEWER_CONFIG_KEYS is reported,
+    # and a key under a listed block is not.
+    old = set(_CONFIG_KEYS_1_0_9.read_text(encoding="utf-8").split())
+    new = set(old) | {"guardrail.brand_new_switch", "guardrail.secret_flow.sink_action.default"}
+    assert _missing_from_newer_config_keys(new, old) == ["guardrail.brand_new_switch"]
+    assert _missing_from_newer_config_keys(old, old) == []
 
 
 @pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
