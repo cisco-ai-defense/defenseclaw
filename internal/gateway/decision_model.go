@@ -332,7 +332,7 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	case choice == "allow" && res.risk <= routing.allowAt:
 		res.route = decisionAllow
 	case choice == "block" && res.risk >= routing.blockAt && score >= routing.blockRiskScore &&
-		!(routing.escalateRuleFlagged && decisionRuleFloorFrom(ctx)):
+		(!routing.escalateRuleFlagged || !decisionRuleFloorFrom(ctx)):
 		// A confident block needs the disposition AND the risk score (R4),
 		// and never lands on a call the rules flagged (RF): those escalate.
 		res.route = decisionBlock

@@ -668,7 +668,7 @@ func readCascadeModule(ref AssetFileRef) ([]byte, error) {
 	}
 	if cascadePolicyCheck != nil {
 		if err := cascadePolicyCheck(src); err != nil {
-			return nil, fmt.Errorf("Rego: %v", err)
+			return nil, fmt.Errorf("rego: %v", err)
 		}
 	}
 	return src, nil

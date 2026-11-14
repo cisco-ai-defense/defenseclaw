@@ -554,14 +554,6 @@ func stringsAny(in []string) []any {
 	return out
 }
 
-// cascadePolicyOf is the prepared cascade policy of generation g.
-func cascadePolicyOf(g *Generation) *policy.CascadePolicy {
-	if g == nil {
-		return nil
-	}
-	return g.CascadePolicy
-}
-
 // buildCascadePolicy prepares the verified policy module cfg carries.
 func buildCascadePolicy(ctx context.Context, cfg *config.Config) (*policy.CascadePolicy, error) {
 	if cfg == nil || cfg.SecureClientIntegration() {
