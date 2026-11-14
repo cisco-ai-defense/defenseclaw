@@ -109,6 +109,28 @@ const (
 	MaxListReadings    = maxListReadings
 )
 
+// psparseBoundCaps names the psparse bounds a parse hit: its nesting depth
+// (ps_depth_limit) and its input size (ps_truncated). A script psparse stopped
+// reading at a bound is not left unread: the reading is truncated and the
+// call is judged at the unknown tier of the pack at least (rel-1-0-10:GAP-0478).
+// Any other diagnostic (an unbalanced or dynamic construct) is psparse not
+// resolving the script, which leaves the call as the tokenizer read it.
+func psparseBoundCaps(script *psparse.Script) bounded.CapSet {
+	var caps bounded.CapSet
+	if script == nil {
+		return caps
+	}
+	for _, diagnostic := range script.Diagnostics {
+		switch diagnostic.Reason {
+		case psparse.ReasonDepthLimit:
+			caps = caps.Union(bounded.Of(bounded.Depth))
+		case psparse.ReasonTruncated:
+			caps = caps.Union(bounded.Of(bounded.Bytes))
+		}
+	}
+	return caps
+}
+
 // unwrapHostSource unwraps source (PowerShell or cmd.exe grammar) until no
 // static host wrapper is left, at most maxWrapperDepth layers. ok is false when
 // source holds no static wrapper.
@@ -152,7 +174,7 @@ func unwrapPowerShellOnce(source string) (string, Dialect, bool, bounded.CapSet)
 	var caps bounded.CapSet
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) != 0 || len(script.Statements) == 0 {
-		return "", DialectNone, false, caps
+		return "", DialectNone, false, psparseBoundCaps(script)
 	}
 	type edit struct {
 		start, end int
@@ -1062,7 +1084,7 @@ func powerShellNestedTexts(source string) ([]nestedText, bounded.CapSet) {
 	}
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) != 0 {
-		return nil, caps
+		return nil, psparseBoundCaps(script)
 	}
 	var out []nestedText
 	for _, nested := range psparse.ExtractNestedScripts(script) {
@@ -1150,7 +1172,7 @@ func powerShellStatementTexts(source string) ([]string, bounded.CapSet) {
 	}
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) != 0 || len(script.Statements) < 2 {
-		return nil, caps
+		return nil, psparseBoundCaps(script)
 	}
 	statements := script.Statements
 	if len(statements) > maxListReadings {

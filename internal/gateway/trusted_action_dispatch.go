@@ -632,7 +632,12 @@ func dispatchTrustedAction(
 				if twin.hostTwinListed {
 					// A statement of a list read alone is a fragment: that it
 					// is too large to judge says nothing the whole call's own
-					// limit does not.
+					// limit does not. A bound the statement's own reading hit
+					// (a launcher nested past the depth, a body past the size)
+					// is a truncation of the call all the same, alone, in a
+					// list or in a call block: its caps reach the call
+					// (rel-1-0-10:GAP-0477).
+					caps = caps.Union(boundedCapsOf(twinFindings))
 					twinFindings = withoutLimitFindings(twinFindings)
 				}
 				findings = withHostTwinFindings(findings, twinFindings)
@@ -6490,7 +6495,7 @@ func withHostTwinFindings(findings, twin []RuleFinding) []RuleFinding {
 			joined[index].RuleID, joined[index].Title = before[index].RuleID, before[index].Title
 		}
 	}
-	return joined
+	return withCarriedBoundedCaps(joined, twin)
 }
 
 // withoutLimitFindings drops the evaluation-limit finding of a reading that is

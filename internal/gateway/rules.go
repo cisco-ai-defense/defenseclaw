@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
@@ -98,6 +99,11 @@ type RuleFinding struct {
 	// file. It is private and value-free; guardrailActionForProfile keeps its
 	// block in every profile.
 	omittedOperand bool
+	// boundedCaps are the caps of a reader's truncation this evaluation-limit
+	// finding stands for (withBoundedTruncation). It is private and
+	// value-free; a reading joined as a fragment of the call drops its limit
+	// finding but carries these caps to the call (rel-1-0-10:GAP-0477).
+	boundedCaps bounded.CapSet
 }
 
 type findingEnforcement uint8

@@ -21,7 +21,8 @@ import (
 // together, from windowsAtomicParityPositives); the unreadable statement is a
 // subexpression the reader does not model, placed before and after it. Without
 // the Windows hook's readings the parse is partial and the multi-statement
-// finding is lost, which this test pins as the reason for the twin.
+// finding is lost, which this test pins as the reason for the twin (the
+// script reading off as well: either one recovers the finding).
 func TestWindowsHookJudgesTheReadableStatementsOfAPartialPowerShellCall(t *testing.T) {
 	const caseName, rule = "UAC event viewer handler chain", "privilege.windows_uac_autoelevation_hijack"
 	var positive *windowsAtomicParityCase
@@ -50,12 +51,21 @@ func TestWindowsHookJudgesTheReadableStatementsOfAPartialPowerShellCall(t *testi
 				if !slices.Contains(whole.RuleIDs, rule) {
 					t.Fatalf("the atomic case alone has no %s: %v", rule, whole.RuleIDs)
 				}
-				plain := evaluateDeterministicAction(context.Background(), input, command, "benchmark-"+pack, pack, false)
-				if plain.Authoritative {
-					t.Fatalf("the unreadable statement left the parse %q: the test no longer pins the partial reading", plain.ParseStatus)
+				// Without the readings: the Windows hook's readable-statements
+				// reading off, and the script reading (actionfacts.
+				// HostScriptReadings, whose statement list can find the same
+				// rule, rel-1-0-10:GAP-0481) off too.
+				var plainFacts actionfacts.Facts
+				plain := dispatchTrustedAction(context.Background(), trustedActionRequest{
+					Input: input, LegacyText: command, Connector: "benchmark-" + pack, EnforcementCapable: true,
+					hostScriptTwinOff: true,
+					record:            func(facts actionfacts.Facts, _ []RuleFinding) { plainFacts = facts },
+				})
+				if plainFacts.Authoritative() {
+					t.Fatalf("the unreadable statement left the parse %q: the test no longer pins the partial reading", plainFacts.Parse.Status)
 				}
-				if slices.Contains(plain.RuleIDs, rule) {
-					t.Fatalf("without the readings the partial call already has %s: %v", rule, plain.RuleIDs)
+				if slices.ContainsFunc(plain, func(f RuleFinding) bool { return f.RuleID == rule }) {
+					t.Fatalf("without the readings the partial call already has %s: %v", rule, FindingStrings(plain))
 				}
 				got := evaluateDeterministicAction(context.Background(), input, command, "benchmark-"+pack, pack, true)
 				if !slices.Contains(got.RuleIDs, rule) || got.Action != whole.Action {

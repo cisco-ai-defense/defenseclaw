@@ -141,3 +141,81 @@ func TestWindowsProfilePathWithASpaceIsAProtectedKeyFile(t *testing.T) {
 		})
 	}
 }
+
+// windowsBoundsAllowed reports a clean allow: the verdict of the findings
+// neither alerts nor blocks.
+func windowsBoundsAllowed(findings []RuleFinding) bool {
+	verdict := buildVerdict(findings, "pre")
+	return verdict == nil || verdict.Action == "" || verdict.Action == "allow"
+}
+
+// windowsEncodedLayers is script under layers powershell -EncodedCommand
+// launchers.
+func windowsEncodedLayers(script string, layers int) string {
+	for range layers {
+		script = "powershell -EncodedCommand " + windowsEncodedCommand(script)
+	}
+	return script
+}
+
+// TestWindowsListedStatementBoundReachesTheCall (rel-1-0-10:GAP-0477): a
+// bound a statement's own reading hits (a launcher nested past the wrapper
+// depth) truncates the call, whether the statement stands alone, follows an
+// inert statement, follows a variable statement or sits in a call block. The
+// fragment's own size limit is still not the call's.
+func TestWindowsListedStatementBoundReachesTheCall(t *testing.T) {
+	for _, id := range []string{
+		"windows-disable-multiple-defender-registry-controls", "azure-workload-token-read", "browser-session-read",
+	} {
+		command, _ := windowsFixtureCommand(t, id)
+		// Past the wrapper depth, and (7 layers) past the nested size too.
+		for _, layers := range []int{actionfacts.MaxWrapperDepth + 1, 7} {
+			deep := windowsEncodedLayers(command, layers)
+			for _, pack := range []string{"default", "strict"} {
+				for _, shape := range []struct{ name, command string }{
+					{"alone", deep},
+					{"after an inert statement", "Write-Output a; " + deep},
+					{"after a variable statement", "$v = 1; Write-Output $v; " + deep},
+					{"in a call block after an inert statement", "Write-Output a; & { " + deep + " }"},
+				} {
+					t.Run(id+"/"+pack+"/"+shape.name, func(t *testing.T) {
+						findings := windowsBoundsFindings(t, pack, "PowerShell", shape.command, `C:\Users\alice`, pack == "strict")
+						if windowsBoundsAllowed(findings) || !windowsBoundsHasLimit(findings) {
+							t.Fatalf("%d launcher layers in a list are not truncated: %v", layers, FindingStrings(findings))
+						}
+					})
+				}
+			}
+		}
+	}
+	// A shallow benign launcher after an inert statement stays clean.
+	benign := "Write-Output a; " + windowsEncodedLayers("Get-Date", 2)
+	for _, pack := range []string{"default", "strict"} {
+		if findings := windowsBoundsFindings(t, pack, "PowerShell", benign, `C:\Users\alice`, pack == "strict"); windowsBoundsHasLimit(findings) {
+			t.Fatalf("%s: a shallow benign launcher in a list is truncated: %v", pack, FindingStrings(findings))
+		}
+	}
+}
+
+// TestWindowsCallBlocksPastTheParserDepthAreTruncated (rel-1-0-10:GAP-0478):
+// call blocks nested past psparse's depth guard are a truncated reading of
+// the call, judged at the pack's unknown tier at least, benign body or not.
+func TestWindowsCallBlocksPastTheParserDepthAreTruncated(t *testing.T) {
+	nest := func(script string, layers int) string {
+		return strings.Repeat("& { ", layers) + script + strings.Repeat(" }", layers)
+	}
+	for _, id := range []string{"windows-disable-multiple-defender-registry-controls", "windows-uac-eventvwr-autoelevation-hijack", ""} {
+		command := "Get-Date"
+		if id != "" {
+			command, _ = windowsFixtureCommand(t, id)
+		}
+		for _, pack := range []string{"default", "strict"} {
+			for _, layers := range []int{250, 400} {
+				findings := windowsBoundsFindings(t, pack, "PowerShell", nest(command, layers), `C:\Users\alice`, pack == "strict")
+				if windowsBoundsAllowed(findings) || !windowsBoundsHasLimit(findings) {
+					t.Fatalf("%q %s: %d call blocks are not truncated: %v", id, pack, layers, FindingStrings(findings))
+				}
+			}
+		}
+	}
+}

@@ -230,6 +230,14 @@ func (p *parser) parseIndex(target Expr) Expr {
 func (p *parser) parsePrimary() Expr {
 	if p.overDepth() {
 		t := p.advance()
+		if !p.depthHit {
+			// The tree past this point is not the script (the rest of the
+			// input is read as statements of the levels above): the parse
+			// says so, once, as a reader of an unbalanced input would
+			// (rel-1-0-10:GAP-0478).
+			p.depthHit = true
+			p.diag(t.Start, t.End, ReasonDepthLimit, "nesting depth exceeded")
+		}
 		return &ErrorExpr{span: span{t.Start, t.End}, Reason: ReasonDepthLimit, Text: t.Raw}
 	}
 	t := p.cur()

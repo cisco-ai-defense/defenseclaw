@@ -31,6 +31,7 @@ type parser struct {
 	diags     []Diagnostic
 	dialect   Dialect
 	depth     int
+	depthHit  bool // the depth guard tripped (one ReasonDepthLimit diagnostic)
 	topParams []*Variable
 	exprMode  bool   // true inside (), $(), @{} values, [], method args
 	forHeader int    // >0 while inside a for/foreach header, so 'in' is a keyword
