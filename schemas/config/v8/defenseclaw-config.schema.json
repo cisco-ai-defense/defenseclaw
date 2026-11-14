@@ -456,6 +456,18 @@
           "type": "string",
           "maxLength": 8192
         },
+        "block_risk_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "escalate_rule_flagged": {
+          "type": "boolean"
+        },
+        "protocol": {
+          "type": "string",
+          "enum": ["", "system-one", "gemini-decisions"]
+        },
         "api_key_env": {
           "$ref": "#/$defs/envNameOrEmpty"
         },

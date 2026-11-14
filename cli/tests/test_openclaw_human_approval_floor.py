@@ -23,6 +23,8 @@ from types import SimpleNamespace
 import pytest
 from defenseclaw.commands import cmd_setup
 
+pytestmark = pytest.mark.usefixtures("openclaw_proxy_topology")
+
 
 def _discovery(version: str) -> SimpleNamespace:
     signal = SimpleNamespace(

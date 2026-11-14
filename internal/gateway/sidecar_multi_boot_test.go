@@ -2664,6 +2664,8 @@ func TestConnectorSetupTokensProxyKeepsMasterOutOfScopedSidecar(t *testing.T) {
 // bind only one guardrail proxy port, so openclaw alongside codex is a config
 // error we surface loudly.
 func TestRunGuardrailMulti_FailFastProxyGuard(t *testing.T) {
+	// OpenClaw needs the proxy binding on Linux/macOS (native Windows has none).
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	s := &Sidecar{
 		cfg: &config.Config{
 			DataDir: t.TempDir(),

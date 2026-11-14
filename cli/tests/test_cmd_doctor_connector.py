@@ -54,6 +54,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_doctor import (
@@ -3121,6 +3123,7 @@ class TestConnectorEnabled(unittest.TestCase):
 
 
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class TestDisabledGuardrailDoctorRows(unittest.TestCase):
     """GAP-2511: after setup guardrail --disable doctor says the hooks are removed.
 
