@@ -506,7 +506,11 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"runtime_asset_state":              retentionOwnedProtected,
 	// Field class sets are named by the rows retention keeps; bounded by
 	// maxFieldClassSets, never pruned (field_class_sets.go).
-	"audit_field_class_sets":             retentionOwnedProtected,
+	"audit_field_class_sets": retentionOwnedProtected,
+	// Lone hook_decision rows (hook_row_tracking.go): an entry goes with its
+	// audit row (trg_audit_hook_lone_delete), so retention never reaps it
+	// itself (rel-1-0-10:GAP-0316).
+	"audit_hook_lone":                    retentionOwnedProtected,
 	"guardrail_chain_deny_receipts":      retentionOwnedGraph,
 	"guardrail_chain_events":             retentionOwnedGraph,
 	"guardrail_chain_partitions":         retentionOwnedGraph,
