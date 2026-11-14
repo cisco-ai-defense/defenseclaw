@@ -13340,6 +13340,7 @@ def _check_systemone_reachable(routing, cfg, r: _DoctorResult) -> None:
         )
         return
     code, _detail = _http_probe(endpoint, timeout=2.0)
+    mode = getattr(routing, 'on_classifier_error', '') or 'original'
     origin = _endpoint_origin(endpoint)
     if code > 0:
         _emit("pass", "System One classifier", f"{origin} answers (HTTP {code})", r=r)
@@ -13347,7 +13348,7 @@ def _check_systemone_reachable(routing, cfg, r: _DoctorResult) -> None:
     _emit(
         "fail",
         "System One classifier",
-        f"{origin} is not reachable: routing uses on_classifier_error ({getattr(routing, 'on_classifier_error', '') or 'original'}) for every request",
+        f"{origin} is not reachable: routing uses on_classifier_error ({mode}) for every request",
         remediation=(
             "start the System One endpoint, or check its URL with defenseclaw setup decision-model --ping; "
             "routing.on_classifier_error rules keeps keyword routing while it is down"

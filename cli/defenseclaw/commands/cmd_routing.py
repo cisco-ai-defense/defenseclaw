@@ -1169,9 +1169,8 @@ def routing_test(app: AppContext, prompt: str, connector: str, as_profile: str, 
     )
     click.echo(f"Candidate:  {a.get('candidate_alias') or '-'}")
     if a.get("filtered_by"):
-        click.echo(
-            f"Narrowed:   by {a['filtered_by']}" + (f" (rules {', '.join(_strs(a['rule_ids']))})" if a.get("rule_ids") else "")
-        )
+        rules_text = f" (rules {', '.join(_strs(a['rule_ids']))})" if a.get("rule_ids") else ""
+        click.echo(f"Narrowed:   by {a['filtered_by']}{rules_text}")
     click.echo(
         f"Result:     {a.get('outcome')}"
         + (f" -> {a['selected_alias']} ({a.get('selected_model', '')})" if a.get("selected_alias") else "")
