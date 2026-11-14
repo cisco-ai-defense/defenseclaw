@@ -28,6 +28,8 @@ from defenseclaw.migrations import _pending_migration_steps, migrate
 
 from tests.environment import isolated_home_env
 
+pytestmark = pytest.mark.usefixtures("openclaw_proxy_topology")
+
 TIERS = {"default": "open", "permissive": "open", "strict": "closed"}
 
 
