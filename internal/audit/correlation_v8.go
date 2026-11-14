@@ -1704,8 +1704,8 @@ func (tx *CorrelationTx) PutRelationshipEvidence(
 }
 
 // PutRelationshipFirstSourceEvidence records evidence for a relationship
-// that holds none yet, as PutRelationshipEvidence does, and records nothing
-// for one that already has evidence; stored says which. It is for the edges
+// that holds no source evidence yet, as PutRelationshipEvidence does, and
+// records nothing for one that already has; stored says which. It is for the edges
 // of a session that every hook of the session reports again (its agent or
 // turn membership, its reported lineage): one source row per hook made the
 // edge evidence, and RelationshipEvidenceCount inside the hook correlation
@@ -1723,7 +1723,8 @@ func (tx *CorrelationTx) PutRelationshipFirstSourceEvidence(
 	}
 	if !tx.repo.store.secureClientSchema {
 		var one int
-		switch err := tx.tx.QueryRowContext(ctx, correlationEvidenceAnySQL, evidence.RelationshipID).Scan(&one); {
+		switch err := tx.tx.QueryRowContext(ctx, correlationEvidenceSourceSQL, evidence.RelationshipID,
+			string(CorrelationEvidenceSource)).Scan(&one); {
 		case err == nil:
 			return "", false, nil
 		case !errors.Is(err, sql.ErrNoRows):
@@ -1734,10 +1735,12 @@ func (tx *CorrelationTx) PutRelationshipFirstSourceEvidence(
 	return id, err == nil, err
 }
 
-// correlationEvidenceAnySQL finds whether a relationship has any evidence
-// row, from idx_correlation_evidence_relationship alone.
-const correlationEvidenceAnySQL = `SELECT 1
-	FROM correlation_relationship_evidence WHERE relationship_id = ? LIMIT 1`
+// correlationEvidenceSourceSQL finds whether a relationship has a source
+// evidence row (seeking idx_correlation_evidence_relationship; the first row
+// of a session edge is its source). Only a source row stops a new one: a
+// corroborating or unverified row of another writer does not.
+const correlationEvidenceSourceSQL = `SELECT 1
+	FROM correlation_relationship_evidence WHERE relationship_id = ? AND evidence_role = ? LIMIT 1`
 
 // RelationshipEvidenceCount returns the durable number of distinct evidence
 // rows supporting a relationship inside the caller-owned transaction. Export

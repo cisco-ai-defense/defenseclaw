@@ -38,10 +38,11 @@ var hookCorrelationGroupLimits = audit.CorrelationGroupLimits{Occurrences: 1, Ho
 // returns is put back on the caller's context.
 //
 // The turn replaces the per-session turn of rel-1-0-6 GAP-0490: the hooks of
-// one session still correlate one at a time and in arrival order, and the
-// occurrences of every session that queue behind each other can share one
-// baton turn, one BEGIN and one COMMIT instead of one each (issue #1384),
-// up to hookCorrelationGroupLimits.
+// one session still correlate one at a time and in arrival order. With
+// hookCorrelationGroupLimits.Occurrences above 1 the occurrences of every
+// session that queue behind each other share one baton turn, one BEGIN and
+// one COMMIT (issue #1384); production runs groups of one (S8 design 17.5):
+// one transaction per occurrence, and the attempt keeps the caller context.
 func (a *APIServer) correlateHookOccurrenceInTurn(
 	ctx context.Context,
 	profile connector.HookProfile,

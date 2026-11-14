@@ -540,3 +540,65 @@ func TestCorrelationGroupConcurrentOccurrences(t *testing.T) {
 	t.Logf("%d shared transactions of more than one occurrence out of %d", shared, len(groups()))
 	groupIdle(t, store)
 }
+
+// TestCorrelationGroupOfOneKeepsTheCallerDeadline: a transaction that holds
+// one occurrence (groups of one, Secure Client) keeps the caller deadline in
+// its write turn, as the serial path did, so an observe-mode ledger deadline
+// that passes mid-write rolls the occurrence back and the hook answers
+// without it (rel-1-0-6 GAP-0152). A shared transaction keeps its statements
+// uncancelled: an interrupted statement would roll back the others.
+func TestCorrelationGroupOfOneKeepsTheCallerDeadline(t *testing.T) {
+	for _, leg := range []struct {
+		name      string
+		limits    CorrelationGroupLimits
+		committed bool
+	}{
+		{"groups-of-one", CorrelationGroupLimits{Occurrences: 1}, false},
+		{"shared", groupTestLimits, true},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			store, repo := newCorrelationTestStore(t)
+			instance := mustCorrelationInstance(t, repo, "group", ConnectorCustodyHookOnly)
+			ctx, cancel := context.WithTimeout(t.Context(), 40*time.Millisecond)
+			defer cancel()
+			member, release, err := store.JoinCorrelationGroup(ctx, "deadline", leg.limits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			attempt := CorrelationTurnContext(ctx, member)
+			semantic, err := NewSemanticEventID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx, _, err := member.BeginOccurrence(attempt, CorrelationOccurrenceInput{Event: CorrelationEvent{
+				SemanticEventID: semantic, LogicalEventID: LogicalEventID(semantic),
+				Connector: instance.Connector, ConnectorInstanceID: instance.ConnectorInstanceID,
+				Rail: CorrelationRailHook, EventName: "tool.started", ReceivedTime: time.Now().UTC(),
+				ProfileVersion: instance.ProfileVersion, Completeness: CorrelationComplete,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-ctx.Done()
+			time.Sleep(10 * time.Millisecond)
+			writeErr := tx.PutCursor(attempt, CorrelationCursor{
+				ConnectorInstanceID: instance.ConnectorInstanceID, SessionID: "deadline", AgentID: "agent",
+				Phase: "active", Sequence: 1, LastSemanticEventID: semantic,
+				ProfileVersion: instance.ProfileVersion, Active: true, UpdatedAt: time.Now().UTC(),
+			})
+			commitErr := tx.Commit()
+			if leg.committed {
+				if writeErr != nil || commitErr != nil {
+					t.Fatalf("shared transaction: write %v, commit %v; want both to finish after the deadline", writeErr, commitErr)
+				}
+			} else if writeErr == nil && commitErr == nil {
+				t.Fatal("group of one: the write and commit after the caller deadline succeeded; want the occurrence rolled back")
+			}
+			if got := groupEventExists(t, store, semantic); got != leg.committed {
+				t.Fatalf("event committed %v, want %v", got, leg.committed)
+			}
+			groupIdle(t, store)
+		})
+	}
+}

@@ -156,6 +156,8 @@ var correlationGroupFinished func(savepoints int, err error)
 // context without cancellation (context.WithoutCancel of the caller's): an
 // interrupted statement inside an explicit transaction makes SQLite roll back
 // all of it, the other occurrences too. ctx itself bounds only the waits.
+// With limits.Occurrences 1 (and on a Secure Client store) nothing is
+// shared and the statements keep ctx, as on the serial path.
 func (s *Store) JoinCorrelationGroup(ctx context.Context, key string, limits CorrelationGroupLimits) (*CorrelationRepository, func(), error) {
 	repo, err := s.CorrelationRepository()
 	if err != nil {
@@ -179,7 +181,8 @@ func (s *Store) JoinCorrelationGroup(ctx context.Context, key string, limits Cor
 
 // CorrelationTurnQueueSnapshot is the number of occurrences waiting for a
 // session turn or the write turn of the store's correlation group, and the
-// age of the oldest one.
+// age of the oldest one. A test seam with no production reader: the audit
+// and gateway group tests queue their occurrences in a known order on it.
 func (s *Store) CorrelationTurnQueueSnapshot() WriteQueueSnapshot {
 	if s == nil {
 		return WriteQueueSnapshot{}
@@ -525,10 +528,14 @@ func (group *correlationGroup) handOnSession(member *correlationBatchMember) boo
 // it has no cancellation and no deadline: its statements run inside the
 // transaction other occurrences share, and an interrupted statement would
 // make SQLite roll all of it back. Outside the write turn (its reads on the
-// read pool, a connector instance resolution) it is ctx, cancellation and
-// deadline included. Values are always those of ctx.
+// read pool, a connector instance resolution), and always when its
+// transaction holds only this occurrence (groups of one, Secure Client), it
+// is ctx, cancellation and deadline included, as on the serial path: a
+// deadline that passes mid-write rolls the occurrence back and the hook
+// answers without its correlation (rel-1-0-6 GAP-0152). Values are always
+// those of ctx.
 func CorrelationTurnContext(ctx context.Context, repo *CorrelationRepository) context.Context {
-	if repo == nil || repo.batch == nil {
+	if repo == nil || repo.batch == nil || repo.batch.solo() {
 		return ctx
 	}
 	return correlationTurnContext{Context: ctx, member: repo.batch}
@@ -558,6 +565,12 @@ func (c correlationTurnContext) Err() error {
 		return nil
 	}
 	return c.Context.Err()
+}
+
+// solo reports whether the transactions of member hold one occurrence each,
+// so nothing is shared and its statements keep the caller cancellation.
+func (member *correlationBatchMember) solo() bool {
+	return member.limits.Occurrences <= 1
 }
 
 // inWrite reports whether member holds an unfinished write turn.
@@ -676,7 +689,7 @@ func (member *correlationBatchMember) beginOccurrence(ctx context.Context, repo 
 	if err := member.enterWrite(); err != nil {
 		return nil, fmt.Errorf("audit: begin correlation occurrence: %w", err)
 	}
-	if ctx.Done() != nil {
+	if !member.solo() && ctx.Done() != nil {
 		// Checked in the write turn, where CorrelationTurnContext has none.
 		return nil, errors.New("audit: a correlation group occurrence needs a context without cancellation in its write turn")
 	}
@@ -703,15 +716,20 @@ func (member *correlationBatchMember) beginOccurrence(ctx context.Context, repo 
 			release()
 			return nil, fmt.Errorf("audit: begin correlation occurrence: %w", err)
 		}
-		// The wait for the writer connection ends with the caller; the
-		// transaction outlives it and ends with the batch.
+		// The wait for the writer connection ends with the caller; a shared
+		// transaction outlives it and ends with the batch. A transaction of
+		// one occurrence ends with the caller, as the serial path did.
 		conn, err := member.store.db.Conn(member.wait)
 		if err != nil {
 			turn()
 			release()
 			return nil, fmt.Errorf("audit: begin correlation occurrence: %w", err)
 		}
-		tx, err = conn.BeginTx(context.WithoutCancel(member.wait), nil)
+		txCtx := context.WithoutCancel(member.wait)
+		if member.solo() {
+			txCtx = ctx
+		}
+		tx, err = conn.BeginTx(txCtx, nil)
 		if err != nil {
 			_ = conn.Close()
 			turn()
