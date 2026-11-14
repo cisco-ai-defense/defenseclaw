@@ -132,7 +132,8 @@ func toolResultChecks(generation *compiledRulePackCategories, content, toolName 
 			}
 		}
 	}
-	for _, f := range toolResultInjectionFindings(view) {
+	structural, cut := toolResultInjectionFindings(view)
+	for _, f := range structural {
 		if seen[f.RuleID] {
 			continue
 		}
@@ -146,6 +147,12 @@ func toolResultChecks(generation *compiledRulePackCategories, content, toolName 
 		injection = append(injection, f)
 	}
 	out := append(findings, injection...)
+	if cut.Any() {
+		// The output was read up to a cap: the unknown tier of the pack (an
+		// alert in default and permissive, a block in strict), never below
+		// what was read before the cap (rel-1-0-10:GAP-0639).
+		out = append(out, boundedTruncatedFinding(cut, true))
+	}
 	for i := range out {
 		if strings.EqualFold(out[i].Severity, "CRITICAL") {
 			out[i].Severity = "HIGH"
