@@ -93,4 +93,6 @@
 {"id": "g596-n27", "dialect": "", "command": "kill -0 4242", "want": ""}
 {"id": "g596-n28", "dialect": "", "command": "DEFENSECLAW_X=$(pwd) uv run defenseclaw agent-control sync --once | jq .", "want": ""}
 {"id": "g596-n29", "dialect": "", "command": "kill $(cat /tmp/app.pid)", "want": ""}
+{"id": "g596-n30", "dialect": "", "command": "defenseclaw-gateway enterprise linux uninstall --help", "want": ""}
+{"id": "g596-n31", "dialect": "", "command": "defenseclaw guardrail disable -h", "want": ""}
 {"id": "g596-n26", "dialect": "", "command": "git commit -m 'stop defenseclaw-gateway'", "want": ""}

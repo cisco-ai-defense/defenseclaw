@@ -490,6 +490,12 @@ var (
 // cannot name, or has an operand the parse left open before any verb.
 func judgeDefenseClawCLI(args []string, program string, dynamic bool) (kind DefenseClawControlKind, decided bool) {
 	words, flags := splitOperands(args)
+	// A help or version request runs nothing, whatever verb it names.
+	for _, flag := range flags {
+		if defenseClawReadFlags[flag] {
+			return "", true
+		}
+	}
 	for _, flag := range flags {
 		if flag == "--disable" || flag == "--uninstall" {
 			return DefenseClawControlDisable, true
