@@ -226,9 +226,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// same setting as the callout: config substrate.chain_egress_action,
 		// which the gateway and the leader read from the same ConfigMap
 		// (owner decision 2026-11-13; GAP-0250).
-		chainAction, chainSource := substrateChainEgressAction(cfg, serveFlags.chainEgressAction)
-		if err := gateway.SetSubstrateChainEgressAction(chainAction); err != nil {
-			return fmt.Errorf("serve: chain egress action (%s): %w", chainSource, err)
+		if err := gateway.SetSubstrateChainEgressAction(cfg.Substrate.EffectiveChainEgressAction()); err != nil {
+			return fmt.Errorf("serve: config substrate.chain_egress_action: %w", err)
 		}
 		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
 		return runSidecar(cmd, args)
