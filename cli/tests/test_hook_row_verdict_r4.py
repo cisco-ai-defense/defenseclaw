@@ -321,3 +321,58 @@ def test_retention_on_any_connection_keeps_the_lone_count_exact(store: Store) ->
     if _tracked(store):
         left = store.db.execute("SELECT COUNT(*) FROM audit_hook_lone WHERE audit_event_id = 'lone-allow'").fetchone()[0]
         assert left == 0
+
+
+def test_recent_hook_decisions_read_only_their_window(tmp_path) -> None:
+    """On a store with planner statistics, the recent hook decisions are
+    taken newest first through the time index, and only the window's rows
+    are read: the plan never sorts every hook row by its retention instant,
+    a column stored after the JSON records (rel-1-0-10:GAP-0316; 239 s cold
+    on a grown 6.4 GB store)."""
+
+    db = Store(str(tmp_path / "audit.db"))
+    db.init()
+    columns = {row[1] for row in db.db.execute("PRAGMA table_info(audit_events)")}
+    for column, kind in (("event_name", "TEXT"), ("payload_json", "TEXT"), ("projected_record_json", "TEXT"),
+                         ("bucket", "TEXT"), ("retention_timestamp_unix_nano", "INTEGER")):
+        if column not in columns:
+            db.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} {kind}")
+    db.db.execute("CREATE INDEX IF NOT EXISTS idx_retention_audit_events_timestamp"
+                  " ON audit_events(retention_timestamp_unix_nano, id)")
+    db.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action)")
+    for index in range(3000):
+        at = _BASE + timedelta(milliseconds=index)
+        if index % 3:
+            _insert_connector_hook(db, f"ch-{index}", f"sid-{index}", at, "allow")
+        else:
+            _insert_hook_decision(db, f"hd-{index}", f"sid-{index}", at, _body("allow", "allow"))
+        db.db.execute("UPDATE audit_events SET retention_timestamp_unix_nano = ? WHERE rowid = last_insert_rowid()",
+                      (int(at.timestamp() * 1_000_000_000),))
+    db.db.commit()
+    # The planner statistics of the grown dc-ent-rhel store (taken at 433,872
+    # rows, 670,000 at the copy): idx_audit_action reads as 334 rows a value,
+    # so a plan that trusts it sorted every hook row (GAP-0316).
+    db.db.execute("ANALYZE")
+    db.db.execute("DELETE FROM sqlite_stat1 WHERE tbl = 'audit_events'")
+    db.db.executemany(
+        "INSERT INTO sqlite_stat1 (tbl, idx, stat) VALUES ('audit_events', ?, ?)",
+        [("sqlite_autoindex_audit_events_1", "433857 1"), ("idx_audit_action", "433872 334"),
+         ("idx_retention_audit_events_timestamp", "433872 1 1")],
+    )
+    db.db.commit()
+    db.db.execute("ANALYZE sqlite_schema")
+    connection = db.db
+    capture = _CapturingConnection(connection)
+    db.db = capture
+    try:
+        events = db.list_connector_hook_event_summaries(10)
+    finally:
+        db.db = connection
+    assert [event.id for event in events][:2] == ["ch-2999", "ch-2998"]
+    statement = [(sql, args) for sql, args in capture.statements if "semantic_event_id" in sql]
+    assert statement, "the summaries statement was not captured"
+    sql, args = statement[0]
+    plan = " | ".join(row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + sql, *args))
+    assert "idx_retention_audit_events_timestamp" in plan, plan
+    assert "USING INDEX idx_audit_action" not in plan, plan
+    db.close()

@@ -514,7 +514,8 @@ def lone_hook_decision_rows_sql(alias: str = "lone") -> str:
     """
 
     return (
-        f"FROM {HOOK_ROWS_TABLE} AS hook_lone CROSS JOIN audit_events AS {alias} ON {alias}.id = hook_lone.audit_event_id"
+        f"FROM {HOOK_ROWS_TABLE} AS hook_lone CROSS JOIN audit_events AS {alias}"
+        f" ON {alias}.id = hook_lone.audit_event_id"
         f" WHERE {alias}.action = '{HOOK_DECISION_ACTION}'"
     )
 
