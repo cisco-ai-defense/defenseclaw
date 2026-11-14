@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -275,10 +276,14 @@ func TestGAP0526SyntaxErrorSweepNeverAllowsABlockedCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fixtures are POSIX shell text")
 	}
-	// The full sweep runs in the plain build (about two minutes); the race
-	// build and -short run a slice of it.
-	perCommand := 500
-	if testing.Short() || hookAnswerRaceBuild {
+	// The full sweep (500 suffixes per command, about two and a half
+	// minutes) runs with DEFENSECLAW_FULL_SWEEP set; the package run reads
+	// 100, the race build and -short 50.
+	perCommand := 100
+	switch {
+	case os.Getenv("DEFENSECLAW_FULL_SWEEP") != "":
+		perCommand = 500
+	case testing.Short() || hookAnswerRaceBuild:
 		perCommand = 50
 	}
 	suffixes := gap0526SyntaxSuffixes(perCommand)
@@ -410,12 +415,18 @@ func TestGAP0535QuotedShellOptionSweepNeverAllowsABlockedBody(t *testing.T) {
 		t.Skip("the fixtures are POSIX shell text")
 	}
 	bodies := map[string]string{"B1": gap0486Blocked["B1"], "EB1": "eval " + gap0526Quote(gap0486Blocked["B1"]), "B3": gap0486Blocked["B3"]}
-	// The full sweep runs in the plain build (about seven minutes); the race
-	// build and -short read the first spellings of -c with every wrapper,
-	// shell and body (about 4 minutes under -race on a loaded box).
+	// The full sweep (all 60 spellings, about seven minutes) runs with
+	// DEFENSECLAW_FULL_SWEEP set; the package run reads the first 10
+	// spellings of -c with every wrapper, shell and body, the race build and
+	// -short the first 3, so the gateway package stays inside its gate
+	// timeout.
 	options := gap0535OptionWords()
-	if testing.Short() || hookAnswerRaceBuild {
+	switch {
+	case os.Getenv("DEFENSECLAW_FULL_SWEEP") != "":
+	case testing.Short() || hookAnswerRaceBuild:
 		options = options[:3]
+	default:
+		options = options[:10]
 	}
 	for _, name := range []string{"default", "permissive", "strict"} {
 		p := gap0437Pack{name: name, pack: name}
