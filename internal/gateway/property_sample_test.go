@@ -209,8 +209,8 @@ func covPick(sample [][]int) func(idx ...int) bool {
 func TestCovSampleCoversEveryClassDeterministically(t *testing.T) {
 	dims := []int{2, 3, 5, 10, 2}
 	names := []string{"mode", "wire", "probe", "shape", "stream"}
-	noProbeShape := func(a, b int) bool { return !(a == 2 && b == 3) }
-	valid := func(c []int) bool { return !(c[0] == 0 && c[3] == 9) } // a combination that does not exist
+	noProbeShape := func(a, b int) bool { return a != 2 || b != 3 }
+	valid := func(c []int) bool { return c[0] != 0 || c[3] != 9 } // a combination that does not exist
 	a := covSample(t, "unit", names, dims, valid, noProbeShape)
 	b := covSample(t, "unit", names, dims, valid, noProbeShape)
 	if fmt.Sprint(a) != fmt.Sprint(b) {
