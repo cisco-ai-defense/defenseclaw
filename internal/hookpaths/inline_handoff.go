@@ -227,6 +227,10 @@ func (r *inlineReading) call(words, assigned []string, depth int) {
 	}
 	for _, word := range words[handoff.From:] {
 		switch {
+		case word == "$" && handoff.CodeUnseen:
+			// Code read from stdin and a variable the words do not bind
+			// (python3 - "$out" <<EOF): no fixed path, and the code is not in the
+			// words: owner traces run such scripts on their own files all day.
 		case word == "$" || strings.Contains(word, "{}") || strings.ContainsAny(word, "*?[") || strings.Contains(word, "{") && strings.Contains(word, ","):
 			add("", true) // a runner, a glob or a brace list: the value is not in the words
 		default:

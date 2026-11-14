@@ -58,6 +58,9 @@ type InlineHandoff struct {
 	Fed bool
 	// Access is what the code does with the words it is handed.
 	Access InlineAccess
+	// CodeUnseen is set when the code is not in the words (read from stdin):
+	// a word only a runner knows then names no path of its own.
+	CodeUnseen bool
 	// ProvenReads is set when the call is an inline interpreter child whose
 	// code a read grammar proves read-only (From is then -1).
 	ProvenReads bool
@@ -114,7 +117,7 @@ func InlineCodeHandoff(argv []string) InlineHandoff {
 		case word == "-" && key != "php" && (index+1 < len(argv) || fed):
 			// The code is read from stdin (python3 - ARG <<EOF): its text is
 			// not in the words, so it is no proven read.
-			return InlineHandoff{From: offset + index + 1, Fed: fed, Access: InlineUnknown, Caps: caps}
+			return InlineHandoff{From: offset + index + 1, Fed: fed, Access: InlineUnknown, CodeUnseen: true, Caps: caps}
 		case inlineValueOptions[key][word]:
 			index++
 		case strings.HasPrefix(word, "-") && word != "-" && word != "--":
