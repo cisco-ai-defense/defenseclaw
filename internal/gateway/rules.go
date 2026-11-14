@@ -108,6 +108,19 @@ const (
 	findingDispositionUnspecified findingDisposition = iota
 	findingDispositionAudit
 	findingDispositionAdvisory
+	// findingDispositionEffectKnown and findingDispositionEffectUnknown are the
+	// effect-model rule-lane dispositions. Known marks a known effect on a
+	// protected target or a known attack tool; Unknown marks an unknown effect
+	// touching a protected set. They let the benchmark and S8 tell an effect
+	// verdict from today's, and S8 map the unknown tier to ask later, without
+	// changing the public finding schema.
+	findingDispositionEffectKnown
+	findingDispositionEffectUnknown
+	// findingDispositionFlowSecretEgress marks a Secret flow tracking hit: a
+	// labeled secret reached an external sink. S8 maps it to a native ask
+	// where a connector supports one; until then default alerts and
+	// strict/managed block.
+	findingDispositionFlowSecretEgress
 )
 
 const (
