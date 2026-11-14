@@ -49,6 +49,7 @@ func TestOwnSSHFolderCopyAlertsInsideTheHomeOnly(t *testing.T) {
 		{`cp -r {H}/.ssh/* {H}/backup/ssh_backup/`, "alert"},
 		{`cp -r {H}/.ssh {H}/backup/ssh_backup`, "alert"},
 		{`mkdir -p {H}/backup/new && cp -r {H}/.ssh/* {H}/backup/new/`, "alert"},
+		{`cp -r {H}/.ssh/* {H}/backup/ssh_backup/`, "alert@nocwd"},
 		{`cp -r {H}/.ssh {O}/ssh`, "block"},
 		{`cp -r {H}/.ssh/* /tmp/ssh_backup/`, "block"},
 		{`cp -r {H}/.ssh/* {H}/leak/`, "block"},
@@ -61,8 +62,15 @@ func TestOwnSSHFolderCopyAlertsInsideTheHomeOnly(t *testing.T) {
 		{`rsync -a {H}/.ssh/ {O}/ssh/`, "block"},
 	} {
 		for _, strict := range []bool{false, true} {
+			want, cwd := row.want, home
+			if want == "alert@nocwd" {
+				// A call that carries no working directory (workdir in the tool arguments only).
+				want, cwd = "alert", ""
+			}
+			row := row
+			row.want = want
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-				Input:     actionfacts.Input{Tool: "Bash", Command: replacer.Replace(row.command), CWD: home, ActiveHome: home},
+				Input:     actionfacts.Input{Tool: "Bash", Command: replacer.Replace(row.command), CWD: cwd, ActiveHome: home},
 				Connector: "claudecode", EnforcementCapable: true, StrictPolicy: strict,
 			})
 			if got := buildVerdict(findings, "tool_call").Action; got != row.want {

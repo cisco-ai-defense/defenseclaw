@@ -232,8 +232,7 @@ const ownSSHFolderCopyTitle = "A copy of your own SSH folder content to another 
 // gateway cannot see the home, and a copy keeps the modes of its sources.
 func trustedActionOwnSSHFolderCopy(request trustedActionRequest, input actionfacts.Input) bool {
 	home := strings.TrimRight(input.ActiveHome, "/")
-	if request.ProtectedHomeHook || home == "" || !trustedShellCommandInput(input) || input.Command == "" ||
-		!filepath.IsAbs(input.CWD) {
+	if request.ProtectedHomeHook || home == "" || !trustedShellCommandInput(input) || input.Command == "" {
 		return false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
