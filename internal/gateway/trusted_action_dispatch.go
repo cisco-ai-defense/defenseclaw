@@ -238,6 +238,10 @@ type trustedActionRequest struct {
 	// DefenseClaw state: a LoginGuess reading of a simple command keeps only
 	// that proof (loginGuessProvedFinding), so no other rule needs to run.
 	stateProofOnly bool
+	// sendDestination marks the routing values of a message call, where its
+	// text is sent (ToolInspectRequest.sendDestination): the call is a send
+	// whatever the tool is named (trustedActionSendsMessage).
+	sendDestination bool
 	// overBudgetOmission, when set, is told that the authorized-keys proof
 	// found only an operand that the client's bounded map left out because
 	// it was full (hookpaths.BudgetKey, GAP-0146).
@@ -6993,7 +6997,10 @@ func finalizeTrustedActionFindings(
 	findings []RuleFinding,
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(generation, facts, findings, request.CopilotSharedLocalFile && request.Input.Tool == "read_file")
+	findings = applyTrustedActionContextDisposition(generation, facts, findings, trustedActionDispositionScope{
+		protectedLocalFileRead: request.CopilotSharedLocalFile && request.Input.Tool == "read_file",
+		sendDestination:        request.sendDestination,
+	})
 	if !request.StrictPolicy {
 		findings = trustedActionOrdinaryCredentialCopyFindings(facts, findings)
 	}

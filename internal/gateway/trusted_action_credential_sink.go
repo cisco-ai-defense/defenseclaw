@@ -33,8 +33,10 @@ func trustedActionCredentialLiteralRule(finding RuleFinding) bool {
 
 // trustedActionPersistsCredentialLiteral reports whether the action hands the
 // literals in its arguments to a file, a store or a process, and does not
-// merely look at them.
-func trustedActionPersistsCredentialLiteral(facts actionfacts.Facts) bool {
+// merely look at them. sendDestination marks the routing values of a message
+// call: they are where its text is sent, so they are a send tool's arguments
+// whatever the tool is named (GAP-0651).
+func trustedActionPersistsCredentialLiteral(facts actionfacts.Facts, sendDestination bool) bool {
 	tool := strings.ToLower(strings.TrimSpace(facts.Tool))
 	switch {
 	case isWriteToolName(tool):
@@ -54,7 +56,7 @@ func trustedActionPersistsCredentialLiteral(facts actionfacts.Facts) bool {
 		return !wrote
 	case strings.HasPrefix(tool, "mcp__") || strings.HasPrefix(tool, "mcp."):
 		return trustedActionMutatingToolName(tool) && !trustedActionCredentialStoreTool(tool)
-	case trustedActionSendToolName(tool):
+	case sendDestination || trustedActionSendToolName(tool):
 		// A send tool hands its message to someone else.
 		return !trustedActionCredentialStoreTool(tool)
 	}

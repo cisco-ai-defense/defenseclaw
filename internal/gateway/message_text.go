@@ -764,6 +764,7 @@ func (a *APIServer) inspectMessageCall(ctx context.Context, req *ToolInspectRequ
 		// the same lane that reads the destination of any other send tool.
 		routeReq := *req
 		routeReq.Args, routeReq.Content, routeReq.skipJudge = routing, "", true
+		routeReq.sendDestination = true
 		verdict = mergeToolInspectVerdicts(verdict, a.inspectToolPolicyCtx(ctx, &routeReq))
 	}
 	// Text the read limits dropped is unknown: the verdict of the part read

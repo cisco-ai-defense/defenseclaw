@@ -108,6 +108,16 @@ func trustedActionSendToolName(tool string) bool {
 	return false
 }
 
+// trustedActionSendsMessage reports a call that hands its arguments to someone
+// else: a send tool by name, or the routing values of a message call that
+// carries text, which are where that text goes (GAP-0651). The OpenClaw
+// message tool is a noun, so its name alone decides nothing (a call with no
+// text reads, reacts or pins as often as it sends); the message lane knows
+// when the call sends.
+func trustedActionSendsMessage(request trustedActionRequest) bool {
+	return request.sendDestination || trustedActionSendToolName(request.Input.Tool)
+}
+
 // outboundPIIStrings returns the string values of a tool call's arguments in
 // a fixed order (object keys sorted, arrays in order), so the same call is
 // judged the same way every time. Nothing is cut: each string is scanned
@@ -151,7 +161,7 @@ var outboundPIIQuotes = strings.NewReplacer("'", " ", `"`, " ", "`", " ", `\`, "
 // outboundPIIFindings adds an alert-only finding for a labelled card or
 // passport number in the message of a send tool.
 func outboundPIIFindings(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
-	if !request.EnforcementCapable || !trustedActionSendToolName(request.Input.Tool) ||
+	if !request.EnforcementCapable || !trustedActionSendsMessage(request) ||
 		len(request.Input.Args) == 0 {
 		return findings
 	}
