@@ -2835,6 +2835,8 @@ func TestAPIStatusRejectsPost(t *testing.T) {
 // the Guardrail field plumbing could silently regress the contract
 // and the TUI would render a misleading panel.
 func TestAPIStatusEmitsConnectorMode(t *testing.T) {
+	// OpenClaw cases use the Linux/macOS proxy topology on every host.
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cases := []struct {
 		name             string
 		connector        string
@@ -3046,6 +3048,7 @@ func TestAPIStatusAMPActionPolicyModeUsesHooksWithoutProxy(t *testing.T) {
 // This is the API-contract guard behind the gateway-status "Connector Mode"
 // fan-out so a 3-connector install never collapses to a single posture.
 func TestAPIStatusConnectorModesFansOut(t *testing.T) {
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cfg := &config.Config{}
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
 		"codex":    {},

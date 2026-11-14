@@ -866,6 +866,7 @@ def test_fix_starts_the_gateway_before_the_watchdog() -> None:
     assert row["label"] == "Watchdog last-known state" and row["status"] == "warn"
 
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 def test_proxy_connector_without_a_guardrail_model_needs_no_llm_key(tmp_path, monkeypatch) -> None:
     # GAP-1453: OpenClaw passes the agent's own provider credentials through.
     from defenseclaw import credentials
