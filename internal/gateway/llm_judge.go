@@ -129,6 +129,10 @@ type LLMJudge struct {
 
 	toolContextMu sync.Mutex
 	toolContext   map[string]toolJudgeSessionContext
+	// history is the decision model's session history (survives a new
+	// prompt; decision_model_history.go).
+	historyMu sync.Mutex
+	history   map[string]*decisionHistorySession
 
 	telemetryMu sync.RWMutex
 	traceV8     judgeTraceV8Runtime
@@ -2164,7 +2168,9 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		state := decisionModelState{
 			SessionUserIntent: entry.userIntent,
 			CurrentToolCall:   decisionModelToolCall{Tool: sanitizeToolName(toolName), Arguments: current},
+			SessionHistory:    j.renderDecisionHistory(ctx),
 		}
+		j.recordDecisionHistory(ctx, decisionHistoryEvent{kind: 'c', tool: sanitizeToolName(toolName), text: args})
 		for _, event := range prior {
 			state.RecentToolCalls = append(state.RecentToolCalls, decisionModelToolCall{Tool: event.toolName, Arguments: event.args})
 		}
@@ -2222,6 +2228,9 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 		userIntent: toolJudgeUserIntentExcerpt(content),
 		lastSeen:   now,
 	}
+	// The decision model's history keeps the prompt as a turn and is not
+	// cleared by it.
+	j.recordDecisionHistory(ctx, decisionHistoryEvent{kind: 'u', text: content})
 }
 
 // ResetToolJudgeSession drops bounded in-memory context when a connector
@@ -2234,12 +2243,20 @@ func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
 	j.toolContextMu.Lock()
 	delete(j.toolContext, sessionID)
 	j.toolContextMu.Unlock()
+	j.historyMu.Lock()
+	delete(j.history, sessionID)
+	j.historyMu.Unlock()
 }
 
 // RunToolJudge runs injection detection on tool call arguments.
 // Returns an allow verdict if the judge is disabled, not configured, or
 // tool_injection is false.
 func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *ScanVerdict {
+	if p := decisionPrepassFrom(ctx, j); p != nil {
+		// The hook lane already prepared the sample and asked the decision
+		// model (decisionPrepass): do not record the call twice.
+		return j.runToolJudgeSample(ctx, toolName, args, p.sample)
+	}
 	sample, eligible := j.prepareToolJudgeSample(ctx, toolName, args)
 	if !eligible {
 		return allowVerdict("llm-judge-tool")
@@ -2271,6 +2288,11 @@ func (j *LLMJudge) runToolJudgeSample(ctx context.Context, toolName, args, sampl
 
 // runToolJudgeLLM is the LLM tool-call judge.
 func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample string) *ScanVerdict {
+	if judgeUnavailableFrom(ctx) {
+		// The hook lane could not run the judge (no slot, no budget, no
+		// time): only the decision model answered.
+		return errorVerdict("llm-judge-tool")
+	}
 
 	timeout := time.Duration(j.cfg.Timeout) * time.Second
 	if timeout <= 0 {

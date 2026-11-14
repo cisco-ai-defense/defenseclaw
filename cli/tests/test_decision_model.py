@@ -763,6 +763,10 @@ def test_retired_decide_is_not_written_and_doctor_warns(home):
     cfg = config_module.load()
     dmod.apply_settings(cfg, on_confident_block="decide")
     assert cfg.decision_model.on_confident_block == ""
+    # Any setup write drops a retired decide, also without the option.
+    plain = config_module.load()
+    dmod.apply_settings(plain, timeout=2)
+    assert plain.decision_model.on_confident_block == ""
     from defenseclaw.commands import cmd_doctor
 
     class _R:
@@ -777,6 +781,20 @@ def test_retired_decide_is_not_written_and_doctor_warns(home):
     finally:
         cmd_doctor._emit = orig
     assert any(s == "warn" and "retired" in d for s, _n, d in seen), seen
+
+
+def test_history_and_flow_guard_settings(home):
+    dm = DecisionModelConfig()
+    assert dm.effective_history_turns() == 25 and dm.effective_flow_guard() is True and dm.history_tool_results is False
+    assert "history_turns must be between 0 and 100" in DecisionModelConfig(history_turns=101).validation_error()
+    assert "flow_guard must be true or false" in DecisionModelConfig(flow_guard="no").validation_error()
+    (home / "config.yaml").write_text(
+        "config_version: 9\ndecision_model:\n  history_turns: 0\n  history_tool_results: true\n  flow_guard: false\n"
+    )
+    cfg = config_module.load()
+    rows = dict(dmod.summary_rows(cfg))
+    assert rows["decision_model.history_turns"] == "0 (off)" and rows["decision_model.flow_guard"] == "false"
+    assert rows["decision_model.history_tool_results"] == "true"
 
 
 def test_escalate_rule_flagged_is_strict(home):

@@ -50,6 +50,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
 // runGitListMaxBytes caps the bytes we will read from a `git`
@@ -321,8 +322,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}
-		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) &&
-			(cfg == nil || !cfg.SecureClientIntegration()) {
+		windowsReadings := windowsHookHost() && !isSandboxHookRequest(ctx) &&
+			(cfg == nil || !cfg.SecureClientIntegration())
+		if windowsReadings {
 			actionInput.DialectHint = selectWindowsShellDialect(
 				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
 			)
@@ -337,6 +339,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			DowngradeReadOnlyDataArgs:     mode != "action",
 			SandboxGuestCWD:               req.guestCWD,
+			windowsDialectReadings:        windowsReadings,
 			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
@@ -1010,6 +1013,9 @@ func (a *APIServer) inspectCodexToolResult(
 ) *ToolInspectVerdict {
 	req = req.withTrustedActiveHome(ctx)
 	content := codexToolResponseString(req.ToolResponse)
+	for _, j := range a.hookSessionJudges(ctx) {
+		j.ObserveToolResult(ctx, content) // decision_model.history_tool_results only
+	}
 	if sandboxToolResultUntrusted(ctx) {
 		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, ruleContentScopeUntrusted))
 	}
@@ -2456,7 +2462,7 @@ func codexStaticReaderShellStructureSafe(command string) bool {
 		return false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(
-		strings.NewReader(command), "",
+		shellparse.Reader(command), "",
 	)
 	if err != nil {
 		return false

@@ -122,6 +122,19 @@ A cascade-2 confirmation:
 
 The rules always come first. A rule block is never revisited, and the decision model never lowers a rule finding: on a call the rules flagged, an allow keeps the rule verdict (cascade 2) or still runs the judge (cascade 3), and a block answer is not confident (`escalate_rule_flagged`): it asks (cascade 2) or goes to the judge (cascade 3). Why both gates: on real work (owner sessions) and the public benchmarks, a block answer alone was wrong often enough to block ordinary commands; requiring the risk score as well cut those false blocks by about two thirds, at a cost in block recall (the calls it no longer blocks still ask or alert). Every finding goes through `block_at` and `alert_at` like a judge finding. In observe mode nothing is blocked or asked.
 
+### Session history and the flow guard
+
+With the decision model on, each request also carries the session's recent history and two flow questions:
+
+- **History** (`decision_model.history_turns`, default 25, `0` turns it off, at most 100): the last 25 turns of the session, where a turn is a tool call and the user prompts before it. Only user prompts and tool calls are sent: each prompt is cut to 1.5 KB and each tool argument to 600 bytes, and every cut is marked `[TRUNCATED n bytes]`. Tool results are not sent unless you set `decision_model.history_tool_results: true` (each result cut to 1 KB); that adds time and can make the model read a plausible result as permission. The history is marked untrusted and wrapped in tags that carry a random value chosen for each request, so text in the session cannot end the section early.
+- **Flow guard** (`decision_model.flow_guard`, default on): the same request asks whether the user authorized this target or action earlier and whether the call serves the user's latest request. When either answer is 0.2 or lower, a confident allow becomes an escalation: the LLM judge decides where it runs, otherwise the rule verdict stands. The flow guard never blocks.
+
+Measured on real owner sessions and spliced attacks (S7 S1FLOW, Gemini Decision 1): with the shipped routing, history raised the confident blocks of hijacked-session attacks from 31% to 37% and left none of them confidently allowed (8 of 180 without history, 0 with the flow guard), with no confident block on 296 real owner calls. The history adds about 2.5k input tokens per call (about USD 0.0005) and kept p99 latency at 0.81 s.
+
+### When the judge is late, failing or busy (cascade 3)
+
+The decision model answers before the judge takes one of its slots. A confident block is a HIGH `JUDGE-DECISION-MODEL` finding that stands whenever the judge gives no verdict: it fails, misses the hook answer window, has no free slot, or the hook's judge time is spent. A judge that answers late is ignored; it can never remove the finding. Any other answer (an escalation) keeps the rule verdict when the judge cannot run. The decision model's finding does not replace a fail-closed refusal: under `hook_fail_mode: closed` a call the rules escalated to the judge as CRITICAL is still refused when the judge gives no verdict.
+
 ## When it is down
 
 A decision model that is unreachable, slower than `timeout` (1 second; in cascade 3 never more than a quarter of the time left, about 0.85 s at most on a hook), or answers outside the protocol never allows a call by itself:
@@ -160,6 +173,9 @@ On a managed device the administrator sets `decision_model:` in the admin `confi
 | `decision_model.allow_threshold` | `0.30` | Risk at or below which an allow is confident. `0` uses the default. |
 | `decision_model.block_threshold` | `0.75` | Risk at or above which a block answer is confident. `0` uses the default. |
 | `decision_model.block_risk_score` | `1.5` | A block answer is confident only when the model's risk score (0 ordinary work, 1 dual use, 2 clear serious harm) is at or above this too; otherwise the call escalates. `0` uses the default. |
+| `decision_model.history_turns` | `25` | Turns of session history (user prompts and tool calls) sent with each call; `0` sends none; at most 100. |
+| `decision_model.history_tool_results` | `false` | Also send each tool's result (cut to 1 KB) in that history. |
+| `decision_model.flow_guard` | `true` | Ask the two flow questions; an unauthorized or off-task confident allow then becomes an escalation. Never blocks. |
 | `decision_model.escalate_rule_flagged` | `true` | A call the rules already flagged never gets a decision-model confident block: it goes to the judge (cascade 3) or asks (cascade 2). |
 | `decision_model.on_confident_block` | `escalate` | Retired in 1.0.10: a confident block always goes to the judge in cascade 3. `decide` still loads (configs from 1.0.9) and acts as `escalate`. |
 

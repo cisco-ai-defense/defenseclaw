@@ -112,7 +112,10 @@ type decisionResult struct {
 	risk   float64
 	// riskScore is the risk score answer (0..2), -1 when it is missing.
 	riskScore float64
-	latencyMs int64
+	// flowGuarded: a confident allow the flow guard turned into an
+	// escalation.
+	flowGuarded bool
+	latencyMs   int64
 	// failure is set when the model gave no usable answer; route is then
 	// decisionEscalate.
 	failure      gatewaylog.JudgeFailureClass
@@ -143,6 +146,12 @@ type decisionModel struct {
 	// escalateRuleFlagged: no confident block on a call the rules flagged
 	// (decision_model.escalate_rule_flagged).
 	escalateRuleFlagged bool
+	// historyTurns and historyResults shape the session history it sees;
+	// flowGuard asks the flow questions (decision_model_history.go).
+	historyTurns   int
+	historyResults bool
+	flowGuard      bool
+	questions      map[string]any
 	// alone: no judge follows (cascade 2), so the model may use all of the
 	// time left rather than a quarter of it.
 	alone  bool
@@ -199,6 +208,10 @@ func newDecisionModel(cfg *config.Config, dotenvPath string) *decisionModel {
 		blockAt:             dm.EffectiveBlockThreshold(),
 		blockRiskScore:      dm.EffectiveBlockRiskScore(),
 		escalateRuleFlagged: dm.EffectiveEscalateRuleFlagged(),
+		historyTurns:        min(dm.EffectiveHistoryTurns(), maxDecisionHistoryTurns),
+		historyResults:      dm.HistoryToolResults,
+		flowGuard:           dm.EffectiveFlowGuard(),
+		questions:           decisionQuestionsFor(dm.EffectiveFlowGuard()),
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   timeout,
@@ -215,6 +228,10 @@ type decisionModelState struct {
 	SessionUserIntent string                  `json:"session_user_intent,omitempty"`
 	RecentToolCalls   []decisionModelToolCall `json:"recent_tool_calls,omitempty"`
 	CurrentToolCall   decisionModelToolCall   `json:"current_tool_call"`
+	// SessionHistory is the rendered, nonce-delimited session history
+	// (decision_model_history.go). System One gets it in its state; the
+	// Decisions API input gets it as text before the STATE section.
+	SessionHistory string `json:"session_history,omitempty"`
 }
 
 type decisionModelToolCall struct {
@@ -312,7 +329,7 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 		return res
 	}
 	cctx, cancel := context.WithTimeout(ctx, budget)
-	choice, probs, score, err := d.call(cctx, state)
+	choice, probs, score, flow, err := d.call(cctx, state)
 	cancel()
 	res.latencyMs = time.Since(start).Milliseconds()
 	var rerr decisionRefusalError
@@ -338,6 +355,10 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	res.risk = 1 - probs["allow"]
 	res.riskScore = score
 	switch {
+	case choice == "allow" && res.risk <= d.allowAt && d.flowGuard && flow.guards():
+		// The flow guard: an allow the user did not ask for is not
+		// confident (S1FLOW); it escalates and never blocks.
+		res.flowGuarded = true
 	case choice == "allow" && res.risk <= d.allowAt && !(decisionBench.allowRiskVeto && score >= d.blockRiskScore):
 		res.route = decisionAllow
 	case choice == "block" && res.risk >= d.blockAt && score >= d.blockRiskScore && !d.ruleFlagEscalates(ctx):
@@ -358,17 +379,22 @@ type decisionParseError struct{ msg string }
 
 func (e decisionParseError) Error() string { return e.msg }
 
-func (d *decisionModel) call(ctx context.Context, state decisionModelState) (choice string, probs map[string]float64, score float64, err error) {
+func (d *decisionModel) call(ctx context.Context, state decisionModelState) (choice string, probs map[string]float64, score float64, flow decisionFlowAnswers, err error) {
 	score = -1
+	flow = decisionFlowAnswers{userAuthorized: -1, servesLatest: -1}
 	usage := beginGatewayCallUsage(ctx, modelusage.RoleDecisionModel, "decision_model", d.model)
 	defer func() { usage.End(err) }()
-	body, err := decisionWireBody(d.protocol, d.model, state, decisionModelQuestions)
+	questions := d.questions
+	if questions == nil {
+		questions = decisionModelQuestions
+	}
+	body, err := decisionWireBody(d.protocol, d.model, state, questions)
 	if err != nil {
-		return "", nil, score, decisionParseError{"encode request: " + err.Error()}
+		return "", nil, score, flow, decisionParseError{"encode request: " + err.Error()}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", nil, score, errors.New("decision model request could not be built")
+		return "", nil, score, flow, errors.New("decision model request could not be built")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	setDecisionWireAuth(req, d.protocol, d.apiKey)
@@ -377,21 +403,21 @@ func (d *decisionModel) call(ctx context.Context, state decisionModelState) (cho
 		usage.UpstreamHeader(resp.StatusCode, nil)
 	}
 	if err != nil {
-		return "", nil, score, fmt.Errorf("decision model unreachable: %s", redactDecisionModelError(err))
+		return "", nil, score, flow, fmt.Errorf("decision model unreachable: %s", redactDecisionModelError(err))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDecisionModelResponseBytes+1))
 	if err != nil {
-		return "", nil, score, fmt.Errorf("decision model read failed: %w", err)
+		return "", nil, score, flow, fmt.Errorf("decision model read failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, score, decisionHTTPError(d.protocol, resp.StatusCode, raw)
+		return "", nil, score, flow, decisionHTTPError(d.protocol, resp.StatusCode, raw)
 	}
 	if len(raw) > maxDecisionModelResponseBytes {
-		return "", nil, score, decisionParseError{"decision model answer exceeds 64 KiB"}
+		return "", nil, score, flow, decisionParseError{"decision model answer exceeds 64 KiB"}
 	}
 	choice, probs, err = parseDecisionModelAnswer(raw)
-	return choice, probs, decisionRiskScore(raw), err
+	return choice, probs, decisionRiskScore(raw), parseDecisionFlowAnswers(raw), err
 }
 
 // decisionRiskScore reads the risk score answer (0..2), or -1 when it is
@@ -427,11 +453,17 @@ func decisionWireBody(protocol, model string, state any, questions map[string]an
 	if protocol != config.DecisionModelProtocolGeminiDecisions {
 		return json.Marshal(map[string]any{"model": model, "state": state, "questions": questions})
 	}
+	history := ""
+	if st, ok := state.(decisionModelState); ok && st.SessionHistory != "" {
+		// The history goes before the STATE section as its own text.
+		history, st.SessionHistory = st.SessionHistory, ""
+		state = st
+	}
 	input, err := decisionModelInput(state)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(map[string]any{"model": model, "input": input, "questions": questions})
+	return json.Marshal(map[string]any{"model": model, "input": history + input, "questions": questions})
 }
 
 // decisionModelInput renders state as the labeled input text: one-space
@@ -620,7 +652,7 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 	if dm == nil {
 		return j.runToolJudgeLLM(ctx, toolName, args, sample)
 	}
-	res := dm.decide(ctx, j.takeDecisionState(sample, toolName, args))
+	res := j.decideOnce(ctx, sample, toolName, args)
 	if res.failure == "" && res.logLine != "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", res.logLine)
 	}
@@ -637,14 +669,7 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 		emitDecisionModel(ctx, dm.model, toolName, args, res, v)
 		return v
 	case decisionBlock:
-		floor := &ScanVerdict{
-			Action:     "block",
-			Severity:   "HIGH",
-			Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f, risk score %.2f >= %.2f)", res.risk, dm.blockAt, res.riskScore, dm.blockRiskScore),
-			Findings:   []string{decisionModelFindingID},
-			Scanner:    decisionModelScanner,
-			Confidence: res.risk,
-		}
+		floor := dm.blockFloor(res)
 		emitDecisionModel(ctx, dm.model, toolName, args, res, floor)
 		// The hook sees the floor before the judge runs, so a judge that
 		// misses the hook answer window cannot drop it (GAP-0392).
@@ -699,7 +724,7 @@ func newDecisionOnlyJudge(cfg *config.Config) *LLMJudge {
 // is never an allow of its own.
 func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 	dm := j.decision
-	res := dm.decide(ctx, j.takeDecisionState(sample, toolName, args))
+	res := j.decideOnce(ctx, sample, toolName, args)
 	if res.failure != "" && res.refusal == "" {
 		if res.logLine != "" {
 			fmt.Fprintf(os.Stderr, "[guardrail] %s (%s)\n", res.logLine, res.failureCause)
@@ -804,7 +829,10 @@ func decisionConfirmWithoutAsk(verdict *ToolInspectVerdict, action string) strin
 // model's floor is stronger or the judge failed.
 func strongerDecisionVerdict(judged, floor *ScanVerdict) *ScanVerdict {
 	if judged == nil || judged.JudgeFailed {
-		return floor
+		// Only the floor: the judge gave no verdict.
+		out := *floor
+		out.decisionFloorOnly = true
+		return &out
 	}
 	if guardrailSeverityRank(judged.Severity) >= guardrailSeverityRank(floor.Severity) {
 		return judged
@@ -894,6 +922,85 @@ func judgeInputHash(content string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// blockFloor is the cascade-3 verdict of a confident block: a HIGH
+// JUDGE-DECISION-MODEL finding the judge can raise and never remove.
+func (d *decisionModel) blockFloor(res decisionResult) *ScanVerdict {
+	return &ScanVerdict{
+		Action:     "block",
+		Severity:   "HIGH",
+		Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f, risk score %.2f >= %.2f)", res.risk, d.blockAt, res.riskScore, d.blockRiskScore),
+		Findings:   []string{decisionModelFindingID},
+		Scanner:    decisionModelScanner,
+		Confidence: res.risk,
+	}
+}
+
+// decisionPrepass is a decision-model answer the hook lane got before it
+// took a judge slot (P3-1, S7 sysone review round 3): the decision model is
+// fast and cheap, so it answers even when the judge cannot run (all slots
+// busy, the hook judge budget spent, a deadline too short), and a
+// confident block then still stands as the HIGH floor. The judge path, when
+// it runs, uses this answer and this sample instead of asking again.
+type decisionPrepass struct {
+	judge  *LLMJudge
+	sample string
+	res    decisionResult
+}
+
+type decisionPrepassKey struct{}
+
+// prepareDecision records the call in the judge's session context, asks the
+// decision model once and keeps the answer on ctx. nil when the call is not
+// eligible for the judge (then no model runs, as before) or the judge has no
+// decision model.
+func (j *LLMJudge) prepareDecision(ctx context.Context, toolName, args string) (context.Context, *decisionPrepass) {
+	if j == nil || j.decision == nil {
+		return ctx, nil
+	}
+	sample, eligible := j.prepareToolJudgeSample(ctx, toolName, args)
+	if !eligible {
+		return ctx, nil
+	}
+	p := &decisionPrepass{judge: j, sample: sample, res: j.decision.decide(ctx, j.takeDecisionState(sample, toolName, args))}
+	if p.res.route == decisionBlock && !j.decisionOnly {
+		// Visible to the hook before the judge starts (GAP-0392).
+		decisionFloorSlotFrom(ctx).set(j.decision.blockFloor(p.res))
+	}
+	return context.WithValue(ctx, decisionPrepassKey{}, p), p
+}
+
+// decisionPrepassFrom returns the prepass of ctx made for judge j, or nil.
+func decisionPrepassFrom(ctx context.Context, j *LLMJudge) *decisionPrepass {
+	p, _ := ctx.Value(decisionPrepassKey{}).(*decisionPrepass)
+	if p == nil || p.judge != j {
+		return nil
+	}
+	return p
+}
+
+// decideOnce returns the prepass answer when the hook lane already asked
+// the decision model for this call, else asks it now.
+func (j *LLMJudge) decideOnce(ctx context.Context, sample, toolName, args string) decisionResult {
+	if p := decisionPrepassFrom(ctx, j); p != nil && p.sample == sample {
+		return p.res
+	}
+	return j.decision.decide(ctx, j.takeDecisionState(sample, toolName, args))
+}
+
+type judgeUnavailableKey struct{}
+
+// withJudgeUnavailable marks ctx so the LLM judge is not called: the hook
+// lane has no slot, budget or time for it, and only the decision model's
+// answer (the prepass) decides.
+func withJudgeUnavailable(ctx context.Context) context.Context {
+	return context.WithValue(ctx, judgeUnavailableKey{}, true)
+}
+
+func judgeUnavailableFrom(ctx context.Context) bool {
+	v, _ := ctx.Value(judgeUnavailableKey{}).(bool)
+	return v
+}
+
 // decisionFloorSlot carries a cascade-3 decision-model floor (a confident
 // block on its way to the judge) out of the judge goroutine, so the hook
 // can answer with it when the judge is late or fails (GAP-0392). A late
@@ -936,6 +1043,8 @@ func (s *decisionFloorSlot) get() *ScanVerdict {
 		return nil
 	}
 	c := *s.floor
+	// A floor read from the slot stands in for a judge that gave nothing.
+	c.decisionFloorOnly = true
 	return &c
 }
 

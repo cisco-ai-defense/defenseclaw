@@ -317,7 +317,7 @@ func TestBuildFailures(t *testing.T) {
 		want   string
 		calls  map[string]int // docker verbs ("" is any call) and how often they run
 	}{
-		"tampered image": {testSpec(harness.ClaudeCode), imageDocker(t, c, strings.Replace(goodProbeOutput(c), "version 2.1.156", "version 2.1.999", 1)),
+		"tampered image": {testSpec(harness.ClaudeCode), imageDocker(t, c, strings.Replace(goodProbeOutput(c), "version 2.1.311", "version 2.1.999", 1)),
 			"failed verification", map[string]int{"image rm": 1}},
 		"unknown contract": {unknown, &fakeDocker{handler: func([]string, []byte) (string, int) { return "", 0 }}, "", map[string]int{"": 0}},
 		"docker failure":   {testSpec(harness.ClaudeCode), &fakeDocker{handler: func([]string, []byte) (string, int) { return "", 1 }}, "docker build", nil},

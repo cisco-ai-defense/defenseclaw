@@ -111,9 +111,10 @@ def apply_settings(
         updated.allow_threshold = float(allow_threshold)
     if block_threshold is not None:
         updated.block_threshold = float(block_threshold)
-    if on_confident_block is not None:
+    if on_confident_block is not None or (updated.on_confident_block or "").strip().lower() == "decide":
         # decide is retired (it acts as escalate): never write it, and drop
-        # an old one, so the file holds only what the gateway does.
+        # an old one on any setup write, so the file holds only what the
+        # gateway does.
         updated.on_confident_block = ""
     if hook_connectors is not None:
         updated.hook_connectors = parse_connectors(hook_connectors)
@@ -383,6 +384,9 @@ def summary_rows(cfg: Config) -> list[tuple[str, str]]:
         ("decision_model.block_threshold", f"{dm.effective_block_threshold():.2f}"),
         ("decision_model.block_risk_score", f"{dm.effective_block_risk_score():.2f}"),
         ("decision_model.escalate_rule_flagged", "true" if dm.effective_escalate_rule_flagged() else "false"),
+        ("decision_model.history_turns", str(dm.effective_history_turns()) + (" (off)" if dm.effective_history_turns() == 0 else "")),
+        ("decision_model.history_tool_results", "true" if dm.history_tool_results else "false"),
+        ("decision_model.flow_guard", "true" if dm.effective_flow_guard() else "false"),
         (
             "decision_model.on_confident_block",
             "escalate" if dm.effective_on_confident_block() == "escalate" else "decide (retired: acts as escalate)",

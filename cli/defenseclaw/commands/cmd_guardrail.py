@@ -207,7 +207,7 @@ def _resolve_active_connector(cfg) -> str:
 
 def _enabled_connectors_need_model(cfg, connector: str) -> bool:
     """Report whether re-enabling routes LLM traffic through the proxy."""
-    from defenseclaw.platform_support import is_proxy_connector
+    from defenseclaw.platform_support import uses_guardrail_proxy
 
     names: list[str] = []
     resolver = getattr(cfg, "active_connectors", None)
@@ -218,7 +218,7 @@ def _enabled_connectors_need_model(cfg, connector: str) -> bool:
             names = []
     if not names:
         names = [connector]
-    return any(is_proxy_connector(normalize_connector(name) or name) for name in names)
+    return any(uses_guardrail_proxy(normalize_connector(name) or name) for name in names)
 
 
 def _connector_label(name: str) -> str:
@@ -988,9 +988,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         actives = [connector]
     # Only proxy connectors (openclaw, zeptoclaw) use guardrail.port; hook
     # connectors have no proxy listener (GAP-1649).
-    from defenseclaw.platform_support import PROXY_CONNECTORS
+    # Native OpenClaw (Windows) runs no proxy (rel-1-0-10 GAP-0047).
+    from defenseclaw.platform_support import uses_guardrail_proxy
 
-    proxy_in_use = any(normalize_connector(n) in PROXY_CONNECTORS for n in actives)
+    proxy_in_use = any(uses_guardrail_proxy(normalize_connector(n)) for n in actives)
 
     # G3: optional --connector scoping. Default shows the full roster (uniform
     # layout, unchanged); --connector X narrows it to one active peer, matched
@@ -1702,7 +1703,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         elif proxy:
             # No hooks: the model requests follow the outage mode the unscoped
             # view and status print, resolved by the one shared helper (GAP-0824).
-            runtime_value = proxy_outage_summary(proxy_model_outage_mode(app.cfg, key))
+            runtime_value = proxy_outage_summary(proxy_model_outage_mode(app.cfg, key), key)
         elif runtime_state.limit:
             runtime_value = runtime_state.effective
             if runtime_value == "closed":
@@ -2121,7 +2122,7 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
         if not enforcing:
             shown = "disabled (no hooks)"
         elif _is_proxy_connector(name):
-            shown = proxy_outage_summary(proxy_model_outage_mode(app.cfg, name))
+            shown = proxy_outage_summary(proxy_model_outage_mode(app.cfg, name), name)
             shown += " (" + proxy_outage_source(app.cfg, name).rstrip(".") + ")"
         else:
             tier = gc.hook_policy_tier(name) if hasattr(gc, "hook_policy_tier") else "default"
@@ -2273,7 +2274,7 @@ def fail_mode_cmd(
                 elif _state.note:
                     _eff += f" ({_state.note})"
             elif _is_proxy_connector(_name):
-                _eff = proxy_outage_summary(proxy_model_outage_mode(app.cfg, _name))
+                _eff = proxy_outage_summary(proxy_model_outage_mode(app.cfg, _name), _name)
             if _enforcing and normalize_connector(_name) not in _RUNTIME_FAIL_MODE_CONNECTORS:
                 # A hook entry the agent skips, or one that does not run
                 # DefenseClaw's current hook, leaves calls unchecked whatever
@@ -5135,6 +5136,76 @@ def protection_disable_cmd(
     _change_protection(app, name, connector, profile, enable=False, json_out=json_out)
 
 
+def _validate_composed_protections(
+    app: AppContext,
+    connector_key: str | None,
+    profile: str | None,
+    desired: tuple[str, ...],
+    where: str,
+    _fail,
+) -> None:
+    """Refuse an opt-in protection pack a running gateway would reject.
+
+    Composes the scope's base rule pack with every ``guardrail.rules`` layer that
+    shapes the scope -- global, connector, profile and profile connector, widest
+    first, each with its protections, enable, disable and severity overrides --
+    with this scope's ``protections`` replaced by *desired*. That is the compose
+    the gateway runs on reload for this scope, so packs enabled here and at the
+    wider scopes add up as they do there. Narrower scopes and the
+    application_protection layers are not re-checked here. It runs through the authoritative Go loader and fails
+    on a definitive invalid result -- most importantly the semantic rule-cost
+    limit on a large base such as strict (rel-1-0-10:GAP-0050). A missing or
+    incompatible helper is best-effort: the check is skipped rather than block a
+    legitimate change.
+    """
+    from defenseclaw import policy_catalog, rulepack_validation
+
+    blocks = _scope_blocks(app.cfg, connector_key, profile)
+    target = _scope_block(app.cfg, connector_key, profile)
+
+    def _layer(rules) -> dict:
+        if rules is None:
+            return {}
+        layer: dict = {}
+        for key in ("protections", "enable", "disable"):
+            values = [str(v) for v in (getattr(rules, key, None) or [])]
+            if values:
+                layer[key] = values
+        overrides = {str(k): str(v) for k, v in (getattr(rules, "severity_overrides", None) or {}).items()}
+        if overrides:
+            layer["severity_overrides"] = overrides
+        return layer
+
+    layers = [layer for block in blocks if block is not target and (layer := _layer(getattr(block, "rules", None)))]
+    own = _layer(getattr(target, "rules", None) if target is not None else None)
+    own["protections"] = list(desired)
+    layers.append(own)
+    pack_dir = ""
+    for block in reversed(blocks):
+        pack_dir = policy_catalog.configured_pack_dir(app.cfg, block)
+        if pack_dir:
+            break
+    if not pack_dir:
+        pack_dir = policy_catalog.preset_pack_dir(app.cfg, "default")
+    if not pack_dir:
+        return
+    try:
+        result = rulepack_validation.validate_rule_pack(pack_dir, layers=layers)
+    except rulepack_validation.RulePackValidationBridgeError:
+        return
+    if getattr(result, "valid", True):
+        return
+    reason = ""
+    issue = getattr(result, "error", None)
+    if issue is not None:
+        reason = f" ({issue.code}: {issue.reason})" if getattr(issue, "reason", "") else f" ({issue.code})"
+    _fail(
+        1,
+        f"Turning on these protection packs for {where} would make a rule pack the gateway "
+        f"cannot load{reason}. Nothing was changed.",
+    )
+
+
 def _change_protection(
     app: AppContext,
     name: str,
@@ -5237,6 +5308,8 @@ def _change_protection(
         wanted = (set(on_now) | {name}) if enable else (set(on_now) - {name})
         order = {p.name: index for index, p in enumerate(packs)}
         desired = sorted(wanted, key=lambda n: order.get(n, len(order)))
+        if enable and desired:
+            _validate_composed_protections(app, connector_key, profile_name, tuple(desired), where, _fail)
         change = (
             config_writer.Change(path, desired)
             if desired else config_writer.Change(

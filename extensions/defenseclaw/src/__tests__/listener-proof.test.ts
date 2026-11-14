@@ -93,7 +93,7 @@ describe("listener proof (GAP-0594)", () => {
     const good = await listener(TOKEN);
     const port = good.port;
     const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: TOKEN });
-    expect((await client.status()).ok).toBe(true);
+    expect((await client.listBlocked()).ok).toBe(true);
     await proveListener("127.0.0.1", port, TOKEN);
     await new Promise((r) => good.server.close(r));
 
@@ -312,7 +312,7 @@ describe("listener proof (GAP-0594)", () => {
     const { server, port, seen } = await listener("b".repeat(64));
     servers.push(server);
     const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: TOKEN });
-    const res = await client.status();
+    const res = await client.listBlocked();
     expect(res.ok).toBe(false);
     expect(res.status).toBe(0);
     expect(seen.authorized).toEqual([]);
@@ -323,7 +323,7 @@ describe("listener proof (GAP-0594)", () => {
     const { server, port, seen } = await listener(TOKEN);
     servers.push(server);
     const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: TOKEN });
-    const res = await client.status();
+    const res = await client.listBlocked();
     expect(res.ok).toBe(true);
     expect(seen.authorized).toEqual([`Bearer ${TOKEN}`]);
     const headers = await client.buildOutboundHeaders();
@@ -447,5 +447,15 @@ describe("outage classification of a check that got no answer", () => {
       expect(res.status).toBe(0);
       expect(res.outage).toBe(true);
     }
+  });
+});
+
+describe("listener proof outage wording (rel-1-0-10 GAP-0064)", () => {
+  it("says the gateway is not running when nothing listens", async () => {
+    _setListenerProofForTest(undefined);
+    const err = await proveListener("127.0.0.1", 1, "a".repeat(64)).catch((e) => e);
+    expect(err).toBeInstanceOf(ListenerProofError);
+    expect(String(err.message)).toContain("the DefenseClaw gateway is not running");
+    expect(String(err.message)).not.toContain("did not prove");
   });
 });

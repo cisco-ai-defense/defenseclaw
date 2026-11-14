@@ -16,7 +16,9 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -202,6 +204,19 @@ func (e *S7Engine) DeterministicFor(ctx context.Context, connectorName, toolName
 		out.Findings = append(out.Findings, S7Finding{RuleID: f.RuleID, Severity: f.Severity, Confidence: f.Confidence, Disposition: f.Disposition, Route: f.Route})
 	}
 	return out
+}
+
+// S7SetDecisionHistoryNonce makes the history section nonce a hash of the
+// history text, so a replay sends the same bytes (bench only; the product
+// draws a fresh random nonce).
+func S7SetDecisionHistoryNonce(deterministic bool) {
+	if !deterministic {
+		return
+	}
+	decisionHistoryNonce = func(body string) string {
+		sum := sha256.Sum256([]byte("s7bench-history-nonce|" + body))
+		return hex.EncodeToString(sum[:8])
+	}
 }
 
 // S7SetDecisionRouting sets the bench-only switches (see decisionBench).

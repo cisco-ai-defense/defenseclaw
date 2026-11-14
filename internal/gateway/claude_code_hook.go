@@ -242,12 +242,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
 			ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
 		}
-		if a.agentHookWindowsDialectHint(ctx) {
+		windowsReadings := a.agentHookWindowsDialectHint(ctx)
+		if windowsReadings {
 			actionInput.DialectHint = claudeCodeWindowsShellDialect(actionInput)
 		}
 		if coworkDialect != "" {
 			// The Cowork shell runs in a Linux VM on every host.
 			actionInput.DialectHint = coworkDialect
+			windowsReadings = false
 		}
 		if coworkDeny != nil {
 			verdict = coworkDeny
@@ -262,6 +264,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: actionArgs}),
 				ActiveAgentFileIdentities:     activeAgentContext.identities,
 				SandboxGuestCWD:               req.guestCWD,
+				windowsDialectReadings:        windowsReadings,
 				record:                        toolChainRecorderFromContext(ctx),
 			}, command, commandTool)
 		}
@@ -899,6 +902,11 @@ func (a *APIServer) inspectClaudeCodeToolResult(
 	mode string,
 ) *ToolInspectVerdict {
 	content := claudeCodeToolOutput(req)
+	if req.HookEventName == "PostToolUse" {
+		for _, j := range a.hookSessionJudges(ctx) {
+			j.ObserveToolResult(ctx, content) // decision_model.history_tool_results only
+		}
+	}
 	if sandboxToolResultUntrusted(ctx) || req.HookEventName != "PostToolUse" || req.ToolResponse == nil ||
 		req.ToolCalls != nil || strings.TrimSpace(req.Error) != "" ||
 		strings.TrimSpace(req.ErrorDetails) != "" || strings.TrimSpace(req.ToolName) == "" {

@@ -244,6 +244,8 @@ func main() {
 	dmAllowRiskVeto := flag.Bool("dm-allow-risk-veto", false, "bench variant: a risk score >= block_risk_score turns a confident allow into an escalation")
 	judgeHookConnectors := flag.String("judge-hook-connectors", "claudecode", "guardrail.judge.hook_connectors (names separated by , or +; all = every connector)")
 	dmRuleFlagged := flag.String("dm-escalate-rule-flagged", "", "decision_model.escalate_rule_flagged: true, false or empty (product default true)")
+	dmHistoryTurns := flag.Int("dm-history-turns", -1, "decision_model.history_turns (-1: product default 25; 0: off)")
+	dmFlowGuard := flag.String("dm-flow-guard", "", "decision_model.flow_guard: true, false or empty (product default true)")
 	dmCacheLog := flag.String("dm-cache-log", "", "with -dm-cache-dir: JSONL of every upstream call (sha, status, latency, tokens, retries); default <cache-dir>/../log/<time>-<pid>.jsonl")
 	dmTimeout := flag.Float64("dm-timeout", 0, "decision model timeout seconds (0: product default)")
 	judgeTimeout := flag.Float64("judge-timeout", 0, "hook judge timeout seconds (0: product default)")
@@ -400,6 +402,14 @@ func main() {
 		}
 		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: baseURL, Protocol: *dmProtocol, Timeout: *dmTimeout,
 			AllowThreshold: *dmAllowAt, BlockThreshold: *dmBlockAt, OnConfidentBlock: *dmOnBlock, BlockRiskScore: *dmBlockRiskScore}
+		if *dmHistoryTurns >= 0 {
+			n := *dmHistoryTurns
+			cfg.DecisionModel.HistoryTurns = &n
+		}
+		if v := strings.TrimSpace(*dmFlowGuard); v != "" {
+			b := v == "true"
+			cfg.DecisionModel.FlowGuard = &b
+		}
 		if v := strings.TrimSpace(*dmRuleFlagged); v != "" {
 			b := v == "true"
 			cfg.DecisionModel.EscalateRuleFlagged = &b
@@ -412,6 +422,7 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "[s7bench] decision model: %s external=%v corpus=%s hook_connectors=%v key=%v\n", *dmModel, !dmLoopback(*dmURL), *corpusName, cfg.DecisionModel.HookConnectors, dmKeyPresent())
 	}
+	gateway.S7SetDecisionHistoryNonce(*dmCacheDir != "")
 	gateway.S7SetDecisionRouting(*dmCacheDir != "" && *dmCacheOnly, *dmMediumAlerts, *dmAllowRiskVeto)
 	gateway.S7SetSessionStartArrival(time.Duration(*startArrivalMS) * time.Millisecond)
 	var err2 error

@@ -102,6 +102,20 @@ type DecisionModelConfig struct {
 	// decision-model confident block; it escalates (the judge, or a
 	// confirmation in cascade 2). Unset = true.
 	EscalateRuleFlagged *bool `mapstructure:"escalate_rule_flagged" yaml:"escalate_rule_flagged,omitempty"`
+	// HistoryTurns: the decision model sees the last this many turns of the
+	// session (a turn is a tool call and the prompts before it), user prompts
+	// and tool calls only, every field cut and marked. Unset = 25; 0 = none;
+	// at most 100.
+	HistoryTurns *int `mapstructure:"history_turns" yaml:"history_turns,omitempty"`
+	// HistoryToolResults adds each tool's result (cut to 1 KB) to that
+	// history. Off by default: it costs time and lets a plausible result read
+	// as authorization.
+	HistoryToolResults bool `mapstructure:"history_tool_results" yaml:"history_tool_results,omitempty"`
+	// FlowGuard asks two flow questions in the same request (did the user
+	// authorize this, does it serve the latest request); when either is
+	// answered P(yes) <= 0.2 a confident allow becomes an escalation. It
+	// never blocks. Unset = true.
+	FlowGuard *bool `mapstructure:"flow_guard" yaml:"flow_guard,omitempty"`
 	// HookConnectors lists the connectors whose hook tool calls the
 	// decision model answers on its own where the LLM judge does not judge
 	// them (cascade 2: rules, then the decision model). "*" matches every
@@ -172,6 +186,23 @@ func (d DecisionModelConfig) EffectiveEscalateRuleFlagged() bool {
 	return d.EscalateRuleFlagged == nil || *d.EscalateRuleFlagged
 }
 
+// DefaultDecisionModelHistoryTurns is the session history the decision model
+// sees by default (S7 S1FLOW: 25 turns, calls only).
+const DefaultDecisionModelHistoryTurns = 25
+
+// EffectiveHistoryTurns returns HistoryTurns, 25 when unset.
+func (d DecisionModelConfig) EffectiveHistoryTurns() int {
+	if d.HistoryTurns == nil {
+		return DefaultDecisionModelHistoryTurns
+	}
+	return *d.HistoryTurns
+}
+
+// EffectiveFlowGuard returns FlowGuard, true when unset.
+func (d DecisionModelConfig) EffectiveFlowGuard() bool {
+	return d.FlowGuard == nil || *d.FlowGuard
+}
+
 // EffectiveOnConfidentBlock returns OnConfidentBlock or escalate.
 func (d DecisionModelConfig) EffectiveOnConfidentBlock() string {
 	if v := strings.ToLower(strings.TrimSpace(d.OnConfidentBlock)); v != "" {
@@ -211,6 +242,9 @@ func (d DecisionModelConfig) Validate() error {
 	}
 	if math.IsNaN(d.BlockRiskScore) || d.BlockRiskScore < 0 || d.BlockRiskScore > maxDecisionModelRiskScore {
 		return fmt.Errorf("block_risk_score must be between 0 and %v, got %v", maxDecisionModelRiskScore, d.BlockRiskScore)
+	}
+	if d.HistoryTurns != nil && (*d.HistoryTurns < 0 || *d.HistoryTurns > 100) {
+		return fmt.Errorf("history_turns must be between 0 and 100, got %d", *d.HistoryTurns)
 	}
 	if math.IsNaN(d.Timeout) || d.Timeout < 0 || d.Timeout > maxDecisionModelTimeoutSeconds {
 		return fmt.Errorf("timeout must be between 0 and %v seconds, got %v", maxDecisionModelTimeoutSeconds, d.Timeout)
