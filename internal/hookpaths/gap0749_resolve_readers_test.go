@@ -82,6 +82,34 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		LiteralWriteOperands(wrapped, cwd, home)
 		ShellDirectoryWriteOperands(wrapped, cwd, home, sourceFacts, true, false)
 	}
+	if awked := actionfacts.AwkCommandTwin(command); awked.Text != "" && awked.Text != command {
+		readings = append(readings, awked.Text)
+		twin := fallback
+		twin.Command = awked.Text
+		awkedFacts := actionfacts.Analyze(twin)
+		ShellWriteOperands(awked.Text, cwd, home)
+		LiteralWriteOperands(awked.Text, cwd, home)
+		ShellDirectoryWriteOperands(awked.Text, cwd, home, sourceFacts, true, false)
+		AdjacentAssignedWriteOperands(awked.Text, cwd, home)
+		DeclaredRedirectWriteOperands(awked.Text, cwd, home)
+		BoundedShellWriteOperands(awked.Text, cwd, home)
+		QuotedDynamicCopyDestinations(awked.Text, cwd, home)
+		quotedGlobNameWriteOperands(awked.Text, cwd, home, awkedFacts.Paths)
+		BoundedLoopCopyDestinations(awked.Text, cwd, home)
+		CopySourceGlobDestinations(awked.Text, cwd, home, nil)
+		BoundedGlobLoopCopyDestinations(awked.Text, cwd, home, nil)
+		commandLinksWithFacts(awked.Text, cwd, home, sourceFacts, true)
+		actionGlobFacts(awked.Text, cwd, home)
+		LinkWalkFacts(awked.Text, cwd, home)
+		for _, body := range awked.Bodies {
+			// The decision of a body is a plain command's (the command
+			// readers above), read here as the command text of the body.
+			ActionCommandDecision(body, cwd, home)
+		}
+		if len(awked.Bodies) == 1 && awked.Text == awked.Bodies[0] && NoDereferenceTouchShape(awked.Text, cwd, home) {
+			noDereferenceTouchStatus(awked.Text, cwd, home)
+		}
+	}
 	for _, reading := range readings {
 		for _, twin := range actionfacts.DynamicOperandTwins(reading, home) {
 			if twin == reading {
@@ -121,7 +149,7 @@ var gap0749ResolveReaderCalls = []string{
 	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
 	"actionConcreteProtectedWriteOnWithOperands", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
-	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
+	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin", "actionfacts.AwkCommandTwin", "addReading",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
 	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "quotedGlobNameWriteOperands", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
 }

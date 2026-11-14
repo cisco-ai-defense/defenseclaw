@@ -554,6 +554,17 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 	return called
 }
 
+// awkTwinTouchesNoLink reports an awk reading that is one touch -h whose
+// operands are links that are not themselves protected: the call changes no
+// protected file, as the plain no-dereference touch (noDereferenceTouchStatus).
+func awkTwinTouchesNoLink(twin actionfacts.AwkTwin, cwd, home string) bool {
+	if len(twin.Bodies) != 1 || twin.Text != twin.Bodies[0] || !NoDereferenceTouchShape(twin.Text, cwd, home) {
+		return false
+	}
+	safe, protectedTarget := noDereferenceTouchStatus(twin.Text, cwd, home)
+	return safe && !protectedTarget
+}
+
 // clientProtectedDecision is the protected-target decision the hook client
 // reaches for a plain shell command (the one an awk program starts too): a concrete write to a protected file, a
 // variable write a per-user gateway resolves through the user's links, a loop
@@ -2195,17 +2206,15 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					// that reading, and behind ProtectHome reads its targets
 					// only from this map (GAP-0499).
 					awkTwin := actionfacts.AwkCommandTwin(command)
-					if awkTwin.Text != "" && awkTwin.Text != command {
+					// An awk call that is the whole command and starts one touch -h of
+					// a link itself is as safe as the plain call: the plain call lists
+					// its entry and the safe mark, and a gateway that reads the awk
+					// text as written would read the entry alone, so the reading is
+					// not listed (GAP-0499).
+					if awkTwin.Text != "" && awkTwin.Text != command && !awkTwinTouchesNoLink(awkTwin, cwd, home) {
 						addReading(awkTwin.Text, true)
 						for _, body := range awkTwin.Bodies {
 							protectedDecision = protectedDecision || clientProtectedDecision(body, cwd, home)
-						}
-						// An awk call that is the whole command and starts one
-						// command is that command: a touch -h of a link itself
-						// is as safe as the plain call (GAP-0499).
-						if !protectedDecision && !noDereferenceTouchSafe && len(awkTwin.Bodies) == 1 &&
-							awkTwin.Text == awkTwin.Bodies[0] && NoDereferenceTouchShape(awkTwin.Text, cwd, home) {
-							noDereferenceTouchSafe, protectedDecision = noDereferenceTouchStatus(awkTwin.Text, cwd, home)
 						}
 					}
 					truncated = truncated || awkTwin.Truncated.Any()

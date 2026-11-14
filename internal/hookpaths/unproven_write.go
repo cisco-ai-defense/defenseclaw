@@ -562,17 +562,6 @@ func (w *unprovenBoundedWriter) Write(p []byte) (int, error) {
 	return w.Builder.Write(p)
 }
 
-// awkCommandUnread reports an awk program that starts a command this proof
-// cannot read: one built from a field or a variable, a gawk directive, or
-// text that does not scan. A command written as string literals is read as
-// the shell it runs (awkCommandShell, actionfacts.AwkCommandTwin), so the
-// readers judge it as the hook running it directly, and it is not unproved
-// (rel-1-0-10:GAP-0499).
-func awkCommandUnread(program string) bool {
-	_, dynamic := awkprog.ProgramsShell([]string{program})
-	return dynamic
-}
-
 // awkCallUnproven reports an awk call whose program text has an output this
 // proof cannot name, or whose file or command effects depend on a word the
 // shell computes. The words are read as awk reads them: options, then one
@@ -686,7 +675,7 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 		return true
 	}
 	for _, program := range programs {
-		if awkUnprovenOutput(program, cwd, home) || awkCommandUnread(program) {
+		if awkUnprovenOutput(program, cwd, home) || awkprog.Parse(program).RunsCommand() {
 			return true
 		}
 	}
