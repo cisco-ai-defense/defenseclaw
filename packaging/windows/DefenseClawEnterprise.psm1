@@ -34424,10 +34424,14 @@ function Restart-DefenseClawDeferredRecoveryRelease {
         (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
         return ''
     }
+    # A committed uninstall leaves a tombstone that keeps the removed
+    # release's product_version (GAP-1074); it is not installed.
     $installedVersion = ''
     try {
         $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
-        if ($null -ne $metadata -and $null -ne $metadata.PSObject.Properties['product_version']) {
+        if ($null -ne $metadata -and
+            (Test-DefenseClawMetadataInstalled -Metadata $metadata) -and
+            $null -ne $metadata.PSObject.Properties['product_version']) {
             $installedVersion = [string]$metadata.product_version
         }
     }
@@ -57812,7 +57816,6 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             foreach ($key in @($original.Data.Keys)) {
                 $combined.Data[$key] = $original.Data[$key]
             }
-            $combined.Data['deferred_recovery_restart'] = $restarted
             throw $combined
         }
         throw

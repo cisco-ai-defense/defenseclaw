@@ -55,8 +55,10 @@ $script:InstalledVersion = '1.0.9'
 function Get-DefenseClawDeploymentMetadata {
     param($Layout)
     if ($null -eq $script:InstalledVersion) { return $null }
-    return [pscustomobject]@{ product_version = $script:InstalledVersion }
+    return [pscustomobject]@{ product_version = $script:InstalledVersion; installed = -not [bool]$script:Tombstone }
 }
+$script:Tombstone = $false
+function Test-DefenseClawMetadataInstalled { param($Metadata) [bool]$Metadata.installed }
 function Get-DefenseClawTransactionServiceStates {
     param($Services, $GatewayServiceName, $GuardianServiceName)
     $states = @{}
@@ -150,10 +152,17 @@ try {
     if ((Restart-DefenseClawDeferredRecoveryRelease -Layout $layout) -ne '' -or $script:Calls.Count -ne 0) {
         throw 'restarted after the upgrade committed'
     }
+    # A committed uninstall's tombstone keeps the removed release's version.
+    Set-Deferred
+    $script:Tombstone = $true
+    if ((Restart-DefenseClawDeferredRecoveryRelease -Layout $layout) -ne '' -or $script:Calls.Count -ne 0) {
+        throw 'restarted after the uninstall committed'
+    }
+    $script:Tombstone = $false
     Set-Deferred
     $script:InstalledVersion = $null
     if ((Restart-DefenseClawDeferredRecoveryRelease -Layout $layout) -ne '' -or $script:Calls.Count -ne 0) {
-        throw 'restarted after the uninstall committed'
+        throw 'restarted with no deployment record'
     }
 
     # Secure Client never defers, and is never restarted here.
