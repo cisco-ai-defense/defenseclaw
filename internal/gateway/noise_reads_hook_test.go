@@ -36,6 +36,10 @@ func TestGAP0018KeyReadersAreNotKeyWrites(t *testing.T) {
 		{"printed source files named for the keys", `sed -n '2090,2115p' internal/gateway/semantic_authorized_keys_proof.go && sed -n '1,230p' internal/hookpaths/applypatch.go`, false},
 		// A source file called applypatch.go is a file, not an apply_patch call.
 		{"printed source files, one named applypatch.go", `sed -n 1,5p internal/gateway/semantic_authorized_keys_proof.go && cat internal/hookpaths/applypatch.go`, false},
+		// A glob that can reach the keys file by name is decided by identity: it blocks as
+		// it always did (glob review round 4, rows B2 and B3).
+		{"B2 dotglob glob reaching the keys file by name", `shopt -s dotglob; cat ~/*/authorized_keys`, true},
+		{"B3 dotglob glob reaching a key file by a name prefix", `shopt -s dotglob; cat ~/*/auth*`, true},
 		{"printed source file, then a key write", `sed -n '2090,2115p' internal/gateway/semantic_authorized_keys_proof.go && echo x >> ~/.ssh/authorized_keys`, true},
 		// A statement with an output redirect is no plain read (owner ruling, GAP-2590):
 		// the copy of the file's content into another file stays a block.

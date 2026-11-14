@@ -413,13 +413,23 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					found = true
 					return false
 				}
-				roleUnknown := memo.nonWritesExcused() && actionCallRoleUnknown(call, home)
+				// A glob that can reach a protected file by name is decided by identity,
+				// as it always was: no excuse of a read or of an unknown program applies
+				// to a call that holds one (rel-1-0-10:GAP-0018, GAP-0350).
+				callHasGlob := false
+				for _, word := range call.Args {
+					if actionWordHasUnquotedGlob(word, command) {
+						callHasGlob = true
+						break
+					}
+				}
+				roleUnknown := memo.nonWritesExcused() && !callHasGlob && actionCallRoleUnknown(call, home)
 				// A statement that only reads, outside a pipeline and not a cd, names
 				// the file to read it: its words leave the text scan too (a quoted
 				// remote command, a shell body), as a read-only statement's hit words
 				// are judged above. The walk keeps the old reading when a link is
 				// removed or replaced (a word then names a removed entry).
-				blankReads := memo.nonWritesExcused() && readOnly && direct[stmt] && !actionCallChangesDirectory(call, home)
+				blankReads := memo.nonWritesExcused() && !callHasGlob && readOnly && direct[stmt] && !actionCallChangesDirectory(call, home)
 				for _, word := range call.Args {
 					if blankReads && len(removedEntries) == 0 && len(replacedEntries) == 0 {
 						judgedWords = append(judgedWords, word)
@@ -456,7 +466,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					}
 					if actionExpandedWordGlob(word, values, effectiveCWD, home, check) || checkBraceFields(word, false) || checkWord(word) {
 						if readOnly && direct[stmt] {
-							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values), enters: actionCallChangesDirectory(call, home)})
+							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values), enters: actionCallChangesDirectory(call, home) || callHasGlob})
 							judgedWords = append(judgedWords, word)
 							continue
 						}
