@@ -39,7 +39,10 @@ type event struct {
 	Command  string          `json:"command"`
 	CWD      string          `json:"cwd"`
 	Dialect  string          `json:"dialect"`
-	Outcome  string          `json:"outcome"`
+	// Server is the MCP server that serves the tool (case-v1 mcp_server, optional; for MCPTox the harness takes it from
+	// strata.domain). A non-native tool goes out as mcp__<server>__<tool>, as a real client names it; with none, mcp__bench__<tool>.
+	Server  string `json:"mcp_server"`
+	Outcome string `json:"outcome"`
 	// Result is the tool output (tool-result surface corpora); sent as the PostToolUse tool_response with -surface tool-result.
 	Result string `json:"result"`
 	// ToolResult is case-v1 events[].tool_result (optional): the tool output of the source trace. The hook surface replays it as the PostToolUse
@@ -78,7 +81,28 @@ type corpusCase struct {
 	Payload payload `json:"payload"`
 	Strata  struct {
 		Provider string `json:"provider"`
+		Domain   string `json:"domain"`
 	} `json:"strata"`
+	Source struct {
+		Dataset string `json:"dataset"`
+	} `json:"source"`
+}
+
+// mcpServer is the MCP server a case's calls go to when the corpus names one: MCPTox's strata.domain is the server of the
+// call (FileSystem, Prisma, Slack, ...). Other corpora use domain for a scenario or suite (MCPHunt, AgentDojo), not a server.
+func (c corpusCase) mcpServer() string {
+	if c.Source.Dataset == "mcptox" {
+		return strings.TrimSpace(c.Strata.Domain)
+	}
+	return ""
+}
+
+var underscores = regexp.MustCompile(`_{2,}`)
+
+// serverSegment spells a server name as one segment of an mcp__<server>__<tool> name: characters outside [A-Za-z0-9_-]
+// become "_", and a run of "_" collapses so the segment cannot end early at "__".
+func serverSegment(server string) string {
+	return strings.Trim(underscores.ReplaceAllString(nonWord.ReplaceAllString(strings.TrimSpace(server), "_"), "_"), "_")
 }
 
 type record struct {
@@ -214,7 +238,11 @@ func mapTool(ev event) (string, json.RawMessage, string) {
 	if len(raw) == 0 || string(raw) == "null" {
 		raw = json.RawMessage(`{}`)
 	}
-	return "mcp__bench__" + nonWord.ReplaceAllString(name, "_"), raw, "mcp"
+	server := serverSegment(ev.Server)
+	if server == "" {
+		server = "bench"
+	}
+	return "mcp__" + server + "__" + nonWord.ReplaceAllString(name, "_"), raw, "mcp"
 }
 
 func main() {
@@ -503,6 +531,14 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 			one.ToolResult = c.Payload.EventResult
 		}
 		events = []event{one}
+	}
+	if srv := c.mcpServer(); srv != "" {
+		events = append([]event(nil), events...)
+		for i := range events {
+			if events[i].Server == "" {
+				events[i].Server = srv
+			}
+		}
 	}
 	cwd := "/home/bench/work"
 	if surface == "prompt" {
