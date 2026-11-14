@@ -8064,6 +8064,9 @@ func TestTeardown_DoesNotDeleteOtherConnectorsHookScripts(t *testing.T) {
 // --- Security Surface Coverage tests ---
 
 func TestSecuritySurfaceCoverage(t *testing.T) {
+	// The OpenClaw row describes the Linux/macOS proxy topology (bash PATH
+	// shims); the native Windows answer is checked at the end.
+	t.Cleanup(PinOpenClawHooksGOOSForTest("linux"))
 	type expectation struct {
 		name     string
 		toolMode ToolInspectionMode
@@ -8091,6 +8094,21 @@ func TestSecuritySurfaceCoverage(t *testing.T) {
 		if policy != exp.policy {
 			t.Errorf("%s: SubprocessPolicy = %q, want %q", exp.name, policy, exp.policy)
 		}
+	}
+
+	// Native Windows OpenClaw runs no shims (they are bash scripts and the
+	// host has no sh); every tool call, exec included, still goes through the
+	// plugin's before_tool_call hook, so tool inspection stays both.
+	defer PinOpenClawHooksGOOSForTest("windows")()
+	c, ok := reg.Get("openclaw")
+	if !ok {
+		t.Fatal("missing connector \"openclaw\"")
+	}
+	if got := c.SubprocessPolicy(); got != SubprocessNone {
+		t.Errorf("openclaw on windows: SubprocessPolicy = %q, want %q", got, SubprocessNone)
+	}
+	if got := c.ToolInspectionMode(); got != ToolModeBoth {
+		t.Errorf("openclaw on windows: ToolInspectionMode = %q, want %q", got, ToolModeBoth)
 	}
 }
 
