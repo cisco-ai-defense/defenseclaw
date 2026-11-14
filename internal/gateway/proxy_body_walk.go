@@ -401,11 +401,16 @@ type textWalker struct {
 	redact     map[historyHash]historyRefusal
 	redactions []historyRedaction
 	turn       int
-	ambiguous  string // why the body can be read two ways, if it can
-	reply      bool
-	stream     bool // reply event of a stream: calls under delta, item and content_block belong to sseToolCalls
-	skipCalls  bool
-	calls      []sseToolCall
+	// curTurn is set while the walker reads a current-scope turn that is
+	// not system or developer text; its strings also go into turnSegs, the
+	// candidates a refusal is attributed to (GAP-0257).
+	curTurn   bool
+	turnSegs  []string
+	ambiguous string // why the body can be read two ways, if it can
+	reply     bool
+	stream    bool // reply event of a stream: calls under delta, item and content_block belong to sseToolCalls
+	skipCalls bool
+	calls     []sseToolCall
 	// cur is the object whose value is being read and curKey the field it
 	// sits under (media positions); payload counts the free-form payloads
 	// (tool input and results) the walker is inside.
@@ -448,6 +453,9 @@ func (w *textWalker) add(s string) string {
 		return s
 	}
 	w.segs = append(w.segs, s)
+	if w.curTurn {
+		w.turnSegs = append(w.turnSegs, s)
+	}
 	return s
 }
 
@@ -632,10 +640,11 @@ func (w *textWalker) walkTurns(list *jnode) {
 		}
 	}
 	for i, it := range list.kids {
-		hist, user := false, false
+		hist, user, sys := false, false, false
 		if it.kind == 'o' {
 			role := strings.ToLower(it.str("role"))
-			hist = role != "system" && role != "developer" && (i < last || (i == last && i != len(list.kids)-1))
+			sys = role == "system" || role == "developer"
+			hist = !sys && (i < last || (i == last && i != len(list.kids)-1))
 			user = role == "user"
 		}
 		if hist {
@@ -644,10 +653,10 @@ func (w *textWalker) walkTurns(list *jnode) {
 		if user {
 			w.user++
 		}
-		prevTurn := w.turn
-		w.turn = i
+		prevTurn, prevCur := w.turn, w.curTurn
+		w.turn, w.curTurn = i, !hist && !sys
 		w.walk(it, "", 1)
-		w.turn = prevTurn
+		w.turn, w.curTurn = prevTurn, prevCur
 		if user {
 			w.user--
 		}
@@ -670,6 +679,10 @@ type passthroughSidePrompt struct {
 	// Segments: the proxy inspects what this actor or session has not sent
 	// before (historySeen).
 	History []string
+	// Turn is the strings of Segments that sit in the current turns (not
+	// system or developer text, not instructions or tool definitions): the
+	// candidates a refusal is attributed to (refusedSegments, GAP-0257).
+	Turn []string
 	// Unreadable is why the body takes the fail mode ("" when it is read).
 	Unreadable string
 }
@@ -731,7 +744,7 @@ func passthroughPromptFor(body []byte, jsonHint bool, max int) passthroughSidePr
 	}
 	w.checkKeys(root)
 	w.walkRequest(root)
-	side := passthroughSidePrompt{Segments: w.segs, History: w.hist, Unreadable: w.ambiguous}
+	side := passthroughSidePrompt{Segments: w.segs, History: w.hist, Turn: w.turnSegs, Unreadable: w.ambiguous}
 	// A body whose only text is a probe carries a prompt: the probe.
 	if len(w.segs) == 0 && !w.probe && prompt && side.Unreadable == "" {
 		side.Unreadable = "the body carries no prompt text"
@@ -757,10 +770,12 @@ func (w *textWalker) walkRequest(root *jnode) {
 			user := (f == "input" && c.kind == 's') || (f == "prompt" && (c.kind == 's' || c.kind == 'a'))
 			if user {
 				w.user++
+				w.curTurn = true
 			}
 			w.walk(c, k, 1)
 			if user {
 				w.user--
+				w.curTurn = false
 			}
 		}
 	}
