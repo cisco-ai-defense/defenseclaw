@@ -282,6 +282,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Connector:    "codex",
 			contentScope: ruleContentScopeUntrusted,
 		})
+		a.forgetBlockedPrompt(ctx, req.Prompt, verdict)
 		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{
 				targetType: "skill",

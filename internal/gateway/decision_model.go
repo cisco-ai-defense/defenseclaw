@@ -739,6 +739,20 @@ func newDecisionOnlyJudge(cfg *config.Config) *LLMJudge {
 func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 	dm := j.decision
 	res := j.decideOnce(ctx, sample, toolName, args)
+	if res.flowGuarded {
+		// GAP-0458: the flow guard only takes the confidence away from an
+		// allow. Alone (cascade 2) that leaves the rule verdict: the model
+		// abstains; it is never a confirm that a strict block_at blocks.
+		v := &ScanVerdict{
+			Action:          guardrailActionAllow,
+			Severity:        "NONE",
+			Reason:          fmt.Sprintf("decision-model: flow guard: the user may not have asked for this call (risk %.2f); not a confident allow, the rule verdict stands", res.risk),
+			Scanner:         decisionModelScanner,
+			decisionAbstain: true,
+		}
+		emitDecisionModel(ctx, dm.model, toolName, args, res, nil)
+		return v
+	}
 	if res.failure != "" && res.refusal == "" {
 		if res.logLine != "" {
 			fmt.Fprintf(os.Stderr, "[guardrail] %s (%s)\n", res.logLine, res.failureCause)
@@ -894,6 +908,10 @@ func emitDecisionModel(ctx context.Context, model, toolName, args string, res de
 		payload.Action = v.Action
 		payload.Severity = deriveSeverity(v.Severity)
 		payload.Findings = judgeFindingsPayload(v)
+	}
+	if res.flowGuarded {
+		// The flow guard's escalation is named on the event (GAP-0458).
+		payload.Findings = []gatewaylog.Finding{{Category: decisionModelFindingID, Severity: payload.Severity, Rule: decisionModelFindingID, RuleID: "flow_guard_escalated", Source: "judge"}}
 	}
 	if res.refusal != "" {
 		// The refusal class rides on the decision-model finding: the event

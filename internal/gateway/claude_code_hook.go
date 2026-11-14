@@ -189,6 +189,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodePromptContent(req), "prompt",
 		))
+		if isToolJudgeIntentEvent(req.HookEventName) {
+			a.forgetBlockedPrompt(ctx, req.Prompt, verdict)
+		}
 		if req.HookEventName == "UserPromptExpansion" {
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
 		}
