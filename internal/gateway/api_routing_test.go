@@ -169,3 +169,41 @@ func TestRoutingAPIUsersSeeNone(t *testing.T) {
 		t.Fatalf("users_see own: the kernel peer reads its own (key %q admin %v ok %v)", key, admin, ok)
 	}
 }
+
+// TestRoutingListsAreNeverNull: a default config has no budgets, rules or
+// decisions, and the answer must carry [] for each list, never null (the
+// Python CLI iterated null and crashed, GAP-0561, GAP-0564, GAP-0566).
+func TestRoutingListsAreNeverNull(t *testing.T) {
+	for name, cfg := range map[string]*config.Config{
+		"default":    {},
+		"admin only": {Routing: config.RoutingConfig{Admin: &config.RoutingAdminConfig{}}},
+	} {
+		a := &APIServer{scannerCfg: cfg}
+		rec := httptest.NewRecorder()
+		a.handleRoutingEffective(rec, httptest.NewRequest(http.MethodGet, "/api/v1/routing/effective?recent=5", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: effective = %d %s", name, rec.Code, rec.Body.String())
+		}
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, key := range []string{"budgets", "recent", "rules", "allowed_aliases"} {
+			raw, ok := body[key]
+			if !ok {
+				if key == "rules" || key == "allowed_aliases" {
+					continue // only an administrator with routing.admin set gets these
+				}
+				t.Fatalf("%s: effective has no %s: %s", name, key, rec.Body.String())
+			}
+			if strings.TrimSpace(string(raw)) == "null" {
+				t.Fatalf("%s: effective %s is null: %s", name, key, rec.Body.String())
+			}
+		}
+		rec = httptest.NewRecorder()
+		a.handleRoutingBudgets(rec, httptest.NewRequest(http.MethodGet, "/api/v1/routing/budgets", nil))
+		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "null") {
+			t.Fatalf("%s: budgets = %d %s", name, rec.Code, rec.Body.String())
+		}
+	}
+}

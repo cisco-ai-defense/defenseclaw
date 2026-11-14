@@ -939,7 +939,7 @@ class _GatewaySession(requests.Session):
 
 
 class RoutingAPIError(Exception):
-    """A refusal or error answer from a /api/v1/routing or /api/v1/usage route."""
+    """A refusal or error answer from a /api/v1/routing route or GET /usage."""
 
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
@@ -1143,7 +1143,7 @@ class OrchestratorClient:
         self, method: str, path: str, *, params: Mapping[str, Any] | None = None, json: Any = None
     ) -> Any:
         """One call to a routing or usage route; RoutingAPIError on a non-2xx answer."""
-        if not (path.startswith("/api/v1/routing/") or path == "/api/v1/usage"):
+        if not (path.startswith("/api/v1/routing/") or path == "/usage"):
             raise ValueError(f"not a routing route: {path}")
         resp = self._session.request(
             method, f"{self.base_url}{path}", params=params, json=json, timeout=self.timeout, allow_redirects=False
