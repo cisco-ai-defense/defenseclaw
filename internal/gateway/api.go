@@ -2156,6 +2156,10 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// enforcement/observability posture, not just the primary's.
 		"connector_mode":  a.connectorModeSummary(r.Context()),
 		"connector_modes": a.connectorModesSummary(r.Context()),
+		// hook_capacity is the overload signal of the hook path: calls that
+		// ended at their answer budget per minute (deadline denies, late
+		// allows, shed) beside the calls answered in time (DESIGN 18).
+		"hook_capacity": hookCapacity.snapshot(),
 	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
 		set := a.guardrailProfileSet()

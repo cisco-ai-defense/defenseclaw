@@ -1577,6 +1577,9 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// acknowledgement is a live answer even though it reuses the pending
 	// occurrence IDs to deduplicate audit writes.
 	live := !req.pendingRecovery || req.sandboxReceiptAcknowledgment
+	if !req.pendingRecovery {
+		a.noteHookCallCapacity(resp, clientLeft)
+	}
 	safeSection := func(section string, fn func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {

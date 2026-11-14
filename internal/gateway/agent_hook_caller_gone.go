@@ -188,6 +188,7 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	ctx = audit.ContextWithEnvelope(ctx, env)
+	a.noteHookCallerGoneCapacity(connectorName, shed)
 	if err := a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
 		Connector: connectorName,
 		Event:     event,
