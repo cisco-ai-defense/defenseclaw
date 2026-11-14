@@ -61,7 +61,7 @@ func TestEveryCredentialTableRowStartsSecretReadChainGAP0550(t *testing.T) {
 		windows := `C:\Users\agent\` + strings.ReplaceAll(probe, "/", `\`)
 		t.Run("windows/"+probe, func(t *testing.T) {
 			facts := actionfacts.Analyze(actionfacts.Input{
-				Tool: "PowerShell", Command: "Get-Content " + windows, CWD: `C:\work\f5proj`,
+				Tool: "PowerShell", Command: "Get-Content \"" + windows + "\"", CWD: `C:\work\f5proj`,
 				ActiveHome: `C:\Users\agent`, DialectHint: actionfacts.DialectPowerShell,
 			})
 			projection := guardrail.ToolChainProjection{ParseStatus: facts.Parse.Status}
@@ -178,6 +178,11 @@ func TestEveryCredentialTableRowThenEgressOnTheHookPathGAP0550(t *testing.T) {
 				for _, root := range credentialStoreRoots[:2] {
 					file := path.Join(root, probe)
 					for _, tool := range []string{"Bash", "Read"} {
+						// The Read tool takes the active home and one project;
+						// the table walk above covers every root.
+						if tool == "Read" && root != credentialStoreRoots[0] {
+							continue
+						}
 						value := file
 						if tool == "Bash" {
 							value = "cat " + file
