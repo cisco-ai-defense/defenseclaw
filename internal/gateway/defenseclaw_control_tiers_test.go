@@ -43,6 +43,9 @@ func TestDefenseClawControlFiveTiers(t *testing.T) {
 	}
 	for _, p := range gap0437Packs {
 		a := gap0437Server(t, p, "openclaw", "action")
+		// The first call of a pack builds its rule generation; under -race on
+		// a loaded box that can outlast the scan deadline.
+		gap0437Inspect(t, a, t.TempDir(), "ls")
 		for _, r := range rows {
 			out := gap0437Inspect(t, a, t.TempDir(), r.Command)
 			raw, _ := json.Marshal(out)
@@ -97,6 +100,7 @@ func TestDefenseClawControlOnTheClaudeHookPath(t *testing.T) {
 	}
 	for _, p := range gap0437Packs {
 		a := gap0437Server(t, p, "claudecode", "action")
+		gap0437Hook(t, a, t.TempDir(), p.name+"warm", "ls")
 		for id, action := range want {
 			out := gap0437Hook(t, a, t.TempDir(), p.name+id, rows[id])
 			if got, _ := out["action"].(string); got != action {
