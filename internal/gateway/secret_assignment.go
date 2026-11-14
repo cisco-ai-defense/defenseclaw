@@ -174,6 +174,11 @@ func passwordAssignmentSeparator(sep string) bool {
 	return false
 }
 
+// passwordAssignmentQualifiedName is a name qualified by a lower-case package,
+// module or receiver (cfg.UserPassword, opts.password, os.Args): code that
+// reads a value, not a password a person set.
+var passwordAssignmentQualifiedName = regexp.MustCompile(`^[a-z_][a-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$`)
+
 // passwordAssignmentRejection is secretAssignmentRejection for a password
 // word: 8 to 128 characters, still not a reference, placeholder, path or
 // name, and with a letter and a digit or symbol (a bare word or type name
@@ -195,7 +200,8 @@ func passwordAssignmentRejection(raw string) string {
 	if len(value) < 8 || len(value) > 128 {
 		return "length"
 	}
-	if secretAssignmentVarRef.MatchString(value) || secretAssignmentCodeRef.MatchString(value) {
+	if secretAssignmentVarRef.MatchString(value) || secretAssignmentCodeRef.MatchString(value) ||
+		passwordAssignmentQualifiedName.MatchString(value) {
 		return "reference"
 	}
 	if secretAssignmentPlaceholderValue(value) || obviousCredentialPlaceholder(value) {
