@@ -116,15 +116,12 @@ func ValidateCandidate(configFile string, raw []byte) error {
 	if err != nil {
 		return err
 	}
-	// The loader replaces an invalid guardrail.cascade with its fallback;
-	// a writer refuses it before it lands.
-	if invalid := cfg.Guardrail.Cascade.invalid; invalid != nil {
-		return &V8SemanticError{
-			Path:     "$.guardrail.cascade",
-			Summary:  invalid.Error,
-			Expected: "a guardrail.cascade the gateway accepts",
-			Action:   "fix the named key, then retry",
-		}
+	// The loader ignores a locked or invalid narrower-scope value and
+	// replaces an invalid top-level guardrail.cascade with its fallback; a
+	// writer refuses all of them before they land (the same check as
+	// `config validate`).
+	if err := CascadeCandidateError(cfg); err != nil {
+		return err
 	}
 	return ValidateManagedStandaloneLiteralCandidate(cfg, raw)
 }

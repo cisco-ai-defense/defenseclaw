@@ -1629,6 +1629,138 @@ def test_upgrade_keeps_keys_the_target_release_has(
 _DOMAINS_CONFIG = "config_version: 9\nguardrail:\n  internal_domains:\n  - corp.example.com\n"
 
 
+# 1.0.10 keys: 1.0.9's gateway (LoadRuntimeV8File) and every 1.0.9 config
+# write (ValidateCandidate) refuse each one ("additionalProperties"), so a
+# downgrade to 1.0.9 sets them aside (s7-nscfg).
+_KEYS_1_0_10 = (
+    "config_version: 9\n"
+    "guardrail:\n"
+    "  mode: observe\n"
+    "  cascade:\n    lanes:\n      nonshell: \"off\"\n      effects: shadow\n"
+    "  secret_flow:\n    sink_action:\n      strict: alert\n"
+    "  effects_rules_tier: restricted\n"
+    "decision_model:\n  escalate_rule_flagged: true\n"
+    "observability:\n  local:\n    keep_rejected_records: true\n"
+    "routing:\n  min_confidence: 0.5\n"
+)
+
+
+def test_downgrade_to_1_0_9_sets_aside_the_1_0_10_keys(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_KEYS_1_0_10, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    assert len(execs) == 1
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    guardrail = config["guardrail"]
+    for key in ("cascade", "secret_flow", "effects_rules_tier"):
+        assert key not in guardrail, key
+    assert guardrail["mode"] == "observe"
+    assert "escalate_rule_flagged" not in (config.get("decision_model") or {})
+    assert "keep_rejected_records" not in ((config.get("observability") or {}).get("local") or {})
+    assert "min_confidence" not in (config.get("routing") or {})
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record["for"] == "1.0.9"
+    assert record["keys"] == {
+        "guardrail.cascade": {"lanes": {"nonshell": "off", "effects": "shadow"}},
+        "guardrail.secret_flow": {"sink_action": {"strict": "alert"}},
+        "guardrail.effects_rules_tier": "restricted",
+        "decision_model.escalate_rule_flagged": True,
+        "observability.local.keep_rejected_records": True,
+        "routing.min_confidence": 0.5,
+    }
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CONFIG_KEYS_1_0_9 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.9.txt"
+
+
+def _schema_key_paths(schema: dict) -> set[str]:
+    """Every dotted key the v8 config schema names (properties, through $ref and *Of)."""
+
+    defs = schema.get("$defs", {})
+    out: set[str] = set()
+
+    def walk(node: object, prefix: str, refs: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            return
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/") and ref.count("/") == 2:
+            name = ref.rsplit("/", 1)[-1]
+            if name not in refs:
+                walk(defs.get(name), prefix, (*refs, name))
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            for branch in node.get(keyword, []):
+                walk(branch, prefix, refs)
+        for key, child in node.get("properties", {}).items():
+            dotted = f"{prefix}.{key}" if prefix else key
+            out.add(dotted)
+            walk(child, dotted, refs)
+
+    walk(schema, "", ())
+    return out
+
+
+_SCHEMA_1_0_9 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.9.schema.json"
+
+
+def _missing_from_newer_config_keys(new_paths: set[str], old_paths: set[str]) -> list[str]:
+    """Keys in the new schema, absent from 1.0.9, that NEWER_CONFIG_KEYS (a key or a block above it) does not list."""
+
+    listed = [
+        key
+        for key, since in (*upgrade_shim.NEWER_CONFIG_KEYS, *upgrade_shim.NEWER_CONFIG_SUBTREES)
+        if since > (1, 0, 9) and "*" not in key
+    ]
+    return sorted(
+        path
+        for path in new_paths - old_paths
+        if not any(path == key or path.startswith(key + ".") for key in listed)
+    )
+
+
+def test_the_frozen_1_0_9_key_list_is_the_published_1_0_9_schema() -> None:
+    # fixtures/config_keys/1.0.9.txt is not typed by hand: it is _schema_key_paths of
+    # fixtures/config_keys/1.0.9.schema.json, a byte copy of the schema 1.0.9 published:
+    #   git show 1.0.9:schemas/config/v8/defenseclaw-config.schema.json > 1.0.9.schema.json
+    # This test regenerates the list from that copy and requires the two to match, so a
+    # hand edit of either one fails here.
+    schema = json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8"))
+    regenerated = sorted(_schema_key_paths(schema))
+    assert regenerated == _CONFIG_KEYS_1_0_9.read_text(encoding="utf-8").split()
+    assert "guardrail.mode" in regenerated
+    assert not {"guardrail.cascade", "guardrail.secret_flow", "guardrail.effects_rules_tier", "routing.min_confidence"} & set(regenerated)
+
+
+def test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade() -> None:
+    # A key the schema adds after 1.0.9 is refused by 1.0.9, so it must be in
+    # NEWER_CONFIG_KEYS (itself or a block that holds it), or a downgrade
+    # leaves a config.yaml 1.0.9 does not start with.
+    old = set(_CONFIG_KEYS_1_0_9.read_text(encoding="utf-8").split())
+    schema = json.loads(
+        (_REPO_ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json").read_text(encoding="utf-8")
+    )
+    new = _schema_key_paths(schema)
+    missing = _missing_from_newer_config_keys(new, old)
+    assert missing == [], f"add these to upgrade_shim.NEWER_CONFIG_KEYS: {missing}"
+
+
+def test_the_downgrade_guard_fails_on_a_key_the_list_does_not_cover() -> None:
+    # The guard above would pass on an empty diff; prove it bites: a key that is in the
+    # 1.0.10 schema, not in the frozen 1.0.9 list and not in NEWER_CONFIG_KEYS is reported,
+    # and a key under a listed block is not.
+    old = set(_CONFIG_KEYS_1_0_9.read_text(encoding="utf-8").split())
+    new = set(old) | {"guardrail.brand_new_switch", "guardrail.secret_flow.sink_action.default"}
+    assert _missing_from_newer_config_keys(new, old) == ["guardrail.brand_new_switch"]
+    assert _missing_from_newer_config_keys(old, old) == []
+
+
 @pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
 def test_downgrade_below_1_0_6_sets_aside_internal_domains(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
@@ -1911,3 +2043,126 @@ def test_a_good_defenseclaw_repo_is_still_accepted(
 ) -> None:
     monkeypatch.setenv(upgrade_shim.REPO_ENV, value)
     assert upgrade_shim.release_source() == base
+
+
+# GAP-0583: a cascade block under a connector or a profile scope is a 1.0.10
+# key inside a map of named entries. 1.0.9 refuses it as it refuses
+# guardrail.cascade (GAP-0544), so a downgrade sets each one aside by its own
+# dotted key (NEWER_CONFIG_SUBTREES) and keeps everything else of the entry.
+_SCOPED_CASCADE = (
+    "config_version: 9\n"
+    "guardrail:\n"
+    "  mode: action\n"
+    "  connectors:\n"
+    "    codex:\n"
+    "      block_at: HIGH\n"
+    "      cascade:\n        unknown: block\n"
+    "  profiles:\n"
+    "    contractors:\n"
+    "      block_at: MEDIUM\n"
+    "      cascade:\n        judge:\n          max_action: alert\n"
+    "      connectors:\n"
+    "        claudecode:\n"
+    "          mode: observe\n"
+    "          cascade:\n            unknown: confirm\n"
+)
+
+
+def test_downgrade_to_1_0_9_sets_aside_every_scoped_cascade(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_SCOPED_CASCADE, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    assert len(execs) == 1
+    guardrail = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["guardrail"]
+    assert guardrail["connectors"] == {"codex": {"block_at": "HIGH"}}
+    profile = guardrail["profiles"]["contractors"]
+    assert profile == {"block_at": "MEDIUM", "connectors": {"claudecode": {"mode": "observe"}}}
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record["for"] == "1.0.9"
+    assert record["keys"] == {
+        "guardrail.connectors.codex.cascade": {"unknown": "block"},
+        "guardrail.profiles.contractors.cascade": {"judge": {"max_action": "alert"}},
+        "guardrail.profiles.contractors.connectors.claudecode.cascade": {"unknown": "confirm"},
+    }
+
+
+def test_upgrade_to_1_0_10_keeps_the_scoped_cascades(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_SCOPED_CASCADE, encoding="utf-8")
+    assert upgrade_shim.newer_config_values({"guardrail": {"connectors": {"codex": {"cascade": {"unknown": "block"}}}}}, (1, 0, 10)) == {}
+    assert upgrade_shim.is_newer_config_key("guardrail.profiles.p.connectors.codex.cascade")
+    assert upgrade_shim.is_newer_config_key("guardrail.connectors.codex.cascade")
+    assert not upgrade_shim.is_newer_config_key("guardrail.connectors.codex.block_at")
+    assert not upgrade_shim.is_newer_config_key("guardrail.profiles.p.connectors.codex")
+
+
+def _schema_key_paths_with_maps(schema: dict) -> set[str]:
+    """_schema_key_paths, plus the keys inside maps of named entries (additionalProperties
+    or patternProperties objects), with "*" for the entry name."""
+
+    defs = schema.get("$defs", {})
+    out: set[str] = set()
+
+    def walk(node: object, prefix: str, refs: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            return
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/") and ref.count("/") == 2:
+            name = ref.rsplit("/", 1)[-1]
+            if name not in refs:
+                walk(defs.get(name), prefix, (*refs, name))
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            for branch in node.get(keyword, []):
+                walk(branch, prefix, refs)
+        for key, child in node.get("properties", {}).items():
+            dotted = f"{prefix}.{key}" if prefix else key
+            out.add(dotted)
+            walk(child, dotted, refs)
+        entries = [node.get("additionalProperties"), *node.get("patternProperties", {}).values()]
+        for child in entries:
+            if isinstance(child, dict) and prefix:
+                walk(child, f"{prefix}.*", refs)
+
+    walk(schema, "", ())
+    return out
+
+
+def _covered_by_newer_keys(path: str) -> bool:
+    parts = path.split(".")
+    for dotted, since in (*upgrade_shim.NEWER_CONFIG_KEYS, *upgrade_shim.NEWER_CONFIG_SUBTREES):
+        if since <= (1, 0, 9):
+            continue
+        pattern = dotted.split(".")
+        if len(parts) >= len(pattern) and all(p in ("*", k) for p, k in zip(pattern, parts)):
+            return True
+    return False
+
+
+def test_every_scoped_key_new_since_1_0_9_is_set_aside_on_a_downgrade() -> None:
+    # The GAP-0544 guard reads properties only, so a key inside a map of named
+    # entries (guardrail.connectors.<c>, guardrail.profiles.<p>) passed it
+    # unseen (GAP-0583). This walks the maps too, on the frozen 1.0.9 schema
+    # and on this release's.
+    old = _schema_key_paths_with_maps(json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8")))
+    new = _schema_key_paths_with_maps(
+        json.loads((_REPO_ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json").read_text(encoding="utf-8"))
+    )
+    assert "guardrail.connectors.*.block_at" in old
+    assert "guardrail.profiles.*.connectors.*.cascade" in new
+    missing = sorted(p for p in new - old if not _covered_by_newer_keys(p))
+    assert missing == [], f"add these to upgrade_shim.NEWER_CONFIG_KEYS or NEWER_CONFIG_SUBTREES: {missing}"
+
+
+def test_the_scoped_downgrade_guard_fails_on_an_uncovered_scoped_key() -> None:
+    assert not _covered_by_newer_keys("guardrail.profiles.*.brand_new_switch")
+    assert _covered_by_newer_keys("guardrail.profiles.*.connectors.*.cascade.unknown")
+    assert _covered_by_newer_keys("guardrail.cascade.admin.locked")

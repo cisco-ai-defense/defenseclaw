@@ -6738,14 +6738,23 @@ def cascade_group() -> None:
     type=click.Path(exists=True, dir_okay=False),
     help="Replay one decision: a cascade policy input (JSON) through the Rego policy and the limits.",
 )
+@click.option(
+    "--last",
+    default=0,
+    type=click.IntRange(min=0),
+    help="Replay the Nth most recent decision the gateway recorded (1 = the latest): "
+    "the decisions the Rego policy set or failed on, or that a floor raised after it.",
+)
 @click.option("--json", "json_out", is_flag=True, help="Print JSON.")
-def cascade_explain_cmd(connector: str, profile: str, input_path: str | None, json_out: bool) -> None:
+def cascade_explain_cmd(connector: str, profile: str, input_path: str | None, last: int, json_out: bool) -> None:
     """Show the effective cascade for a connector: what runs, what each outcome does,
     the unknown tier, lanes, the Rego policy and locks, and the key that set each value.
     With --input, also which layer or policy rule set the final action of that decision."""
     from defenseclaw import cascade
 
-    payload, error = cascade.gateway_explain(connector, profile, input_path or "", as_json=json_out)
+    if input_path and last:
+        raise click.UsageError("use --input or --last, not both")
+    payload, error = cascade.gateway_explain(connector, profile, input_path or "", as_json=json_out, last=last)
     if error:
         raise click.ClickException(error)
     if json_out:

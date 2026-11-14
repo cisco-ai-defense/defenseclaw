@@ -13795,13 +13795,24 @@ def _check_guardrail_cascade(cfg, r: _DoctorResult) -> None:
     invalid = view.get("invalid")
     if invalid:
         fallback = "the last-known-good cascade" if invalid.get("fallback") == "last_known_good" else "the rule pack defaults"
-        detail = f"invalid: {invalid.get('error')}; deciding with {fallback}"
+        detail = (
+            f"invalid: {invalid.get('error')}; a running gateway refuses the reload and keeps its current "
+            f"configuration; a gateway started now decides with {fallback}"
+        )
         if invalid.get("weaker"):
             detail += "; WEAKER than your configuration: " + "; ".join(invalid["weaker"])
         _emit("fail", "Guardrail cascade", detail, r=r,
               remediation="fix the named guardrail.cascade key, then: defenseclaw guardrail cascade explain")
         return
     notes = cascade.loosening_notes(view)
+    ignored = view.get("ignored") or []
+    if ignored:
+        # A locked key or an invalid connector/profile cascade: the
+        # administrator's top-level values apply, the narrower one does not.
+        shown = "; ".join(f"{i.get('path')}: {i.get('reason')}" for i in ignored[:5])
+        if len(ignored) > 5:
+            shown += f"; and {len(ignored) - 5} more"
+        notes = [f"{len(ignored)} narrower-scope setting(s) not applied: {shown}", *notes]
     summary = (
         f"unknown {(view.get('unknown') or {}).get('action')}, judge {(view.get('judge') or {}).get('runs')}, "
         f"System One {(view.get('system_one') or {}).get('runs')}, Rego policy "

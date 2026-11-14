@@ -78,7 +78,7 @@ func TestCascadeFinalActionTable(t *testing.T) {
 			if tt.floor != "" {
 				eff.CriticalFloor = tt.floor
 			}
-			out := cascadeFinalAction(tt.before, tt.flagged, tt.critical, tt.decisions, tt.err, "alert", eff)
+			out := cascadeFinalAction(tt.before, tt.flagged, tt.critical, false, tt.decisions, tt.err, "alert", eff)
 			if out.Final != tt.want || out.DecidedBy != tt.decidedBy || out.PolicyRule != tt.policyRule {
 				t.Fatalf("got final=%s decided_by=%q rule=%q, want %s %q %q", out.Final, out.DecidedBy, out.PolicyRule, tt.want, tt.decidedBy, tt.policyRule)
 			}
@@ -101,47 +101,52 @@ func TestCascadeFinalInvariantGrid(t *testing.T) {
 		for _, answer := range answers {
 			for _, flagged := range []bool{false, true} {
 				for _, critical := range []bool{false, true} {
-					if critical && !flagged {
-						continue // a proven finding flags the call
-					}
-					for _, lowest := range []string{"allow", "log", "alert", "confirm"} {
-						for _, highest := range []string{"alert", "confirm", "block"} {
-							if rank(lowest) > rank(highest) {
-								continue
-							}
-							for _, floor := range []string{"log", "alert", "confirm", "block"} {
-								for _, unknown := range []string{"alert", "confirm", "block"} {
-									e := base
-									e.PolicyLowest, e.PolicyHighest, e.CriticalFloor = lowest, highest, floor
-									var decisions []policy.CascadeDecision
-									var err error
-									switch answer {
-									case "":
-									case "error":
-										err = errors.New("eval failed")
-									default:
-										decisions = []policy.CascadeDecision{{Action: answer, ID: "x"}}
-									}
-									out := cascadeFinalAction(before, flagged, critical, decisions, err, unknown, e)
-									got := rank(out.Final)
-									n++
-									if critical && got < rank(floor) {
-										t.Fatalf("critical below floor: before=%s answer=%s floor=%s -> %s", before, answer, floor, out.Final)
-									}
-									if critical && floor != "log" && got < rank("alert") {
-										t.Fatalf("critical silenced without the opt-out: %+v", out)
-									}
-									if flagged && got < min(rank(lowest), rank(before)) {
-										t.Fatalf("flagged call below lowest: before=%s answer=%s lowest=%s -> %s", before, answer, lowest, out.Final)
-									}
-									if got > max(rank(before), rank(highest), rank(floor)*boolInt(critical), rank(unknown)*boolInt(err != nil)) {
-										t.Fatalf("raised above the limits: before=%s answer=%s highest=%s -> %s", before, answer, highest, out.Final)
-									}
-									if err != nil && got < max(rank(before), rank(unknown)) {
-										t.Fatalf("error below the unknown tier: before=%s unknown=%s -> %s", before, unknown, out.Final)
-									}
-									if answer == "" && err == nil && !critical && got != rank(before) {
-										t.Fatalf("no decision changed the action: %s -> %s", before, out.Final)
+					for _, uninspected := range []bool{false, true} {
+						if critical && !flagged {
+							continue // a proven finding flags the call
+						}
+						for _, lowest := range []string{"allow", "log", "alert", "confirm"} {
+							for _, highest := range []string{"alert", "confirm", "block"} {
+								if rank(lowest) > rank(highest) {
+									continue
+								}
+								for _, floor := range []string{"log", "alert", "confirm", "block"} {
+									for _, unknown := range []string{"alert", "confirm", "block"} {
+										e := base
+										e.PolicyLowest, e.PolicyHighest, e.CriticalFloor = lowest, highest, floor
+										var decisions []policy.CascadeDecision
+										var err error
+										switch answer {
+										case "":
+										case "error":
+											err = errors.New("eval failed")
+										default:
+											decisions = []policy.CascadeDecision{{Action: answer, ID: "x"}}
+										}
+										out := cascadeFinalAction(before, flagged, critical, uninspected, decisions, err, unknown, e)
+										got := rank(out.Final)
+										n++
+										if critical && got < rank(floor) {
+											t.Fatalf("critical below floor: before=%s answer=%s floor=%s -> %s", before, answer, floor, out.Final)
+										}
+										if critical && floor != "log" && got < rank("alert") {
+											t.Fatalf("critical silenced without the opt-out: %+v", out)
+										}
+										if flagged && got < min(rank(lowest), rank(before)) {
+											t.Fatalf("flagged call below lowest: before=%s answer=%s lowest=%s -> %s", before, answer, lowest, out.Final)
+										}
+										if uninspected && got < rank(unknown) {
+											t.Fatalf("uninspected call below the unknown tier (GAP-0579): before=%s answer=%s lowest=%s unknown=%s -> %s", before, answer, lowest, unknown, out.Final)
+										}
+										if got > max(rank(before), rank(highest), rank(floor)*boolInt(critical), rank(unknown)*boolInt(err != nil || uninspected)) {
+											t.Fatalf("raised above the limits: before=%s answer=%s highest=%s -> %s", before, answer, highest, out.Final)
+										}
+										if err != nil && got < max(rank(before), rank(unknown)) {
+											t.Fatalf("error below the unknown tier: before=%s unknown=%s -> %s", before, unknown, out.Final)
+										}
+										if answer == "" && err == nil && !critical && !uninspected && got != rank(before) {
+											t.Fatalf("no decision changed the action: %s -> %s", before, out.Final)
+										}
 									}
 								}
 							}
@@ -398,7 +403,7 @@ func TestCascadeOffCostsNothing(t *testing.T) {
 	if allocs > 0 {
 		t.Fatalf("applyCascadeFinal allocates %.0f times per call without a policy", allocs)
 	}
-	if v.Action != "alert" || v.cascadeOutcome != nil {
+	if v.Action != "alert" || len(v.Findings) != 1 || v.Reason != "" {
 		t.Fatalf("verdict changed: %+v", v)
 	}
 }

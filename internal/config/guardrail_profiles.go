@@ -793,6 +793,7 @@ func (c *Config) DeepCopy() (*Config, error) {
 	// The verified policy module and the fallback verdict belong to the load,
 	// like the custom_packs verdict.
 	out.Guardrail.Cascade.policySource, out.Guardrail.Cascade.invalid = c.Guardrail.Cascade.policySource, c.Guardrail.Cascade.invalid
+	out.Guardrail.Cascade.ignored, out.Guardrail.Cascade.candidateErr = c.Guardrail.Cascade.ignored, c.Guardrail.Cascade.candidateErr
 	aid := c.CiscoAIDefense
 	out.CiscoAIDefense.protectedCredentialRequired = aid.protectedCredentialRequired
 	out.CiscoAIDefense.protectedCredential, out.CiscoAIDefense.protectedSecretsDir = aid.protectedCredential, aid.protectedSecretsDir

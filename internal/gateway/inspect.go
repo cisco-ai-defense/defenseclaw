@@ -191,9 +191,6 @@ type ToolInspectVerdict struct {
 	// agent cannot ask, such a confirm is the HIGH alert the judge mapping
 	// gives, not a block (decisionConfirmWithoutAsk). Never serialized.
 	decisionConfirm bool
-	// cascadeOutcome is what the cascade's final step (the policy, the
-	// CRITICAL floor) did with the call, nil when it changed nothing.
-	cascadeOutcome *CascadeOutcome
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,

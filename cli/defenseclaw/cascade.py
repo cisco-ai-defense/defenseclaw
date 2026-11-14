@@ -48,7 +48,13 @@ def configured(cfg: Any) -> bool:
 
 
 def gateway_explain(
-    connector: str = "", profile: str = "", input_path: str = "", *, as_json: bool = True, timeout: float = 30.0
+    connector: str = "",
+    profile: str = "",
+    input_path: str = "",
+    *,
+    as_json: bool = True,
+    timeout: float = 30.0,
+    last: int = 0,
 ) -> tuple[Any, str]:
     """Run ``defenseclaw-gateway policy cascade``. Returns (payload, error):
     the parsed JSON (or the text when ``as_json`` is false), else "" and why."""
@@ -64,6 +70,8 @@ def gateway_explain(
         argv += ["--profile", profile]
     if input_path:
         argv += ["--input", input_path]
+    if last > 0:
+        argv += ["--last", str(last)]
     if as_json:
         argv.append("--json")
     try:

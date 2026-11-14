@@ -35,12 +35,15 @@ type CascadeExplanation struct {
 	Profile   string                 `json:"profile,omitempty"`
 	Valid     bool                   `json:"valid"`
 	Invalid   *config.CascadeInvalid `json:"invalid,omitempty"`
-	Rules     CascadeRulesLayer      `json:"rules"`
-	SystemOne CascadeSystemOneLayer  `json:"system_one"`
-	Judge     CascadeJudgeLayer      `json:"judge"`
-	Unknown   CascadeUnknownView     `json:"unknown"`
-	Lanes     []CascadeLaneView      `json:"lanes"`
-	Policy    CascadePolicyView      `json:"policy"`
+	// Ignored lists the narrower-scope values the gateway does not apply (a
+	// locked key, an invalid connector or profile cascade).
+	Ignored   []config.CascadeIgnored `json:"ignored,omitempty"`
+	Rules     CascadeRulesLayer       `json:"rules"`
+	SystemOne CascadeSystemOneLayer   `json:"system_one"`
+	Judge     CascadeJudgeLayer       `json:"judge"`
+	Unknown   CascadeUnknownView      `json:"unknown"`
+	Lanes     []CascadeLaneView       `json:"lanes"`
+	Policy    CascadePolicyView       `json:"policy"`
 	// CriticalFloor is the lowest action a proven CRITICAL ends at.
 	CriticalFloor string   `json:"critical_floor"`
 	Locked        []string `json:"locked,omitempty"`
@@ -135,7 +138,7 @@ func ExplainCascade(cfg *config.Config, connector, profile string) (CascadeExpla
 	tier := postureFromManifest(dir, guardrail.ReadPackPosture(dir))
 	hilt := scoped.EffectiveHILTForConnector(connector)
 	out := CascadeExplanation{
-		Connector: connector, Profile: profile, Valid: e.Invalid == nil, Invalid: e.Invalid,
+		Connector: connector, Profile: profile, Valid: e.Invalid == nil, Invalid: e.Invalid, Ignored: cfg.Guardrail.Cascade.Ignored(),
 		Rules: CascadeRulesLayer{
 			Mode: scoped.HookModeForConnector(connector), Pack: packLabel(ref, tier), Tier: tier,
 			BlockAt: levels.Block, AlertAt: levels.Alert, Source: levels.Source, HILT: hilt.Enabled,
@@ -217,6 +220,7 @@ func SimulateCascade(ctx context.Context, cfg *config.Config, connector string, 
 		unknown = config.CascadeAlert
 	}
 	flagged, _ := input["flagged"].(bool)
+	uninspected := cascadeInputUninspected(input)
 	critical := false
 	if findings, ok := input["findings"].([]any); ok {
 		for _, f := range findings {
@@ -259,7 +263,7 @@ func SimulateCascade(ctx context.Context, cfg *config.Config, connector string, 
 		decisions, evalErr = p.Evaluate(evalCtx, input)
 		cancel()
 	}
-	sim.Outcome = cascadeFinalAction(before, flagged, critical, decisions, evalErr, unknown, e)
+	sim.Outcome = cascadeFinalAction(before, flagged, critical, uninspected, decisions, evalErr, unknown, e)
 	if sim.Outcome.DecidedBy == "" {
 		sim.Outcome.DecidedBy = decidedBefore
 	}

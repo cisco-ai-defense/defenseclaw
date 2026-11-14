@@ -103,6 +103,19 @@ class TestCascadeDoctor(unittest.TestCase):
         self.assertEqual(rows[0][0], "fail")
         self.assertIn("the rule pack defaults", rows[0][2])
         self.assertIn("WEAKER", rows[0][2])
+        # A running gateway refuses such a reload and keeps its configuration (GAP-0582).
+        self.assertIn("refuses the reload", rows[0][2])
+
+    def test_ignored_narrower_values_warn(self):
+        # GAP-0580: a locked key in a profile is not applied; doctor names it.
+        view = dict(VIEW, ignored=[{
+            "path": "guardrail.profiles.contractors.block_at",
+            "reason": "\"block_at\" is locked by guardrail.cascade.admin.locked; the top-level value applies",
+        }])
+        rows = self._run({"cascade": view})
+        self.assertEqual(rows[0][0], "warn")
+        self.assertIn("1 narrower-scope setting(s) not applied", rows[0][2])
+        self.assertIn("guardrail.profiles.contractors.block_at", rows[0][2])
 
     def test_loosening_settings_warn(self):
         view = dict(VIEW, critical_floor="log", policy={"active": True, "lowest": "allow"})
@@ -127,8 +140,8 @@ class TestCascadeExplainCommand(unittest.TestCase):
     def test_explain_passes_the_scope_to_the_gateway(self):
         calls = []
 
-        def fake(connector="", profile="", input_path="", *, as_json=True, timeout=30.0):
-            calls.append((connector, profile, input_path, as_json))
+        def fake(connector="", profile="", input_path="", *, as_json=True, timeout=30.0, last=0):
+            calls.append((connector, profile, input_path, as_json) + ((last,) if last else ()))
             return ({"cascade": VIEW}, "") if as_json else ("Guardrail cascade for codex\n", "")
 
         with patch.object(cascade, "gateway_explain", side_effect=fake):
@@ -139,6 +152,35 @@ class TestCascadeExplainCommand(unittest.TestCase):
             self.assertEqual(text.exit_code, 0, text.output)
             self.assertIn("Guardrail cascade for codex", text.output)
         self.assertEqual(calls, [("codex", "", "", True), ("codex", "p", "", False)])
+
+    def test_explain_last_replays_a_recorded_decision(self):
+        calls = []
+
+        def fake(connector="", profile="", input_path="", *, as_json=True, timeout=30.0, last=0):
+            calls.append((connector, input_path, last))
+            return ({"cascade": VIEW, "recorded": {"live": {"final": "allow"}}}, "")
+
+        with patch.object(cascade, "gateway_explain", side_effect=fake):
+            result = CliRunner().invoke(cmd_guardrail.guardrail, ["cascade", "explain", "--last", "2", "--json"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            both = CliRunner().invoke(cmd_guardrail.guardrail, ["cascade", "explain", "--last", "1", "--input", __file__])
+            self.assertNotEqual(both.exit_code, 0)
+        self.assertEqual(calls, [("", "", 2)])
+
+    def test_gateway_explain_passes_last(self):
+        seen = {}
+
+        class Done:
+            returncode, stdout, stderr = 0, "{}", ""
+
+        def run(argv, **_kw):
+            seen["argv"] = argv
+            return Done()
+
+        with patch("defenseclaw.gateway.resolve_gateway_binary", return_value="/bin/gw"), patch.object(cascade.subprocess, "run", side_effect=run):
+            payload, error = cascade.gateway_explain("codex", last=3)
+        self.assertEqual(error, "")
+        self.assertEqual(seen["argv"], ["/bin/gw", "policy", "cascade", "--connector", "codex", "--last", "3", "--json"])
 
     def test_explain_reports_a_missing_gateway(self):
         with patch.object(cascade, "gateway_explain", return_value=(None, "defenseclaw-gateway is not installed")):

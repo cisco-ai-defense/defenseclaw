@@ -34,6 +34,7 @@ var (
 	policyCascadeProfile   string
 	policyCascadeInput     string
 	policyCascadeJSON      bool
+	policyCascadeLast      int
 )
 
 func init() {
@@ -41,6 +42,7 @@ func init() {
 	policyCascadeCmd.Flags().StringVar(&policyCascadeConnector, "connector", "", "Agent connector (claudecode, codex, ...); empty for the global scope")
 	policyCascadeCmd.Flags().StringVar(&policyCascadeProfile, "profile", "", "Guardrail profile to resolve for")
 	policyCascadeCmd.Flags().StringVar(&policyCascadeInput, "input", "", "Replay one decision: a cascade policy input (JSON file) through the policy and the limits")
+	policyCascadeCmd.Flags().IntVar(&policyCascadeLast, "last", 0, "Replay the Nth most recent decision the gateway recorded (1 = the latest; see "+gateway.CascadeDecisionsFile+" in the data directory)")
 	policyCascadeCmd.Flags().BoolVar(&policyCascadeJSON, "json", false, "Print JSON")
 }
 
@@ -56,6 +58,25 @@ var policyCascadeCmd = &cobra.Command{
 			return err
 		}
 		var sim *gateway.CascadeSimulation
+		var recorded *gateway.CascadeDecisionRecord
+		if policyCascadeInput != "" && policyCascadeLast > 0 {
+			return fmt.Errorf("cascade: use --input or --last, not both")
+		}
+		if policyCascadeLast > 0 {
+			rec, err := gateway.ReadCascadeDecision(cfg, policyCascadeLast)
+			if err != nil {
+				return fmt.Errorf("cascade: --last %d: %w", policyCascadeLast, err)
+			}
+			connector := policyCascadeConnector
+			if connector == "" {
+				connector = rec.Connector
+			}
+			replayed, err := gateway.SimulateCascade(cmd.Context(), cfg, connector, rec.Input)
+			if err != nil {
+				return err
+			}
+			sim, recorded = &replayed, &rec
+		}
 		if policyCascadeInput != "" {
 			raw, err := os.ReadFile(policyCascadeInput)
 			if err != nil {
@@ -76,6 +97,9 @@ var policyCascadeCmd = &cobra.Command{
 			if sim != nil {
 				view["replay"] = sim
 			}
+			if recorded != nil {
+				view["recorded"] = recorded
+			}
 			out, err := json.MarshalIndent(view, "", "  ")
 			if err != nil {
 				return err
@@ -84,6 +108,14 @@ var policyCascadeCmd = &cobra.Command{
 			return nil
 		}
 		printCascadeExplanation(cmd.OutOrStdout(), explanation, sim)
+		if recorded != nil {
+			live := recorded.Live
+			fmt.Fprintf(cmd.OutOrStdout(), "Recorded live decision (%s, %s %s): final %s, decided by %s", recorded.Time, recorded.Connector, recorded.Surface, live.Final, live.DecidedBy)
+			if live.PolicyRule != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), " (rule %s)", live.PolicyRule)
+			}
+			fmt.Fprintln(cmd.OutOrStdout())
+		}
 		return nil
 	},
 }
@@ -99,6 +131,12 @@ func printCascadeExplanation(w io.Writer, e gateway.CascadeExplanation, sim *gat
 	fmt.Fprintf(w, "Guardrail cascade for %s\n", scope)
 	if e.Invalid != nil {
 		fmt.Fprintf(w, "\n  INVALID: %s\n", e.Invalid.Message())
+	}
+	for _, ig := range e.Ignored {
+		fmt.Fprintf(w, "\n  IGNORED %s: %s", ig.Path, ig.Reason)
+	}
+	if len(e.Ignored) > 0 {
+		fmt.Fprintln(w)
 	}
 	fmt.Fprintf(w, "\n1. Rules (always on): mode %s, pack %s (%s tier), block at %s, alert at %s (%s)", e.Rules.Mode, e.Rules.Pack, e.Rules.Tier, e.Rules.BlockAt, e.Rules.AlertAt, e.Rules.Source)
 	if e.Rules.HILT {
