@@ -542,9 +542,10 @@ func (w *walker) str(key, val string) {
 			w.nested--
 			return
 		}
-		// A document in the shape of JSON that no lenient reading parses is
-		// unread: the call is unknown, not clean.
-		w.trunc.Hit(bounded.Nodes)
+		// A document in the shape of JSON that no lenient reading parses is one
+		// the receiving server cannot parse either. It is read as text for the
+		// locations it names, so a protected path in it is still judged.
+		w.textPaths(key, val)
 		return
 	}
 	if t.locationKey(key) {
@@ -668,6 +669,22 @@ func (w *walker) bodyIsData(val string) bool {
 		return false
 	}
 	return !jsonDocument(val)
+}
+
+var rePathToken = regexp.MustCompile("(?:[A-Za-z]:[\\\\/]|~[\\\\/]|/)[^\\s\"'`,;|&<>(){}\\[\\]]{2,}")
+
+// textPaths reads the path-shaped tokens of a text as read effects (a bounded
+// number: past it the items bound is recorded).
+func (w *walker) textPaths(key, val string) {
+	for i, tok := range rePathToken.FindAllString(val, maxItems+1) {
+		if i >= maxItems {
+			w.trunc.Hit(bounded.Items)
+			return
+		}
+		if absolutePath(tok) {
+			w.path(KindRead, key, tok)
+		}
+	}
 }
 
 // path adds a path effect. A path past maxPath is still judged (the native

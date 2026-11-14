@@ -500,8 +500,8 @@ func TestReviewRound2Mapping(t *testing.T) {
 	if m := mapOf(t, "mcp__x__do", `{"arguments":"{'path': '/home/u/.ssh/id_rsa', 'ok': True}"}`); !has(m, "/home/u/.ssh/id_rsa") {
 		t.Errorf("python literal: %+v", m.Effects)
 	}
-	if m := mapOf(t, "mcp__x__do", `{"arguments":"{\"path\": /home/u/x oops}"}`); !m.Truncated.Any() {
-		t.Errorf("a JSON-shaped document no reading parses must be unread: %v", m.Truncated)
+	if m := mapOf(t, "mcp__x__do", `{"arguments":"{\"path\": /home/u/.ssh/id_rsa oops}"}`); m.Truncated.Any() || !has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("unparseable document read as text: %v %+v", m.Truncated, m.Effects)
 	}
 	// Prose that starts with a bracket is text.
 	for _, v := range []string{"[INFO] done", "{{name}} said hi", "[1] see below", "[formatted HTML content]", "[{'entityName': 'AI', 'text': 'x'}]"} {
@@ -724,8 +724,8 @@ func TestRound4(t *testing.T) {
 			t.Errorf("%q: %+v", doc, m.Effects)
 		}
 	}
-	if m := mapOf(t, "mcp__proxy__call_tool", `{"arguments":"{\"path\": /home/u/x oops}"}`); !m.Truncated.Any() {
-		t.Errorf("a JSON-shaped document no reading parses must be unread: %v", m.Truncated)
+	if m := mapOf(t, "mcp__proxy__call_tool", `{"arguments":"{\"path\": /home/u/.ssh/id_rsa oops}"}`); m.Truncated.Any() || !has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("unparseable document read as text: %v %+v", m.Truncated, m.Effects)
 	}
 	// The verb of a proxy's tool name applies to proxy-shaped calls only.
 	if m := mapOf(t, "mcp__x__do", `{"name":"write_file","path":"/etc/passwd"}`); m.Verb != "" {
