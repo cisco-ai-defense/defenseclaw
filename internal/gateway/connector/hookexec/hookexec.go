@@ -1880,6 +1880,8 @@ func (f *hookRequestFacts) watch() *hookpaths.PatchTargetWatch {
 // watch of the patch targets its write evidence attests.
 func setHookRequestFacts(header http.Header, opts Options, payload []byte) (patchWatch *hookpaths.PatchTargetWatch) {
 	startupEvent := hookpaths.IsSessionStartEvent(opts.Event)
+	// The agent's shell startup, for a gateway that does not run in it.
+	header.Set(hookpaths.ShellStartupHeader, hookpaths.CurrentShellStartup().Encode())
 	if opts.ManagedEnterprise && !opts.SecureClient &&
 		(runtime.GOOS != "windows" || startupEvent || hookpaths.ProjectSkillHookCall(opts.Connector, payload)) {
 		// The surface and bound event are the ones this call sends the

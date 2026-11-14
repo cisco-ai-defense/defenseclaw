@@ -225,9 +225,30 @@ func TestR105LinkRenameAndNestedCd(t *testing.T) {
 				t.Errorf("%s %q: evaluator panic %s", connectorName, row.command, panicked)
 				continue
 			}
+			// A move or a state write whose target the walk cannot place (a nested cd
+			// into a link, a find that moves what it matches) names no protected
+			// spelling: UNCERTAIN, so the default pack alerts (rel-1-0-10:GAP-0350).
+			if uncertainLinkRenameRows[row.command] {
+				if verdict := buildVerdict(findings, "tool_call").Action; verdict != "alert" {
+					t.Errorf("%s %q: action=%s want alert (%v)", connectorName, row.command, verdict, findings)
+				}
+				continue
+			}
 			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
 				t.Errorf("%s %q: block=%v want %v (%v)", connectorName, row.command, blocked, row.block, findings)
 			}
 		}
 	}
+}
+
+// uncertainLinkRenameRows are the rows of TestR105LinkRenameAndNestedCd whose
+// target the walk cannot place and whose text names no protected spelling.
+var uncertainLinkRenameRows = map[string]bool{
+	`ln -s build/keys.orig k; find . -name "*.orig" -exec mv {} build/ \;; echo key >> k`: true,
+	`ln -s {E} e; bash -c "cd '~/r/y' && echo z > config.yaml"`:                           true,
+	`ln -s {E} e; bash -c "cd d2/r/y && echo z > config.yaml"`:                            true,
+	`ln -s {E} e; bash -c "cd e/y && echo z > config.yaml"`:                               true,
+	`ln -s {E} e; bash -c "cd ~/project/d2/r/y && echo z > config.yaml"`:                  true,
+	`ln -s {E} e; find . -maxdepth 1 -name a.txt -exec mv {} d2/r/x/ \;`:                  true,
+	`ln -s {E} e; find . -name "*.txt" -exec mv {} e/x/ \;`:                               true,
 }

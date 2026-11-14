@@ -339,6 +339,28 @@ func shellCommandArgsKey(connectorName, toolName string) (key, out string) {
 	return "", ""
 }
 
+// BlankShellCommand reports a call of the connector's shell tool whose only
+// argument is its command key holding blank text (a lone newline from a
+// harness that sends an empty step). Such a call runs nothing, so there is no
+// command to verify and nothing for the unverified-call finding to guard; any
+// other argument next to the blank command (a key a harness may honor), a
+// repeated key or a command of another type keeps the call unverified.
+func BlankShellCommand(connectorName, toolName string, args json.RawMessage) bool {
+	key, _ := shellCommandTool(connectorName, toolName)
+	if key == "" || antigravityValidateUniqueJSON(args) != nil {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(args, &fields); err != nil || len(fields) != 1 {
+		return false
+	}
+	raw, present := fields[key]
+	var text string
+	// A JSON null also unmarshals into a string, so the value must be a string.
+	return present && bytes.HasPrefix(bytes.TrimSpace(raw), []byte(`"`)) &&
+		json.Unmarshal(raw, &text) == nil && strings.TrimSpace(text) == ""
+}
+
 // IsShellTool reports whether toolName is the connector's shell tool, as
 // the tool is named to hooks (the tools ShellCommandArgs reduces).
 func IsShellTool(connectorName, toolName string) bool {

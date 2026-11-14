@@ -552,6 +552,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 			r = r.WithContext(context.WithValue(r.Context(), resolvedWritesContextKey{}, targets))
 		}
+		if value := r.Header.Get(hookpaths.ShellStartupHeader); value != "" {
+			startup, ok := hookpaths.DecodeShellStartup(value)
+			if !ok {
+				// An unreadable header never proves a statement safe.
+				startup = hookpaths.UnknownShellStartup()
+			}
+			r = r.WithContext(context.WithValue(r.Context(), shellStartupContextKey{}, &startup))
+		}
 		if registeredEvent != "" && !eventIn(registeredEvent, profile.SupportedEvents) {
 			a.recordConnectorHookRejection(r.Context(), connectorName, registeredEvent, "event_outside_contract", int64(len(b)))
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event is outside the active contract", "reason": hookexec.MalformedHookPayloadReason})
@@ -3731,6 +3739,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			ManagedInstall:          a.managedInstallForHook(ctx),
 			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
 			ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
+			ShellStartup:            shellStartupFromContext(ctx),
 			patchTarget:             hermesV4APatch,
 			strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
 			SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),

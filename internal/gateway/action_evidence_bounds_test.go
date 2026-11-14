@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // b36ManagedHookFixture is a managed user's home that the gateway cannot
@@ -66,9 +67,17 @@ func newB36ManagedHookFixture(t *testing.T) b36ManagedHookFixture {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", f.home)
+	clearShellStartupEnv(t)
 	t.Cleanup(func() { _ = os.Chmod(f.homes, 0o700) })
 	return f
 }
+
+// clearShellStartupEnv removes the shell startup the hook reads from the
+// environment of whoever runs the test: a dcenv or profile that exports bash
+// functions, BASH_ENV or ENV changes the hook's startup readings (GAP-0293:
+// the shared dev host exports two helpers). A test that needs a startup sets
+// it after the fixture.
+func clearShellStartupEnv(t *testing.T) { testenv.ClearShellStartupT(t) }
 
 func (f b36ManagedHookFixture) payload(t *testing.T, command string) []byte {
 	t.Helper()

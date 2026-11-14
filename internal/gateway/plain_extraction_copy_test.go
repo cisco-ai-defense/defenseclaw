@@ -94,25 +94,25 @@ func TestR107CopyOfAPlainExtractionIsPlain(t *testing.T) {
 	}
 	r106Reader2CheckWith(t, []r106Reader2Row{
 		{"plain tar, cp -a of the folder only", "project", `tar -xf plain.tar -C d1 && cp -a d1 e3`, "allow"},
-		{"plain tar, cp -a of the folder, append to the copy", "project", `tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "allow/block"},
-		{"plain tar, rsync -a of the folder, append to the copy", "project", `tar -xf plain.tar -C d1 && rsync -a d1/ e2/ && echo k >> e2/p`, "allow/block"},
-		{"plain tar, append into the folder", "project", `tar -xf plain.tar -C d1 && echo k >> d1/sub/q`, "allow/block"},
-		{"plain tgz, cp -a of the folder, append to the copy", "project", `tar -xzf plain.tgz -C d1 && cp -a d1 e3 && echo k >> e3/p`, "allow/block"},
-		{"symlink tar, cp -a, append to the copy", "project", `tar -xf link.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "block"},
-		{"symlink tar, append into the folder", "project", `tar -xf link.tar -C d1 && echo k >> d1/p`, "block"},
-		{"hard link tar, cp -a, append to the copy", "project", `tar -xf hard.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "block"},
-		{"dot-dot tar, append", "project", `tar -xf dotdot.tar -C d1 && echo k >> d1/p`, "block"},
-		{"fifo member is not a plain file", "project", `tar -xf fifo.tar -C d1 && echo k >> d1/p`, "block"},
-		{"absolute member name is not plain", "project", `tar -xf absolute.tar -C d1 && echo k >> d1/p`, "block"},
-		{"backslash member name is not plain", "project", `tar -xf backslash.tar -C d1 && echo k >> d1/p`, "block"},
-		{"archive rewritten first", "project", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "block"},
-		{"archive rewritten first through a glob", "project", `cp link.tar p[l]ain.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "block"},
-		{"archive rewritten first through a hard-linked name", "project", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "block"},
-		{"two archive words", "project", `tar -xf plain.tar --file=plain.tgz -C d1 && echo k >> d1/p`, "block"},
+		{"plain tar, cp -a of the folder, append to the copy", "project", `tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "allow/alert"},
+		{"plain tar, rsync -a of the folder, append to the copy", "project", `tar -xf plain.tar -C d1 && rsync -a d1/ e2/ && echo k >> e2/p`, "allow/alert"},
+		{"plain tar, append into the folder", "project", `tar -xf plain.tar -C d1 && echo k >> d1/sub/q`, "allow/alert"},
+		{"plain tgz, cp -a of the folder, append to the copy", "project", `tar -xzf plain.tgz -C d1 && cp -a d1 e3 && echo k >> e3/p`, "allow/alert"},
+		{"symlink tar, cp -a, append to the copy", "project", `tar -xf link.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "alert/block"},
+		{"symlink tar, append into the folder", "project", `tar -xf link.tar -C d1 && echo k >> d1/p`, "alert/block"},
+		{"hard link tar, cp -a, append to the copy", "project", `tar -xf hard.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "alert/block"},
+		{"dot-dot tar, append", "project", `tar -xf dotdot.tar -C d1 && echo k >> d1/p`, "alert/block"},
+		{"fifo member is not a plain file", "project", `tar -xf fifo.tar -C d1 && echo k >> d1/p`, "alert/block"},
+		{"absolute member name is not plain", "project", `tar -xf absolute.tar -C d1 && echo k >> d1/p`, "alert/block"},
+		{"backslash member name is not plain", "project", `tar -xf backslash.tar -C d1 && echo k >> d1/p`, "alert/block"},
+		{"archive rewritten first", "project", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "alert/block"},
+		{"archive rewritten first through a glob", "project", `cp link.tar p[l]ain.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "alert/block"},
+		{"archive rewritten first through a hard-linked name", "project", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "alert/block"},
+		{"two archive words", "project", `tar -xf plain.tar --file=plain.tgz -C d1 && echo k >> d1/p`, "alert/block"},
 		{"plain tar into a folder holding a keys link, append through it", "project", `tar -xf plain.tar -C d0 && echo k >> d0/p`, "block"},
 		{"plain tar into a folder holding a keys link, cp -a, append to the copy", "project", `tar -xf plain.tar -C d0 && cp -a d0 e4 && echo k >> e4/p`, "block"},
 		{"plain tar after a link is made in the destination", "project", `mkdir -p d1 && ln -s ../../.ssh d1/ssh && tar -xf plain.tar -C d1 && echo k >> d1/ssh/authorized_keys`, "block"},
-		{"write into the extraction scope (fake archive)", "project", `tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "block"},
+		{"write into the extraction scope (fake archive)", "project", `tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "alert/block"},
 	}, setup)
 }
 
@@ -122,9 +122,9 @@ func TestR107PlainArchiveRewriteViaShellHook(t *testing.T) {
 	rows := []struct {
 		name, command, want string
 	}{
-		{"plain extraction", `tar -xf plain.tar -C d1 && echo k >> d1/p`, "allow/block"},
-		{"archive rewritten first", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "block"},
-		{"archive rewritten through hard link", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "block"},
+		{"plain extraction", `tar -xf plain.tar -C d1 && echo k >> d1/p`, "allow/alert"},
+		{"archive rewritten first", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "alert/block"},
+		{"archive rewritten through hard link", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "alert/block"},
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, row := range rows {
@@ -166,7 +166,7 @@ func TestR107PlainArchiveRewriteViaShellHook(t *testing.T) {
 // The archive reader's byte and member limits keep these extractions opaque.
 func TestR107Review8TarPlainBounds(t *testing.T) {
 	r106Reader2CheckWith(t, []r106Reader2Row{
-		{"archive file exceeds 64 MiB", "project", `tar -xf overbytes.tar -C d1 && echo k >> d1/p`, "block"},
+		{"archive file exceeds 64 MiB", "project", `tar -xf overbytes.tar -C d1 && echo k >> d1/p`, "alert/block"},
 	}, func(t *testing.T, f b36ManagedHookFixture) {
 		if err := os.Mkdir(filepath.Join(f.project, "d1"), 0o700); err != nil {
 			t.Fatal(err)
@@ -178,7 +178,7 @@ func TestR107Review8TarPlainBounds(t *testing.T) {
 		}
 	})
 	r106Reader2CheckWith(t, []r106Reader2Row{
-		{"archive has 4097 members", "project", `tar -xf overmembers.tar -C d1 && echo k >> d1/p`, "block"},
+		{"archive has 4097 members", "project", `tar -xf overmembers.tar -C d1 && echo k >> d1/p`, "alert/block"},
 	}, func(t *testing.T, f b36ManagedHookFixture) {
 		if err := os.Mkdir(filepath.Join(f.project, "d1"), 0o700); err != nil {
 			t.Fatal(err)
@@ -224,7 +224,7 @@ func TestR107Review8ForgedTarPlainFact(t *testing.T) {
 func TestR107Review9RedirectSubstitutionRewritesArchive(t *testing.T) {
 	r106Reader2CheckWith(t, []r106Reader2Row{
 		{"redirect substitution rewrites hard-linked archive", "project",
-			`tar -xf plain.tar -C d1 > "$(cp link.tar alias.tar; echo out)" && echo k >> d1/p`, "block"},
+			`tar -xf plain.tar -C d1 > "$(cp link.tar alias.tar; echo out)" && echo k >> d1/p`, "alert/block"},
 	}, func(t *testing.T, f b36ManagedHookFixture) {
 		r107WriteTar(t, filepath.Join(f.project, "plain.tar"), false,
 			tar.Header{Name: "p", Typeflag: tar.TypeReg})

@@ -594,6 +594,11 @@ func TestClaudeResolvedWriteHeaderMarkerRule(t *testing.T) {
 			if row.block {
 				want = `"raw_action":"block"`
 			}
+			if row.name == "forty one link chain" {
+				// A chain past the kernel limit reaches no file: the target is
+				// UNCERTAIN, so the default pack alerts (rel-1-0-10:GAP-0350).
+				want = `"raw_action":"alert"`
+			}
 			if !strings.Contains(recorder.Body.String(), want) {
 				t.Fatalf("response = %d %s, want %s", recorder.Code, recorder.Body.String(), want)
 			}
@@ -1099,7 +1104,6 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cd dirlink && echo k >> authorized_keys`,
 		`cd ~/proj/dirlink && tee -a authorized_keys < x`,
 		`cd dirlink && echo k | tee -a authorized_keys`,
-		`echo ok > first.txt; tar xf keys.tar; cd build && echo ok > notes.txt`,
 		`cd -P dirlink && echo k >> authorized_keys`,
 		`cd -L dirlink && cp x authorized_keys`,
 		`pushd dirlink && dd if=x of=authorized_keys`,
@@ -1136,30 +1140,13 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`python3 -c 'open("disklink", mode="a").write("k")'`,
 		`python3 -c 'open("disklink", "a", encoding="utf-8").write("k")'`,
 		// GAP-1545: every archive destination spelling must cover the later write.
-		`tar -xf keys.tar -C../out && echo k >> ../out/n`,
-		`tar -xC ../out -f keys.tar && echo k >> ../out/n`,
-		`tar xfC keys.tar ../out && echo k >> ../out/n`,
-		`tar -xf keys.tar --dir=../out && echo k >> ../out/n`,
-		`tar -xf keys.tar --direc ../out && echo k >> ../out/n`,
-		`bsdtar -xf keys.tar --cd ../out && echo k >> ../out/n`,
-		`X=1 tar -xf keys.tar -C../out; echo k >> ../out/n`,
-		`tar -x -f keys.tar --one-top-level=../out; echo k >> ../out/n`,
-		`unzip keys.zip -d../out && echo k >> ../out/n`,
 		// GAP-1546: a pre-existing alias can enter an extraction scope.
-		`tar -C unpack -xf evil.tar && echo k >> outlink`,
-		`tar -C unpack -xf evil.tar && echo k >> dlink/n`,
-		`tar -C unpack -xf evil.tar && echo k >> outlink2`,
 		// GAP-1556: a pre-existing directory link precedes ".." in another link.
 		`echo k >> a/l`,
 		`cp x a/l`,
 		`tee -a a/l < x`,
 		`ln -s b/../authorized_keys a/new && echo k >> a/new`,
-		`tar -C unpack -xf evil.tar && echo k >> a2/l`,
 		// GAP-1547: an early redirect does not exempt later command writers.
-		`echo a > n1.txt; tar xf evil.tar; cp payload n1.txt`,
-		`echo a > n1.txt; tar xf evil.tar; install -m 600 payload n1.txt`,
-		`echo a > n1.txt; tar xf evil.tar; dd if=payload of=n1.txt`,
-		`echo a > n1.txt; tar xf evil.tar && tee -a n1.txt < payload`,
 		// GAP-1548: cp long options and target-directory preserve link scopes.
 		`ln -s ~/.ssh/authorized_keys s && cp --archive s notes.txt && echo k >> notes.txt`,
 		`ln -s ~/.ssh/authorized_keys s && cp --recursive s d && echo k >> d`,
@@ -1186,7 +1173,6 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`ln ~/.ssh/authorized_keys n0.txt && mv n0.txt notes.txt && echo k >> notes.txt`,
 		`cd .. && ln -s .ssh/authorized_keys proj/notes.txt && cd proj && echo k >> notes.txt`,
 		`python3 -c "import os; os.link('../.ssh/authorized_keys', 'notes.txt')"; echo k >> notes.txt`,
-		`mklink /H notes.txt keys; echo k >> notes.txt`,
 		`pwsh -c "New-Item -ItemType HardLink -Path notes.txt -Target ../.ssh/authorized_keys"; echo k >> notes.txt`,
 		`busybox ln ~/.ssh/autho""rized_keys notes.txt && echo k >> notes.txt`,
 		`toybox ln ~/.ssh/authorized_keys notes.txt && echo k >> notes.txt`,
@@ -1204,23 +1190,6 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`ln -s ~/.ssh/authorized_keys s && rsync -l s notes.txt && echo k >> notes.txt`,
 		`ln -s ~/.ssh/authorized_keys s && echo s | cpio -pd d && echo k >> d/s`,
 		`ln -s ~/.ssh/authorized_keys s && pax -rw s d && echo k >> d/s`,
-		`cpio -id < keys.cpio; echo k >> notes.txt`,
-		`pax -r -f keys.pax; echo k >> notes.txt`,
-		`pax -r < keys.pax; echo k >> notes.txt`,
-		`bsdcpio -id < keys.cpio; echo k >> notes.txt`,
-		`unzip -o keys.zip; echo k >> notes.txt`,
-		`7z x keys.7z; echo k >> notes.txt`,
-		`7z x keys.7z -o../outside; echo k >> ../outside/n`,
-		`cpio -id -D ../outside < keys.cpio; echo k >> ../outside/n`,
-		`busybox cpio -i < keys.cpio; echo k >> notes.txt`,
-		`busybox unzip keys.zip; echo k >> notes.txt`,
-		`tar $X keys.tar; echo k >> notes.txt`,
-		`tar -$X -f keys.tar; echo k >> notes.txt`,
-		`tar xzf node.tgz && ./configure > build.log`,
-		`tar xzf x.tgz && ./configure > build.log`,
-		`tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`,
-		`for i in 1 2; do echo k >> notes.txt; tar xf keys.tar; done`,
-		`echo "$(tar xf keys.tar)" > notes.txt`,
 		`c"d" ~/.ssh && echo k >> authorized_keys`,
 		`"c""d" ~/.ssh && echo k >> authorized_keys`,
 		`$'cd' ~/.ssh && echo k >> authorized_keys`,
@@ -1232,9 +1201,6 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`ln -sfn ~/.ssh/authorized_keys devlink && echo k >> devlink`,
 		"python3 - <<EOF\nimport os\nos.symlink(os.path.expanduser(~/.ssh/authorized_keys), notes.txt)\nEOF\necho k >> notes.txt",
 		`sudo python3 -c 'import os; os.symlink("../.ssh/authorized_keys", "notes.txt")' && echo k >> notes.txt`,
-		`cd ~/x && tar -C ~/x -xf keys.tar && echo k >> n1.txt`,
-		`cpio -id -D unpack < keys.cpio; echo k >> notes.txt`,
-		`tar -P -C unpack -xf keys.tar; echo k >> notes.txt`,
 		`cp -a tree copy && echo k >> copy/k`,
 		`cd -P ~/.ssh && echo k >> authorized_keys`,
 		`cd ~/.ssh || exit 1; echo k >> authorized_keys`,
@@ -1242,6 +1208,50 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
 		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
 		`cp --archive disklink notes.txt`,
+	}
+	// An archive the walk cannot read may hold a link, and an extractor may make one
+	// before the write that follows: the write's target is UNCERTAIN, so the default
+	// pack alerts and the strict pack blocks (rel-1-0-10:GAP-0350).
+	warned := []string{
+		`7z x keys.7z -o../outside; echo k >> ../outside/n`,
+		`7z x keys.7z; echo k >> notes.txt`,
+		`X=1 tar -xf keys.tar -C../out; echo k >> ../out/n`,
+		`bsdcpio -id < keys.cpio; echo k >> notes.txt`,
+		`bsdtar -xf keys.tar --cd ../out && echo k >> ../out/n`,
+		`busybox cpio -i < keys.cpio; echo k >> notes.txt`,
+		`busybox unzip keys.zip; echo k >> notes.txt`,
+		`cd ~/x && tar -C ~/x -xf keys.tar && echo k >> n1.txt`,
+		`cpio -id -D ../outside < keys.cpio; echo k >> ../outside/n`,
+		`cpio -id -D unpack < keys.cpio; echo k >> notes.txt`,
+		`cpio -id < keys.cpio; echo k >> notes.txt`,
+		`echo "$(tar xf keys.tar)" > notes.txt`,
+		`echo a > n1.txt; tar xf evil.tar && tee -a n1.txt < payload`,
+		`echo a > n1.txt; tar xf evil.tar; cp payload n1.txt`,
+		`echo a > n1.txt; tar xf evil.tar; dd if=payload of=n1.txt`,
+		`echo a > n1.txt; tar xf evil.tar; install -m 600 payload n1.txt`,
+		`echo ok > first.txt; tar xf keys.tar; cd build && echo ok > notes.txt`,
+		`for i in 1 2; do echo k >> notes.txt; tar xf keys.tar; done`,
+		`mklink /H notes.txt keys; echo k >> notes.txt`,
+		`pax -r -f keys.pax; echo k >> notes.txt`,
+		`pax -r < keys.pax; echo k >> notes.txt`,
+		`tar $X keys.tar; echo k >> notes.txt`,
+		`tar -$X -f keys.tar; echo k >> notes.txt`,
+		`tar -C unpack -xf evil.tar && echo k >> a2/l`,
+		`tar -C unpack -xf evil.tar && echo k >> dlink/n`,
+		`tar -C unpack -xf evil.tar && echo k >> outlink`,
+		`tar -C unpack -xf evil.tar && echo k >> outlink2`,
+		`tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`,
+		`tar -P -C unpack -xf keys.tar; echo k >> notes.txt`,
+		`tar -x -f keys.tar --one-top-level=../out; echo k >> ../out/n`,
+		`tar -xC ../out -f keys.tar && echo k >> ../out/n`,
+		`tar -xf keys.tar --dir=../out && echo k >> ../out/n`,
+		`tar -xf keys.tar --direc ../out && echo k >> ../out/n`,
+		`tar -xf keys.tar -C../out && echo k >> ../out/n`,
+		`tar xfC keys.tar ../out && echo k >> ../out/n`,
+		`tar xzf node.tgz && ./configure > build.log`,
+		`tar xzf x.tgz && ./configure > build.log`,
+		`unzip -o keys.zip; echo k >> notes.txt`,
+		`unzip keys.zip -d../out && echo k >> ../out/n`,
 	}
 	allowed := []string{
 		// The GAP-0409 forms on an ordinary file.
@@ -1347,6 +1357,22 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 						t.Errorf("%s = %.300s, want block", command, got)
 					}
 					if command == `tar xzf node.tgz && ./configure > build.log` &&
+						!strings.Contains(got, "Run the extraction and the write as separate commands") {
+						t.Errorf("%s = %.300s, want archive chain guidance", command, got)
+					}
+				}
+				for _, command := range warned {
+					got := post(t, command)
+					// The managed cell of this fixture holds no readable archive and no
+					// start-directory reading, so it keeps failing closed.
+					want := `{"action":"alert"`
+					if managed {
+						want = `{"action":"block"`
+					}
+					if !strings.HasPrefix(got, want) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						t.Errorf("%s = %.300s, want %s on the keys rule", command, got, want)
+					}
+					if (command == `tar xzf node.tgz && ./configure > build.log` || command == `tar xzf x.tgz && ./configure > build.log`) &&
 						!strings.Contains(got, "Run the extraction and the write as separate commands") {
 						t.Errorf("%s = %.300s, want archive chain guidance", command, got)
 					}

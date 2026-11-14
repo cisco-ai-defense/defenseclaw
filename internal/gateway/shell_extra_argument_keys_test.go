@@ -105,6 +105,10 @@ func TestShellToolCallWithExtraArgumentKeys(t *testing.T) {
 			{"number-command", `{"command":7,"extra":"x"}`, unverifiedShellCommandRuleID},
 			{"null-command", `{"command":null,"extra":"x"}`, unverifiedShellCommandRuleID},
 			{"blank-command", `{"command":"  ","extra":"x"}`, unverifiedShellCommandRuleID},
+			// A lone blank command runs nothing: no finding (s7-noise).
+			{"blank-command-alone", `{"command":"\n"}`, "allow"},
+			{"blank-command-alone-spaces", `{"command":"  "}`, "allow"},
+
 			{"object-command", `{"command":{"cmd":` + rm + `},"extra":"x"}`, unverifiedShellCommandRuleID},
 			{"empty-args", `{}`, unverifiedShellCommandRuleID},
 			{"benign", `{"command":"ls","description":"x","timeout":5}`, "allow"},

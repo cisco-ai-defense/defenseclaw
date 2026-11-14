@@ -101,6 +101,15 @@ func TestR105CommandLinkThroughDiskLinkToStateBlocks(t *testing.T) {
 					request.ResolvedWriteTargets = targets
 				}
 				findings := dispatchTrustedAction(t.Context(), request)
+				// A link entered by a cd inside a shell body is not followed by a per-user
+				// gateway: the target is UNCERTAIN and the default pack alerts on it
+				// (rel-1-0-10:GAP-0350); the managed hook's map still proves it.
+				if !protected && row.command == `ln -s {E} e; bash -c "cd e/y && echo z > config.yaml"` {
+					if verdict := buildVerdict(findings, "tool_call").Action; verdict != "alert" {
+						t.Errorf("%s protected=%v %q: action=%s, want alert", connector, protected, row.command, verdict)
+					}
+					continue
+				}
 				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
 					ids := ""
 					for _, finding := range findings {

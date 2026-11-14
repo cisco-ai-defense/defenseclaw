@@ -49,6 +49,11 @@ func appendTrustedPrivateKeyReaderFinding(
 		}
 		proved = hookpaths.ActionPrivateKeyReadWithDialect(command, request.Input.CWD, request.Input.ActiveHome, dialect) ||
 			hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome)
+		if proved && trustedActionPrivateKeyOnlyCopiedInHome(request.Input, facts) {
+			// Every command copies inside the home: the key is read only to
+			// be copied there, which alerts and does not block.
+			return appendTrustedPrivateKeyHomeCopyAlert(findings, generation, request)
+		}
 	}
 	if !proved {
 		return findings

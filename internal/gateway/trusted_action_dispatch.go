@@ -210,6 +210,9 @@ type trustedActionRequest struct {
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
 	ResolvedWriteTargets map[string]string
+	// ShellStartup is the shell startup of the agent's process, from the
+	// hook client's header (nil: an older client; the gateway's own).
+	ShellStartup *hookpaths.ShellStartup
 	// ActiveAgentFileIdentities maps the hook client's file identity of each
 	// instruction file the session loaded to that file, for a gateway that
 	// cannot read it (hookpaths.LoadedIdentityPrefix).
@@ -252,6 +255,11 @@ type trustedActionRequest struct {
 	// (rel-1-0-10:GAP-0013). The operand is empty when no one operand was
 	// at fault (a directory walk or a pattern the shell expands).
 	unprovenTarget *unprovenWrite
+	// nonWriteMention, when set, is told that the target scan held the call
+	// only on words of statements that read a protected file, in a per-user
+	// default or permissive install (ActionMentionsNoWriteRole): the finding
+	// alerts, it does not block (rel-1-0-10:GAP-0018).
+	nonWriteMention *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -397,6 +405,9 @@ func dispatchTrustedAction(
 	}
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
+	}
+	if request.ShellStartup != nil {
+		request.targetMemo.WithShellStartup(request.ShellStartup)
 	}
 	if request.simpleMemo == nil {
 		request.simpleMemo = &trustedSimpleMemo{}
@@ -7231,6 +7242,7 @@ func filterTrustedLegacyActionContext(
 					filtered,
 					trustedLegacyProvenCommandFinding(
 						generation,
+						input,
 						finding,
 						facts,
 						loadNestedActions(),
@@ -7273,6 +7285,7 @@ func filterTrustedLegacyActionContext(
 						filtered,
 						trustedLegacyProvenCommandFinding(
 							generation,
+							input,
 							finding,
 							facts,
 							loadNestedActions(),
@@ -7302,6 +7315,7 @@ func filterTrustedLegacyActionContext(
 
 func trustedLegacyProvenCommandFinding(
 	generation *compiledRulePackCategories,
+	input actionfacts.Input,
 	finding RuleFinding,
 	facts actionfacts.Facts,
 	nestedActions []trustedNestedAction,
@@ -7319,6 +7333,11 @@ func trustedLegacyProvenCommandFinding(
 		finding.RuleID,
 		contract,
 	) && (contract.prerequisite == nil || contract.prerequisite(facts)) {
+		finding.enforcement = findingEnforcementDetectionOnly
+	}
+	if finding.RuleID == "CMD-EVAL" && evalEnvInitOnly(input, facts) {
+		// eval "$(opam env)": the shell is configured by a known tool whose
+		// call is visible; audit telemetry only (rel-1-0-10:GAP-0018).
 		finding.enforcement = findingEnforcementDetectionOnly
 	}
 	if finding.RuleID == "CMD-EVAL" &&
