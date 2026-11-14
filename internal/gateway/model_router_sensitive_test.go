@@ -124,11 +124,36 @@ func TestSensitiveCheckInputIsBounded(t *testing.T) {
 	text, cut := sensitiveCheckInput(&ModelRouterInput{Messages: []ChatMessage{
 		{Role: "system", Content: "never"}, {Role: "user", Content: strings.Repeat("a", 600)}, {Role: "user", Content: "newest"},
 	}}, 256)
-	if !cut || len(text) > 256 || !strings.HasPrefix(text, "newest") || strings.Contains(text, "never") {
+	// An older turn cut by the bound is not a truncated input: it was
+	// checked on its own request.
+	if cut || len(text) > 256 || !strings.HasPrefix(text, "newest") || strings.Contains(text, "never") {
 		t.Fatalf("bounded input %q cut=%v", text, cut)
+	}
+	if text, cut := sensitiveCheckInput(&ModelRouterInput{Messages: []ChatMessage{{Role: "user", Content: strings.Repeat("b", 600)}}}, 256); !cut || len(text) > 256 {
+		t.Fatalf("a cut newest turn is truncated: len %d cut=%v", len(text), cut)
 	}
 	if _, cut := sensitiveCheckInput(&ModelRouterInput{Text: "short"}, 256); cut {
 		t.Fatal("a short text is not cut")
 	}
-	_ = engine.SensitiveInput{}
+}
+
+// Review r1 P2: an unavailable check whose local model cannot serve the
+// request keeps the normal route; it is never refused (design rule 3).
+func TestSensitiveCheckUnavailableWithAnIneligibleLocalModelNeverBlocks(t *testing.T) {
+	var calls int32
+	srv := sensitiveCheckServer(t, "maybe", http.StatusBadGateway, &calls, nil)
+	defer srv.Close()
+	cfg := sensitiveCheckConfig(srv.URL + "/v1/systemone")
+	cfg.Routing.Models[0].APIKeyEnv = "S1C_UNSET_LOCAL_KEY_7713"
+	out := routeSensitive(t, cfg, "anything")
+	if out.Result == SemanticRouteDenied || out.Route.Backend == nil || out.Route.Backend.Alias != "paid" {
+		t.Fatalf("unavailable + ineligible local: %+v %+v", out.Route, out.Deny)
+	}
+	if out.Route.SensitiveNarrowed() || !out.Route.Sensitive.Soft || out.Route.Sensitive.CheckFailure == "" {
+		t.Fatalf("soft outcome expected: %+v", out.Route.Sensitive)
+	}
+	r := newEngineRouter(cfg, nil, "")
+	if deny := r.Gate(context.Background(), out, engine.GateTarget{Provider: "openai", Model: "gpt-5"}); deny != nil {
+		t.Fatalf("a soft decision gates the original exit: %+v", deny)
+	}
 }

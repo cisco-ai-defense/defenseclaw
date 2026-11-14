@@ -9,7 +9,6 @@ import (
 	"errors"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -180,16 +179,25 @@ func sensitiveCheckInput(in *ModelRouterInput, maxBytes int) (string, bool) {
 		add(in.Text)
 		return b.String(), trunc.Any()
 	}
+	// Only a cut newest turn is a truncated input (ONE BOUND RULE): older
+	// turns were checked on their own requests, and a positive is sticky.
+	newest := true
 	for i := len(in.Messages) - 1; i >= 0; i-- {
 		switch in.Messages[i].Role {
 		case "system", "developer":
 			continue
 		}
-		if !add(in.Messages[i].Content) {
+		before := trunc.Any()
+		ok := add(in.Messages[i].Content)
+		if newest && !before && trunc.Any() {
+			return b.String(), true
+		}
+		newest = false
+		if !ok {
 			break
 		}
 	}
-	return b.String(), trunc.Any()
+	return b.String(), false
 }
 
 // sensitiveRequestFields fills the check input and the posture tier of req.
@@ -201,51 +209,12 @@ func sensitiveRequestFields(req *engine.Request, in *ModelRouterInput, cfg *conf
 	req.StrictTier = bounded.TierOf(cfg.HookPolicyTierForConnector(config.NormalizeConnectorName(in.Connector))) == bounded.TierStrict
 }
 
-// sensitiveCheckStats counts the checks of this process for doctor and
-// status (no text, no caller).
-type sensitiveCheckStats struct {
-	checked, positive, unavailable atomic.Int64
-	lastFailure                    atomic.Value // string
-	lastUnavailableUnix            atomic.Int64
-}
-
-var routingSensitiveStats sensitiveCheckStats
-
-// SensitiveCheckSnapshot is the status view of the check counters.
-type SensitiveCheckSnapshot struct {
-	Checked, Positive, Unavailable int64
-	LastFailure                    string
-	LastUnavailable                time.Time
-}
-
-// RoutingSensitiveCheckSnapshot returns the counters of this process.
-func RoutingSensitiveCheckSnapshot() SensitiveCheckSnapshot {
-	s := &routingSensitiveStats
-	out := SensitiveCheckSnapshot{Checked: s.checked.Load(), Positive: s.positive.Load(), Unavailable: s.unavailable.Load()}
-	if v, ok := s.lastFailure.Load().(string); ok {
-		out.LastFailure = v
-	}
-	if t := s.lastUnavailableUnix.Load(); t > 0 {
-		out.LastUnavailable = time.Unix(t, 0).UTC()
-	}
-	return out
-}
-
-// noteSensitiveDecision counts one decision and writes the audit row of a
-// check that fired or could not answer: the source and the reason, no text.
+// noteSensitiveDecision writes the audit row of a check that fired or could
+// not answer: the source and the reason, no text.
 func (r *engineRouter) noteSensitiveDecision(ctx context.Context, in *ModelRouterInput, d *engine.Decision) {
 	o := d.Sensitive
 	if !o.Checked {
 		return
-	}
-	st := &routingSensitiveStats
-	st.checked.Add(1)
-	if o.CheckFailure != "" {
-		st.unavailable.Add(1)
-		st.lastFailure.Store(o.CheckFailure)
-		st.lastUnavailableUnix.Store(time.Now().Unix())
-	} else if o.Reason == "positive" {
-		st.positive.Add(1)
 	}
 	if o.Reason == "clear" || r.logger == nil {
 		return

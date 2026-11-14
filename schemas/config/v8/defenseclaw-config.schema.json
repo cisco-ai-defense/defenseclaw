@@ -5655,13 +5655,13 @@
             },
             "timeout_ms": {
               "type": "integer",
-              "minimum": 50,
-              "maximum": 5000
+              "anyOf": [{"const": 0}, {"minimum": 50, "maximum": 5000}],
+              "description": "0 means the default."
             },
             "max_bytes": {
               "type": "integer",
-              "minimum": 256,
-              "maximum": 65536
+              "anyOf": [{"const": 0}, {"minimum": 256, "maximum": 65536}],
+              "description": "0 means the default."
             },
             "definition": {
               "type": "string",

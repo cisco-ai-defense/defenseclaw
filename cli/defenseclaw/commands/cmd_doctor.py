@@ -13289,14 +13289,32 @@ def routing_sensitive_row(cfg) -> tuple[str, str, str] | None:
         )
     dm = getattr(cfg, "decision_model", None)
     has_dm = bool(getattr(dm, "enabled", False)) and bool(str(getattr(dm, "base_url", "") or "").strip())
-    if check == "decision_model" and not has_dm:
+    s1 = getattr(routing, "systemone", None) or {}
+    if str(getattr(routing, "classifier", "") or "").strip().lower() == "systemone" and isinstance(s1, dict):
+        has_dm = has_dm or bool(str(s1.get("base_url") or "").strip())
+    judge = getattr(getattr(cfg, "guardrail", None), "judge", None)
+    has_judge = bool(getattr(judge, "enabled", False))
+    if check == "auto":
+        source = "the decision model" if has_dm else ("the guardrail judge" if has_judge else "")
+    else:
+        source = {
+            "decision_model": "the decision model" if has_dm else "",
+            "judge": "the guardrail judge" if has_judge else "",
+        }.get(check, "")
+    if not source:
         return (
             "warn",
-            f"{floor_text}; routing.sensitive.check is decision_model but no decision model is configured: regex-only",
-            "set up the decision model (defenseclaw setup decision-model) or set routing.sensitive.check judge",
+            f"{floor_text}; routing.sensitive.check is {check} but no model answers it: regex-only",
+            "set up the decision model (defenseclaw setup decision-model) or the guardrail judge, "
+            "or set routing.sensitive.check off",
         )
     unavailable = str(sens.get("on_unavailable") or "local").strip().lower()
-    return ("pass", f"{floor_text}; decision-model check {check}, unavailable -> {unavailable}", "")
+    return (
+        "pass",
+        f"{floor_text}; sensitive-data check by {source} (the newest turns go to it on every routed request), "
+        f"unavailable -> {unavailable}",
+        "",
+    )
 
 
 def _check_routing_sensitive(cfg, r: _DoctorResult) -> None:

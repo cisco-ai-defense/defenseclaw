@@ -21,6 +21,7 @@ type sensitiveRun struct {
 	ch      chan sensitiveCheckResult
 	timeout time.Duration
 	started time.Time
+	cancel  context.CancelFunc
 }
 
 type sensitiveCheckResult struct {
@@ -50,6 +51,10 @@ func (e *Engine) beginSensitive(ctx context.Context, req Request, signals map[st
 	run.timeout = time.Duration(s.EffectiveCheckTimeoutMs()) * time.Millisecond
 	run.started = time.Now()
 	run.ch = make(chan sensitiveCheckResult, 1)
+	// Decide cancels the check when it returns before reading it (a
+	// managed admin deny): the text is not sent for a refused request.
+	cctx, stop := context.WithCancel(ctx)
+	run.cancel = stop
 	in := SensitiveInput{Text: req.SensitiveText, Truncated: req.SensitiveTruncated, Definition: s.Definition, Connector: req.Connector}
 	go func(ch chan<- sensitiveCheckResult, c SensitiveChecker, timeout time.Duration) {
 		defer func() {
@@ -57,9 +62,9 @@ func (e *Engine) beginSensitive(ctx context.Context, req Request, signals map[st
 				ch <- sensitiveCheckResult{err: &ClassifierError{Code: FailureConfig, Err: errors.New("sensitivity checker panicked")}}
 			}
 		}()
-		cctx, cancel := context.WithTimeout(ctx, timeout)
+		tctx, cancel := context.WithTimeout(cctx, timeout)
 		defer cancel()
-		ok, err := c.Check(cctx, in)
+		ok, err := c.Check(tctx, in)
 		ch <- sensitiveCheckResult{sensitive: ok, err: err}
 	}(run.ch, e.checker, run.timeout)
 	return run
@@ -98,7 +103,8 @@ func (e *Engine) applySensitive(pol *Policy, d *Decision, run *sensitiveRun, req
 			d.Sensitive.CheckFailure = code
 			reason = "unavailable:" + code
 			if s.EffectiveOnUnavailable() == config.RoutingSensitiveUnavailableLocal && hasLocal {
-				src = name
+				// Soft: local is tried first, never a block (design 3).
+				src, d.Sensitive.Soft = name, true
 			} else if hasLocal {
 				reason += ":ignored"
 			} else {
@@ -114,14 +120,14 @@ func (e *Engine) applySensitive(pol *Policy, d *Decision, run *sensitiveRun, req
 			reason = "truncated"
 			d.Warnings = append(d.Warnings, "sensitive_check_truncated")
 			if req.StrictTier && hasLocal {
-				src = name
+				src, d.Sensitive.Soft = name, true
 			}
 		default:
 			reason = "clear"
 		}
 	}
 	d.Sensitive.Source, d.Sensitive.Reason = src, reason
-	if src != "" {
+	if src != "" && !d.Sensitive.Soft {
 		pol.AllowedAliases = intersectAliases(pol.AllowedAliases, s.Aliases)
 		d.FilteredBy = "sensitive"
 	}

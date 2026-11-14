@@ -184,8 +184,10 @@ type Decision struct {
 }
 
 // SensitiveNarrowed reports whether routing.sensitive narrowed the decision:
-// its only allowed exits are then the routing.sensitive.aliases models.
-func (d Decision) SensitiveNarrowed() bool { return d.Sensitive.Source != "" }
+// its only allowed exits are then the routing.sensitive.aliases models. A
+// soft decision (the check could not answer, or a strict truncated input)
+// prefers the local models but is never refused for lacking one.
+func (d Decision) SensitiveNarrowed() bool { return d.Sensitive.Source != "" && !d.Sensitive.Soft }
 
 // ClassifyInput is what a classifier sees: no identity, no credentials.
 type ClassifyInput struct {
@@ -236,7 +238,6 @@ func (e *ClassifierError) Unwrap() error { return e.Err }
 
 // Sources of a sensitive narrowing (SensitiveOutcome.Source).
 const (
-	SensitiveSourceNone      = ""
 	SensitiveSourceGuardrail = "guardrail"
 	SensitiveSourceSignal    = "signal"
 	// SensitiveSourceSticky: an earlier turn of the same conversation (same
@@ -257,6 +258,9 @@ type SensitiveOutcome struct {
 	Checked      bool
 	CheckFailure string
 	CheckLatency time.Duration
+	// Soft: the local models are preferred, not required (an unavailable
+	// check under on_unavailable: local, or a strict truncated input).
+	Soft bool
 }
 
 // SensitiveInput is what a sensitivity checker sees: bounded text, no

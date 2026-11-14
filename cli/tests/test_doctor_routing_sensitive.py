@@ -7,10 +7,11 @@ from types import SimpleNamespace
 from defenseclaw.commands.cmd_doctor import routing_sensitive_row
 
 
-def _cfg(sensitive, *, enabled=True, dm=False):
+def _cfg(sensitive, *, enabled=True, dm=False, judge=False):
     return SimpleNamespace(
-        routing=SimpleNamespace(enabled=enabled, sensitive=sensitive),
+        routing=SimpleNamespace(enabled=enabled, sensitive=sensitive, classifier="rules", systemone={}),
         decision_model=SimpleNamespace(enabled=dm, base_url="https://dm.example/v1" if dm else ""),
+        guardrail=SimpleNamespace(judge=SimpleNamespace(enabled=judge, model="gemma" if judge else "")),
     )
 
 
@@ -25,11 +26,14 @@ def test_check_off_says_how_to_turn_it_on():
     assert "routing.sensitive.check auto" in fix and "0.4 s" in fix
 
 
-def test_decision_model_check_without_a_decision_model_warns():
-    status, detail, _fix = routing_sensitive_row(_cfg({"aliases": ["local"], "signals": ["s"], "check": "decision_model"}))
-    assert status == "warn" and "regex-only" in detail
+def test_a_check_no_model_answers_warns():
+    for check in ("decision_model", "judge", "auto"):
+        status, detail, _fix = routing_sensitive_row(_cfg({"aliases": ["local"], "signals": ["s"], "check": check}))
+        assert status == "warn" and "regex-only" in detail, check
 
 
-def test_check_on_passes():
+def test_check_on_names_its_source():
     status, detail, _fix = routing_sensitive_row(_cfg({"aliases": ["local"], "check": "auto"}, dm=True))
-    assert status == "pass" and "check auto" in detail and "unavailable -> local" in detail
+    assert status == "pass" and "by the decision model" in detail and "unavailable -> local" in detail
+    status, detail, _fix = routing_sensitive_row(_cfg({"aliases": ["local"], "check": "auto"}, judge=True))
+    assert status == "pass" and "by the guardrail judge" in detail

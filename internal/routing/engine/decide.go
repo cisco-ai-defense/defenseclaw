@@ -36,6 +36,9 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	pol := e.policyFor(req)
 	signals := e.matcher.Match(req.Text)
 	sens := e.beginSensitive(ctx, req, signals)
+	if sens != nil && sens.cancel != nil {
+		defer sens.cancel()
+	}
 	categories := make([]string, 0, len(pol.Categories))
 	for c := range pol.Categories {
 		categories = append(categories, c)
@@ -105,6 +108,16 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	}
 	narrowed := d.SensitiveNarrowed()
 	req.Narrowed = narrowed
+	if d.Sensitive.Soft {
+		// Prefer the local models (after admin Force); the usual order
+		// follows, so a request no local model can take is never refused.
+		soft := make([]cand, 0, len(e.sensitive.Aliases))
+		for _, a := range e.sensitive.Aliases {
+			soft = append(soft, cand{a, SourceSensitive})
+		}
+		n := len(verdict.Force)
+		order = append(order[:n:n], append(soft, order[n:]...)...)
+	}
 	if narrowed {
 		// A sensitive request tries the local models even when the
 		// classifier and the defaults name only cloud aliases, and even
