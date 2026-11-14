@@ -50,9 +50,14 @@ func TestNestedBodiesOverBudget(t *testing.T) {
 		{"bash -c x6 of a long body", nestedSingleQuoted(6, "bash -c", strings.Repeat(long, 6)), true},
 
 		{"short nested", nestedSingleQuoted(6, "bash -c", "rm -rf ~/project/output"), false},
-		{"one bash -c script of 400 KB", "bash -c '" + strings.Repeat("printf '\\''%s\\n'\\'' \"a b c\" "+strings.Repeat("word ", 400)+"; ", 200) + "'", false},
+		// A 400 KB flat script is past the reading budget (tokens and parsed
+		// nodes); the largest ordinary one is about 60 KB.
+		{"one bash -c script of 60 KB", "bash -c '" + strings.Repeat("printf '\\''%s\\n'\\'' \"a b c\" "+strings.Repeat("word ", 400)+"; ", 30) + "'", false},
 		{"bash -c of a python -c program of 40 KB", "bash -c 'python3 -c \"" + strings.Repeat("x = 1 + 2\n", 4096) + "\"'", false},
-		{"ssh of a bash -c script of 60 KB", `ssh host "bash -c 'printf %s ` + strings.Repeat("a b ", 15000) + `'"`, false},
+		// 60 KB of operands is also past the reading budget (parsed nodes,
+		// shellparse.MaxParsedNodes): the row is the largest ordinary script
+		// inside it, 20,000 nodes.
+		{"ssh of a bash -c script of 20 KB", `ssh host "bash -c 'printf %s ` + strings.Repeat("a b ", 5000) + `'"`, false},
 		{"flat echo of 500 KB", "echo '" + strings.Repeat("ab cd; ef ", 50000) + "'", false},
 		{"here-document of 300 KB", "cat > notes.txt <<'EOF'\n" + strings.Repeat("some text (with) a b c; d | e\n", 10000) + "EOF", false},
 		{"three nested of 7 KB", `bash -c 'ssh host "sh -c '\''printf %s ` + strings.Repeat("a b ", 1800) + `'\''"'`, false},
@@ -99,6 +104,59 @@ func TestUnescapeLiteral(t *testing.T) {
 	} {
 		if got := unescapeLiteral(row.value, row.double); got != row.want {
 			t.Errorf("unescapeLiteral(%q, %v) = %q, want %q", row.value, row.double, got, row.want)
+		}
+	}
+}
+
+// TestNestedBodyBehindWrappersIsCode pins review finding 6 of parselimits-2:
+// a shell body that is past the reading budget is over the nested bound when
+// a shell runs it, directly, behind sudo, env, nohup and their options, or
+// as a here-document fed to the shell; the same text given to a program
+// that only reads it (echo, cat) is not.
+func TestNestedBodyBehindWrappersIsCode(t *testing.T) {
+	body := strings.Repeat("a | ", 1200) + "a"
+	if BudgetExceeded(body) == "" {
+		t.Fatal("the body is within the budget")
+	}
+	for _, row := range []struct {
+		name    string
+		command string
+		over    bool
+	}{
+		{"bash -c", "bash -c '" + body + "'", true},
+		{"sudo bash -c", "sudo bash -c '" + body + "'", true},
+		{"sudo -u user bash -c", "sudo -n -u user bash -c '" + body + "'", true},
+		{"env A=b bash -c", "env A=b -i bash -c '" + body + "'", true},
+		{"env -u NAME sh -c", "env -u NAME sh -c '" + body + "'", true},
+		{"nohup nice -n 5 bash -c", "nohup nice -n 5 bash -c '" + body + "'", true},
+		{"timeout 5 bash -c", "timeout 5 bash -c '" + body + "'", true},
+		{"/usr/bin/sudo /bin/bash -c", "/usr/bin/sudo /bin/bash -c '" + body + "'", true},
+		{"here-document fed to bash", "bash <<'EOF'\n" + body + "\nEOF\n", true},
+		{"here-document fed to sudo bash", "sudo bash <<'EOF'\n" + body + "\nEOF\n", true},
+		{"echo", "echo '" + body + "'", false},
+		{"sudo echo", "sudo echo '" + body + "'", false},
+		{"here-document fed to cat", "cat <<'EOF'\n" + body + "\nEOF\n", false},
+	} {
+		if got := NestedBodiesOverBudget(row.command); got != row.over {
+			t.Errorf("%s (%d bytes): over=%v, want %v", row.name, len(row.command), got, row.over)
+		}
+	}
+}
+
+// TestSelfNamingBodyIsNotNested pins GAP-0381: a static word that is its own
+// body ($ is a shell word) is not a nested body of itself at every level
+// down to the depth bound, so a command of any size that carries one (or a
+// 4 KiB comment next to a sed program that starts with one) weighs nothing.
+func TestSelfNamingBodyIsNotNested(t *testing.T) {
+	for _, size := range []int{nestedBodyMinCommand - 40, nestedBodyMinCommand, 8 << 10, 70 << 10} {
+		for name, command := range map[string]string{
+			"sed program": "sed -i '$ a x y z' ~/.ssh/authorized_keys\n# " + strings.Repeat("x", size),
+			"echo":        "echo '$ a b c'\n" + strings.Repeat(":\n", size/2),
+			"dollar":      "echo '$ a b' $ $ $\n# " + strings.Repeat("x", size),
+		} {
+			if weight := NestedBodyWeight(command); weight != 0 {
+				t.Errorf("%s size=%d: NestedBodyWeight=%d, want 0", name, size, weight)
+			}
 		}
 	}
 }

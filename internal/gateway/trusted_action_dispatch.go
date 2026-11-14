@@ -38,6 +38,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -175,6 +176,11 @@ type trustedActionRequest struct {
 	// check (conflictingToolArgumentKeys); nil when Input.Args is the object
 	// the call carried.
 	conflictSource *conflictingToolArgumentSource
+	// budgetSegment marks the request of one statement of a call the readers
+	// did not read (budgetSegmentTwins): it is judged as a call, but takes
+	// no statements of its own, so a statement that is itself past the
+	// budget cannot ask for itself again.
+	budgetSegment bool
 	// DowngradeReadOnlyDataArgs is advisory-only. Bare executable names and
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
@@ -422,24 +428,34 @@ func dispatchTrustedAction(
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
 	bound := trustedActionCommandBound(request.Input)
-	if bound == shellReadingBudget {
-		// Past the reading budget (shellparse.BudgetExceeded): no reader
-		// below parses it, and the call is opaque to them. It takes the
-		// over-limit path the profile decides, with the reason
-		// parse_budget_exceeded, and keeps the one check that needs no
-		// parse: a call whose text may name the active DefenseClaw state
-		// is a possible write to it, which blocks in every mode and
-		// profile, as the readers' proof of a state write did before the
-		// budget refused to read the call (GAP-0254, GAP-0255, GAP-0281).
-		return withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable))
+	if bound == shellReadingBudget || bound == shellReadingTooDeep {
+		// Past the reading budget (shellparse.BudgetExceeded: nesting,
+		// brace expansion, bytes, tokens, chain operators, nodes, tree
+		// depth): no reader below parses the call. It is truncated in the
+		// sense of the bound rule: judged at the unknown tier (the
+		// evaluation limit: an alert outside strict, managed with a pack
+		// that is not strict included, a block in strict), with the reason
+		// parse_budget_exceeded and the cap, and never below what the raw
+		// text alone proves: a call whose text may name the active
+		// DefenseClaw state blocks in every mode, as the readers' proof of a
+		// state write did before the budget refused to read the call, and
+		// a state write before the nesting cap still blocks past it
+		// (GAP-0254, GAP-0255, GAP-0281, GAP-0312).
+		return withBudgetSegmentBlocks(parent, request, withBudgetTruncation(request, trustedBudgetReason(request.Input)))
 	}
-	if bound == shellReadingTooDeep || bound == shellReadingNestedBodies {
-		// Past the reading bounds: no reader below parses it, and the call
-		// takes the over-limit path, which the profile decides (GAP-2537,
-		// GAP-0677). It is decided before the recovered-parse reading
+	if bound == shellReadingNestedBodies {
+		// Past the nested-body bound: no reader below parses it, and the
+		// call takes the over-limit path, which the profile decides
+		// (GAP-0677). It is decided before the recovered-parse reading
 		// below, which would read the same bodies again for the same
-		// finding.
-		return trustedActionLimitFindings(request.EnforcementCapable)
+		// finding. Nested bodies keep the verdict the owner ruled for them
+		// (GAP-0677: an evaluation-limit-only call alerts outside strict
+		// whatever target its text names), and a decision at once: reading
+		// them for a state write is what took seconds. A state write past
+		// the nesting bound (GAP-0312, GAP-0360) is the budget path above.
+		// A statement of the call that may name a protected target is judged
+		// on its own, as in every call the readers did not read (GAP-0381).
+		return withBudgetSegmentBlocks(parent, request, trustedActionLimitFindings(request.EnforcementCapable))
 	}
 	if request.EnforcementCapable && trustedCallShellParseBound(request) {
 		return trustedActionLimitFindings(true)
@@ -496,7 +512,10 @@ func dispatchTrustedAction(
 			// observe mode allows the budget finding but hard-blocks a
 			// proven write to the active state, and that proof is formed
 			// only there (withOverBudgetStateMutation).
-			return withOverBudgetStateMutation(parent, request, facts, trustedActionLimitFindings(request.EnforcementCapable))
+			// The statement budget is a cap of the bound rule too (items): the
+			// limit finding names it.
+			return withOverBudgetStateMutation(parent, request, facts,
+				withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable), bounded.Of(bounded.Items), request))
 		}
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
@@ -9703,30 +9722,54 @@ func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
 
-// parseBudgetExceededReason is the evidence of the over-limit finding of a
-// call past the reading budget (shellparse.BudgetExceeded): the call is
-// opaque to the readers, not a finding about its text. The profile decides
-// as for any evaluation limit (guardrailActionForProfile): an alert outside
-// the strict profile (managed non-strict included, rel-1-0-6:GAP-0675), a
-// block in strict (managed strict included).
+// parseBudgetExceededReason is the reason the over-limit finding of a call
+// past the reading budget (shellparse.BudgetExceeded) carries beside the cap
+// of the bound rule (bounded_truncated cap=<kind>): the call is opaque to the
+// readers, not a finding about its text.
 const parseBudgetExceededReason = "parse_budget_exceeded"
 
-// trustedActionBudgetFindings is trustedActionLimitFindings for a call past
-// the reading budget, with the reason parse_budget_exceeded.
-func trustedActionBudgetFindings(enforcementCapable bool) []RuleFinding {
-	findings := trustedActionLimitFindings(enforcementCapable)
+// trustedBudgetReason is the reason the command of input is past the reading
+// budget (shellparse.BudgetExceeded).
+func trustedBudgetReason(input actionfacts.Input) string {
+	command := input.Command
+	if command == "" && len(bytes.TrimSpace(input.Args)) > 0 {
+		if field, present, valid := trustedTopLevelCommandField(input.Args); valid && present {
+			command = field
+		}
+	}
+	return shellparse.BudgetExceeded(command)
+}
+
+// withBudgetTruncation judges a call the readers did not read: the check
+// that works on the raw text first (withBudgetStateBlock), then the bound
+// rule's floor (withBoundedTruncation), with the reason of the budget.
+//
+// A brace expansion past its bound (shellparse.BudgetBraces) is not read as
+// text that hides a write: the call parses (the bound is on what the words
+// expand to), the owner traces name the DefenseClaw tree in most of their
+// scripts, and it was an evaluation-limit-only call before the budget, so it
+// keeps that verdict.
+func withBudgetTruncation(request trustedActionRequest, reason string) []RuleFinding {
+	var findings []RuleFinding
+	if reason != shellparse.BudgetBraces {
+		findings = withBudgetStateBlock(request, nil)
+	}
+	findings = withBoundedTruncation(findings, shellparse.BudgetTruncated(reason), request)
 	for index := range findings {
-		findings[index].Evidence = parseBudgetExceededReason
+		if canonicalTrustedRuleID(findings[index].RuleID) == evaluationLimitRuleID {
+			findings[index].Evidence += "; " + parseBudgetExceededReason
+		}
 	}
 	return findings
 }
 
 // withBudgetStateBlock keeps, for a call the readers did not read, the
-// check that works on the raw text. A call whose text may name the active
-// DefenseClaw state (hookpaths.MayNameState: quotes, escapes, case and
-// patterns do not hide it, and over-matching only costs a block on a call
-// that is itself past the budget) is judged as a proven mutation of it, the
-// one finding observe mode also blocks on. Before the budget such a call
+// check that works on the raw text. A call that may write the active
+// DefenseClaw state (hookpaths.BudgetMayWriteState: a statement that may name
+// it, however quotes, escapes, case or patterns spell it, and is not proven
+// read-only) is judged as a proven mutation of it, the one finding observe
+// mode also blocks on. A call that only reads or prints what names the state
+// is not blocked: the owner traces name the DefenseClaw tree in most calls. Before the budget such a call
 // was read in full, and a write to the state after any padding blocked in
 // every mode (rel-1-0-2:GAP-0568); no padding can now turn that into an
 // alert or an allow (GAP-0281). The text is the same the readers would
@@ -9734,11 +9777,13 @@ func trustedActionBudgetFindings(enforcementCapable bool) []RuleFinding {
 // argument.
 func withBudgetStateBlock(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	input := request.Input
-	text := input.Command + "\n" + strings.Join(input.Argv, "\n") + "\n" + string(input.Args)
-	if command, present, valid := trustedTopLevelCommandField(input.Args); valid && present {
-		text += "\n" + command
+	command := input.Command
+	if command == "" {
+		if field, present, valid := trustedTopLevelCommandField(input.Args); valid && present {
+			command = field
+		}
 	}
-	if !hookpaths.MayNameState(text) {
+	if !hookpaths.BudgetMayWriteState(command+"\n"+strings.Join(input.Argv, "\n"), input.ActiveHome) {
 		return findings
 	}
 	return withProvenActiveStateMutation(request, findings)

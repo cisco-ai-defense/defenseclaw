@@ -9,7 +9,6 @@ import (
 	"io"
 	"io/fs"
 	"maps"
-	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -2045,25 +2044,25 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 // The identity index of one active state tree is built at most once per
 // activeStateIndexTTL and shared by every shell operand and request in that
 // time, so a command naming many ordinary hard links costs one bounded walk.
-// The walk stops after activeStateIndexEntries entries or activeStateIndexBudget,
-// well inside every hook deadline; a file it did not reach is not mapped (no
-// block), which never refuses ordinary shell work. A native patch target is
+// The walk stops after activeStateIndexEntries entries, well inside every hook
+// deadline; a file it did not reach is not mapped (no block), which never
+// refuses ordinary shell work. Every bound of these walks counts entries,
+// never wall-clock time, so a call gets the same answer on a loaded box and
+// an idle one (GAP-0339). A native patch target is
 // judged by ResolveActiveStateIdentity instead, which neither caches nor
 // treats an unfinished walk as an answer (GAP-0488, GAP-0073).
 var (
 	activeStateIndexEntries = 4096
-	activeStateIndexBudget  = 250 * time.Millisecond
 	activeStateIndexTTL     = 2 * time.Second
 	activeStateIndexWalks   atomic.Int64
 	activeStateIndex        struct {
 		sync.Mutex
 		byRoot map[string]activeStateIdentityIndex
 	}
-	// The identity walk of a patch target has no entry bound and a time bound
-	// only: it runs for an existing multiply linked target, never answers
-	// from a partial view, and a state too large to read in the time is not
-	// proved.
-	activeStateExactBudget = 2 * time.Second
+	// The identity walk of a patch target has a large entry bound only: it
+	// runs for an existing multiply linked target, never answers from a
+	// partial view, and a state with more entries is not proved.
+	activeStateExactEntries = 100000
 )
 
 type activeStateIdentity struct {
@@ -2093,7 +2092,7 @@ func activeStateIdentities(activeRoot string) []activeStateIdentity {
 	}
 	activeStateIndexWalks.Add(1)
 	var files []activeStateIdentity
-	walkActiveStateFiles(activeRoot, activeStateIndexEntries, now.Add(activeStateIndexBudget), func(relative string, info os.FileInfo) bool {
+	walkActiveStateFiles(activeRoot, activeStateIndexEntries, func(relative string, info os.FileInfo) bool {
 		files = append(files, activeStateIdentity{relative: relative, info: info})
 		return false
 	})
@@ -2174,9 +2173,8 @@ func activeStateViewOf(activeRoot string) (files []activeStateIdentity, complete
 	started := time.Now()
 	settleLimit := activeStateSettleLimit(started)
 	walk := &activeStateWalk{
-		limit:    math.MaxInt,
-		deadline: started.Add(activeStateExactBudget),
-		record:   true,
+		limit:  activeStateExactEntries,
+		record: true,
 		visit: func(relative string, info os.FileInfo) bool {
 			files = append(files, activeStateIdentity{relative: relative, info: info})
 			return false
@@ -2236,25 +2234,24 @@ const maxActiveStateDepth = 64
 
 // activeStateWalk is one pass over the regular files of the active state.
 type activeStateWalk struct {
-	limit    int
-	deadline time.Time
-	visit    func(relative string, info os.FileInfo) bool
-	record   bool // keep the fingerprint of every directory and link read
-	watches  []activeStateWatch
-	visited  int
-	stopped  bool          // visit accepted a file
-	over     bool          // the entry or time bound was reached
-	partial  bool          // some of the state could not be seen
-	linked   []os.FileInfo // directories reached through a link, walked once
+	limit   int
+	visit   func(relative string, info os.FileInfo) bool
+	record  bool // keep the fingerprint of every directory and link read
+	watches []activeStateWatch
+	visited int
+	stopped bool          // visit accepted a file
+	over    bool          // the entry bound was reached
+	partial bool          // some of the state could not be seen
+	linked  []os.FileInfo // directories reached through a link, walked once
 }
 
 // walkActiveStateFiles visits the regular files of the active state in the
 // order of activeStateFiles and activeStateTrees until visit returns true. A
 // link to a directory is followed. It reports whether the view was complete:
-// false when it stopped at the entry or time bound, or could not list a
+// false when it stopped at the entry bound, or could not list a
 // directory or stat a name, so what it did not see is unknown.
-func walkActiveStateFiles(activeRoot string, limit int, deadline time.Time, visit func(relative string, info os.FileInfo) bool) (complete bool) {
-	return (&activeStateWalk{limit: limit, deadline: deadline, visit: visit}).run(activeRoot)
+func walkActiveStateFiles(activeRoot string, limit int, visit func(relative string, info os.FileInfo) bool) (complete bool) {
+	return (&activeStateWalk{limit: limit, visit: visit}).run(activeRoot)
 }
 
 func (w *activeStateWalk) run(activeRoot string) (complete bool) {
@@ -2318,7 +2315,7 @@ func (w *activeStateWalk) enter() bool {
 		return false
 	}
 	w.visited++
-	if w.visited > w.limit || time.Now().After(w.deadline) {
+	if w.visited > w.limit {
 		w.over, w.partial = true, true
 		return false
 	}

@@ -72,22 +72,47 @@ func NestedBodyWeight(command string) int {
 		return 0
 	}
 	work := 0
-	var visit func(text string, depth int) bool
-	visit = func(text string, depth int) bool {
+	var visit func(text string, depth int, code bool) bool
+	visit = func(text string, depth int, code bool) bool {
 		if depth >= 3 {
 			work += len(text) * (depth - 2) * (depth - 2)
 			if work > MaxNestedBodyBytes {
 				return true
 			}
 		}
-		if depth >= nestedBodyMaxDepth || nestingBound(text) != "" {
+		if depth >= nestedBodyMaxDepth {
+			return false
+		}
+		// A body is a command the readers parse: it is under the reading
+		// budget like the call that carries it, and the measure does not
+		// parse a body past it. The first stage reads a single-quoted body as
+		// data (its brackets are not nesting, its words are no tokens), so
+		// the body is the one place the budget sees what it holds. A body a
+		// shell is given (bash -c, eval) that is past the budget, nesting
+		// included, is past the nested bound; any other candidate (an
+		// argument of echo, a here-document: text a program reads) is not
+		// parsed and not counted.
+		if depth > 0 && (nestingBound(text) != "" || BudgetExceeded(text) != "") {
+			if code {
+				work = MaxNestedBodyBytes + 1
+				return true
+			}
+			return false
+		}
+		if nestingBound(text) != "" {
 			return false
 		}
 		file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
 		if err != nil || file == nil {
 			return false
 		}
+		// A body is strictly shorter than the text that holds it (it is a
+		// quoted or escaped part of it): a body as long as its text is the
+		// text again ($ names itself), which the measure would count at
+		// every level down to the depth bound, and a call carrying a 4 KiB
+		// comment weighed 17 KiB for it (GAP-0381).
 		over := false
+		fed := map[*syntax.Redirect]bool{}
 		syntax.Walk(file, func(node syntax.Node) bool {
 			if over {
 				return false
@@ -95,13 +120,20 @@ func NestedBodyWeight(command string) int {
 			switch node := node.(type) {
 			case *syntax.CallExpr:
 				for _, arg := range node.Args {
-					if body, ok := staticBodyWord(arg); ok && visit(body, depth+1) {
+					if body, ok := staticBodyWord(arg); ok && len(body) < len(text) && visit(body, depth+1, shellBodyProgram(node)) {
 						over = true
 						return false
 					}
 				}
+			case *syntax.Stmt:
+				// A here-document fed to a shell is code: bash <<EOF.
+				if call, isCall := node.Cmd.(*syntax.CallExpr); isCall && shellBodyProgram(call) {
+					for _, redirect := range node.Redirs {
+						fed[redirect] = true
+					}
+				}
 			case *syntax.Redirect:
-				if body, ok := staticBodyWord(node.Hdoc); ok && visit(body, depth+1) {
+				if body, ok := staticBodyWord(node.Hdoc); ok && len(body) < len(text) && visit(body, depth+1, fed[node]) {
 					over = true
 					return false
 				}
@@ -110,8 +142,62 @@ func NestedBodyWeight(command string) int {
 		})
 		return over
 	}
-	visit(command, 0)
+	visit(command, 0, false)
 	return work
+}
+
+// shellBodyProgram reports that call hands its arguments to a shell as code:
+// the program is a shell, or eval, directly or behind a wrapper that runs
+// the next command (sudo, env, nohup, ...), as the readers unwrap it.
+func shellBodyProgram(call *syntax.CallExpr) bool {
+	wrapper := ""
+	for i := 0; i < len(call.Args); i++ {
+		name := bodyWordName(call.Args[i])
+		if wrapper != "" && (strings.HasPrefix(name, "-") || strings.Contains(name, "=")) {
+			// An option or an assignment of the wrapper; skip the value an
+			// option takes as a separate word.
+			if bodyWrapperValueOption[wrapper+" "+name] {
+				i++
+			}
+			continue
+		}
+		switch name {
+		case "bash", "sh", "zsh", "dash", "ksh", "ash", "eval":
+			return true
+		case "sudo", "doas", "env", "nohup", "nice", "ionice", "time", "command", "exec", "setsid", "stdbuf", "timeout", "chroot", "unbuffer":
+			wrapper = name
+			if name == "timeout" {
+				i++ // the duration
+			}
+			continue
+		}
+		return false
+	}
+	return false
+}
+
+// bodyWordName is the program name of word: its static value without the
+// directory.
+func bodyWordName(word *syntax.Word) string {
+	name, ok := staticBodyWord(word)
+	if !ok {
+		name = word.Lit()
+	}
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		name = name[i+1:]
+	}
+	return name
+}
+
+// bodyWrapperValueOption lists the options of the wrappers that take a
+// separate value word (sudo -u user, env -u NAME, nice -n 5).
+var bodyWrapperValueOption = map[string]bool{
+	"sudo -u": true, "sudo -g": true, "sudo -h": true, "sudo -p": true, "sudo -C": true, "sudo -D": true, "sudo -r": true, "sudo -t": true, "sudo -U": true,
+	"doas -u": true, "doas -C": true,
+	"env -u": true, "env -C": true, "env -S": true,
+	"nice -n": true, "ionice -c": true, "ionice -n": true,
+	"stdbuf -i": true, "stdbuf -o": true, "stdbuf -e": true,
+	"timeout -s": true, "timeout -k": true,
 }
 
 // staticBodyWord is the shell value of a word made only of literal and

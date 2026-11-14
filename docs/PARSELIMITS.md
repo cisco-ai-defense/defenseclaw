@@ -20,7 +20,11 @@ copy of the parse cache, a fatal error that kills the process).
    full) and *raw* (every byte, with a bound eight times and four times the
    aware one). The aware count is this pass's reading of the grammar, not the
    parser's: where the two differ, the raw bound still limits what the parser is
-   given, and the tree measure below counts what it really holds.
+   given, and the tree measure below counts what it really holds. A `#` starts
+   a comment only at the start of a word: not after an escaped blank or
+   bracket (`a\ #x` is one word), and not inside an open double-quoted string
+   (the `#` there is text and a `$(` after it is code); where one pass cannot
+   tell, the text counts as code.
 2. **A tree measure**, for a text past a soft bound (more than 2,048 bytes or
    512 chain bytes): the text is parsed once and the tree is counted with an
    iterative walk (explicit stack, no recursion): nodes, depth and chain
@@ -56,19 +60,60 @@ bound.
 
 ## An over-budget call
 
-A call past the budget is opaque to the readers, so it takes the unknown tier
-of the hook, the existing evaluation limit (`ACTION-COMPOUND-LIMIT`), with the
-reason `parse_budget_exceeded`: an alert outside the strict profile, a block in
-strict, managed strict included (managed non-strict alerts, by the owner rule
-of rel-1-0-6:GAP-0675). It never reads as allowed.
+A call past the budget is truncated in the sense of the bound rule
+(`internal/guardrail/bounded`): it takes the
+unknown tier of the hook, the existing evaluation limit
+(`ACTION-COMPOUND-LIMIT`), through `withBoundedTruncation`. The reason is
+`bounded_truncated cap=<kind>` and `parse_budget_exceeded` (bytes: `bytes`;
+nesting and tree depth: `depth`; tree nodes: `nodes`; chain operators, tokens,
+brace expansion, an unparsed chain: `items`). It alerts outside the strict
+profile, a managed install with a pack that is not strict included (the owner
+ruling of rel-1-0-6:GAP-0675), and blocks in strict, managed strict included.
+It never reads as allowed.
 
-It keeps the check that works on the raw text. A call whose text may name the
-active DefenseClaw state (`hookpaths.MayNameState`: quotes, escapes, case and
-patterns do not hide it) is judged as a proven mutation of it, which blocks in
-every mode, including observe, as the readers' proof of a state write did
-before the budget refused to read the call (GAP-0281). The hook client sends
-the incomplete-evidence header for such a call; the gateway does not depend on
-it.
+It keeps the check that works on the raw text. A call whose statements may
+write the active DefenseClaw state (`hookpaths.BudgetMayWriteState`: a
+statement that may name it, however quotes, escapes, case or patterns spell
+it, and is not proven read-only) is judged as a proven mutation of it, which
+blocks in every mode, including observe, as the readers' proof of a state write
+did before the budget refused to read the call (GAP-0281). That holds for a
+state write before the cap (GAP-0312: a write before 513 nested subshells) and
+after it. A call that only reads or prints what names the state (the owner
+traces name the tree in most scripts) is not blocked. The hook client sends the
+incomplete-evidence header for such a call, listing the state it may write
+(`hookpaths.BudgetStateReading`); the gateway does not depend on it.
+
+The statements of such a call that may name a protected target or the state
+are also judged one by one, each as the call it is (`budgetSegments`: at most
+16 statements of at most 4 KiB, found by halving the call, from the first and
+the last 32 KiB of it; `shellparse.StatementSpans` cuts at `;`, line ends, `&&`
+and `||` and never inside a quoted string, a comment or a here-document body).
+A block proven on one of them counts, whether the padding that put the call
+past the budget comes before or after it (GAP-0435, GAP-0381). A statement is
+not cut into statements again.
+
+A brace expansion past its bound and nested shell bodies past
+`MaxNestedBodyBytes` keep the evaluation-limit-only verdict the owner ruled for
+them (rel-1-0-6:GAP-0675, GAP-0677).
+
+A shell call over the string limit of the analysis (64 KiB) leaves the
+analysers no command to judge. When its padding is white space or comments the
+bounded twin reads the whole call; otherwise (one word of that size) it is
+judged as on base: GAP-0382 asks to truncate it and stays open for the lead's
+decision. A trailing comment never takes a block away (GAP-0381): the nested
+body measure counts a body that is strictly shorter than the text that holds
+it (a body that names itself, such as `$`, was counted again at every level
+and weighed 17 KiB), and treats the body of `sudo`, `env`, `nohup`, `nice`,
+`timeout` and like wrappers, and a here-document fed to a shell, as code. Two of 3,134,337 real calls are over 64 KiB.
+
+## Every cap counts work, never time
+
+No bound of a shell reader counts wall-clock time: the walks of the active
+state, the linked-tree walks and the state-glob expansion end at an entry or
+work bound, so one call has one verdict whatever the load of the box
+(GAP-0339, tests under full CPU load, 50 runs per call and tier; under the
+race detector 4 runs and one busy goroutine, so a CI shard finishes the test in
+seconds, GAP-0440).
 
 ## Cost curve
 
@@ -185,11 +230,31 @@ heredoc-lines  n=65536   bytes=393244 ms=808.4   MiB=354  action=allow
 __CURVE2_DONE__                                           
 ```
 
-The `bytes` dimension is not a structure and is not in this table. A benign
-here-document of ordinary text costs the rule engine about 2.5 ms and 1 MiB
-per KB (98 KB: 250 ms and 103 MiB), whatever its structure; that is the same
-cost as before the budget, bounded by `MaxCommandBytes`, and tracked as its own
-gap.
+### Share of real calls near a bound
+
+Over the 3,134,337 calls of the owner traces: 0 are past a bound of this
+budget (220 are past the older brace-expansion bound, unchanged); the largest
+chain has 38 nodes (7% of the cap), the deepest tree 52 levels (3%), the
+largest 13,559 nodes (41%; 1 call is within 10x of the cap, none within 2x),
+the largest call 97,371 bytes (9% of the cap). The hook p95 on 20,000 owner
+trace calls and 20,000 s3 calls is unchanged against the base (see the review
+notes of the commit), with identical verdicts on every call.
+
+### What the budget does not bound: the bytes of benign text
+
+A benign here-document of ordinary text is one node, so no structural bound
+applies to it, and the readers pay a per-byte cost on its text: about 2.5 ms
+and 1 MiB per KB (98 KB, the largest real call: 250 ms and 103 MiB; extrapolated
+1 MiB: about 2.3 s and 900 MiB). It is the same cost as before the budget
+(rel-1-0-10:GAP-0299, P3). It is spread over about ten readers (the patch
+target reader, the whole-call fallback, the nested-body weight, the rule scan),
+so there is no single input to bound. The one lever is a cap on the command
+size. A cap at the 64 KiB analysis limit would turn benign text rows into
+alerts, and would bypass the over-limit reading of padded calls
+(`actionfacts/over_limit_command_layout.go`), which proves protected writes in a
+call past 64 KiB; that would be a downgrade of the kind GAP-0281 describes. So
+`MaxCommandBytes` stays at the hook body cap until that reading can be done
+without the per-byte cost.
 
 ## Tests
 

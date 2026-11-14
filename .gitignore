@@ -220,3 +220,6 @@ outputs/
 # DefenseClaw-managed Kiro hook config. Written by `defenseclaw setup kiro`
 # with machine-absolute hook-script paths, so it is per-machine state.
 .kiro/hooks/defenseclaw.json
+
+# Windows test binaries are built and copied by the gate scripts, never committed.
+.wintest/

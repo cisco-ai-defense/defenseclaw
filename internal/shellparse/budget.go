@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -110,6 +111,25 @@ const (
 	BudgetUnparsed = "unparsed_chain"
 )
 
+// BudgetTruncated is the bound rule's view of a budget reason
+// (BudgetExceeded): the cap kind the reading hit, for the verdict floor of
+// internal/guardrail/bounded. The reasons map to the kinds: bytes to Bytes;
+// nesting and tree depth to Depth; tree nodes to Nodes; chain operators,
+// tokens, brace expansion and an unparsed chain to Items.
+func BudgetTruncated(reason string) bounded.CapSet {
+	switch reason {
+	case "":
+		return bounded.CapSet{}
+	case BudgetBytes:
+		return bounded.Of(bounded.Bytes)
+	case BudgetNesting, BudgetDepth:
+		return bounded.Of(bounded.Depth)
+	case BudgetNodes:
+		return bounded.Of(bounded.Nodes)
+	}
+	return bounded.Of(bounded.Items)
+}
+
 // TooDeep reports whether command is past the reading budget (see
 // BudgetExceeded). Callers take their over-limit path and never hand such a
 // command to a recursive parser or an expander.
@@ -211,7 +231,11 @@ func computeBudget(command string) string {
 		return BudgetChain
 	case aware.tokens > MaxTokens || raw.tokens > rawTokens:
 		return BudgetTokens
-	case aware.chain <= softChainBytes && len(command) <= softBytes:
+	case raw.chain <= softChainBytes && len(command) <= softBytes:
+		// The shortcut counts every | and & byte of the text, data and all:
+		// the aware count is this pass's reading of the grammar (a # after an
+		// escaped blank, a quote after a backslash) and the parser may read
+		// it differently, so it never decides that a text needs no measure.
 		return ""
 	}
 	file, ok := parseUnbudgeted(command)
@@ -219,7 +243,7 @@ func computeBudget(command string) string {
 		// Text that does not parse has no tree to count. Past the soft
 		// chain bound it may be a chain with a syntax error (GAP-0284); other
 		// text is bounded by MaxTokens and MaxCommandBytes.
-		if aware.chain > softChainBytes {
+		if raw.chain > softChainBytes {
 			return BudgetUnparsed
 		}
 		return ""
@@ -227,42 +251,79 @@ func computeBudget(command string) string {
 	return measureTree(file)
 }
 
+// maxRawNesting bounds the nesting of ( { [ counted in every byte, comments
+// and all. The nesting bound proper (MaxNestingDepth) counts them outside
+// comments, so a comment full of brackets is not nesting (GAP-0381). This one
+// is the stop when this pass reads the grammar differently from the parser: the mvdan parser
+// takes about 6 KB of stack for a level, so 32,768 levels are 200 MB of a 1 GB
+// goroutine stack (GAP-2537 overflowed at 180,000).
+const maxRawNesting = 64 * MaxNestingDepth
+
 // scanCounts is the one linear pass over the raw bytes: the nesting of ( {
 // [ (whose overflow it returns as the reason) and the two counts, raw and
 // aware of data.
 func scanCounts(command string) (raw, aware budgetCounts, braces bool, reason string) {
-	depth := 0
+	depth, rawDepth := 0, 0
 	var pending []heredocSpec
-	dataUntil := 0
+	dataUntil, commentUntil := 0, 0
+	quoted := false // inside an open double-quoted string, as far as one pass can tell
 	for i := 0; i < len(command); i++ {
 		c := command[i]
+		data := i < dataUntil
+		if !data {
+			if end := dataSpan(command, i, &pending, quoted); end > i {
+				dataUntil, data = end, true
+				if c == '#' || c == '\\' {
+					commentUntil = end
+				}
+			}
+		}
+		// Only a comment and an escaped byte are certainly no code. A single-quoted string or a
+		// here-document body may be the script a shell is given (bash -c,
+		// eval, a shell reading its standard input), so its brackets count as
+		// nesting, as they did before the budget.
+		code := !data || i >= commentUntil
 		switch c {
 		case '(', '{', '[':
-			if depth++; depth > MaxNestingDepth {
+			if rawDepth++; rawDepth > maxRawNesting {
 				return raw, aware, braces, BudgetNesting
+			}
+			if code {
+				if depth++; depth > MaxNestingDepth {
+					return raw, aware, braces, BudgetNesting
+				}
 			}
 			braces = braces || c == '{'
 		case ')', '}', ']':
-			if depth > 0 {
+			if rawDepth > 0 {
+				rawDepth--
+			}
+			if code && depth > 0 {
 				depth--
 			}
 		}
-		if i < dataUntil {
-			// Data the shell does not parse: only the raw count sees it.
-			raw.feed(command, i)
-			aware.inWord = true
-			continue
+		if c == '"' && !data {
+			quoted = !quoted
 		}
-		if end := dataSpan(command, i, &pending); end > i {
-			dataUntil = end
-			raw.feed(command, i)
+		raw.feed(command, i)
+		if data {
+			// Data the shell does not parse: only the raw count sees it.
 			aware.inWord = true
 			continue
 		}
 		aware.feed(command, i)
-		raw.feed(command, i)
 	}
 	return raw, aware, braces, ""
+}
+
+// escapedAt reports whether command[i] is escaped: an odd number of
+// backslashes precede it.
+func escapedAt(command string, i int) bool {
+	n := 0
+	for j := i - 1; j >= 0 && command[j] == '\\'; j-- {
+		n++
+	}
+	return n%2 == 1
 }
 
 // heredocSpec is a here-document whose body starts after the next newline.
@@ -279,7 +340,7 @@ type heredocSpec struct {
 // | or && in it for the raw bound only, so a here-document of shell code or
 // prose is not mistaken for a chain. A here-document marker adds to
 // pending; the body is data from the next newline.
-func dataSpan(command string, i int, pending *[]heredocSpec) int {
+func dataSpan(command string, i int, pending *[]heredocSpec, quoted bool) int {
 	switch c := command[i]; c {
 	case '\\':
 		return i + 2 // an escaped byte is never a quote, a # or a <
@@ -300,7 +361,11 @@ func dataSpan(command string, i int, pending *[]heredocSpec) int {
 		}
 		return len(command)
 	case '#':
-		if i == 0 || strings.IndexByte(" \t\n;&|()", command[i-1]) >= 0 {
+		// A # starts a comment only at the start of a word: not after an
+		// escaped blank or bracket (a\ #x is one word), and not inside a
+		// double-quoted string (a # there is text, and a $( after it is
+		// code). When one pass cannot tell, the text counts as code.
+		if !quoted && (i == 0 || strings.IndexByte(" \t\n;&|()", command[i-1]) >= 0 && !escapedAt(command, i-1)) {
 			if end := strings.IndexByte(command[i:], '\n'); end >= 0 {
 				return i + end
 			}
@@ -505,4 +570,49 @@ func measureTree(file *syntax.File) string {
 		}
 	}
 	return ""
+}
+
+// StatementSpans returns the byte ranges of the statements of command, cut at
+// ;, a line end, && and || (no parse: the text is read once, linearly). What
+// the shell does not read as code never splits a statement: a single-quoted
+// string, a comment, an escaped byte, and the body of a here-document, so a
+// line of a here-document is no statement of its own. Blanks at the start of
+// a statement are not in its range; empty statements are dropped.
+func StatementSpans(command string) [][2]int {
+	var spans [][2]int
+	var pending []heredocSpec
+	start := 0
+	cut := func(end, next int) {
+		for start < end && strings.IndexByte(" \t\r", command[start]) >= 0 {
+			start++
+		}
+		if start < end {
+			spans = append(spans, [2]int{start, end})
+		}
+		start = next
+	}
+	for i := 0; i < len(command); {
+		c := command[i]
+		if end := dataSpan(command, i, &pending, false); end > i {
+			if c == '\n' {
+				// The line end of a statement that opened a here-document:
+				// its body (data) is skipped, not cut into statements.
+				cut(i, end)
+			}
+			i = end
+			continue
+		}
+		switch c {
+		case ';', '\n':
+			cut(i, i+1)
+		case '&', '|':
+			if i+1 < len(command) && command[i+1] == c {
+				cut(i, i+2)
+				i++
+			}
+		}
+		i++
+	}
+	cut(len(command), len(command))
+	return spans
 }

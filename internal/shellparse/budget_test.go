@@ -162,6 +162,38 @@ func TestChainBytesFollowTheParser(t *testing.T) {
 	}
 }
 
+// TestBracketsInCommentsAreNotNesting pins GAP-0381 for the nesting bound: a
+// comment full of brackets is not nesting, and real nesting still is, in a
+// single-quoted string or a here-document body too (it may be the script a
+// shell is given).
+func TestBracketsInCommentsAreNotNesting(t *testing.T) {
+	brackets := strings.Repeat("([{", 2000)
+	for name, command := range map[string]string{
+		"comment":          "echo a # " + brackets + "\necho b",
+		"escaped brackets": "echo " + strings.Repeat("\\(", MaxNestingDepth+10),
+	} {
+		if reason := BudgetExceeded(command); reason != "" {
+			t.Errorf("%s: BudgetExceeded=%q", name, reason)
+		}
+	}
+	for name, command := range map[string]string{
+		"real nesting":       strings.Repeat("(", MaxNestingDepth+1) + "a",
+		"nesting after data": "echo a # (\n" + strings.Repeat("(", MaxNestingDepth+1) + "a",
+		"raw nesting bound":  "echo a # " + strings.Repeat("(", maxRawNesting+1),
+		"in single quotes":   "bash -c '" + strings.Repeat("(", MaxNestingDepth+1) + "a'",
+		"in a here-document": "bash <<'EOF'\n" + strings.Repeat("(", MaxNestingDepth+1) + "a\nEOF\n",
+		// The parser reads # as text here, so what follows is code
+		// (parselimits-2 review, finding 4).
+		"after an escaped blank":   "echo a\\ # " + strings.Repeat("$(", MaxNestingDepth+1) + "a",
+		"after an escaped bracket": "echo a\\(# " + strings.Repeat("$(", MaxNestingDepth+1) + "a",
+		"inside double quotes":     "echo \"a # " + strings.Repeat("$(", MaxNestingDepth+1) + "a",
+	} {
+		if reason := BudgetExceeded(command); reason != BudgetNesting {
+			t.Errorf("%s: BudgetExceeded=%q, want %q", name, reason, BudgetNesting)
+		}
+	}
+}
+
 // TestUnparsedChainIsOverTheBudget pins GAP-0284: a chain past the soft
 // bound that cannot be parsed (a syntax error, a wrapper that fails) has no
 // tree to measure and is over the budget, not within it.
@@ -362,6 +394,33 @@ func treeChain(file *syntax.File) int {
 	return chain
 }
 
+// hiddenChainForms are prefixes after which this pass's reading of the
+// grammar (aware of comments, quotes and here-documents) can differ from the
+// parser's: an escaped blank before a #, an escaped ( before a #, a quote
+// after a backslash, a here-document followed by an escaped NUL, CR or
+// newline. A chain behind each is real code for the parser.
+var hiddenChainForms = []string{
+	"a\\ #", "a\\(#", "\\$'x\\'", "a\\ '#", "a#b ",
+	"cat <<'EOF'\\\x00\nx\nEOF\n", "cat <<'EOF'\\\r\nx\nEOF\n", "cat <<EOF\\\x00\nx\nEOF\n",
+}
+
+// TestHiddenChainFormsAreMeasured pins the shortcut of the first stage: a
+// text under the soft byte bound whose | bytes the aware count may skip is
+// still measured when its raw count passes the soft chain bound, so a chain
+// the parser reads is never counted low (review P3 of rel-1-0-10:GAP-0283).
+func TestHiddenChainFormsAreMeasured(t *testing.T) {
+	for _, form := range hiddenChainForms {
+		command := form + strings.Repeat("|a", softChainBytes+90)
+		file, ok := parseUnbudgeted(command)
+		if !ok || treeChain(file) <= MaxChainOperators {
+			continue // not a chain for the parser: nothing to count
+		}
+		if reason := BudgetExceeded(command); reason == "" {
+			t.Errorf("%q: a chain of %d nodes is within the budget", form, treeChain(file))
+		}
+	}
+}
+
 // FuzzBudget generates large commands from the family table (and takes raw
 // text as well) and asserts the invariants of the budget: it answers; a
 // command past the budget is never parsed; a command within it parses to a
@@ -371,6 +430,9 @@ func FuzzBudget(f *testing.F) {
 		f.Add(name, uint32(1000), "")
 	}
 	f.Add("pipe", uint32(166443), "tail")
+	for _, form := range hiddenChainForms {
+		f.Add("", uint32(0), form+strings.Repeat("|a", 600))
+	}
 	f.Fuzz(func(t *testing.T, name string, n uint32, extra string) {
 		command := extra
 		if s, known := budgetShapes[name]; known {
@@ -392,14 +454,43 @@ func FuzzBudget(f *testing.F) {
 			// The first stage never counts fewer chain operators than the
 			// tree holds (its reading of data may skip real code only up to
 			// the raw bound, which this check does not excuse).
-			if _, aware, _, nesting := scanCounts(command); nesting == "" && aware.chain < treeChain(file) {
-				t.Fatalf("the first stage counts %d chain bytes but the tree has %d chain nodes", aware.chain, treeChain(file))
+			if raw, _, _, nesting := scanCounts(command); nesting == "" && raw.chain < treeChain(file) {
+				t.Fatalf("the first stage counts %d chain bytes but the tree has %d chain nodes", raw.chain, treeChain(file))
 			}
-			// The soft bounds hold: a text under both is never past a
-			// tree bound, so it is not parsed to find out.
-			if chain := strings.Count(command, "|") + strings.Count(command, "&&"); got != "" && len(command) <= softBytes && chain <= softChainBytes {
+			// The soft bounds hold: a text under both (its | and & bytes
+			// counted all, as the first stage counts them: the parser reads
+			// two & with a NUL or a line continuation between them as one &&)
+			// is never past a tree bound, so it is not parsed to find out.
+			if chain := strings.Count(command, "|") + strings.Count(command, "&"); got != "" && len(command) <= softBytes && chain <= softChainBytes {
 				t.Fatalf("a %d-byte command with %d chain bytes measures as %q but the first stage passes it", len(command), chain, got)
 			}
 		}
 	})
+}
+
+// TestStatementSpansSkipData pins the cut of the statement finder of a call
+// the readers did not read: statements end at ; a line end && and ||, and
+// what the shell does not read as code (a quoted string, a comment, an
+// escaped byte, a here-document body) never splits one.
+func TestStatementSpansSkipData(t *testing.T) {
+	for _, row := range []struct {
+		name, command string
+		want          []string
+	}{
+		{"cuts", "a; b && c || d\ne", []string{"a", "b", "c", "d", "e"}},
+		{"single quotes", "echo 'a; b' && c", []string{"echo 'a; b'", "c"}},
+		{"escaped", "echo a\\; b; c", []string{"echo a\\; b", "c"}},
+		{"comment", "a # b; c\nd", []string{"a # b; c", "d"}},
+		{"here-document", "cat <<'EOF'\nrm x\nrm y\nEOF\nafter", []string{"cat <<'EOF'", "after"}},
+		{"two here-documents", "cat <<A <<B\nx\nA\ny\nB\nz", []string{"cat <<A <<B", "z"}},
+		{"blanks", "  a ;;  ; b  ", []string{"a", "b"}},
+	} {
+		var got []string
+		for _, span := range StatementSpans(row.command) {
+			got = append(got, strings.TrimRight(row.command[span[0]:span[1]], " "))
+		}
+		if strings.Join(got, "|") != strings.Join(row.want, "|") {
+			t.Errorf("%s: StatementSpans = %q, want %q", row.name, got, row.want)
+		}
+	}
 }
