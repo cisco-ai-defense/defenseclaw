@@ -816,7 +816,7 @@ func TestInspectToolMessageLargeNumberTableStillBlocksTheKey(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("POSIX home fixture requires an unprivileged Unix user")
 	}
-	rows := make([]any, 30000)
+	rows := make([]any, 56000)
 	for i := range rows {
 		rows[i] = []any{i, i * 7}
 	}
