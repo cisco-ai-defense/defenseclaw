@@ -68,7 +68,13 @@ type capFloorState struct {
 
 // withCapFloor adds to the findings of the call in request the blocks its cap
 // pieces prove (see the comment above).
-func withCapFloor(parent context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+//
+// analysisStopped reports that the action analysis of the call stopped at its
+// syntax depth or node bound and holds no path of it (capFloorAnalysisStopped,
+// a state write inside 30 nested subshells was allowed in every tier): the
+// pieces of such a call are judged too. No limit finding is added for it, so
+// a call whose pieces prove nothing keeps its rel verdict.
+func withCapFloor(parent context.Context, request trustedActionRequest, findings []RuleFinding, analysisStopped bool) []RuleFinding {
 	if request.capFloor == nil || request.capFloorDepth > capFloorMaxDepth ||
 		!trustedBashExecutionTool(request.Input.Tool) ||
 		request.Input.DialectHint != "" && request.Input.DialectHint != actionfacts.DialectPOSIX {
@@ -78,11 +84,11 @@ func withCapFloor(parent context.Context, request trustedActionRequest, findings
 	if !known || command == "" {
 		return findings
 	}
-	capped := boundedLimitIndex(findings) >= 0
+	cwd, home := request.Input.CWD, request.Input.ActiveHome
+	capped := analysisStopped || boundedLimitIndex(findings) >= 0
 	if !capped && !strings.Contains(command, "<<") {
 		return findings
 	}
-	cwd, home := request.Input.CWD, request.Input.ActiveHome
 	head, tail := capFloorPieces(command)
 	if !capped {
 		// No cap: only a here-document fed to a shell is judged as the
@@ -276,6 +282,10 @@ type capFloorHeredoc struct {
 func capFloorCut(command string, from, to int) []capFloorPiece {
 	var pieces []capFloorPiece
 	var pending []capFloorHeredoc
+	// open holds the open double quotes (") and subshells or command
+	// substitutions (() around i: a $( inside a double-quoted string is
+	// code again, and its ) returns to the string.
+	var open []byte
 	start := from
 	cut := func(end, next int) {
 		if end > start {
@@ -283,10 +293,36 @@ func capFloorCut(command string, from, to int) []capFloorPiece {
 		}
 		start = next
 	}
-	wordStart := func(i int) bool { return i == from || strings.IndexByte(" \t\n;&|()`", command[i-1]) >= 0 }
+	wordStart := func(i int) bool {
+		j := i - 1
+		for j > from && command[j] == '\n' && command[j-1] == '\\' && !capFloorEscaped(command, from, j-1) {
+			// A line continuation is removed before the word is read.
+			j -= 2
+		}
+		return j < from || strings.IndexByte(" \t\n;&|()`", command[j]) >= 0 && !capFloorEscaped(command, from, j)
+	}
 	wordEnd := func(i int) bool { return i+1 >= to || strings.IndexByte(" \t\n;&|)`", command[i+1]) >= 0 }
 	for i := from; i < to; {
 		c := command[i]
+		if n := len(open); n > 0 && open[n-1] == '"' {
+			switch {
+			case c == '\\':
+				i += 2
+			case c == '"':
+				open = open[:n-1]
+				i++
+			case c == '$' && i+1 < to && command[i+1] == '(':
+				cut(i, i+2)
+				open = append(open, '(')
+				i += 2
+			case c == '`':
+				cut(i, i+1)
+				i++
+			default:
+				i++
+			}
+			continue
+		}
 		switch {
 		case c == '\\':
 			i += 2
@@ -304,7 +340,8 @@ func capFloorCut(command string, from, to int) []capFloorPiece {
 			i = end
 			continue
 		case c == '"':
-			i = capFloorDoubleQuotedEnd(command, i, to)
+			open = append(open, '"')
+			i++
 			continue
 		case c == '#' && wordStart(i):
 			cut(i, i)
@@ -359,12 +396,22 @@ func capFloorCut(command string, from, to int) []capFloorPiece {
 			pending = nil
 			start = i
 			continue
-		case c == ';' || c == '`' || c == '(' || c == ')':
+		case c == ';' || c == '`':
 			cut(i, i+1)
-		case c == '$' && i+1 < to && command[i+1] == '(':
-			cut(i, i+2)
-			i += 2
+		case c == '(' || c == '$' && i+1 < to && command[i+1] == '(':
+			next := i + 1
+			if c == '$' {
+				next++
+			}
+			cut(i, next)
+			open = append(open, '(')
+			i = next
 			continue
+		case c == ')':
+			cut(i, i+1)
+			if n := len(open); n > 0 && open[n-1] == '(' {
+				open = open[:n-1]
+			}
 		case c == '|' || c == '&':
 			if i > from && (command[i-1] == '>' || command[i-1] == '<') || i+1 < to && command[i+1] == '>' {
 				// A redirect (2>&1, &>, >|), not a list operator.
@@ -412,18 +459,14 @@ func capFloorSingleQuoted(command string, i, to int) (value string, end int) {
 	}
 }
 
-// capFloorDoubleQuotedEnd is the index after the double-quoted string at
-// command[i], or to when it is not closed.
-func capFloorDoubleQuotedEnd(command string, i, to int) int {
-	for j := i + 1; j < to; j++ {
-		switch command[j] {
-		case '\\':
-			j++
-		case '"':
-			return j + 1
-		}
+// capFloorEscaped reports whether command[i] is escaped: an odd number of
+// backslashes (from from on) precede it.
+func capFloorEscaped(command string, from, i int) bool {
+	n := 0
+	for j := i - 1; j >= from && command[j] == '\\'; j-- {
+		n++
 	}
-	return to
+	return n%2 == 1
 }
 
 // capFloorHeredocAt reads the here-document operator at command[i] (<< or
@@ -528,4 +571,13 @@ func capFloorStripKeywords(text string) string {
 		}
 		return text
 	}
+}
+
+// capFloorAnalysisStopped reports an action analysis that stopped at its
+// syntax depth or node bound (actionfacts StatusLimitExceeded): its facts hold
+// no path of the call.
+func capFloorAnalysisStopped(facts actionfacts.Facts) bool {
+	return facts.Parse.Status == actionfacts.StatusLimitExceeded &&
+		(slices.Contains(facts.Parse.Issues, actionfacts.IssueDepthLimit) ||
+			slices.Contains(facts.Parse.Issues, actionfacts.IssueNodeLimit))
 }

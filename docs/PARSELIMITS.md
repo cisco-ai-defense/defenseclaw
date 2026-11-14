@@ -70,6 +70,42 @@ before the budget refused to read the call (GAP-0281). The hook client sends
 the incomplete-evidence header for such a call; the gateway does not depend on
 it.
 
+## A block proven beside a cap (the cap floor)
+
+The unknown tier is a floor, not the verdict. A call past any reading cap of
+the trusted-action path (nesting, this budget, the statement budget, the
+nested-body bound: every call that carries `ACTION-COMPOUND-LIMIT`) is also cut
+into pieces in `internal/gateway/cap_floor.go` (`withCapFloor`, one place, run
+after every dispatch path). The cut reads the text once and never parses: it
+splits at `;`, `&`, `|`, `&&`, `||`, `(`, `)`, `$(`, a backquote, a line end
+and the `{` and `}` words, never inside a quoted string, a comment or a
+here-document body. The static script of a shell (`bash -c` with a
+single-quoted script, a here-document fed to a shell on standard input) is a
+piece of its own. A piece whose text may name a protected target or the
+DefenseClaw state (`hookpaths.BoundCallMayNameProtected`) is judged by every
+reader as the call it is, and a finding a reader proves there (an
+authoritative proof that is not itself an evaluation limit or a parse failure)
+counts for the whole call, rule id included. So a write that blocks alone
+still blocks before, after or inside the padding that hit the cap, in every
+tier, and a state write still blocks in observe (rel-1-0-10:GAP-0312,
+GAP-0360, GAP-0435, GAP-0381).
+
+A call that names no protected target or state gets no piece and keeps the
+evaluation-limit verdict, so a cap alone is not a new block. Reads beside a
+cap stay reads: a piece is judged by the same rules as the call it is.
+
+A here-document fed to a shell is that shell's script whether or not a cap is
+hit; its body is judged as a piece of every such call (GAP-0532: a state write
+in it was allowed at any size).
+
+The floor has bounds of its own, each of which leaves the call at the unknown
+tier it already has: 16 pieces per hook call (half from the start of the call,
+half from its end, bodies included), a statement of at most 4 KiB, a shell
+body of at most 256 KiB, a body cut again at most twice, and of a call over
+96 KiB only the first 64 KiB and the last 32 KiB are cut. The pieces that name
+a target are found by halving, so a call of thousands of statements costs a
+pass over its text per level of the halving.
+
 ## Cost curve
 
 Hook decision, default tier, median of three, on the gate box. The caps are
@@ -204,5 +240,9 @@ gap.
   connectors, per user and managed, default and strict tiers, observe and
   action modes; the state-write proof at and past every bound; bounded
   allocation and time. Inputs come from the generators of `budget_gen_test.go`.
+- `internal/gateway/cap_floor_test.go`: the cut (`TestCapFloorPieces`); a
+  write proven alone (fixtures by case id) keeps its block and rule id beside
+  every cap family in all five tiers, the state write in observe, and a cap
+  alone or a script that writes nothing keeps its rel verdict.
 - `internal/actionfacts/pipeline_scope_test.go`: the statement split of a
   pipeline is linear.

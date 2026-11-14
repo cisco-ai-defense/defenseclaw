@@ -428,6 +428,8 @@ func dispatchTrustedAction(
 	// binding; the other tiers follow the top-level statements before it.
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
+	// analysisStopped: the action analysis below stopped at its own bound.
+	var analysisStopped bool
 	if !request.capFloorSeen {
 		// After every path below, the budget and limit paths included: a
 		// block proven on a statement the cap did not take still decides
@@ -438,7 +440,7 @@ func dispatchTrustedAction(
 			request.capFloor = &capFloorState{}
 		}
 		floorRequest := request
-		defer func() { findings = withCapFloor(parent, floorRequest, findings) }()
+		defer func() { findings = withCapFloor(parent, floorRequest, findings, analysisStopped) }()
 	}
 	bound := trustedActionCommandBound(request.Input)
 	if bound == shellReadingBudget {
@@ -586,6 +588,7 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
+	analysisStopped = capFloorAnalysisStopped(facts)
 	for _, twin := range windowsReadingTwinRequests(request, facts) {
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))

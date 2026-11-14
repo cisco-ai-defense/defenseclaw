@@ -60,8 +60,11 @@ func capFloorParityCommand(t *testing.T, id string) string {
 }
 
 // capFloorFillers put a call past one cap each: nesting (subshells, command
-// substitutions, brace groups), the reading budget (chain operators, tokens)
-// and the statement budget.
+// substitutions, brace groups, also inside a double-quoted string and after
+// an escaped blank), the reading budget (chain operators, tokens), the
+// statement budget (also through line continuations) and the depth bound of
+// the action analysis (silent: rel reads such a call alone as allowed, with no
+// limit finding).
 var capFloorFillers = []struct {
 	name  string
 	build func(inner string) string
@@ -72,7 +75,18 @@ var capFloorFillers = []struct {
 	{"pipe/513", func(string) string { return strings.Repeat("a|", 513) + "a" }},
 	{"pipe/129", func(string) string { return strings.Repeat("a|", 129) + "a" }},
 	{"words/131073", func(string) string { return "echo " + strings.Repeat("a ", 131073) }},
+	{"nest-dq-subst/600", func(in string) string {
+		return "echo \"a " + strings.Repeat("$(", 600) + in + strings.Repeat(")", 600) + "\""
+	}},
+	{"nest-escaped-blank/600", func(in string) string {
+		return "echo a\\ #" + strings.Repeat("$(", 600) + in + strings.Repeat(")", 600)
+	}},
+	{"nest-paren/64", func(in string) string { return strings.Repeat("(", 64) + in + strings.Repeat(")", 64) }},
 }
+
+// capFloorSilentFillers are the fillers whose cap rel reports with no limit
+// finding (the analysis depth bound).
+var capFloorSilentFillers = map[string]bool{"nest-paren/64": true}
 
 // capFloorShellBodies put the write inside the script of a shell, behind a
 // pipe chain of n stages.
@@ -199,11 +213,16 @@ func TestCapFloorCapAloneKeepsItsVerdict(t *testing.T) {
 	}
 	for _, tier := range boundedTestTiers {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
-		floor := bounded.Unknown(tier.tier)
-		for id, command := range commands {
-			action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(command))
-			if got := boundedParse(action); got != floor {
-				t.Errorf("%s %s: action=%s, want the unknown tier %s; findings=%v", tier.name, id, action, floor, findings)
+		for _, f := range capFloorFillers {
+			want := bounded.Unknown(tier.tier)
+			if capFloorSilentFillers[f.name] {
+				want = bounded.Allow
+			}
+			for _, id := range []string{f.name, f.name + "/listing"} {
+				action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(commands[id]))
+				if got := boundedParse(action); got != want {
+					t.Errorf("%s %s: action=%s, want %s (rel); findings=%v", tier.name, id, action, want, findings)
+				}
 			}
 		}
 		if tier.tier == bounded.TierStrict {
@@ -242,6 +261,9 @@ func TestCapFloorPieces(t *testing.T) {
 		{"echo 'a; b' \"c; d\"", []string{"echo 'a; b' \"c; d\""}},
 		{"a # b; c\nd", []string{"a", "d"}},
 		{"if x; then y; fi", []string{"x", "y"}},
+		{"echo \"a $(b; c) d\" e", []string{"echo \"a", "b", "c", "d\" e"}},
+		{"echo a\\ #$(b)", []string{"echo a\\ #", "b"}},
+		{"echo a \\\n#b; c\nd", []string{"echo a \\", "d"}},
 		{"bash -c 'p; q'", []string{"bash -c 'p; q'", "body:p; q"}},
 		{"sudo -n bash -lc 'p'\\''s; q'", []string{"sudo -n bash -lc 'p'\\''s; q'", "body:p's; q"}},
 		{"echo -c 'p; q'", []string{"echo -c 'p; q'"}},
