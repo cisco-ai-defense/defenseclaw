@@ -1842,7 +1842,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// A managed gateway cannot read the user's folders, so its resolver would call
 	// every glob unread; the hook client's reading decides there (GAP-0415).
 	if input.Command != "" && !request.ProtectedHomeHook && trustedShellCommandInput(request.Input) {
-		if reason := hookpaths.UncertainGlobWriteReason(input.Command, input.CWD, facts.ActiveHome, nil); reason != "" {
+		// Only a glob form or option the resolver does not model (the dynamic-argument
+		// class) is read here; a folder it cannot read is the older tier and stays
+		// as it was.
+		if reason := hookpaths.UncertainGlobWriteReason(input.Command, input.CWD, facts.ActiveHome, nil); reason == "dynamic-argument" {
 			return unproven(reason, "")
 		}
 	}

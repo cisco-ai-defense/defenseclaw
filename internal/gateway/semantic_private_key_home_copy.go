@@ -380,34 +380,25 @@ func ownSSHFolderPrivateDestination(destination, cwd, home string) bool {
 	if slices.Contains(trustedActionHomeSharedFolders, strings.ToLower(first)) {
 		return false
 	}
-	realHome, err := filepath.EvalSymlinks(home)
-	if err != nil {
-		return false
-	}
+	// Nothing of the destination below the home exists on this host (the home
+	// itself may be absent): there is no link to follow, the name is all there is.
 	existing := value
-	for existing != "" && existing != "/" {
+	for existing != home && pathWithin(existing, home) {
 		if _, err := os.Lstat(existing); err == nil {
 			break
 		}
 		existing = path.Dir(existing)
+	}
+	if _, err := os.Lstat(existing); err != nil {
+		return true
+	}
+	realHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return false
 	}
 	resolved, err := filepath.EvalSymlinks(existing)
 	if err != nil {
 		return false
 	}
 	return pathWithin(resolved, realHome) && !pathWithin(resolved, realHome+"/.ssh")
-}
-
-// ownSSHFolderLiteralGlob is the text of a word that is literal text and glob
-// characters only (no quote, expansion or substitution), such as /home/u/.ssh/*.
-func ownSSHFolderLiteralGlob(word *syntax.Word) (string, bool) {
-	var text strings.Builder
-	for _, part := range word.Parts {
-		literal, ok := part.(*syntax.Lit)
-		if !ok {
-			return "", false
-		}
-		text.WriteString(literal.Value)
-	}
-	return text.String(), text.Len() > 0 && !strings.ContainsAny(text.String(), "$`")
 }
