@@ -296,6 +296,18 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 	case "exec.remote_ip_download_execute_same_artifact":
 		return func(_, match string, _, _ int) bool { return acceptedPublicIPv4Download(match) }
 	}
+	if ruleID == secretAssignmentRuleID {
+		return func(text, match string, start, _ int) bool {
+			// The call text is JSON: an escaped newline, return or tab is the two
+			// characters backslash and n, r or t, and the word boundary the
+			// pattern found sits between them and the key. The letter is the
+			// escape, not the first letter of the key.
+			if start > 0 && text[start-1] == '\\' && strings.IndexByte("nrt", match[0]) >= 0 {
+				match = match[1:]
+			}
+			return acceptedSecretAssignment(match)
+		}
+	}
 	if strings.HasPrefix(ruleID, "SEC-") {
 		return func(_, match string, _, _ int) bool { return acceptedCredentialMatch(ruleID, match) }
 	}
@@ -1217,7 +1229,10 @@ func acceptedCredentialMatch(ruleID, match string) bool {
 	// A URI with user-info has already proved a credential-bearing structure.
 	// Never hide weak/default passwords based on their spelling.
 	if ruleID == "SEC-CONNSTR" {
-		return true
+		// A password that is one reference to a variable (${DB_PASSWORD},
+		// $DB_PASS, <password>) is a template slot, not a password: nothing is
+		// exposed. A reference in front of literal characters is a password.
+		return !secretAssignmentWholeReference.MatchString(strings.TrimSpace(candidate))
 	}
 	if knownPublicCredentialExample(ruleID, candidate) {
 		return false
@@ -1348,15 +1363,94 @@ func obviousCredentialPlaceholder(candidate string) bool {
 	return repeatedShortCredentialUnit(compact)
 }
 
+// secretAlnumCount counts the letters and digits of s; = + / padding carries no secret.
+func secretAlnumCount(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			n++
+		}
+	}
+	return n
+}
+
+// awsDocumentedSecretKey is the example secret access key of the AWS documentation.
+const awsDocumentedSecretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
 func knownPublicCredentialExample(ruleID, candidate string) bool {
 	switch ruleID {
 	case "SEC-AWS-KEY":
 		return strings.EqualFold(candidate, "IOSFODNN7EXAMPLE")
 	case "SEC-AWS-SECRET":
-		return candidate == "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+		// Only the pair AWS documents. The raw text carries it exactly. Shell
+		// normalization drops its slashes and may run the escaped newlines
+		// after it into the value, so there the slash-free documented value
+		// followed by nothing but that debris is the same pair; anything
+		// else after it is part of another secret.
+		if candidate == awsDocumentedSecretKey {
+			return true
+		}
+		rest, ok := strings.CutPrefix(strings.ReplaceAll(candidate, "/", ""), strings.ReplaceAll(awsDocumentedSecretKey, "/", ""))
+		return ok && awsExampleDebris(rest)
 	default:
 		return false
 	}
+}
+
+// awsExampleDebris reports what the documented AWS value may be followed by
+// when it is still only the documented value: the letters n, r and t of the
+// escaped newlines, return and tab after it, a rule line under it (one
+// character repeated: = or +), and the first word of the next line. Nothing
+// else is meaningful: no digit, no mix of symbols, no letters that are not a
+// word. The match class of the rule is letters, digits, + and =.
+func awsExampleDebris(rest string) bool {
+	const maxRule = 100 // a rule line under a documentation line
+	var alnum []string
+	rules := 0
+	for i := 0; i < len(rest); {
+		j := i
+		if c := rest[i]; c == '+' || c == '=' {
+			for j < len(rest) && rest[j] == c {
+				j++
+			}
+			rules++
+			if j-i > maxRule || rules > 2 {
+				return false
+			}
+		} else {
+			for j < len(rest) && rest[j] != '+' && rest[j] != '=' {
+				j++
+			}
+			alnum = append(alnum, rest[i:j])
+		}
+		i = j
+	}
+	for k, run := range alnum {
+		if k < len(alnum)-1 {
+			if len(run) > 8 || strings.Trim(run, "nrt") != "" {
+				return false
+			}
+			continue
+		}
+		// The last run is escape letters, then at most one word.
+		for cut := 0; cut <= len(run) && cut <= 8; cut++ {
+			if strings.Trim(run[:cut], "nrt") != "" {
+				break
+			}
+			if word := run[cut:]; word == "" || awsExampleNextLineWord(word) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// awsExampleNextLineWord reports a single word of letters of one case shape
+// with the vowels and consonants of a word: the head of the next line.
+func awsExampleNextLineWord(word string) bool {
+	return len(word) <= 16 && secretAssignmentWordShaped(word, 3) && countLetters(word) == len(word)
 }
 
 func compactCredential(value string) string {

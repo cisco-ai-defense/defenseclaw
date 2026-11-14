@@ -84,10 +84,16 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "fbb392bb8ac84607447cefa5a889cfe95ad396026c46159501d634c52bdd25ef",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "bada955b0ca029db29465c2ab0d5b4ffde02406eed0e16c36e70c7bc1de27ec6",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             "0dcc0d9a1cd54d73c8267c8950bb759806cd8e5a36b50b90d979ac39cc9eae18",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "b82abc998f4b917dbbc856bda3bb4f9211ce829b3ab86a6464a031b6953b680a",
+            # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
+            "ab20b275b3c44a0ade2cc47942dbe18d40a4cadb5626315ecb097b905f110f76",
+            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN and the batch 9 shell recall rules.
+            "b5cd7987ebc0047977727d2ce6ed58bee849229f4b6b6e3a5e07f3d3e6275e79",
         }
     ),
     "permissive": frozenset(
@@ -128,10 +134,16 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "9a79a431a425ee9a61e856af9bccfe840d0dbc1cd14757d7ba352eee704c671a",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "a35b1f3babbf06082de85953c1b6f7743233cff459a7ec19dbbf6c64181c5177",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             "976c0343636d8163f496e37746aa26c57f5495c906a5cd7142fda001d78bdeb0",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "969de899d5a8544152cd09ad05b1e67ac841a4da53c4bb1e992a3b55c796f7a1",
+            # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
+            "33c8403eee2442fcde01f22d118261ac3e8ded4d6652875d335ffaef70d823bc",
+            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN and the batch 9 shell recall rules.
+            "2bc8b27f12facb6c1b1356c52801fc529a39f63110e4d8ac6742acc9c3e25b41",
         }
     ),
     "strict": frozenset(
@@ -171,10 +183,16 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "bdd27d5347627c74b8b90da944b7dca7de20d5488c6e36c50b28d5a9d73763fc",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "18bef68d5e6cf60390d9f3925667fa2afa39d9d74b70ee5114c02de8b714c3ec",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             "437f688e218aef5d3c5b47eb1591330401fecc157964c742f7570781f885a9b3",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "f6ba060634b55b87887932700fbd73cd7d658f175f2bc83a75b057e45e8355aa",
+            # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
+            "5353b7ce79f3fc38085c93b43cae0075973d4f38f34a0ebd7bc11b065f870caa",
+            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN and the batch 9 shell recall rules.
+            "67d67ccace7e9cac5dfdf024d9492b92917af77ca6795bd5f194765ec95814b7",
         }
     ),
 }

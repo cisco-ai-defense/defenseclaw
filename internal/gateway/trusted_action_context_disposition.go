@@ -147,9 +147,20 @@ func applyTrustedActionContextDisposition(
 			continue
 		}
 		if !trustedActionContentFindingHasRiskPair(findingFacts, rule) {
-			// Literal secret/PII material in an action remains visible for
-			// local audit, but cannot alert or block without command-local
-			// proof of external egress or an active sensitive-path write.
+			if trustedActionCredentialLiteralRule(finding) &&
+				finding.enforcement != findingEnforcementDetectionOnly &&
+				trustedActionPersistsCredentialLiteral(findingFacts) {
+				// A credential value the action writes into a file, a store
+				// or a process alerts: it leaves the context for a place that
+				// keeps it. Without proof of where it goes it never blocks.
+				finding.enforcement = findingEnforcementAlertOnly
+				adjusted[index] = finding
+				continue
+			}
+			// Literal secret/PII material the action only looks at, and PII
+			// anywhere, remains visible for local audit, but cannot alert or
+			// block without command-local proof of external egress or an
+			// active sensitive-path write.
 			adjusted[index] = trustedActionAuditFinding(finding)
 			continue
 		}
