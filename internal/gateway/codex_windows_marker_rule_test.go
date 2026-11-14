@@ -80,7 +80,10 @@ func TestCodexWindowsActionBlocksCompleteArgvMarker(t *testing.T) {
 					!strings.Contains(strings.ToLower(string(mustJSONMarshal(resp.CodexOutput))), "deny") {
 					t.Fatalf("%s: action=%s raw=%s rules=%v output=%v reason=%s", tc.command, resp.Action, resp.RawAction, resp.RuleIDs, resp.CodexOutput, resp.Reason)
 				}
-			} else if resp.Action != "allow" || containsString(resp.RuleIDs, ruleID) {
+			} else if resp.Action != "allow" || (containsString(resp.RuleIDs, ruleID) && !strings.HasPrefix(resp.Reason, "detection-only")) {
+				// The rule may be named as detection-only telemetry (a partial
+				// cmd parse); it must not drive the verdict. The answer names
+				// its rule ids with or without an audit logger (GAP-0353).
 				t.Fatalf("benign command: action=%s rules=%v reason=%s", resp.Action, resp.RuleIDs, resp.Reason)
 			}
 		})
