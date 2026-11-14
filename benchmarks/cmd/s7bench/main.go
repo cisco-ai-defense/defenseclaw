@@ -44,6 +44,8 @@ type payload struct {
 	Events []event `json:"events"`
 	Intent string  `json:"user_intent"`
 	Prompt string  `json:"user_prompt"`
+	// Content is the user task of a case-v1 payload (the compare sets).
+	Content string `json:"content"`
 }
 
 type corpusCase struct {
@@ -197,6 +199,8 @@ func main() {
 	limit := flag.Int("limit", 0, "max cases")
 	strategy := flag.String("strategy", "regex_only", "guardrail.detection_strategy for the hook path")
 	judgeModel := flag.String("judge-model", "", "judge model (OpenAI-compatible name at -judge-url); empty: no judge")
+	alignmentLane := flag.String("alignment", "", "guardrail.cascade.lanes.alignment (off, shadow, alert, block); needs -judge-model")
+	promptFromContentFlag := flag.Bool("prompt-from-content", false, "send case-v1 payload.content as the UserPromptSubmit before the tool calls (the user task)")
 	judgeURL := flag.String("judge-url", "", "judge base URL")
 	dmURL := flag.String("dm-url", "", "decision model System One URL; empty: off")
 	dmModel := flag.String("dm-model", "", "decision model name")
@@ -249,6 +253,10 @@ func main() {
 			cfg.DecisionModel.HookConnectors = []string{"claudecode"}
 		}
 	}
+	if *alignmentLane != "" {
+		cfg.Guardrail.Cascade.Lanes = map[string]string{"alignment": *alignmentLane}
+	}
+	promptFromContent = *promptFromContentFlag
 	engine, err := gateway.S7NewEngine(cfg, "claudecode")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "boot:", err)
@@ -359,7 +367,11 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 		events = []event{c.Payload.event}
 	}
 	cwd := "/home/bench/work"
-	if intent := firstNonEmpty(c.Payload.Intent, c.Payload.Prompt); intent != "" {
+	intent := firstNonEmpty(c.Payload.Intent, c.Payload.Prompt)
+	if intent == "" && promptFromContent {
+		intent = c.Payload.Content
+	}
+	if intent != "" {
 		body, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": cwd, "prompt": intent, "transcript_path": ""})
 		e.Hook(ctx, body)
 	}
@@ -408,6 +420,9 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 		emit(r)
 	}
 }
+
+// promptFromContent is the -prompt-from-content flag.
+var promptFromContent bool
 
 func firstNonEmpty(v ...string) string {
 	for _, s := range v {

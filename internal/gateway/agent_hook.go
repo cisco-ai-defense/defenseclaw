@@ -3653,6 +3653,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 				judge.ObserveSessionPrompt(ctx, req.Content)
 			}
 			a.observeUserDownloadRequest(ctx, req.Content)
+			a.observeAlignmentTurn(ctx, req.ConnectorName, req.Content)
 		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
 		if isToolJudgeIntentEvent(req.HookEventName) {
@@ -3696,6 +3697,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// toast honor it (managed_enterprise only; no-op otherwise).
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
 	verdict = a.applyCascadeFinal(ctx, req.ConnectorName, hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
+	verdict = a.applyAlignmentLane(ctx, req.ConnectorName, req.HookEventName, req.ToolName, string(req.ToolArgs), req.CWD, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction

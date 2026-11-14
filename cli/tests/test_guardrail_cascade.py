@@ -115,6 +115,17 @@ class TestCascadeDoctor(unittest.TestCase):
         rows = self._run({"cascade": VIEW})
         self.assertEqual(rows[0][0], "pass")
 
+    def test_live_lanes_are_named(self):
+        view = dict(VIEW, lanes=[{"name": "alignment", "mode": "alert", "default": "off"}])
+        rows = self._run({"cascade": view})
+        self.assertEqual(rows[0][0], "pass")
+        self.assertIn("lanes alignment alert", rows[0][2])
+
+    def test_off_lanes_are_not_named(self):
+        view = dict(VIEW, lanes=[{"name": "alignment", "mode": "off", "default": "off"}])
+        rows = self._run({"cascade": view})
+        self.assertNotIn("lanes", rows[0][2])
+
     def test_silent_when_unset(self):
         cfg = config_module.default_config()
         rows = []
@@ -149,3 +160,23 @@ class TestCascadeExplainCommand(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAlignmentLaneStatus(unittest.TestCase):
+    def test_mode_reads_the_global_scope(self):
+        cfg = config_module.default_config()
+        self.assertEqual(cascade.alignment_mode(cfg), "off")
+        cfg.guardrail.cascade = {"lanes": {"alignment": "alert"}}
+        self.assertEqual(cascade.alignment_mode(cfg), "alert")
+
+    def test_status_row_only_when_not_off(self):
+        from defenseclaw.commands import cmd_status
+
+        rows = []
+        cfg = config_module.default_config()
+        with patch.object(cmd_status, "_status_row", side_effect=lambda name, value: rows.append((name, value))):
+            cmd_status._print_alignment_lane(cfg)
+            self.assertEqual(rows, [])
+            cfg.guardrail.cascade = {"lanes": {"alignment": "block"}}
+            cmd_status._print_alignment_lane(cfg)
+        self.assertEqual(rows, [("Alignment check", "block")])

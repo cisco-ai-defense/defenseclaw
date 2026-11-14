@@ -67,6 +67,10 @@ const (
 	CascadeLaneOff    = "off"
 	CascadeLaneShadow = "shadow"
 	CascadeLaneOn     = "on"
+	// CascadeLaneAlert and CascadeLaneBlock are the live values of a lane
+	// that emits its own finding (CascadeLane.Values), at that action.
+	CascadeLaneAlert = "alert"
+	CascadeLaneBlock = "block"
 
 	// DefaultCascadePolicyTimeout bounds one Rego evaluation on the hook path.
 	DefaultCascadePolicyTimeout = 5 * time.Millisecond
@@ -305,6 +309,10 @@ type CascadeLane struct {
 	ShadowOnly string
 	// Description is shown by explain.
 	Description string
+	// Values, when set, is the value set of a lane that emits its own
+	// finding at an action the admin picks (for example off, shadow, alert,
+	// block). Nil means off, shadow and on.
+	Values []string
 }
 
 var (
@@ -320,7 +328,7 @@ func RegisterCascadeLane(lane CascadeLane) {
 	cascadeLanesMu.Lock()
 	defer cascadeLanesMu.Unlock()
 	lane.Name = strings.TrimSpace(lane.Name)
-	if lane.Name == "" || !cascadeLaneValue(lane.Default) {
+	if lane.Name == "" || !lane.accepts(lane.Default) {
 		panic(fmt.Sprintf("config: cascade lane %q: bad registration", lane.Name))
 	}
 	if lane.ShadowOnly != "" && lane.Default == CascadeLaneOn {
@@ -350,6 +358,22 @@ func cascadeLane(name string) (CascadeLane, bool) {
 
 func cascadeLaneValue(v string) bool {
 	return v == CascadeLaneOff || v == CascadeLaneShadow || v == CascadeLaneOn
+}
+
+// accepts reports whether v is one of the values of the lane.
+func (l CascadeLane) accepts(v string) bool {
+	if l.Values != nil {
+		return slices.Contains(l.Values, v)
+	}
+	return cascadeLaneValue(v)
+}
+
+// valueList names the values of the lane for an error message.
+func (l CascadeLane) valueList() string {
+	if l.Values != nil {
+		return strings.Join(l.Values, ", ")
+	}
+	return "off, shadow, on"
 }
 
 // CascadeLockableKeys are the names guardrail.cascade.admin.locked accepts.
@@ -594,8 +618,8 @@ func validateCascadeScope(path string, s CascadeScope) error {
 		switch {
 		case !ok:
 			errs = append(errs, fmt.Errorf("%s.lanes.%s: no such lane in this release (lanes: %s)", path, name, cascadeLaneNames()))
-		case !cascadeLaneValue(value):
-			errs = append(errs, fmt.Errorf("%s.lanes.%s: %q is not one of off, shadow, on", path, name, s.Lanes[name]))
+		case !lane.accepts(value):
+			errs = append(errs, fmt.Errorf("%s.lanes.%s: %q is not one of %s", path, name, s.Lanes[name], lane.valueList()))
 		case value == CascadeLaneOn && lane.ShadowOnly != "":
 			errs = append(errs, fmt.Errorf("%s.lanes.%s: on is not available in this release: the lane ships shadow-only (%s); use shadow (record its verdict without changing the answer) or off", path, name, lane.ShadowOnly))
 		}
@@ -1122,8 +1146,8 @@ func cascadeWeaker(intended cascadeSnapshot, c *Config) []string {
 		out = append(out, "your admin.locked keys are not enforced")
 	}
 	for name, value := range want.Lanes {
-		if value == CascadeLaneOn && cascadeOr(got.Lanes[name], "") != CascadeLaneOn {
-			out = append(out, "lane "+name+" on is not in effect")
+		if laneRank(value) > laneRank(CascadeLaneShadow) && cascadeOr(got.Lanes[name], "") != value {
+			out = append(out, "lane "+name+" "+value+" is not in effect")
 		}
 	}
 	for path, scope := range intended.Connectors {
@@ -1173,7 +1197,9 @@ func meetCascadeRank(v string) int {
 
 func laneRank(v string) int {
 	switch v {
-	case CascadeLaneOn:
+	case CascadeLaneBlock:
+		return 3
+	case CascadeLaneOn, CascadeLaneAlert:
 		return 2
 	case CascadeLaneShadow:
 		return 1

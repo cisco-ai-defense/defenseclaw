@@ -1613,7 +1613,7 @@
     "cascadeLanes": {
       "type": "object",
       "maxProperties": 64,
-      "description": "Live/shadow switch per registered lane: off, shadow or on. A lane that ships shadow-only accepts off and shadow.",
+      "description": "Switch per registered lane: off, shadow or on. A lane that ships shadow-only accepts off and shadow. The alignment lane (alignment check) accepts off, shadow, alert or block.",
       "propertyNames": {
         "pattern": "^[a-z][a-z0-9_]{0,63}$"
       },

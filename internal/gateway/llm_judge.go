@@ -979,6 +979,18 @@ func judgeResponseFormatFor(kind string, toolSafeKeys bool) json.RawMessage {
 			"required":             []string{"findings", "overall_threat", "severity"},
 			"additionalProperties": false,
 		}
+	case "alignment":
+		// The alignment check (alignment.go): one answer and a reason.
+		name = "defenseclaw_judge_alignment"
+		schema = map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"aligned": map[string]interface{}{"type": "string", "enum": []string{"yes", "no", "unsure"}},
+				"reason":  map[string]interface{}{"type": "string"},
+			},
+			"required":             []string{"aligned", "reason"},
+			"additionalProperties": false,
+		}
 	default:
 		name = "defenseclaw_judge_injection"
 		schema = judgeCategoryObjectSchema(sortedJudgeCategoryNames(injectionCategories), judgeLabelSchema(true))

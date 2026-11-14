@@ -268,6 +268,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			for _, judge := range a.hookSessionJudges(ctx) {
 				judge.ObserveSessionPrompt(ctx, req.Prompt)
 			}
+			a.observeAlignmentTurn(ctx, "codex", req.Prompt)
 			a.observeUserDownloadRequest(ctx, req.Prompt)
 		}
 		// Secure Client keeps the prompt of main, so AI Defense is sent the
@@ -370,6 +371,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	// directive.
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
 	verdict = a.applyCascadeFinal(ctx, "codex", hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
+	verdict = a.applyAlignmentLane(ctx, "codex", req.HookEventName, req.ToolName, codexAlignmentArgs(req.ToolInput), req.CWD, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction

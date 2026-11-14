@@ -70,6 +70,10 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
+	// alignment is the per-session context of the alignment check
+	// (alignment.go); empty while the lane is off.
+	alignment alignmentStore
+
 	// apiBindFoundHeld: the first API bind of Run found the port held
 	// (another process, possibly another account, had it while this
 	// gateway restarted); set by acquireAPIListener, read by Run.

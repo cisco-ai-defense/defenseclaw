@@ -82,6 +82,38 @@ def gateway_explain(
         return None, "defenseclaw-gateway policy cascade printed no JSON"
 
 
+def lane_summary(cascade: dict[str, Any]) -> str:
+    """The lanes of a resolved cascade that are not off ("alignment alert"),
+    or "" when every lane is off."""
+    parts = []
+    for lane in cascade.get("lanes") or []:
+        mode = (lane or {}).get("mode") or "off"
+        if mode != "off":
+            parts.append(f"{lane.get('name')} {mode}")
+    return ", ".join(parts)
+
+
+def alignment_mode(cfg: Any) -> str:
+    """The guardrail.cascade.lanes.alignment value as written at the global
+    scope ("off" when unset), and whether a connector or profile scope sets
+    it too (then `defenseclaw guardrail cascade explain` has the per-scope
+    value). The gateway resolves the value it runs with."""
+    gc = getattr(cfg, "guardrail", None)
+    top = (getattr(gc, "cascade", None) or {}) if gc is not None else {}
+    mode = str(((top.get("lanes") or {}).get("alignment")) or "off").strip().lower()
+    scoped = False
+    for entry in (getattr(gc, "connectors", None) or {}).values() if gc is not None else []:
+        if ((getattr(entry, "cascade", None) or {}).get("lanes") or {}).get("alignment"):
+            scoped = True
+    for profile in (getattr(gc, "profiles", None) or {}).values() if gc is not None else []:
+        if ((getattr(profile, "cascade", None) or {}).get("lanes") or {}).get("alignment"):
+            scoped = True
+        for entry in (getattr(profile, "connectors", None) or {}).values():
+            if ((getattr(entry, "cascade", None) or {}).get("lanes") or {}).get("alignment"):
+                scoped = True
+    return mode + (" (connector or profile scopes set it too: defenseclaw guardrail cascade explain)" if scoped else "")
+
+
 def loosening_notes(cascade: dict[str, Any]) -> list[str]:
     """Settings that let the guardrail do less than the pack would."""
     notes: list[str] = []
