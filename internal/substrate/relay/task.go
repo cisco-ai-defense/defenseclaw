@@ -342,8 +342,11 @@ func watch(cmd *exec.Cmd, connector string, stall time.Duration, o HeadlessOptio
 }
 
 // ReportTaskEnd sends end to the gateway with report, retrying an attempt
-// without an answer or with a 5xx for up to reportBudget. A refusal (any
-// other non-2xx, such as an older gateway without the route) is final.
+// without an answer, with a 5xx or with a 429 for up to reportBudget, and
+// waiting at least an answer's Retry-After (GAP-0301: the agent shares the
+// actor's request budget, so a 429 must not drop the relay's real end). A
+// refusal (any other non-2xx, such as an older gateway without the route)
+// is final.
 func ReportTaskEnd(ctx context.Context, report func(context.Context, TaskEnd) error, end TaskEnd) error {
 	ctx, cancel := context.WithTimeout(ctx, reportBudget)
 	defer cancel()
@@ -353,15 +356,38 @@ func ReportTaskEnd(ctx context.Context, report func(context.Context, TaskEnd) er
 		if err == nil || errors.Is(err, errReportRefused) {
 			return err
 		}
+		wait := delay
+		var later *reportLater
+		if errors.As(err, &later) && later.after > wait {
+			wait = min(later.after, 30*time.Second)
+		}
 		select {
 		case <-ctx.Done():
 			return err
-		case <-time.After(delay):
+		case <-time.After(wait):
 		}
 		if delay < 30*time.Second {
 			delay *= 2
 		}
 	}
+}
+
+// reportLater is a report the gateway asked to send again (429 or 5xx),
+// after at least after when it said so.
+type reportLater struct {
+	status int
+	after  time.Duration
+}
+
+func (e *reportLater) Error() string { return fmt.Sprintf("task-end report: status %d", e.status) }
+
+// retryAfter reads a Retry-After of seconds; a date or garbage is 0.
+func retryAfter(v string) time.Duration {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return time.Duration(min(n, 300)) * time.Second
 }
 
 // errReportRefused is a task-end report the gateway answered with a status
@@ -378,8 +404,8 @@ func GatewayReport(t *kit.Transport) func(context.Context, TaskEnd) error {
 			return err
 		case resp.Status >= 200 && resp.Status < 300:
 			return nil
-		case resp.Status >= 500:
-			return fmt.Errorf("task-end report: status %d", resp.Status)
+		case resp.Status >= 500 || resp.Status == http.StatusTooManyRequests:
+			return &reportLater{status: resp.Status, after: retryAfter(resp.RetryAfter)}
 		}
 		return fmt.Errorf("%w (status %d)", errReportRefused, resp.Status)
 	}

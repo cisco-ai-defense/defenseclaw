@@ -57,6 +57,11 @@ func TestProcTreeFollowsTheAgentsDescendants(t *testing.T) {
 	if u, ok := tr.usage(); ok {
 		t.Fatalf("reused PIDs counted: %+v", u)
 	}
+	// GAP-0303: neither is a new process that reuses the agent's own PID.
+	put(100, 1, 100, 77, 900, "")
+	if u, ok := tr.usage(); ok {
+		t.Fatalf("a process reusing the agent's PID counted: %+v", u)
+	}
 }
 
 func TestParseProcStat(t *testing.T) {

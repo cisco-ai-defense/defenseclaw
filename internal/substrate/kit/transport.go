@@ -43,6 +43,8 @@ type Response struct {
 	// Mode and FailMode are the gateway's ModeHeader and FailModeHeader.
 	Mode     string `json:"mode,omitempty"`
 	FailMode string `json:"fail_mode,omitempty"`
+	// RetryAfter is the answer's Retry-After header ("" without one).
+	RetryAfter string `json:"retry_after,omitempty"`
 }
 
 // ErrUnreachable wraps a failure to get any HTTP answer.
@@ -230,7 +232,7 @@ func (t *Transport) once(ctx context.Context, r Request, key string, budget time
 		return Response{Status: resp.StatusCode}, errors.New("gateway answer too large")
 	}
 	return Response{Status: resp.StatusCode, Body: body,
-		Mode: resp.Header.Get(ModeHeader), FailMode: resp.Header.Get(FailModeHeader)}, nil
+		Mode: resp.Header.Get(ModeHeader), FailMode: resp.Header.Get(FailModeHeader), RetryAfter: resp.Header.Get("Retry-After")}, nil
 }
 
 // Warm makes one request to the actor listener so the egress path (the

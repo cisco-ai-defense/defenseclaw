@@ -67,6 +67,7 @@ Flags:
   --model ID                      default model id
   --gateway-url URL               actor listener URL (default http://<substrate.services.actor> of --config)
   --fail-mode MODE                interactive outage mode: open or closed
+  --task-stall DURATION           end a --task run that makes no progress for this long (1m to 24h; default 10m)
   --no-mcp-static                 do not run mcp-scanner over tool descriptions
   --mcp-analyzers LIST            mcp-scanner analyzers (default yara)
   --keep-entrypoint               keep the base image ENTRYPOINT and CMD (tests; a real actor image starts the relay)

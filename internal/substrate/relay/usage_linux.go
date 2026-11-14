@@ -33,6 +33,9 @@ type procTree struct {
 	proc  string
 	root  int
 	known map[int]uint64 // pid -> start time
+	// rootStart is the agent's start time from the first scan that saw it:
+	// a later process that reuses the PID is not the agent (GAP-0303).
+	rootStart uint64
 }
 
 func newProcTree(root int) *procTree {
@@ -80,15 +83,23 @@ func (t *procTree) scan() map[int]procStat {
 			queue = append(queue, pid)
 		}
 	}
-	add(t.root)
+	if st, ok := all[t.root]; ok && (t.rootStart == 0 || st.start == t.rootStart) {
+		t.rootStart = st.start
+		add(t.root)
+	}
 	for pid, start := range t.known {
 		if st, ok := all[pid]; ok && st.start == start {
 			add(pid)
 		}
 	}
-	for pid, st := range all {
-		if st.pgrp == t.root {
-			add(pid)
+	// The agent's group outlives the agent, but the kernel reuses the PID
+	// only once the group is empty: a different process on the agent's PID
+	// means the group is someone else's.
+	if st, ok := all[t.root]; t.rootStart != 0 && (!ok || st.start == t.rootStart) {
+		for pid, st := range all {
+			if st.pgrp == t.root {
+				add(pid)
+			}
 		}
 	}
 	for len(queue) > 0 {
