@@ -20,8 +20,6 @@ func init() {
 			gen: boundedPowerShellLane(boundedCallBlockLayers), seen: boundedPowerShellSeenCall},
 		boundedLaneCap{lane: "s7/winrecall in-list wrapper body", cap: bounded.Bytes, limit: actionfacts.MaxHostMidListBody,
 			gen: boundedPowerShellLane(boundedMidListBody), seen: boundedPowerShellSeenCall},
-		boundedLaneCap{lane: "s7/winrecall statement list", cap: bounded.Items, limit: actionfacts.MaxListReadings,
-			gen: boundedPowerShellLane(boundedStatementList), seen: boundedPowerShellSeenCall},
 	)
 }
 
@@ -66,9 +64,4 @@ func boundedCallBlockLayers(size int) string {
 func boundedMidListBody(size int) string {
 	const frame = `Write-Output ''`
 	return "Get-Date; &{" + frame[:len(frame)-1] + strings.Repeat("x", max(0, size-len(frame))) + "'}; Get-Date"
-}
-
-// boundedStatementList is size benign statements.
-func boundedStatementList(size int) string {
-	return strings.TrimSuffix(strings.Repeat("Get-Date; ", size), "; ")
 }

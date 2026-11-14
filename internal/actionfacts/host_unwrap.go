@@ -699,8 +699,17 @@ func rawCMDLauncherLine(source string) (string, Dialect, bool) {
 	return "", DialectNone, false
 }
 
+// posixOnlySyntax reports a text that holds a here-document operator (<<): no
+// PowerShell statement has one, so the text is a POSIX script whose body lines
+// (a note, a README, a script it writes) are not PowerShell statements and are
+// not read as a list of them.
+func posixOnlySyntax(source string) bool {
+	return strings.Contains(source, "<<")
+}
+
 // maxListReadings is the number of statements of one list that are read one by
-// one; a longer list is truncated (the bound rule), not read in part silently.
+// one (a work bound of the extra readings; the call's own statement budget
+// decides a longer list).
 const maxListReadings = 32
 
 // HostScriptReading is what HostScriptReadings returns: the readings of the
@@ -720,8 +729,8 @@ type HostScriptReading struct {
 	// statements) of a list: it is never split into statements again.
 	Listed []bool
 	// Caps is the set of bounds the reading hit: the wrapper depth, the
-	// nested size budget, a body past the in-list size, a list past
-	// maxListReadings. A truncated reading is judged at the unknown tier of
+	// nested size budget, a body past the in-list size, more nested scripts
+	// than maxListReadings. A truncated reading is judged at the unknown tier of
 	// the pack at least (internal/guardrail/bounded).
 	Caps bounded.CapSet
 }
@@ -954,6 +963,9 @@ type nestedText struct {
 // more of them than maxListReadings, is truncated.
 func powerShellNestedTexts(source string) ([]nestedText, bounded.CapSet) {
 	var caps bounded.CapSet
+	if posixOnlySyntax(source) {
+		return nil, caps
+	}
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) != 0 {
 		return nil, caps
@@ -1039,13 +1051,20 @@ func powerShellInertStatement(statement psparse.Statement) bool {
 // truncated.
 func powerShellStatementTexts(source string) ([]string, bounded.CapSet) {
 	var caps bounded.CapSet
+	if posixOnlySyntax(source) {
+		return nil, caps
+	}
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) != 0 || len(script.Statements) < 2 {
 		return nil, caps
 	}
 	statements := script.Statements
 	if len(statements) > maxListReadings {
-		caps = caps.Union(bounded.Of(bounded.Items))
+		// Past the work bound the list is read as far as it goes. This is not
+		// a truncation of the call: the readings of a list are extra readings
+		// beside the call as written, whose own statement budget decides a
+		// long script (an ordinary 130-statement script stays allowed,
+		// TestGAP0331PowerShellPrefixDoesNotHideTheBudget).
 		statements = statements[:maxListReadings]
 	}
 	span := func(index int) (int, int, bool) {

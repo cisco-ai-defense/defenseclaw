@@ -565,6 +565,7 @@ func dispatchTrustedAction(
 	// over the word limit) is truncated: judged as unknown at the pack's
 	// unknown tier at least, never a clean allow (rel-1-0-10:GAP-0345).
 	if facts.Parse.Status == actionfacts.StatusLimitExceeded &&
+		slices.Contains(facts.Parse.Issues, actionfacts.IssueInputLimit) &&
 		(facts.Parse.Dialect == actionfacts.DialectPowerShell || facts.Parse.Dialect == actionfacts.DialectCMD) {
 		defer func() {
 			findings = withBoundedTruncation(findings, bounded.Of(bounded.Bytes), request)
