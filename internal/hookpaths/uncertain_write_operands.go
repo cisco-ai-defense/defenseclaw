@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"path/filepath"
 
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -61,10 +62,26 @@ func uncertainWriteReason(command, cwd, home string, startup *ShellStartup, glob
 		if reason != "" || word == nil {
 			return
 		}
-		if globOnly && !resolverWordKnown(word, values) {
+		if !globOnly {
+			reason = resolveWriteWord(word, values, cwd, options).uncertain
 			return
 		}
-		reason = resolveWriteWord(word, values, cwd, options).uncertain
+		// Bash expands a brace list into its words first; each is then a plain
+		// word or a glob. A list of known alternatives is read word by word, as the
+		// shell passes them; a list that is too long is not read.
+		alternatives := expand.Braces(word)
+		if len(alternatives) > 64 {
+			reason = wordUncertainDynamic
+			return
+		}
+		for _, alternative := range alternatives {
+			if !resolverWordKnown(alternative, values) {
+				continue
+			}
+			if reason = resolveWriteWord(alternative, values, cwd, options).uncertain; reason != "" {
+				return
+			}
+		}
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if reason != "" {
