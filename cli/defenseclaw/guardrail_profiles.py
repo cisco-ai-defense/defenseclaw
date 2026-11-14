@@ -81,10 +81,14 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
+            # 1.0.10 (s7/promptfloor + s7/pii-email, GAP-0175/GAP-0172): prompt-injection floor and the two email PII rules.
+            "3c30a91dfbda99fe4f72e5d78d300979fa0fb1561f8495018b9b1184ba10ff29",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             "0dcc0d9a1cd54d73c8267c8950bb759806cd8e5a36b50b90d979ac39cc9eae18",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "b82abc998f4b917dbbc856bda3bb4f9211ce829b3ab86a6464a031b6953b680a",
+            # 1.0.10 (s7/promptfloor merged with rel/1.0.10 a5d59bf2b9): prompt-injection floor, email PII rules and the NetExec fold.
+            "e77d12c6c5ccec6408c3e0587dea4ddc8ff6c7377e892d699ce077355d6cf833",
         }
     ),
     "permissive": frozenset(
@@ -122,10 +126,14 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
+            # 1.0.10 (s7/promptfloor + s7/pii-email, GAP-0175/GAP-0172): prompt-injection floor and the two email PII rules.
+            "7ff6d705d7fa27e88f79060c0172119e17d4b19206ea44f0e84e79616e1cb8e5",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             "976c0343636d8163f496e37746aa26c57f5495c906a5cd7142fda001d78bdeb0",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "969de899d5a8544152cd09ad05b1e67ac841a4da53c4bb1e992a3b55c796f7a1",
+            # 1.0.10 (s7/promptfloor merged with rel/1.0.10 a5d59bf2b9): prompt-injection floor, email PII rules and the NetExec fold.
+            "ad735709469cd4d9906315c4c50d2ab8658494d3c170fb825e5d7f3052648b17",
         }
     ),
     "strict": frozenset(
@@ -162,10 +170,14 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
+            # 1.0.10 (s7/promptfloor + s7/pii-email, GAP-0175/GAP-0172): prompt-injection floor and the two email PII rules.
+            "5db217d923f7cc8d20e1af9077f11478e568cba974add100cb5ed6fb5d5174b5",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             "437f688e218aef5d3c5b47eb1591330401fecc157964c742f7570781f885a9b3",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "f6ba060634b55b87887932700fbd73cd7d658f175f2bc83a75b057e45e8355aa",
+            # 1.0.10 (s7/promptfloor merged with rel/1.0.10 a5d59bf2b9): prompt-injection floor, email PII rules and the NetExec fold.
+            "c200921e9d1c36b52fb305f1ec8bc5b9d693719999dac03a981c494f563b3065",
         }
     ),
 }
