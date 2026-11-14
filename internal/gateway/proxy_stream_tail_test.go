@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
@@ -553,6 +554,19 @@ func TestStreamTailStalledPartialLine(t *testing.T) {
 					t.Fatalf("the unfinished line was held past %v", streamHoldMaxPartialAge)
 				}
 			})
+		}
+	}
+}
+
+// A check the hold bound asks for reads the text since the last check plus
+// streamScanOverlap bytes before it, from a rune boundary.
+func TestStreamScanWindow(t *testing.T) {
+	text := strings.Repeat("é", 3000) // 6000 bytes of two-byte runes
+	for _, from := range []int{0, 10, 4096, 5001, 6000} {
+		w := streamScanWindow(text, from)
+		start := len(text) - len(w)
+		if !utf8.ValidString(w) || start > max(from-streamScanOverlap, 0)+1 || start < max(from-streamScanOverlap, 0) {
+			t.Fatalf("from %d: window starts at %d", from, start)
 		}
 	}
 }

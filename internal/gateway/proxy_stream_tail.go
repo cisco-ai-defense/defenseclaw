@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
@@ -15,9 +16,12 @@ import (
 // The tail of a streamed completion (rel-1-0-10:GAP-0212). In action mode
 // the passthrough and /llm streaming paths keep the bytes no check has
 // covered yet in a streamHold and send them only after a check has read
-// their text: the mid-stream scan (every 500 bytes of text, as before), the
-// same scan once the oldest held byte has waited streamHoldMaxAge, and at the
-// end of the stream the final post-stream check, which is enforced. A final
+// their text: the mid-stream scan of the whole text (every 500 bytes of
+// text, as before), the same scan over the text since the last check plus
+// streamScanOverlap bytes before it once the oldest held byte has waited
+// streamHoldMaxAge (so a slow stream does not rescan its whole text ten
+// times a second), and at the end of the stream the final post-stream check
+// over the whole text, which is enforced. A final
 // check that blocks withholds the tail and ends the stream as a mid-stream
 // block does. Observe mode holds nothing and only records the would-block.
 //
@@ -39,6 +43,22 @@ const (
 	streamHoldMaxPartial    = 1 << 20
 	streamHoldMaxPartialAge = 5 * time.Second
 )
+
+// streamScanOverlap is the text before the last check that a check the
+// hold bound asks for reads again with the new text (a finding split across
+// the two is read whole). The every-500-bytes check reads the whole text, as
+// before.
+const streamScanOverlap = 4 << 10
+
+// streamScanWindow is text from streamScanOverlap bytes before from, on a
+// rune boundary.
+func streamScanWindow(text string, from int) string {
+	start := min(max(from-streamScanOverlap, 0), len(text))
+	for start > 0 && start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	return text[start:]
+}
 
 // streamHold is the bytes of one streamed reply waiting for a check, in
 // stream order.
