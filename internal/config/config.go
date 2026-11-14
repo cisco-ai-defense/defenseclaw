@@ -1775,6 +1775,9 @@ type HILTConfig struct {
 // DefaultMaxBodyValues is the default of guardrail.max_body_values.
 const DefaultMaxBodyValues = 400000
 
+// DefaultHistorySeenMax is the default of guardrail.history_seen_max.
+const DefaultHistorySeenMax = 2048
+
 type GuardrailConfig struct {
 	Enabled     bool   `mapstructure:"enabled"              yaml:"enabled"`
 	Mode        string `mapstructure:"mode"                 yaml:"mode"`
@@ -1822,6 +1825,11 @@ type GuardrailConfig struct {
 	// and the strict tier refuse it, the OSS default forwards it with an
 	// alert. A resource bound, not a policy; 0 means DefaultMaxBodyValues.
 	MaxBodyValues int `mapstructure:"max_body_values"      yaml:"max_body_values"`
+	// HistorySeenMax is the most history segments (earlier turns of a
+	// request) the guardrail proxy remembers as inspected per actor or
+	// session: a remembered segment is not inspected again, any other is.
+	// A resource bound, not a policy; 0 means DefaultHistorySeenMax.
+	HistorySeenMax int `mapstructure:"history_seen_max"     yaml:"history_seen_max"`
 	// RulePackDir is a v8 key: migration input for RulePack/CustomPacks,
 	// rejected in a config_version 9 source.
 	RulePackDir string `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
@@ -4154,6 +4162,7 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
 	viper.SetDefault("guardrail.max_body_values", DefaultMaxBodyValues)
+	viper.SetDefault("guardrail.history_seen_max", DefaultHistorySeenMax)
 	viper.SetDefault("guardrail.block_message", "")
 	viper.SetDefault("guardrail.rule_pack_dir", join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.hilt.enabled", false)

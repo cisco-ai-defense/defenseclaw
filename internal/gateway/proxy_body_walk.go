@@ -382,7 +382,18 @@ func isCallType(t string) bool {
 
 // textWalker collects the inspectable strings of a body.
 type textWalker struct {
-	segs      []string
+	segs []string
+	// hist collects the strings of the history turns (walkTurns) while
+	// history > 0: inspected once per actor or session (proxy_history_seen.go).
+	hist    []string
+	history int
+	// user counts the user turns the walker is inside and result the tool
+	// calls and results: the canonical OpenClaw probes are left out of user
+	// text only (GAP-0251), the one place OpenClaw sends them; probe is set
+	// when a user text held one.
+	user      int
+	result    int
+	probe     bool
 	ambiguous string // why the body can be read two ways, if it can
 	reply     bool
 	stream    bool // reply event of a stream: calls under delta, item and content_block belong to sseToolCalls
@@ -412,9 +423,23 @@ func isResultType(t string) bool {
 }
 
 func (w *textWalker) add(s string) {
-	if strings.TrimSpace(s) != "" {
-		w.segs = append(w.segs, s)
+	if w.user > 0 && w.result == 0 && w.payload == 0 {
+		// The heartbeat and session-startup prompts are left out as the exact
+		// canonical sentences only (guardrail_probe.go); the rest of the text
+		// is inspected. A tool result, a system, developer or instructions
+		// text keeps them: OpenClaw never sends them there (GAP-0251).
+		if rest, ok := stripCanonicalProbes(s); ok {
+			w.probe, s = true, rest
+		}
 	}
+	if strings.TrimSpace(s) == "" {
+		return
+	}
+	if w.history > 0 {
+		w.hist = append(w.hist, s)
+		return
+	}
+	w.segs = append(w.segs, s)
 }
 
 func (w *textWalker) flag(why string) {
@@ -491,6 +516,10 @@ func (w *textWalker) walk(n *jnode, key string, depth int) {
 		defer func() { w.cur, w.curKey = prevCur, prevKey }()
 		typ := n.str("type")
 		holder := isCallType(typ) || isResultType(typ) || callHolderKeys[normKey(key)]
+		if holder {
+			w.result++
+			defer func() { w.result-- }()
+		}
 		for i, k := range n.keys {
 			nk := normKey(k)
 			if w.payload == 0 && walkSkipSubtree[nk] {
@@ -569,11 +598,12 @@ func (w *textWalker) callObject(n *jnode, key string) {
 
 // walkTurns reads a list of turns (chat messages, Responses input items,
 // Anthropic or Converse messages, Gemini contents). System and developer
-// turns are always read. The turns before the model's last turn are history
-// an earlier request already carried and the proxy decided then; reading
-// them again would make one blocked prompt block every later request of the
-// session. The model's own last turn is skipped too, unless it is the final
-// item (a prefill the client wrote).
+// turns, the turns after the model's last turn and a final model turn (a
+// prefill the client wrote) are the current scope: read into segs and
+// inspected on every request. The other turns, the model's last one
+// included, are history: the client can write any of them, so they are read
+// too, into hist, and the proxy inspects each history segment once per actor
+// or session (substrate-1 GAP-0244, proxy_history_seen.go).
 func (w *textWalker) walkTurns(list *jnode) {
 	last := -1
 	for i, it := range list.kids {
@@ -588,13 +618,25 @@ func (w *textWalker) walkTurns(list *jnode) {
 		}
 	}
 	for i, it := range list.kids {
+		hist, user := false, false
 		if it.kind == 'o' {
 			role := strings.ToLower(it.str("role"))
-			if role != "system" && role != "developer" && (i < last || (i == last && i != len(list.kids)-1)) {
-				continue
-			}
+			hist = role != "system" && role != "developer" && (i < last || (i == last && i != len(list.kids)-1))
+			user = role == "user"
+		}
+		if hist {
+			w.history++
+		}
+		if user {
+			w.user++
 		}
 		w.walk(it, "", 1)
+		if user {
+			w.user--
+		}
+		if hist {
+			w.history--
+		}
 	}
 }
 
@@ -606,9 +648,11 @@ var passthroughPromptKeys = map[string]bool{"model": true, "input": true, "messa
 // passthroughSidePrompt is every inspectable text of a request body, and why
 // the body cannot be read with confidence, if it cannot.
 type passthroughSidePrompt struct {
-	// Text is Segments joined by a line feed.
-	Text     string
 	Segments []string
+	// History is the text of the history turns (walkTurns), apart from
+	// Segments: the proxy inspects what this actor or session has not sent
+	// before (historySeen).
+	History []string
 	// Unreadable is why the body takes the fail mode ("" when it is read).
 	Unreadable string
 }
@@ -641,7 +685,7 @@ func passthroughPromptFor(body []byte, jsonHint bool, max int) passthroughSidePr
 		// may take for a prompt. No text at all takes the fail mode.
 		w := &textWalker{}
 		w.walk(root, "", 1)
-		side := passthroughSidePrompt{Segments: w.segs, Text: strings.Join(w.segs, "\n"), Unreadable: w.ambiguous}
+		side := passthroughSidePrompt{Segments: w.segs, Unreadable: w.ambiguous}
 		if len(w.segs) == 0 && side.Unreadable == "" {
 			side.Unreadable = "the JSON body is not an object and carries no text"
 		}
@@ -678,11 +722,21 @@ func passthroughPromptFor(body []byte, jsonHint bool, max int) passthroughSidePr
 			if nk := normKey(k); walkSkipSubtree[nk] {
 				continue
 			}
+			// A Responses input string and a completion prompt (a string or a
+			// list of strings) are the user turn.
+			user := (f == "input" && c.kind == 's') || (f == "prompt" && (c.kind == 's' || c.kind == 'a'))
+			if user {
+				w.user++
+			}
 			w.walk(c, k, 1)
+			if user {
+				w.user--
+			}
 		}
 	}
-	side := passthroughSidePrompt{Segments: w.segs, Text: strings.Join(w.segs, "\n"), Unreadable: w.ambiguous}
-	if len(w.segs) == 0 && prompt && side.Unreadable == "" {
+	side := passthroughSidePrompt{Segments: w.segs, History: w.hist, Unreadable: w.ambiguous}
+	// A body whose only text is a probe carries a prompt: the probe.
+	if len(w.segs) == 0 && !w.probe && prompt && side.Unreadable == "" {
 		side.Unreadable = "the body carries no prompt text"
 	}
 	return side
@@ -708,7 +762,7 @@ func passthroughPromptForRequest(body []byte, contentType string, jsonHint bool,
 func plainBodyPrompt(body []byte) passthroughSidePrompt {
 	if utf8.Valid(body) && !bytes.Contains(body, []byte{0}) {
 		t := string(body)
-		return passthroughSidePrompt{Segments: []string{t}, Text: t}
+		return passthroughSidePrompt{Segments: []string{t}}
 	}
 	return passthroughSidePrompt{Unreadable: "the body is binary and neither JSON nor a form"}
 }
@@ -729,7 +783,7 @@ func formPrompt(body []byte) passthroughSidePrompt {
 			w.add(v)
 		}
 	}
-	return passthroughSidePrompt{Segments: w.segs, Text: strings.Join(w.segs, "\n")}
+	return passthroughSidePrompt{Segments: w.segs}
 }
 
 // multipartPrompt reads a multipart/form-data body: every text field, and
@@ -771,7 +825,7 @@ func multipartPrompt(body []byte, boundary string) passthroughSidePrompt {
 	if parts == 0 {
 		return passthroughSidePrompt{Unreadable: "the multipart body has no parts"}
 	}
-	return passthroughSidePrompt{Segments: w.segs, Text: strings.Join(w.segs, "\n")}
+	return passthroughSidePrompt{Segments: w.segs}
 }
 
 // ---- replies ---------------------------------------------------------------------
@@ -835,16 +889,16 @@ func scanReplyBody(data []byte, max int) (replyScan, bool) {
 
 // joinPromptSegments adds the segments of a body to the text the proxy
 // already inspects (the user turn), once: a segment the text contains is left
-// out. The canonical heartbeat and session-startup sentences are taken out of
-// every segment first (stripCanonicalProbes); what else a segment says is
-// inspected.
+// out. The walker has already left the canonical OpenClaw probes out of the
+// user text, and only there (textWalker.add, GAP-0251); a segment that holds
+// one elsewhere is never contained in the inspected text, which has none, so
+// it is inspected.
 func joinPromptSegments(inspect string, segs []string) string {
 	budget := 64 << 20
 	seen := map[string]bool{}
 	var b strings.Builder
 	b.WriteString(inspect)
 	for _, s := range segs {
-		s, _ = stripCanonicalProbes(s)
 		if seen[s] || strings.TrimSpace(s) == "" {
 			continue
 		}

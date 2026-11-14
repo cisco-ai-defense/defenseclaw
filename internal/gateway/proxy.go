@@ -121,6 +121,10 @@ type GuardrailProxy struct {
 	// is nil in every production proxy.
 	streamReadForTest func(total int)
 
+	// history is the inspect-once record of request history (substrate-1
+	// GAP-0244, proxy_history_seen.go).
+	history historySeen
+
 	// kernelPeer names the verified caller of a request from the kernel
 	// (managed hosts with routing on, S1 DESIGN 15.2 Q3); nil or false
 	// leaves authentication as it was.
@@ -1508,11 +1512,16 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		side = passthroughSidePrompt{Unreadable: bodyUndecodable}
 	}
 	// The OpenClaw heartbeat and session-startup prompts are left out as the
-	// exact canonical sentences only (guardrail_probe.go); everything else in
-	// the same message, and in the rest of the body (system, developer,
-	// instructions, tool results, tool definitions), is inspected.
+	// exact canonical sentences of a user turn only (guardrail_probe.go,
+	// GAP-0251); everything else in the same message, and the rest of the body
+	// (system, developer, instructions, tool results, tool definitions, where
+	// the probe wording is inspected too), is inspected.
 	inspectRaw, _ = stripCanonicalProbes(inspectRaw)
-	inspectRaw = joinPromptSegments(inspectRaw, side.Segments)
+	// The history the client sent: each segment this actor or session has not
+	// had inspected, in the same inspection (GAP-0244, proxy_history_seen.go).
+	historyScope := p.historyScope(r)
+	inspectedSegs := promptSegments(side.Segments, p.history.fresh(historyScope, side.History))
+	inspectRaw = joinPromptSegments(inspectRaw, inspectedSegs)
 	inspectMessages := probeFreeMessages(partial.Messages)
 	inspectionText := promptInspectionText(inspectRaw)
 	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
@@ -1568,6 +1577,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		auditClosed := p.promptAuditFailedClosed(r.Context(), verdict, mode, overlay.evaluationLogErr)
 		if (verdict.Action == "block" && mode == "action") || auditClosed {
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
+			// The current scope and the block text keep this verdict for when
+			// the client sends them back as history; the new history of a
+			// refused request is inspected again (GAP-0244).
+			p.history.record(historyScope, promptSegments(side.Segments, []string{msg}), verdict, p.historySeenMax())
 			// Enqueue a notification BEFORE writing the block
 			// response so the next proxy call (this client's retry,
 			// or any other session) carries the authoritative
@@ -1586,6 +1599,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
 			return
 		}
+		p.history.record(historyScope, inspectedSegs, verdict, p.historySeenMax())
 	}
 
 	// --- Launder prior DefenseClaw-generated assistant turns ---
@@ -2639,6 +2653,13 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	p.rtMu.RUnlock()
 	mode, customBlockMsg = p.profileModeFor(r.Context(), mode, customBlockMsg)
 
+	// The current turn is read from the messages the client sent, as the
+	// passthrough and the body walker read them: once a block turn is
+	// laundered out, the refused prompt before it would join the new user
+	// turn and block it again. What is before the current turn is history,
+	// inspected once (GAP-0244).
+	turnMessages := req.Messages
+
 	// --- Launder prior DefenseClaw-generated assistant turns ---
 	//
 	// See launderInboundHistory in handlePassthrough for the full
@@ -2706,16 +2727,21 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
-	inspectText := promptInspectText(req.Messages)
+	inspectText := promptInspectText(turnMessages)
 	// Every prompt-side text of the body, as on the passthrough: system and
 	// developer turns after the user turn and the tool results sent since
 	// the model's last turn (GAP-0196). The original body, before
 	// DefenseClaw adds its own notice.
 	chatSide := passthroughPromptFor(body, true, p.maxBodyValues())
 	// The heartbeat and session-startup prompts: the exact canonical sentences
-	// only, never the rest of the message or of the body.
+	// only, never the rest of the message or of the body. When the text is a
+	// system or developer fallback, the walker segment of that turn keeps the
+	// probe wording and is inspected (GAP-0251).
 	inspectText, _ = stripCanonicalProbes(inspectText)
-	inspectText = joinPromptSegments(inspectText, chatSide.Segments)
+	// The history the client sent, as on the passthrough (GAP-0244).
+	historyScope := p.historyScope(r)
+	inspectedSegs := promptSegments(chatSide.Segments, p.history.fresh(historyScope, chatSide.History))
+	inspectText = joinPromptSegments(inspectText, inspectedSegs)
 	inspectMessages := probeFreeMessages(req.Messages)
 	if chatSide.Unreadable != "" && p.uninspectablePrompt(r.Context(), req.Model, mode, chatSide.Unreadable) {
 		msg := blockMessage(customBlockMsg, "prompt", "the request could not be inspected: "+chatSide.Unreadable)
@@ -2803,6 +2829,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		if (verdict.Action == "block" && mode == "action") || auditClosed {
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
+			p.history.record(historyScope, promptSegments(chatSide.Segments, []string{msg}), verdict, p.historySeenMax())
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
 			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
 			if req.Stream {
@@ -2812,6 +2839,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 			return
 		}
+		p.history.record(historyScope, inspectedSegs, verdict, p.historySeenMax())
 	}
 
 	// --- Semantic Model Router ---

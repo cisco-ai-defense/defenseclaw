@@ -163,7 +163,7 @@ func TestPassthroughPromptExtraction(t *testing.T) {
 		{`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"systemInstruction":{"parts":[{"text":"gsys"}]}}`, "hi\ngsys", ""},
 	} {
 		got := passthroughPromptFor([]byte(c.body), false, 0)
-		if got.Text != c.want || got.Unreadable != c.unreadable {
+		if strings.Join(got.Segments, "\n") != c.want || got.Unreadable != c.unreadable {
 			t.Errorf("%s: %+v, want %q / %q", c.body, got, c.want, c.unreadable)
 		}
 	}
