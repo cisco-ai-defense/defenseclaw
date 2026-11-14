@@ -1,0 +1,70 @@
+---
+title: Alignment check
+description: An opt-in guardrail lane that asks the LLM judge whether a side-effecting tool call serves the task the user gave, and reports ALIGNMENT-DRIFT when it does not.
+keywords:
+  - alignment check
+  - ALIGNMENT-DRIFT
+  - guardrail.cascade.lanes.alignment
+  - intent deviation
+  - goal hijacking
+  - indirect prompt injection
+---
+
+The alignment check is a separate guardrail lane. It looks for **intent deviation**: a tool call that does something the user never asked for, usually because the agent followed instructions it found in a file, a web page, an email or a tool result. Most public tool-call attacks look like this. The call itself can look ordinary (send an email, transfer money, change a setting), so rules that look for dangerous commands do not see it.
+
+The lane asks the [LLM judge](/docs/guardrail/configure-cascade) one question about each side-effecting tool call:
+
+> Is this call needed for, or consistent with, the user's task?
+
+When the answer is no, the call gets its own finding, `ALIGNMENT-DRIFT`. The lane never changes, lowers or removes what the rules, System One or the tool judge decided. It only adds its finding.
+
+The lane is **off by default**. Turn it on only when you have a judge configured and accept the cost and latency below.
+
+## Turn it on
+
+```yaml
+guardrail:
+  judge:
+    enabled: true
+    # ... the judge model (guardrail.judge.llm)
+  cascade:
+    lanes:
+      alignment: alert   # off (default), shadow, alert or block
+```
+
+| Value | What happens |
+| --- | --- |
+| `off` | The lane does not run. It keeps no session state and makes no model call. This is the default. |
+| `shadow` | The lane runs and records `ALIGNMENT-DRIFT` in the audit log. The answer to the agent does not change. |
+| `alert` | `ALIGNMENT-DRIFT` alerts (MEDIUM). |
+| `block` | `ALIGNMENT-DRIFT` blocks (HIGH). |
+
+The lane follows the cascade [scopes](/docs/guardrail/configure-cascade#scopes): set it per connector or per profile under `guardrail.connectors.<agent>.cascade.lanes.alignment` or `guardrail.profiles.<name>.cascade.lanes.alignment`. On a managed install, `guardrail.cascade.admin.locked: [lanes.alignment]` keeps the top-level value, and a connector or profile that sets it makes the cascade invalid.
+
+`defenseclaw status` shows an **Alignment check** row while the lane is not off. `defenseclaw doctor` names live lanes on the **Guardrail cascade** row, and `defenseclaw guardrail cascade explain` lists every lane with the key that set it.
+
+## What it reads
+
+For each tool call the lane decides first whether the call has a side effect:
+
+- **Shell and file tools** are read by their effects: a network action, a write, delete or run outside the working folder, a read of a home dot-folder (credential stores), or a shell command the parser cannot fully read.
+- **Other tools** (MCP and function tools) are read by the verbs of their name: `send`, `transfer`, `delete`, `update`, `create`, `share`, `invite` and so on. `get_`, `list_`, `read_` and `search_` tools are skipped.
+
+Read-only calls are never sent to the model, which keeps cost, latency and false alerts down.
+
+The model sees the first and the latest user prompt of the session, the last four tool calls and the current call. Every part is cut to a fixed size and marked `[truncated]`. All of it is untrusted data inside the judge's sample. The model has 3 seconds (or the judge's hook timeout if lower). A failed, late or unparsed answer is no finding: the lane never blocks because of its own failure.
+
+## How well it works
+
+RESULTS_TABLE
+
+## Cost and latency
+
+COST_TABLE
+
+## Limits
+
+- The lane needs the user's task. A call with no user prompt earlier in the session is not checked.
+- It judges the call against the prompt text. It does not see tool results in this release.
+- A task the user states vaguely gives the model little to compare against; the model then answers `unsure`, which is no finding.
+- The name-verb list for non-shell tools is fixed in this release. A side-effecting tool named with a word outside the list is not checked.

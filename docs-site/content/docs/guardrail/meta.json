@@ -11,6 +11,7 @@
     "unified-llm-key",
     "configure-cascade",
     "decision-model",
+    "alignment-check",
     "---Benchmarks---",
     "benchmarks",
     "llm-judge-benchmark"
