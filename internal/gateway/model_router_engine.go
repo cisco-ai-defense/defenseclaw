@@ -213,7 +213,9 @@ func mergeEngineFacts(o SemanticRouteOutcome, d *engine.Decision) SemanticRouteO
 }
 
 // engineRequest turns the proxy input into the engine request. The
-// classifier text is the newest user turn (never tool output), bounded.
+// classifier text is the newest user turn the user typed (never tool
+// output, system reminders or agent-injected text), bounded. With
+// routing.context on, routeContext replaces it from the same extractor.
 func engineRequest(in *ModelRouterInput) engine.Request {
 	req := engine.Request{
 		APIFamily: in.APIFamily, Connector: in.Connector, Listener: in.Listener, Severity: in.Severity,
@@ -230,8 +232,11 @@ func engineRequest(in *ModelRouterInput) engine.Request {
 	if req.Listener == "" {
 		req.Listener = engine.ListenerGuardrail
 	}
-	text := in.Text
-	size := len(text)
+	text := ""
+	if in.Text != "" {
+		text = routerUserText(in.Text)
+	}
+	size := len(in.Text)
 	for _, m := range in.Messages {
 		size += len(m.Content)
 		if !req.HasImages && bytes.Contains(m.RawContent, []byte("image")) {
@@ -242,11 +247,10 @@ func engineRequest(in *ModelRouterInput) engine.Request {
 	req.LongContext = size > 400_000
 	if n := len(in.Messages); n > 0 {
 		req.ToolTurn = in.ToolTurn || in.Messages[n-1].Role == "tool"
-		if text == "" {
-			for i := n - 1; i >= 0; i-- {
+		if in.Text == "" {
+			for i := n - 1; i >= 0 && text == ""; i-- {
 				if in.Messages[i].Role == "user" {
-					text = in.Messages[i].Content
-					break
+					text = routerMessageText(&in.Messages[i])
 				}
 			}
 		}

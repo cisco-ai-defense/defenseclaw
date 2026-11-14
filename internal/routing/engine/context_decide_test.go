@@ -72,12 +72,12 @@ func TestDecideToolLoopCondition(t *testing.T) {
 	}
 }
 
-// Truncation never lowers the base: a signal in the newest turn past the
-// per-turn cap still matches, and the decision records the cap.
+// Truncation never lowers the base: per_turn_bytes does not cut the newest
+// turn, its signal still matches, and the cut older turn is recorded.
 func TestDecideContextTruncationKeepsTheBase(t *testing.T) {
 	e := mustEngine(t, contextConfig(config.RoutingContextConfig{RecentUserTurns: 1, MaxBytes: 64, PerTurnBytes: 16}), Options{})
 	req := chat(strings.Repeat("x", 40) + " refactor this")
-	req.ContextTurns = []string{"hello"}
+	req.ContextTurns = []string{strings.Repeat("h", 40)}
 	d := e.Decide(context.Background(), req)
 	if decided(d) != "claude/code" || !slices.Contains(d.Warnings, "context_truncated:bytes") {
 		t.Fatalf("decision = %s warnings %q", decided(d), d.Warnings)
@@ -93,16 +93,18 @@ func (c textClassifier) Classify(_ context.Context, in ClassifyInput) (ClassifyR
 }
 
 func TestDecideContextTextForSystemOneIsBounded(t *testing.T) {
-	cfg := contextConfig(config.RoutingContextConfig{RecentUserTurns: 8, MaxBytes: 65536, PerTurnBytes: 8192})
+	cfg := contextConfig(config.RoutingContextConfig{RecentUserTurns: 8, MaxBytes: 65536, PerTurnBytes: 1024})
 	cfg.Routing.Classifier = "systemone"
 	var seen ClassifyInput
 	e := mustEngine(t, cfg, Options{Classifier: textClassifier{seen: &seen}})
-	req := chat("newest")
+	newest := strings.Repeat("n", 3000)
+	req := chat(newest)
 	req.ContextTurns = []string{strings.Repeat("a", 6000), strings.Repeat("b", 6000)}
 	d := e.Decide(context.Background(), req)
-	if len(seen.Text) > ClassifierTextLimit || !strings.HasPrefix(seen.Text, "newest\n\naaa") {
-		t.Fatalf("classifier text %d bytes, prefix %q", len(seen.Text), seen.Text[:min(len(seen.Text), 12)])
+	if len(seen.Text) > ClassifierTextLimit || !strings.HasPrefix(seen.Text, newest+"\n\n"+strings.Repeat("a", 1024)+"\n\nbbb") {
+		t.Fatalf("classifier text %d bytes, does not start with the whole newest turn and the cut older turns", len(seen.Text))
 	}
+
 	if !slices.Contains(d.Warnings, "context_truncated:bytes") {
 		t.Fatalf("warnings %q, want the classifier cap recorded", d.Warnings)
 	}

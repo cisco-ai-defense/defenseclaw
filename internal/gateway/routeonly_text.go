@@ -72,7 +72,7 @@ type humanTextMessage struct {
 	toolResult bool // a "tool_result" string anywhere in its content
 }
 
-func (m *humanTextMessage) text() string { return capText(stripReminders(m.parts.String())) }
+func (m *humanTextMessage) text() string { return routerUserText(m.parts.String()) }
 
 // humanTextParts joins text parts with newlines and keeps at most
 // routeOnlyRawTextLimit bytes, copied, so a large token is not retained.
@@ -345,7 +345,7 @@ func (s *humanTextScan) content(m *humanTextMessage, collect bool) bool {
 	switch v := tok.(type) {
 	case string:
 		m.toolResult = v == "tool_result"
-		if collect {
+		if collect && !injectedBlock(v) {
 			m.parts.add(v)
 		}
 		return true
@@ -411,15 +411,18 @@ func (s *humanTextScan) block(m *humanTextMessage, collect bool) bool {
 	if toolUse || kind == "tool_use" || kind == "server_tool_use" || kind == "mcp_tool_use" {
 		s.ctx.Tool(name)
 	}
+	// Agent-written blocks in a user message (command output, instruction
+	// files, environment context) are not text the user typed.
+	injected := injectedBlock(text)
 	switch kind {
 	case "text", "input_text":
-		if collect {
+		if collect && !injected {
 			m.parts.add(text)
 		}
 	case "image", "input_image", "image_url":
 		m.images = true
 	case "":
-		if collect && text != "" {
+		if collect && text != "" && !injected {
 			m.parts.add(text)
 		}
 	}
@@ -457,7 +460,7 @@ func (s *humanTextScan) input() bool {
 	case string:
 		var p humanTextParts
 		p.add(v)
-		s.text = capText(stripReminders(p.String()))
+		s.text = routerUserText(p.String())
 		s.ctx.Turn(s.text)
 		return true
 	case json.Delim:

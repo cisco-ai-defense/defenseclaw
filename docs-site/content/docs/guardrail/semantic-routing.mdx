@@ -83,15 +83,16 @@ routing:
   context:
     recent_user_turns: 2          # older user messages, 0 to 8
     include_first_user_turn: true # the message that started the conversation
-    max_bytes: 8192               # the whole context, at most 65536
-    per_turn_bytes: 2048          # one message, at most max_bytes
+    max_bytes: 8192               # older messages together, at most 65536
+    per_turn_bytes: 2048          # one older message, at most max_bytes
     include_tool_names: true      # names of the tools the loop called
 ```
 
-- Only text the user typed is read. Tool results, file contents, assistant replies, system prompts and `<system-reminder>` blocks are never read. Tool names are read without their arguments or results.
-- Keyword signals match the newest message and the context, newest first, one message per paragraph. With `include_tool_names` they also see a line such as `tools: Bash,Read`, and the request condition `tool_loop` matches when the conversation called a tool. `routing.sensitive.signals` match the context too.
+- Read: user messages. Left out: tool results, assistant replies, system prompts, and user-role text that starts with a marker agents write: `<system-reminder>`, `<environment_context>`, `<user_instructions>`, command, hook and IDE tags (`<bash-stdout>`, `<local-command-stdout>`, `<command-name>`, `<user-prompt-submit-hook>`, `<ide_selection>` and similar), `# AGENTS.md instructions`, `# CLAUDE.md`, `Contents of `, compaction summaries and the OpenClaw context message. Text an agent writes without such a marker can still be read. Tool names are read without their arguments or results; MCP tool names are chosen by the tool server.
+- The newest message keeps its 8 KiB limit; `per_turn_bytes` and `max_bytes` bound the older messages.
+- Keyword signals match the newest message and the context, newest first, one message per paragraph, with no recency weighting: an older message can match a higher-priority rule than the newest one. With `include_tool_names` they also see a line such as `tools: Bash,Read`, and the request condition `tool_loop` matches when the conversation called a tool. `routing.sensitive.signals` match the context too.
 - `systemone` gets the same context, at most 8 KiB. `vllm_sr` reads the newest message only, so validation refuses `routing.context` with it.
-- When a limit cuts the context, the decision carries the warning `context_truncated:bytes` (`items` past 32 tool names) in `defenseclaw routing test` and `defenseclaw routing explain`. The newest message is never dropped, and a cut never removes a signal the newest message matched.
+- When a limit cuts the context, the decision carries the warning `context_truncated:bytes` (`items` past 32 tool names), shown by `defenseclaw routing explain`. The newest message is never dropped, and a cut never removes a signal the newest message matched.
 
 ## Verify the running state
 

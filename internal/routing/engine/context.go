@@ -95,10 +95,12 @@ func (e *Engine) classifierText(req Request) (string, map[string]bool, string) {
 }
 
 // assembleContext builds the context text: the newest turn, the older turns
-// newest first, then the first turn, joined by contextSeparator, each cut
-// at PerTurnBytes and the whole at MaxBytes on a UTF-8 boundary. The newest
-// turn is never dropped (it is cut, alone, at the per-turn cap); what is
-// left of MaxBytes goes to the older turns. tools become the signal-only
+// newest first, then the first turn, joined by contextSeparator. The newest
+// turn keeps the classifier text limit of a request without context
+// (ClassifierTextLimit) and is never dropped. The older turns are each cut
+// at PerTurnBytes and together (separators included) at MaxBytes, on a
+// UTF-8 boundary, so the text is at most the newest turn plus MaxBytes.
+// tools become the signal-only
 // line "tools: a,b" (at most ContextMaxToolNames names, each cut at
 // ContextToolNameBytes). signal is text plus that line, and text is a
 // prefix of it. caps names every cap hit: Bytes for cut or dropped text,
@@ -107,26 +109,27 @@ func assembleContext(newest string, older []string, first string, tools []string
 	var t bounded.Truncated
 	var b strings.Builder
 	per := min(o.PerTurnBytes, o.MaxBytes)
-	add := func(s string, room int) {
-		cut := cutUTF8(s, min(per, room))
+	add := func(s string, limit, room int) {
+		cut := cutUTF8(s, min(limit, room))
 		if len(cut) < len(s) {
 			t.Hit(bounded.Bytes)
 		}
 		b.WriteString(cut)
 	}
-	add(newest, o.MaxBytes)
+	add(newest, ClassifierTextLimit, ClassifierTextLimit)
+	base := b.Len()
 	turns := older
 	if first != "" {
 		turns = append(slices.Clip(older), first)
 	}
 	for _, s := range turns {
-		room := o.MaxBytes - b.Len() - len(contextSeparator)
+		room := o.MaxBytes - (b.Len() - base) - len(contextSeparator)
 		if room <= 0 {
 			t.Hit(bounded.Bytes)
 			break
 		}
 		b.WriteString(contextSeparator)
-		add(s, room)
+		add(s, per, room)
 	}
 	textLen := b.Len()
 	if len(tools) > 0 {
