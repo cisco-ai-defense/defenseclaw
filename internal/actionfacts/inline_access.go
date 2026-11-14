@@ -57,7 +57,7 @@ var inlineIdentifierPattern = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
 // inlineWriteModeOpen matches a file open whose literal mode writes: an open
 // or fopen call with a "w", "a", "x" or "+" mode word.
 var inlineWriteModeOpen = regexp.MustCompile(
-	`\b(?:open|fopen|openSync|popen)\s*\([^)]*['"](?:[wax][bt+]*|r[bt]*\+[bt]*)['"]`)
+	`(?s)\b(?:open|fopen|openSync|popen)\s*\(\s*(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,\s*(?:mode\s*=\s*)?['"](?:[wax][bt+]*|r[bt]*\+[bt]*)['"]\s*[,)]`)
 
 // inlineWriterNames lists, per interpreter, the identifiers whose call writes
 // a file, changes it, or runs a program.
