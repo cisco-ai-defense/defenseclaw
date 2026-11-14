@@ -1370,15 +1370,19 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	// AID stays authoritative.
 	if judge := judgeOf(r.policyGeneration(), r.judge); !ManagedEnterpriseActive() && judge != nil && len(payload.Args) > 0 {
 		judgeCtx := ContextWithSessionID(context.Background(), payload.SessionID)
+		scopeReason := r.recordToolScopeFloor(judge, judgeCtx, payload.Tool, string(payload.Args))
 		judgeSample, judgeEligible := judge.prepareToolJudgeSample(judgeCtx, payload.Tool, string(payload.Args))
 		if judgeEligible {
-			go func(tool, sessionID, toolID string, meta llmEventMeta, args json.RawMessage, sample string) {
+			go func(tool, sessionID, toolID string, meta llmEventMeta, args json.RawMessage, sample, scopeReason string) {
 				r.judgeSem <- struct{}{}
 				defer func() { <-r.judgeSem }()
 				judgeCtx := ContextWithSessionID(context.Background(), sessionID)
 				ctx, cancel := context.WithTimeout(judgeCtx, 60*time.Second)
 				defer cancel()
 				verdict := judge.runToolJudgeSample(ctx, tool, string(args), sample)
+				if r.toolScopeMode() == config.IntentScopeAlert {
+					verdict = applyIntentScopeFloor(verdict, scopeReason)
+				}
 				if verdict.Severity != "NONE" {
 					// Keep stderr redacted, but retain the source reason for the v8
 					// route-specific redaction boundary.
@@ -1393,7 +1397,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 						severity: verdict.Severity, observedAt: time.Now().UTC(),
 					})
 				}
-			}(payload.Tool, payload.SessionID, payload.ID, toolObservation.meta, payload.Args, judgeSample)
+			}(payload.Tool, payload.SessionID, payload.ID, toolObservation.meta, payload.Args, judgeSample, scopeReason)
 		}
 	}
 
@@ -1937,4 +1941,28 @@ func countToolUseBlocks(content json.RawMessage) int {
 		}
 	}
 	return count
+}
+
+// toolScopeMode is the lane mode of the task-scope floor for this router.
+func (r *EventRouter) toolScopeMode() string {
+	if cfg := r.guardrailConfig(); cfg != nil {
+		return cfg.Judge.IntentScopeMode()
+	}
+	return config.IntentScopeShadow
+}
+
+// recordToolScopeFloor reads the task-scope floor of a tool call the router
+// observes (the OpenClaw path) before the judge runs, and in shadow mode records
+// it. It returns the reason so alert mode (tests and the harness) can fold it
+// into the verdict this lane logs; a mode of off reads nothing.
+func (r *EventRouter) recordToolScopeFloor(judge *LLMJudge, ctx context.Context, tool, args string) string {
+	mode := r.toolScopeMode()
+	if mode == config.IntentScopeOff {
+		return ""
+	}
+	reason := judge.scopeFloorReason(ctx, tool, args, "")
+	if reason != "" && mode == config.IntentScopeShadow {
+		recordIntentScopeShadow(ctx, tool, args, reason)
+	}
+	return reason
 }

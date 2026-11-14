@@ -185,7 +185,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			claudeCodePromptContent(req), "prompt",
 		))
 		if intentEvent {
-			a.observeUserTurn(ctx, req.Prompt, req.Prompt, verdict)
+			a.observeUserTurn(ctx, req.Prompt, req.Prompt, req.CWD, verdict)
 		}
 		if req.HookEventName == "UserPromptExpansion" {
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)

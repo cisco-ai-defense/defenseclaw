@@ -146,8 +146,13 @@ type toolJudgeSessionContext struct {
 	// session has named (intent_scope.go); the latest prompt alone does not
 	// carry them when it says "continue".
 	scopeTargets []string
-	events       []toolJudgeContextEvent
-	lastSeen     time.Time
+	// gitHosts are the hosts of the git remotes of the session's working folder,
+	// read once at its first event (SnapshotSessionGitRemotes): a remote the agent
+	// adds later does not clear its own send. gitRead marks the read as done.
+	gitHosts []string
+	gitRead  bool
+	events   []toolJudgeContextEvent
+	lastSeen time.Time
 }
 
 type toolJudgeContextEvent struct {
@@ -2295,6 +2300,7 @@ func (j *LLMJudge) ObserveSessionPromptScope(ctx context.Context, content, scope
 	entry := toolJudgeSessionContext{lastSeen: now}
 	prior := j.toolContext[sessionID]
 	entry.scopeTargets = prior.scopeTargets
+	entry.gitHosts, entry.gitRead = prior.gitHosts, prior.gitRead
 	if content != "" {
 		entry.userIntent = toolJudgeUserIntentExcerpt(content)
 		entry.scopeTargets = mergeScopeTargets(prior.scopeTargets, scopeText)

@@ -277,7 +277,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			contentScope: ruleContentScopeUntrusted,
 		})
 		if intentEvent {
-			a.observeUserTurn(ctx, req.Prompt, req.Prompt, verdict)
+			a.observeUserTurn(ctx, req.Prompt, req.Prompt, req.CWD, verdict)
 		}
 		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{

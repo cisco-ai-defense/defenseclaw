@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -91,6 +92,9 @@ var scopeReadSegments = map[string]bool{
 	"probe": true, "inspect": true, "count": true, "preview": true, "draft": true, "compose": true, "render": true,
 	"format": true, "lint": true, "parse": true,
 }
+
+// scopeShellKeys are argument names whose string value is shell text.
+var scopeShellKeys = map[string]bool{"command": true, "cmd": true, "script": true, "code": true}
 
 // scopeSinkKeys are argument names whose string value is a place the call
 // sends to, whatever the tool is called.
@@ -307,6 +311,40 @@ func scanScopeMatches(re *lazyregexp.Regexp, t string, trunc *bounded.Truncated)
 	return ms
 }
 
+// scopeKeyPrecheckBytes is the size above which a call is first checked for any
+// key a destination or a command could sit under (the walk of a megabyte of
+// nested arrays cost 58 ms).
+const scopeKeyPrecheckBytes = 32 << 10
+
+// scopeMayHaveDestination reports whether a JSON object argument text names, as an
+// object key, one of the keys callSendDestinations reads (a shell key, a sink key
+// or an ambiguous key); arguments that are not an object are always read.
+func scopeMayHaveDestination(args string) bool {
+	trimmed := strings.TrimLeft(args, " \t\r\n")
+	if !strings.HasPrefix(trimmed, "{") {
+		return true
+	}
+	lower := strings.ToLower(args)
+	for _, set := range []map[string]bool{scopeShellKeys, scopeSinkKeys, scopeAmbiguousKeys} {
+		for k := range set {
+			if strings.Contains(lower, `"`+k+`"`) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// scanScopeStrings is scanScopeMatches for the whole match text.
+func scanScopeStrings(re *lazyregexp.Regexp, t string, trunc *bounded.Truncated) []string {
+	ms := re.FindAllString(t, maxScopeScanMatches+1)
+	if len(ms) > maxScopeScanMatches {
+		trunc.Hit(bounded.Items)
+		ms = ms[:maxScopeScanMatches]
+	}
+	return ms
+}
+
 // callSendDestinations returns the distinct places a sending call goes to, and
 // the caps its reading hit; nil for a call that does not send. A repeat of a
 // destination already read costs nothing; the seventeenth distinct one is a cap
@@ -314,11 +352,14 @@ func scanScopeMatches(re *lazyregexp.Regexp, t string, trunc *bounded.Truncated)
 // unknown tier applies to the send; there is no text scan).
 func callSendDestinations(toolName, args string, trunc *bounded.Truncated) (dests []scopeDest, unreadable bool) {
 	toolSends, toolReads := scopeToolVerb(toolName)
+	if len(args) > scopeKeyPrecheckBytes && !scopeMayHaveDestination(args) {
+		return nil, false
+	}
 	values := scopeStrings(args, trunc)
 	var texts, shellTexts []string
 	for _, v := range values {
 		switch {
-		case v.key == "command" || v.key == "cmd" || v.key == "script" || v.key == "code" || v.key == "":
+		case scopeShellKeys[v.key] || v.key == "":
 			shellTexts = append(shellTexts, v.value)
 		case scopeSinkKeys[v.key]:
 			if !toolReads || toolSends {
@@ -346,7 +387,7 @@ func callSendDestinations(toolName, args string, trunc *bounded.Truncated) (dest
 	// A shell command is read by its parsed effects: a send is a command that sends.
 	shell := false
 	if len(shellTexts) > 0 {
-		shell, unreadable = shellSendDestinations(toolName, args, shellTexts, add)
+		shell, unreadable = shellSendDestinations(toolName, args, shellTexts, trunc, add)
 	}
 	if !shell && !toolSends && len(texts) == 0 {
 		return nil, false
@@ -457,6 +498,54 @@ func scopePartyNamed(mailbox, intent string, named []string) bool {
 		}
 	}
 	return false
+}
+
+// scopeGitReadTimeout bounds the one read of a session's git remotes: a network
+// home or a stalled mount must not hold the hook.
+const scopeGitReadTimeout = 250 * time.Millisecond
+
+// scopeGitRemoteHostsWithin is scopeGitRemoteHosts with a deadline; on a timeout
+// the session has no git hosts.
+func scopeGitRemoteHostsWithin(dir string, limit time.Duration) []string {
+	if dir == "" || !filepath.IsAbs(dir) {
+		return nil
+	}
+	done := make(chan []string, 1)
+	go func() { done <- scopeGitRemoteHosts(dir) }()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case hosts := <-done:
+		return hosts
+	case <-timer.C:
+		return nil
+	}
+}
+
+// SnapshotSessionGitRemotes reads the git remotes of cwd once for the session, at
+// its first event (a prompt or, failing that, the first tool call). Later calls
+// keep that read: a remote added during the session is not the user's.
+func (j *LLMJudge) SnapshotSessionGitRemotes(ctx context.Context, cwd string) {
+	if j == nil || cwd == "" {
+		return
+	}
+	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
+	if sessionID == "" {
+		return
+	}
+	j.toolContextMu.Lock()
+	entry, ok := j.toolContext[sessionID]
+	j.toolContextMu.Unlock()
+	if !ok || entry.gitRead {
+		return
+	}
+	hosts := scopeGitRemoteHostsWithin(cwd, scopeGitReadTimeout)
+	j.toolContextMu.Lock()
+	defer j.toolContextMu.Unlock()
+	if entry, ok := j.toolContext[sessionID]; ok && !entry.gitRead {
+		entry.gitHosts, entry.gitRead = hosts, true
+		j.toolContext[sessionID] = entry
+	}
 }
 
 // scopeGitRemoteHosts returns the hosts of the git remotes of the repository
@@ -589,7 +678,14 @@ func (j *LLMJudge) scopeFloorReason(ctx context.Context, toolName, args, cwd str
 	if !ok || entry.userIntent == "" {
 		return ""
 	}
-	return intentScopeExceeded(entry.userIntent, entry.scopeTargets, toolName, args, scopeGitRemoteHosts(cwd)...)
+	if !entry.gitRead && cwd != "" {
+		// A session whose first event was this call: the read happens now, once.
+		j.SnapshotSessionGitRemotes(ctx, cwd)
+		j.toolContextMu.Lock()
+		entry = j.toolContext[sessionID]
+		j.toolContextMu.Unlock()
+	}
+	return intentScopeExceeded(entry.userIntent, entry.scopeTargets, toolName, args, entry.gitHosts...)
 }
 
 // applyHookScopeFloor folds the scope finding into the hook verdict: in shadow

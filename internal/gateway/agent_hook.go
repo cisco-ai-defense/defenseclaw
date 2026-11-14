@@ -3621,7 +3621,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			if req.ConnectorName == "hermes" || req.ConnectorName == "openclaw" {
 				scopeText = ""
 			}
-			a.observeUserTurn(ctx, req.Content, scopeText, verdict)
+			a.observeUserTurn(ctx, req.Content, scopeText, req.CWD, verdict)
 		}
 	case isResultLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})

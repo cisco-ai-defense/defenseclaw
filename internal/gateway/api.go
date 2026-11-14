@@ -527,7 +527,7 @@ func (a *APIServer) hookSessionJudges(ctx context.Context) []*LLMJudge {
 // guardrail did not block it: a blocked prompt is not a task DefenseClaw lets
 // later tool calls be excused by. scopeText is the part of the prompt that may
 // name scope targets; "" when it is not known to be what the owner typed.
-func (a *APIServer) observeUserTurn(ctx context.Context, prompt, scopeText string, verdict *ToolInspectVerdict) {
+func (a *APIServer) observeUserTurn(ctx context.Context, prompt, scopeText, cwd string, verdict *ToolInspectVerdict) {
 	if verdict != nil && strings.EqualFold(verdict.Action, "block") {
 		prompt, scopeText = "", ""
 	} else {
@@ -536,6 +536,7 @@ func (a *APIServer) observeUserTurn(ctx context.Context, prompt, scopeText strin
 	}
 	for _, judge := range a.hookSessionJudges(ctx) {
 		judge.ObserveSessionPromptScope(ctx, prompt, scopeText)
+		judge.SnapshotSessionGitRemotes(ctx, cwd)
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
@@ -55,6 +56,7 @@ var scopeSenderPrograms = map[string]bool{
 
 // shellSendReader reads the parsed commands of one call into the places they send to.
 type shellSendReader struct {
+	trunc      *bounded.Truncated
 	add        func(scopeDest)
 	sends      bool
 	unreadable bool
@@ -65,28 +67,32 @@ const maxScopeWrapperDepth = 3
 // shellSendDestinations analyzes a call that has shell command values and adds
 // the places its commands send to. It reports whether a command sends and
 // whether a command that may send could not be read.
-func shellSendDestinations(toolName, rawArgs string, commands []string, add func(scopeDest)) (sends, unreadable bool) {
-	r := &shellSendReader{add: add}
+func shellSendDestinations(toolName, rawArgs string, commands []string, trunc *bounded.Truncated, add func(scopeDest)) (sends, unreadable bool) {
+	r := &shellSendReader{trunc: trunc, add: add}
 	facts := actionfacts.Analyze(actionfacts.Input{Tool: toolName, Args: json.RawMessage(rawArgs)})
 	if facts.Parse.Status != actionfacts.StatusNotApplicable {
-		r.readFacts(facts, scopeCommandOf(rawArgs, commands), 0)
+		r.readFacts(facts, commands, 0)
 		return r.sends, r.unreadable
 	}
 	// A tool name actionfacts does not know as a shell: read each command value as bash.
 	for _, command := range commands {
-		r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: command}), command, 0)
+		r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: command}), []string{command}, 0)
 	}
 	return r.sends, r.unreadable
 }
 
-func (r *shellSendReader) readFacts(facts actionfacts.Facts, command string, depth int) {
+func (r *shellSendReader) readFacts(facts actionfacts.Facts, commands []string, depth int) {
 	switch facts.Parse.Status {
 	case actionfacts.StatusInvalid, actionfacts.StatusLimitExceeded, actionfacts.StatusUnsupported:
 		// actionfacts could not project the command. A send is still a command
 		// whose name is a sending program, read from the syntax tree (not the
 		// text); a command that does not parse is not one the shell runs.
-		if command != "" && scopeSyntaxHasSender(command) {
-			r.sends, r.unreadable = true, true
+		// Every shell value of the call is read, not the first alone.
+		for _, command := range commands {
+			if command != "" && scopeSyntaxHasSender(command) {
+				r.sends, r.unreadable = true, true
+				break
+			}
 		}
 		return
 	}
@@ -167,7 +173,7 @@ func (r *shellSendReader) readFacts(facts actionfacts.Facts, command string, dep
 				continue
 			}
 			joined := scopeShellJoin(inner)
-			r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: joined}), joined, depth+1)
+			r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: joined}), []string{joined}, depth+1)
 		}
 	}
 }
@@ -230,8 +236,6 @@ func scopeProgram(word string) string {
 	return strings.TrimSuffix(strings.ToLower(path.Base(strings.ReplaceAll(word, "\\", "/"))), ".exe")
 }
 
-// scopeURLOperand returns the host of a word that is a URL (a scheme and a
-// host). A host the shell builds (an expansion in it) is unknown: no host.
 // scopeURLOperand returns the host of a word that is a URL (a scheme and a
 // host). A host the shell builds (an expansion in it) is unknown: no host.
 func scopeURLOperand(word string) (string, bool) {
@@ -335,7 +339,9 @@ func (r *shellSendReader) readMail(args []string, here string) {
 	skip := map[string]bool{"-s": true, "-S": true, "-r": true, "-f": true, "-a": true, "--from": true, "--header": true, "--attach": true, "-F": true, "--subject": true}
 	found := false
 	add := func(text string) {
-		for _, m := range scopeShellEmailWord.FindAllString(text, maxScopeDestinations+1) {
+		// The capped scanner: a repeat is not a destination, and more matches than
+		// the scan allows is a cap hit (GAP-0341).
+		for _, m := range scanScopeStrings(scopeShellEmailWord, text, r.trunc) {
 			found = true
 			r.add(scopeDest{mailbox: strings.ToLower(m)})
 		}
@@ -472,15 +478,6 @@ func scopeShellJoin(words []string) string {
 		quoted[i] = "'" + strings.ReplaceAll(w, "'", `'\''`) + "'"
 	}
 	return strings.Join(quoted, " ")
-}
-
-// scopeCommandOf is the command text of a call (the first shell value): only the
-// syntax-tree fallback reads it, and only to find the commands in it.
-func scopeCommandOf(rawArgs string, commands []string) string {
-	if len(commands) > 0 {
-		return commands[0]
-	}
-	return ""
 }
 
 // scopeHasRemoteOperand reports that a remote-copy command names its remote end in
