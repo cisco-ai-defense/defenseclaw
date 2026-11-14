@@ -224,18 +224,32 @@ func TestSecretFlowResultText(t *testing.T) {
 	}
 }
 
-// OpenClaw's plugin has no hook that sends a finished tool call's output to the
-// gateway (tool_result_persist stays in the plugin), so the value lane cannot
-// index OpenClaw results and the docs say so. When the plugin gains such a hook,
-// add an openclaw case to r2Results and update the connector table in
-// secret-flow-tracking.mdx.
-func TestSecretFlowResultAdapterOpenClawHasNoResultPath(t *testing.T) {
+// OpenClaw's plugin posts a finished tool call's output to the gateway
+// (after_tool_call -> /api/v1/inspect/tool-response) with the tool name and the
+// output, but not the call's arguments. The value lane indexes a result only
+// when the call that produced it reads a labeled file, and without the
+// arguments it cannot tell, so it indexes nothing for OpenClaw and the docs say
+// so. When the plugin sends the arguments with the result, add an openclaw case
+// to r2Results and update the connector table in secret-flow-tracking.mdx.
+func TestSecretFlowResultAdapterOpenClawHasNoCallArguments(t *testing.T) {
 	src, err := os.ReadFile("../../extensions/defenseclaw/src/index.ts")
 	if err != nil {
 		t.Skipf("OpenClaw plugin source not in this tree: %v", err)
 	}
-	if strings.Contains(string(src), `api.on("after_tool_call"`) {
-		t.Fatal("the OpenClaw plugin now registers after_tool_call: add an openclaw case to r2Results and update the docs table")
+	text := string(src)
+	i := strings.Index(text, `api.on("after_tool_call"`)
+	if i < 0 {
+		return // no result hook at all: nothing reaches the gateway
+	}
+	end := strings.Index(text[i:], "});")
+	if end < 0 {
+		t.Fatal("cannot find the end of the OpenClaw after_tool_call handler")
+	}
+	handler := text[i : i+end]
+	for _, arg := range []string{"event?.params", "event.params", "params:", "args:", "arguments:", "command:"} {
+		if strings.Contains(handler, arg) {
+			t.Fatalf("the OpenClaw after_tool_call handler now sends the call (%q): add an openclaw case to r2Results and update the docs table", arg)
+		}
 	}
 }
 

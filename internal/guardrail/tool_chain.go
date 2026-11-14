@@ -174,7 +174,7 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		// entry stays while the flow lane ships in shadow so turning the flow
 		// lane off keeps today's answer; it is removed when the flow lane
 		// becomes authoritative by default.
-				ID: ToolChainSecretReadThenEgress, Version: "1.8",
+		ID: ToolChainSecretReadThenEgress, Version: "1.8",
 		Title:       "Secret read followed by external egress",
 		Severity:    "CRITICAL",
 		EventWindow: 8, TimeWindow: 30 * time.Minute, Revision: "h01-h07-n01-n02-n04-to-data-external-egress-bounded8-v3-readproof",

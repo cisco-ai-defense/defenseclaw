@@ -13,6 +13,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/flow"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // The Secret flow tracking result adapter (S7, rel-1-0-10 GAP-0125, GAP-0126).
@@ -274,6 +275,17 @@ func addSecretFlowResultValues(ctx context.Context, req agentHookRequest) {
 	if strings.TrimSpace(result) == "" {
 		return
 	}
+	// The same bounds as the pre-call step (flow_bounds.go): a concurrency
+	// slot, the result and command size, the deadline. A skipped result is not
+	// indexed: shadow records nothing and changes no verdict.
+	bound := startFlowLaneBound()
+	if bound == nil {
+		return
+	}
+	defer bound.finish()
+	if !bound.trunc.Within(bounded.Bytes, len(result), secretFlowResultMaxBytes) {
+		return
+	}
 	// Index the result only when the flow label set labels the read target
 	// (one classifier, same as the file labeler). Indexing every tool output
 	// would waste the digest budget.
@@ -292,7 +304,14 @@ func addSecretFlowResultValues(ctx context.Context, req agentHookRequest) {
 		Home:                home,
 		Flavor:              opts.Flavor,
 	}
+	if !bound.admit(call.Command) {
+		return
+	}
+	opts.Deadline = bound.deadline
 	res := effects.Extract(call, opts)
+	if !bound.alive() {
+		return
+	}
 	labeled := false
 	for i := range res.Effects {
 		e := &res.Effects[i]

@@ -393,17 +393,38 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) (fin
 	if !has {
 		return nil
 	}
-	opts.Flavor = cfg.Flavor
-	opts = secretFlowHostOptions(call, opts)
-	cfg.Flavor = opts.Flavor
-	opts.CaseInsensitive = secretFlowCaseInsensitive(cfg.Flavor)
-	res := effects.Extract(call, opts)
 	// scanText is the call's raw command / argument text, scanned at a sink for
 	// secret values the effect model does not surface as Data (headers, MCP
 	// argument values).
 	scanText := request.Input.Command
 	if scanText == "" && len(request.Input.Args) > 0 {
 		scanText = string(request.Input.Args)
+	}
+	// The lane's bounds (flow_bounds.go): one concurrency slot, the input size
+	// and parser bounds, the deadline.
+	bound := startFlowLaneBound()
+	if bound == nil {
+		return nil
+	}
+	defer func() {
+		set := bound.finish()
+		// A truncated run never reads as clean in on: the bound finding. In
+		// shadow it records nothing and changes no answer.
+		if mode == flowLaneOn && set.Any() {
+			findings = append(findings, boundedTruncatedFinding(set, request.EnforcementCapable))
+		}
+	}()
+	if !bound.admit(call.Command) || !bound.admit(scanText) {
+		return nil
+	}
+	opts.Flavor = cfg.Flavor
+	opts = secretFlowHostOptions(call, opts)
+	cfg.Flavor = opts.Flavor
+	opts.CaseInsensitive = secretFlowCaseInsensitive(cfg.Flavor)
+	opts.Deadline = bound.deadline
+	res := effects.Extract(call, opts)
+	if !bound.alive() {
+		return nil
 	}
 	st := secretFlowSessions.session(sid, cfg)
 	secretFlowSessions.noteDialect(sid, request.Input.DialectHint)
@@ -534,5 +555,6 @@ func (a *APIServer) handleSecretFlow(w http.ResponseWriter, r *http.Request) {
 	secretFlowSessions.mu.Unlock()
 	resp["recent_hits"] = secretFlowSessions.recentHits(maxFlowHitRing)
 	resp["lane_panics"] = secretFlowPanics.Load()
+	resp["bounds"] = flowLaneBoundStats()
 	a.writeJSON(w, http.StatusOK, resp)
 }

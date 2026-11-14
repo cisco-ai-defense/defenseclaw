@@ -6872,8 +6872,9 @@ def _secret_flow_write(app: AppContext, change, reason: str) -> None:
 @pass_ctx
 def secret_flow_enable_cmd(app: AppContext) -> None:
     """Turn Secret flow tracking on in shadow mode (the shipped, safe mode:
-    it records hits but never changes the answer). Use `set mode on` to make
-    it enforce once you have reviewed the alert rate."""
+    it records hits but never changes the answer). `on` is not available in
+    1.0.10: the lane ships shadow-only while the review gaps on the effect
+    model stay open."""
     from defenseclaw import config_writer
 
     _secret_flow_write(app, config_writer.Change("guardrail.cascade.lanes.secret_flow", "shadow"),

@@ -780,11 +780,11 @@ def chain_domain_label(domain: str) -> str:
 
 
 
-def secret_flow_effective_mode(effects_rules: str, mode: str) -> str:
+def secret_flow_effective_mode(effects_lane: str, mode: str) -> str:
     """Fold the effects lane (guardrail.cascade.lanes.effects) and the feature
     switch (guardrail.cascade.lanes.secret_flow) into the effective mode,
     mirroring internal/gateway.secretFlowLaneMode."""
-    rollout = (effects_rules or "shadow")
+    rollout = (effects_lane or "shadow")
     if rollout == "off":
         return "off"
     m = mode or "shadow"
