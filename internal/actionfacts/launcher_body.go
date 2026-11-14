@@ -166,7 +166,7 @@ const maxLauncherTextWords = 64
 // `cmd /c "<script>"` as the Codex shell tool sends it on a Windows host
 // (rel-1-0-10:GAP-0735), read from the launcher's own grammar like
 // ShellLauncherBody. The line is split into words as PowerShell splits it
-// (single quotes, a doubled single quote for a quote, double quotes with `" or "" for a
+// (single quotes with ” for a quote, double quotes with `" or "" for a
 // quote) up to its first statement or redirect operator outside quotes
 // (newline, ; | & < >): what follows is the rest of the call, which the
 // call's own analysis reads. A leading call operator & is skipped.
@@ -197,21 +197,21 @@ func launcherTextWords(text string) ([]string, bool) {
 	i := 0
 	for i < len(text) && len(words) < maxLauncherTextWords {
 		c := text[i]
-		switch {
-		case c == ' ' || c == '\t':
+		switch c {
+		case ' ', '\t':
 			flush()
 			i++
-		case c == '\n' || c == '\r' || c == ';' || c == '|' || c == '<' || c == '>':
+		case '\n', '\r', ';', '|', '<', '>':
 			flush()
 			return words, len(words) > 0
-		case c == '&':
+		case '&':
 			if len(words) == 0 && !in {
 				i++ // the call operator before the program
 				continue
 			}
 			flush()
 			return words, len(words) > 0
-		case c == '\'':
+		case '\'':
 			in = true
 			i++
 			for i < len(text) {
@@ -230,7 +230,7 @@ func launcherTextWords(text string) ([]string, bool) {
 				return nil, false // unterminated quote
 			}
 			i++
-		case c == '"':
+		case '"':
 			in = true
 			i++
 			for i < len(text) {

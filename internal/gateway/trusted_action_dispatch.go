@@ -552,7 +552,7 @@ func dispatchTrustedAction(
 				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcherTwin))
 			}()
 		}
-		if cut := trustedReadingCutRead(request.Input, facts, launcherRead); cut.Any() {
+		if cut := trustedReadingCut(request.Input, facts, launcherRead); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
 			// statement budget: the call is TRUNCATED (the one bound rule),
 			// never judged below the unknown tier of its pack, and what was
@@ -9472,15 +9472,10 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 // A POSIX reading is not truncated by its command cap: its per-statement
 // split (SimpleCommands) reads every statement up to the statement budget
 // (ShellStatementsOverBudget), and each is judged.
-func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
-	return trustedReadingCutRead(input, facts, false)
-}
-
-// trustedReadingCutRead is trustedReadingCut for a call whose argv launcher
-// body is read on its own (launcherBodyTwinRequest) when bodyRead is set: its
-// word over the argv bounds is then not a cut of the reading, and the body's
-// own cuts are the ones that count.
-func trustedReadingCutRead(input actionfacts.Input, facts actionfacts.Facts, bodyRead bool) bounded.CapSet {
+// trustedReadingCut's bodyRead is set for a call whose launcher script is read on
+// its own (launcherBodyTwinRequest): a word over the argv bounds is then not a
+// cut of the reading, and the script's own cuts are the ones that count.
+func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts, bodyRead bool) bounded.CapSet {
 	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 		return bounded.CapSet{}
 	}
