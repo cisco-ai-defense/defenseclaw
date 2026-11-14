@@ -27,6 +27,12 @@ import (
 // them see the same answer. A nil memo reads the file system every time.
 type TargetMemo struct {
 	mu sync.Mutex
+	// excuseNonWrites makes the mention scan leave a protected name alone when
+	// the statement that holds it only reads (ActionMentionsNoWriteRole).
+	excuseNonWrites bool
+	// startup is the agent's shell startup for this evaluation, from the
+	// hook client's header (nil: the process's own).
+	startup *ShellStartup
 	// prefixes is the write-target walk state after each absolute path
 	// prefix (walkWritePathMemo).
 	prefixes map[string]walkState
@@ -276,4 +282,34 @@ func (m *TargetMemo) resolveWriteTarget(path string) (string, bool) {
 	}
 	m.mu.Unlock()
 	return resolved, ok
+}
+
+// nonWritesExcused is set for the scan ActionMentionsNoWriteRole runs; a nil memo
+// (a scan that carries none) never excuses.
+func (m *TargetMemo) nonWritesExcused() bool { return m != nil && m.excuseNonWrites }
+
+// WithShellStartup sets the agent's shell startup the evaluation's safe
+// proofs judge against and returns the memo.
+func (m *TargetMemo) WithShellStartup(startup *ShellStartup) *TargetMemo {
+	if m != nil {
+		m.startup = startup
+	}
+	return m
+}
+
+// ShellStartup is the startup set by WithShellStartup (nil: none).
+func (m *TargetMemo) ShellStartup() *ShellStartup {
+	if m == nil {
+		return nil
+	}
+	return m.startup
+}
+
+// shellStartup is the agent's startup the evaluation was given, or this
+// process's own.
+func (m *TargetMemo) shellStartup() ShellStartup {
+	if m != nil && m.startup != nil {
+		return *m.startup
+	}
+	return CurrentShellStartup()
 }

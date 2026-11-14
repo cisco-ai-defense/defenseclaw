@@ -88,6 +88,15 @@ func postDynamicWordParity(t *testing.T, home, project, connector string, manage
 
 func checkDynamicWordParity(t *testing.T, allowed, blocked []string) {
 	t.Helper()
+	checkDynamicWordParityWarned(t, allowed, blocked, nil)
+}
+
+// checkDynamicWordParityWarned also judges warned rows: a word the walk cannot place
+// (a variable the shell may rebind) leaves the target UNCERTAIN, so a per-user
+// gateway alerts on it in the default pack, and a managed gateway keeps the block
+// (rel-1-0-10:GAP-0350, GAP-0018).
+func checkDynamicWordParityWarned(t *testing.T, allowed, blocked, warned []string) {
+	t.Helper()
 	home, project := dynamicWordParityProject(t)
 	const block, allow = `{"action":"block"`, `{"action":"allow"`
 	for _, connector := range []string{"claudecode", "codex"} {
@@ -102,6 +111,16 @@ func checkDynamicWordParity(t *testing.T, allowed, blocked []string) {
 					got := postDynamicWordParity(t, home, project, connector, managed, command, nil)
 					if !strings.HasPrefix(got, block) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%s = %.300s, want block", command, got)
+					}
+				}
+				for _, command := range warned {
+					got := postDynamicWordParity(t, home, project, connector, managed, command, nil)
+					want := `{"action":"alert"`
+					if managed {
+						want = block
+					}
+					if !strings.HasPrefix(got, want) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						t.Errorf("%s = %.300s, want %s", command, got, want)
 					}
 				}
 			})
@@ -161,7 +180,7 @@ func TestManagedClaudeCodeKeepsTheEvalRedirectBlockWithoutACompleteClientReading
 // spelling in every cell, so managed Codex and Claude Code on macOS and
 // Linux match per-user. A source that may expand to an option stays unknown.
 func TestUnquotedCopyWordWithOneKnownValueGetsTheQuotedVerdictInEveryCell(t *testing.T) {
-	checkDynamicWordParity(t,
+	checkDynamicWordParityWarned(t,
 		[]string{
 			`for f in a.txt README.md; do cp $f build/; done; echo hi > report.txt`,
 			`for f in a.txt README.md; do cp "$f" build/; done; echo hi > report.txt`,
@@ -171,14 +190,16 @@ func TestUnquotedCopyWordWithOneKnownValueGetsTheQuotedVerdictInEveryCell(t *tes
 			`F=a.txt; cp ${F} out.txt && echo done > report.txt`,
 		},
 		[]string{
-			`cp $f build/ && echo hi > report.txt`,
 			`T=--target-directory=$HOME/.ssh; cp $T a.txt`,
 			`for f in a.txt; do cp $f disklink; done`,
 			`for f in a.txt README.md; do cp $f build/; done; echo hi > disklink`,
-			`f=a.txt; read f; cp $f build/ && echo hi > report.txt`,
-			`for f in a.txt; do IFS=.; cp $f build/; done; echo hi > report.txt`,
 			// rel-1-0-2:GAP-0004 review: rebinding through a wrapper or a
 			// deferred string keeps the word unknown.
+		},
+		[]string{
+			`cp $f build/ && echo hi > report.txt`,
+			`f=a.txt; read f; cp $f build/ && echo hi > report.txt`,
+			`for f in a.txt; do IFS=.; cp $f build/; done; echo hi > report.txt`,
 			`f=a.txt; command read f; cp $f build/ && echo hi > report.txt`,
 			`f=a.txt; wait -p f; cp $f build/ && echo hi > report.txt`,
 			`f=a.txt; trap "read f" DEBUG; cp $f build/ && echo hi > report.txt`,
@@ -192,7 +213,7 @@ func TestUnquotedCopyWordWithOneKnownValueGetsTheQuotedVerdictInEveryCell(t *tes
 // verdict; the same word naming the keys link blocks in every cell, and a
 // destination word that may hold another value stays unknown.
 func TestCopyDestinationWordWithOneKnownValueGetsThePerUserVerdictInEveryCell(t *testing.T) {
-	checkDynamicWordParity(t,
+	checkDynamicWordParityWarned(t,
 		[]string{
 			`f=out2.txt; cp a.txt $f`,
 			`f=out2.txt; cp a.txt "$f" && echo hi > report.txt`,
@@ -206,6 +227,8 @@ func TestCopyDestinationWordWithOneKnownValueGetsThePerUserVerdictInEveryCell(t 
 			`for d in disklink; do cp a.txt $d; done`,
 			`f=out2.txt; f=disklink; cp a.txt $f`,
 			`for f in out2.txt disklink; do cp a.txt $f; done`,
+		},
+		[]string{
 			`f=out2.txt; command read f; cp a.txt $f && echo hi > report.txt`,
 			`f=out2.txt; trap "read f" DEBUG; cp a.txt $f && echo hi > report.txt`,
 		})

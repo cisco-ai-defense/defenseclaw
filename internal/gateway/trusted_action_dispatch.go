@@ -210,6 +210,9 @@ type trustedActionRequest struct {
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
 	ResolvedWriteTargets map[string]string
+	// ShellStartup is the shell startup of the agent's process, from the
+	// hook client's header (nil: an older client; the gateway's own).
+	ShellStartup *hookpaths.ShellStartup
 	// ActiveAgentFileIdentities maps the hook client's file identity of each
 	// instruction file the session loaded to that file, for a gateway that
 	// cannot read it (hookpaths.LoadedIdentityPrefix).
@@ -252,6 +255,11 @@ type trustedActionRequest struct {
 	// (rel-1-0-10:GAP-0013). The operand is empty when no one operand was
 	// at fault (a directory walk or a pattern the shell expands).
 	unprovenTarget *unprovenWrite
+	// nonWriteMention, when set, is told that the target scan held the call
+	// only on words of statements that read a protected file, in a per-user
+	// default or permissive install (ActionMentionsNoWriteRole): the finding
+	// alerts, it does not block (rel-1-0-10:GAP-0018).
+	nonWriteMention *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -398,6 +406,9 @@ func dispatchTrustedAction(
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
+	if request.ShellStartup != nil {
+		request.targetMemo.WithShellStartup(request.ShellStartup)
+	}
 	if request.simpleMemo == nil {
 		request.simpleMemo = &trustedSimpleMemo{}
 	}
@@ -415,6 +426,17 @@ func dispatchTrustedAction(
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
 	bound := trustedActionCommandBound(request.Input)
+	if bound == shellReadingBudget {
+		// Past the reading budget (shellparse.BudgetExceeded): no reader
+		// below parses it, and the call is opaque to them. It takes the
+		// over-limit path the profile decides, with the reason
+		// parse_budget_exceeded, and keeps the one check that needs no
+		// parse: a call whose text may name the active DefenseClaw state
+		// is a possible write to it, which blocks in every mode and
+		// profile, as the readers' proof of a state write did before the
+		// budget refused to read the call (GAP-0254, GAP-0255, GAP-0281).
+		return withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable))
+	}
 	if bound == shellReadingTooDeep || bound == shellReadingNestedBodies {
 		// Past the reading bounds: no reader below parses it, and the call
 		// takes the over-limit path, which the profile decides (GAP-2537,
@@ -5195,7 +5217,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	},
 	"credential.directory_ticket_request": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return actionfacts.ExactDirectoryCredentialTicketRequest(facts)
+			return directoryTicketRequestOrServiceUse(facts)
 		},
 	},
 	"credential.pkcs12_private_key_extract": {
@@ -7232,6 +7254,7 @@ func filterTrustedLegacyActionContext(
 					filtered,
 					trustedLegacyProvenCommandFinding(
 						generation,
+						input,
 						finding,
 						facts,
 						loadNestedActions(),
@@ -7274,6 +7297,7 @@ func filterTrustedLegacyActionContext(
 						filtered,
 						trustedLegacyProvenCommandFinding(
 							generation,
+							input,
 							finding,
 							facts,
 							loadNestedActions(),
@@ -7303,6 +7327,7 @@ func filterTrustedLegacyActionContext(
 
 func trustedLegacyProvenCommandFinding(
 	generation *compiledRulePackCategories,
+	input actionfacts.Input,
 	finding RuleFinding,
 	facts actionfacts.Facts,
 	nestedActions []trustedNestedAction,
@@ -7320,6 +7345,11 @@ func trustedLegacyProvenCommandFinding(
 		finding.RuleID,
 		contract,
 	) && (contract.prerequisite == nil || contract.prerequisite(facts)) {
+		finding.enforcement = findingEnforcementDetectionOnly
+	}
+	if finding.RuleID == "CMD-EVAL" && evalEnvInitOnly(input, facts) {
+		// eval "$(opam env)": the shell is configured by a known tool whose
+		// call is visible; audit telemetry only (rel-1-0-10:GAP-0018).
 		finding.enforcement = findingEnforcementDetectionOnly
 	}
 	if finding.RuleID == "CMD-EVAL" &&
@@ -9618,6 +9648,47 @@ func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
 
+// parseBudgetExceededReason is the evidence of the over-limit finding of a
+// call past the reading budget (shellparse.BudgetExceeded): the call is
+// opaque to the readers, not a finding about its text. The profile decides
+// as for any evaluation limit (guardrailActionForProfile): an alert outside
+// the strict profile (managed non-strict included, rel-1-0-6:GAP-0675), a
+// block in strict (managed strict included).
+const parseBudgetExceededReason = "parse_budget_exceeded"
+
+// trustedActionBudgetFindings is trustedActionLimitFindings for a call past
+// the reading budget, with the reason parse_budget_exceeded.
+func trustedActionBudgetFindings(enforcementCapable bool) []RuleFinding {
+	findings := trustedActionLimitFindings(enforcementCapable)
+	for index := range findings {
+		findings[index].Evidence = parseBudgetExceededReason
+	}
+	return findings
+}
+
+// withBudgetStateBlock keeps, for a call the readers did not read, the
+// check that works on the raw text. A call whose text may name the active
+// DefenseClaw state (hookpaths.MayNameState: quotes, escapes, case and
+// patterns do not hide it, and over-matching only costs a block on a call
+// that is itself past the budget) is judged as a proven mutation of it, the
+// one finding observe mode also blocks on. Before the budget such a call
+// was read in full, and a write to the state after any padding blocked in
+// every mode (rel-1-0-2:GAP-0568); no padding can now turn that into an
+// alert or an allow (GAP-0281). The text is the same the readers would
+// have been given: the command, the argv and the top-level command
+// argument.
+func withBudgetStateBlock(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+	input := request.Input
+	text := input.Command + "\n" + strings.Join(input.Argv, "\n") + "\n" + string(input.Args)
+	if command, present, valid := trustedTopLevelCommandField(input.Args); valid && present {
+		text += "\n" + command
+	}
+	if !hookpaths.MayNameState(text) {
+		return findings
+	}
+	return withProvenActiveStateMutation(request, findings)
+}
+
 // parseFailureRuleID is the finding of a call the reader failed on
 // internally (a recovered panic in the per-command reading or in Analyze).
 // Like the evaluation limit it carries no target: it alerts outside the
@@ -9659,6 +9730,12 @@ const (
 	// shellparse.MaxNestedBodyProofBytes; the readers read it but do not
 	// prove its protected targets.
 	shellReadingNestedProof
+	// shellReadingBudget: it is past the reading budget of
+	// shellparse.BudgetExceeded other than by nesting or brace expansion:
+	// too many bytes, tokens, chain operators, nodes or levels of tree, or
+	// a chain that does not parse (GAP-0254, GAP-0255: a chained or flat
+	// command read for seconds and held gigabytes, or killed the process).
+	shellReadingBudget
 )
 
 // trustedActionCommandBound reports the reading bound the command of the
@@ -9679,8 +9756,24 @@ func trustedActionCommandBound(input actionfacts.Input) shellReadingBound {
 			command = field
 		}
 	}
-	if shellparse.TooDeep(command) {
+	// One input budget for every reader, measured before any of them runs
+	// (shellparse.BudgetExceeded): nesting and brace expansion keep their
+	// own over-limit path; a text refused before any parse (bytes, tokens,
+	// chain operators) and a chain that does not parse are the new class.
+	// A tree past the node or depth bound may be nested shell bodies
+	// (quoting doubles at every level, GAP-0677), which keep their own
+	// verdict: the weight of the bodies is asked first.
+	switch reason := shellparse.BudgetExceeded(command); reason {
+	case "":
+	case shellparse.BudgetNesting, shellparse.BudgetBraces:
 		return shellReadingTooDeep
+	case shellparse.BudgetNodes, shellparse.BudgetDepth:
+		if shellparse.NestedBodyWeight(command) > shellparse.MaxNestedBodyBytes {
+			return shellReadingNestedBodies
+		}
+		return shellReadingBudget
+	default:
+		return shellReadingBudget
 	}
 	switch weight := shellparse.NestedBodyWeight(command); {
 	case weight > shellparse.MaxNestedBodyBytes:

@@ -3,7 +3,10 @@
 
 package shellparse
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
 
 // MaxBraceFields and MaxBraceBytes bound the words, and the bytes, that the
 // brace expansions of one command produce. A shell reader that expands a
@@ -27,7 +30,26 @@ const (
 // expands, so a command it passes cannot blow up a reader.
 func BraceExpansionTooLarge(command string) bool {
 	var fields, bytes float64
+	var heredocs []heredocDelimiter
 	for start := 0; start < len(command); {
+		// A here-document body is data the shell does not brace-expand: a
+		// script or JSON text sent to python3 - <<'PY' held thousands of
+		// comma lists that made the whole call "over the reading bound" and
+		// every such call an ACTION-COMPOUND-LIMIT alert (rel-1-0-10:GAP-0018).
+		// The operator is found outside quotes (words are consumed whole), and
+		// the bodies begin at the next newline.
+		if command[start] == '<' && strings.HasPrefix(command[start:], "<<") && !strings.HasPrefix(command[start:], "<<<") {
+			if delimiter, next, ok := heredocOperator(command, start); ok {
+				heredocs = append(heredocs, delimiter)
+				start = next
+				continue
+			}
+		}
+		if command[start] == '\n' && len(heredocs) > 0 {
+			start = skipHeredocBodies(command, start+1, heredocs)
+			heredocs = heredocs[:0]
+			continue
+		}
 		end := wordEnd(command, start)
 		if end > start {
 			word := command[start:end]
@@ -225,4 +247,86 @@ func skipGroup(word string, i int) int {
 		}
 	}
 	return i
+}
+
+// heredocDelimiter is the end marker of a here-document and whether leading
+// tabs of its lines are ignored (<<-).
+type heredocDelimiter struct {
+	word    string
+	dashTab bool
+	// quoted: the delimiter is quoted or escaped, so the body is literal text.
+	// An unquoted body expands dollar-paren and backticks, which run commands.
+	quoted bool
+}
+
+// heredocOperator reads the << or <<- at i and the delimiter word after it.
+// It returns the position after the delimiter word.
+func heredocOperator(command string, i int) (heredocDelimiter, int, bool) {
+	j := i + 2
+	var delimiter heredocDelimiter
+	if j < len(command) && command[j] == '-' {
+		delimiter.dashTab = true
+		j++
+	}
+	for j < len(command) && (command[j] == ' ' || command[j] == '\t') {
+		j++
+	}
+	end := wordEnd(command, j)
+	if end <= j {
+		return delimiter, 0, false
+	}
+	var word strings.Builder
+	for k := j; k < end; k++ {
+		switch c := command[k]; c {
+		case '\'', '"':
+			delimiter.quoted = true
+		case '\\':
+			delimiter.quoted = true
+			if k+1 < end {
+				k++
+				word.WriteByte(command[k])
+			}
+		default:
+			word.WriteByte(c)
+		}
+	}
+	if word.Len() == 0 {
+		return delimiter, 0, false
+	}
+	delimiter.word = word.String()
+	return delimiter, end, true
+}
+
+// skipHeredocBodies returns the position after the bodies of delimiters,
+// which start at from (the line after the operators). A body ends at a line
+// equal to its delimiter; an unterminated body runs to the end of the text,
+// as the shell reads it.
+func skipHeredocBodies(command string, from int, delimiters []heredocDelimiter) int {
+	for _, delimiter := range delimiters {
+		if !delimiter.quoted {
+			// An unquoted body runs $( ) and backticks: it is counted as code.
+			return from
+		}
+	}
+	pos := from
+	for _, delimiter := range delimiters {
+		for pos < len(command) {
+			lineEnd := strings.IndexByte(command[pos:], '\n')
+			line := command[pos:]
+			next := len(command)
+			if lineEnd >= 0 {
+				line = command[pos : pos+lineEnd]
+				next = pos + lineEnd + 1
+			}
+			if delimiter.dashTab {
+				line = strings.TrimLeft(line, "\t")
+			}
+			line = strings.TrimSuffix(line, "\r")
+			pos = next
+			if line == delimiter.word {
+				break
+			}
+		}
+	}
+	return pos
 }

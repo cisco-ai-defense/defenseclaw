@@ -1932,14 +1932,23 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// ordinary text (colour escapes, brackets) is not shell
 				// (RV-p4-1).
 				if shellparse.PastReadingBounds(command) {
-					if !isApplyPatchToolName(tool) {
+					if isApplyPatchToolName(tool) {
+						// An apply_patch command is a patch envelope whose
+						// targets are read from the envelope below; deep text
+						// in it is file content, not shell, and no shell
+						// reader parses it (GAP-2561).
+						break
+					}
+					// No reader parses such a call, so the map says it is
+					// incomplete, and lists the DefenseClaw state it may
+					// write: an empty map must never read as "no state
+					// touched" (BudgetStateReading, GAP-0281).
+					reduced, reducedOK := BudgetStateReading(command)
+					if !reducedOK {
 						return incompleteEvidence(cwd)
 					}
-					// An apply_patch command is a patch envelope whose
-					// targets are read from the envelope below; deep text
-					// in it is file content, not shell, and no shell
-					// reader parses it (GAP-2561).
-					break
+					command = reduced
+					truncated = true
 				}
 				// A POSIX call over the statement budget (more than 128
 				// statements) is refused by the gateway before any reader
@@ -1997,10 +2006,11 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					if protectedDecision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
 						protectedDecision = false
 					}
-					if !protectedDecision && actionClientVariableWriteCandidate(command, home) {
-						// A per-user gateway can resolve a variable write through
-						// the user's links. Carry that positive decision to managed
-						// gateways, excluding an unconditionally overwritten value.
+					if !protectedDecision && !noDereferenceTouchSafe && (actionClientVariableWriteCandidate(command, home) || actionClientShellWordSyntax(command)) {
+						// A per-user gateway can resolve a variable or an expanded
+						// word through the user's links. Carry that positive
+						// decision to managed gateways, excluding a value the
+						// call proves dead (GAP-0326, GAP-0327).
 						protectedDecision = ActionCommandDecision(command, cwd, home) != "" &&
 							!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
 							!actionClientProvedOverwrittenRedirect(command, cwd, home)
@@ -2012,6 +2022,18 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				if !protectedDecision && NoDereferenceTouchShape(command, cwd, home) {
 					noDereferenceTouchSafe, protectedDecision = noDereferenceTouchStatus(command, cwd, home)
 				}
+				// The replace verbs (mv, install, sed -i) change the entry a
+				// name holds; the same key carries that proof (F7).
+				if !protectedDecision && !noDereferenceTouchSafe && ReplaceVerbShape(command, cwd, home) &&
+					replaceVerbSafe(command, cwd, home) {
+					noDereferenceTouchSafe = true
+				}
+				// A word the shell expands (a glob, a quoted or escaped glob
+				// character, an ANSI-C string) is read by the one word
+				// resolver in this client's own decision. A managed gateway
+				// cannot read the user's home, so the client carries that
+				// decision for every verb, not a fixed list (GAP-0326,
+				// GAP-0327: managed at least as strict as per-user).
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
@@ -4429,6 +4451,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				placedLinkCalls[call] = true
 			}
 		case slices.Contains(copyPrograms, program):
+			words, static := copyGlobOperandsAsNames(args, words, static)
 			_, topLevelPlaced := linkDirs[call]
 			_, nestedPlaced := nestedCopyDirs[call]
 			var globDestinations []string
@@ -7458,9 +7481,11 @@ func (l *shellLinks) record(source, name string, literal, symbolic bool, cwd str
 			text = relative
 		}
 	}
-	l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	if !linkPointsIntoItself(name, target) {
+		l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	}
 	if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
-		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
+		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name && !linkPointsIntoItself(resolved, target) {
 			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target, text: text})
 		}
 	}

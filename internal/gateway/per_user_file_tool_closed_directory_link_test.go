@@ -168,8 +168,15 @@ func TestPerUserShellWriteThroughALinkIntoAClosedDirectoryStaysBlockedWhenTheCom
 					t.Cleanup(func() { _ = os.Chmod(closed, 0o700) })
 					return sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": command}))(project)
 				}}
-				if blocked, _, body := postSudoersHook(t, row, profile, false); !blocked {
+				// The command opens the closed folder itself, so where the link ends is
+				// UNCERTAIN: the strict pack blocks it, the default and permissive packs
+				// alert on the key rule (rel-1-0-10:GAP-0350).
+				blocked, _, body := postSudoersHook(t, row, profile, false)
+				switch {
+				case profile == "strict" && !blocked:
 					t.Fatalf("append through a link the command reopens allowed in %s: %.600s", profile, body)
+				case profile != "strict" && (blocked || !strings.Contains(body, "persistence.ssh_authorized_keys_command")):
+					t.Fatalf("append through a link the command reopens is not an alert on the key rule in %s: blocked=%v %.600s", profile, blocked, body)
 				}
 			})
 		}

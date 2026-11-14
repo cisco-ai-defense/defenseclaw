@@ -30,8 +30,10 @@ func TestR104CopyProgramAndLinkOptionsShareOperandProof(t *testing.T) {
 		})
 	}
 
+	// The source is absolute: a relative one would make copies/source point at
+	// itself, a link that reaches nothing and is not recorded (linkPointsIntoItself).
 	links := shellLinks{known: true}
-	if !links.add("cp", []string{"--symbolic-link", "--target-directory", "copies", "source"}, cwd) {
+	if !links.add("cp", []string{"--symbolic-link", "--target-directory", "copies", "/data/source"}, cwd) {
 		t.Fatal("valid copy link options were not parsed")
 	}
 	wantAlias := filepath.Join(cwd, "copies", "source")

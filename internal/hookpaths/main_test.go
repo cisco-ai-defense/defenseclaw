@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // The tests build their homes in the temporary directory, which macOS keeps
@@ -16,10 +18,19 @@ import (
 // A home below a link is a product case of its own (GAP-1725,
 // gap1725_linked_home_test.go).
 func TestMain(m *testing.M) {
+	// No test reads the host's shell startup or system profiles (GAP-0293).
+	testenv.ClearShellStartup()
+	UseSystemShellProfilesForTests(nil, "")
+	restoreHome, err := testenv.IsolateProcessHome()
+	if err != nil {
+		panic(err)
+	}
 	if runtime.GOOS != "windows" {
 		if dir, err := filepath.EvalSymlinks(os.TempDir()); err == nil {
 			_ = os.Setenv("TMPDIR", dir)
 		}
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	restoreHome()
+	os.Exit(code)
 }

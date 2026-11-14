@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -20,7 +19,7 @@ import (
 // changes link entries. Its operands must have one fixed expansion, or one
 // fixed pattern supplied by a preceding assignment.
 func NoDereferenceTouchShape(command, cwd, home string) bool {
-	_, ok := noDereferenceTouchOperands(command, cwd, home, false)
+	_, ok := noDereferenceTouchOperands(command, cwd, home, false, ShellStartup{})
 	return ok
 }
 
@@ -32,17 +31,37 @@ func NoDereferenceTouchSafe(command, cwd, home string) bool {
 	return safe
 }
 
+// NoDereferenceTouchSafeIn is NoDereferenceTouchSafe judged against the
+// agent's shell startup (nil: this process's own).
+func NoDereferenceTouchSafeIn(command, cwd, home string, startup *ShellStartup) bool {
+	if startup == nil {
+		return NoDereferenceTouchSafe(command, cwd, home)
+	}
+	safe, _ := noDereferenceTouchStatusIn(command, cwd, home, *startup)
+	return safe
+}
+
 // noDereferenceTouchStatus reads the entries touch changes. A regular file
 // is checked by identity; -h changes a symbolic link's entry instead.
+//
+// A shell startup that can change what the statement runs only withholds the
+// safe proof. The entries the command names are still read, so a protected
+// file reached through another name (a hard link) is reported whatever the
+// account's environment holds. Before GAP-0293, any exported bash function
+// (RHEL's which, a host profile's helpers) dropped the protected reading
+// too, and the quoted hard link reached the protected file.
 func noDereferenceTouchStatus(command, cwd, home string) (safe, protectedTarget bool) {
+	return noDereferenceTouchStatusIn(command, cwd, home, CurrentShellStartup())
+}
+
+// noDereferenceTouchStatusIn is noDereferenceTouchStatus with the agent's
+// shell startup (a per-user gateway reads it from the client's header).
+func noDereferenceTouchStatusIn(command, cwd, home string, startup ShellStartup) (safe, protectedTarget bool) {
 	if !strings.Contains(command, "touch") ||
 		!strings.Contains(command, "-h") && !strings.Contains(command, "--no-dereference") {
 		return false, false
 	}
-	if actionClientLoopCopySourceStartupUnknown() {
-		return false, false
-	}
-	operands, ok := noDereferenceTouchOperands(command, cwd, home, true)
+	operands, ok := noDereferenceTouchOperands(command, cwd, home, true, startup)
 	if !ok {
 		return false, false
 	}
@@ -75,18 +94,18 @@ func noDereferenceTouchStatus(command, cwd, home string) (safe, protectedTarget 
 			protectedTarget = true
 		}
 	}
-	return !unknown && !protectedTarget, protectedTarget
+	return !unknown && !protectedTarget && !startup.mayChange("touch", "gtouch"), protectedTarget
 }
 
-func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) ([]string, bool) {
-	if !filepath.IsAbs(cwd) || home == "" ||
-		!strings.Contains(command, "touch") ||
-		!strings.Contains(command, "-h") && !strings.Contains(command, "--no-dereference") {
-		return nil, false
-	}
+// entryOnlyStatement reads the bounded statement the entry-only proofs
+// (touch -h, the replace verbs) accept: one simple command, optionally after
+// one plain assignment of a fixed value, with no redirect, no background and
+// no prefix assignment. It returns the command call and the values known
+// before it.
+func entryOnlyStatement(command, cwd, home string) (*syntax.CallExpr, actionValues, bool) {
 	file, parsed := parseShell(command)
 	if !parsed || len(file.Stmts) == 0 || len(file.Stmts) > 2 {
-		return nil, false
+		return nil, nil, false
 	}
 	values := actionValues{"HOME": home, "PWD": cwd}
 	if len(file.Stmts) == 2 {
@@ -94,36 +113,48 @@ func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) 
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 ||
 			len(call.Args) != 0 || len(call.Assigns) != 1 {
-			return nil, false
+			return nil, nil, false
 		}
 		assign := call.Assigns[0]
 		if assign.Name == nil || assign.Name.Value == "HOME" || assign.Name.Value == "PWD" ||
 			assign.Value == nil || assign.Append || assign.Array != nil || assign.Index != nil {
-			return nil, false
+			return nil, nil, false
 		}
 		if !noDereferenceTouchLiteralWord(assign.Value) {
-			return nil, false
+			return nil, nil, false
 		}
 		value, fixed := actionWordValueWithGlob(assign.Value, values, cwd, home, true)
 		if strings.Contains(value, "\\") {
 			if actionWordHasBraceText(assign.Value) {
-				return nil, false
+				return nil, nil, false
 			}
 			fields, err := shellparse.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)}, assign.Value)
 			if err != nil || len(fields) != 1 {
-				return nil, false
+				return nil, nil, false
 			}
 			value = fields[0]
 		}
 		if !fixed || value == "" || strings.ContainsAny(value, " \t\r\n\x00\x1f") {
-			return nil, false
+			return nil, nil, false
 		}
 		values[assign.Name.Value] = value
 	}
 	stmt := file.Stmts[len(file.Stmts)-1]
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 ||
-		len(call.Assigns) != 0 || len(call.Args) < 3 {
+	if !ok || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 || len(call.Assigns) != 0 {
+		return nil, nil, false
+	}
+	return call, values, true
+}
+
+func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool, startup ShellStartup) ([]string, bool) {
+	if !filepath.IsAbs(cwd) || home == "" ||
+		!strings.Contains(command, "touch") ||
+		!strings.Contains(command, "-h") && !strings.Contains(command, "--no-dereference") {
+		return nil, false
+	}
+	call, values, ok := entryOnlyStatement(command, cwd, home)
+	if !ok || len(call.Args) < 3 {
 		return nil, false
 	}
 	program, fixed := staticProgramWord(call.Args[0], home)
@@ -157,18 +188,31 @@ func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) 
 					return nil, false
 				}
 			}
-			value, known := actionWordValueWithGlob(word, values, cwd, home, true)
-			if noDereferenceTouchLiteralWord(word) && !actionWordHasUnquotedGlob(word, command) && strings.Contains(value, "\\") {
-				expanded, err := shellparse.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)}, word)
-				if err != nil || len(expanded) != 1 {
+			if expandPatterns {
+				// The one resolver: quote removal (ANSI-C included), bash's
+				// glob rules and the literal fallback of an unmatched
+				// pattern. Every candidate it names is an operand
+				// (GAP-0293, GAP-0324, GAP-0325). A Windows home reads
+				// these characters as wildcards: no proof there.
+				if actionWindowsHome(home) && shellWordNeedsResolver(word) {
 					return nil, false
 				}
-				value = expanded[0]
+				resolved := resolveShellWord(word, values, cwd, shellGlobOptionsForCall(command, startup))
+				if resolved.uncertain != "" {
+					return nil, false
+				}
+				operands = append(operands, resolved.candidates...)
+				if len(operands) > 1024 {
+					return nil, false
+				}
+				continue
 			}
+			value, known := actionWordValueWithGlob(word, values, cwd, home, true)
 			if !known || value == "" || strings.ContainsAny(value, " \t\r\n\x00\x1f") {
 				return nil, false
 			}
-			fields = []string{value}
+			operands = append(operands, value)
+			continue
 		}
 		activePattern := actionWordHasUnquotedGlob(word, command)
 		if len(word.Parts) == 1 {
@@ -181,15 +225,7 @@ func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) 
 					operands = append(operands, field)
 					continue
 				}
-				patternField := field
-				if len(fields) == 1 && noDereferenceTouchLiteralWord(word) && !actionWordHasBraceText(word) {
-					var known bool
-					patternField, known = noDereferenceTouchPattern(word, home)
-					if !known {
-						return nil, false
-					}
-				}
-				pattern := OperandPath(patternField, cwd)
+				pattern := OperandPath(field, cwd)
 				matches, complete, unseen := actionExpandGlob(pattern, cwd, false, true,
 					func() bool { return actionShellProfileMayDotglob(home) })
 				if !complete || unseen {
@@ -225,45 +261,4 @@ func noDereferenceTouchLiteralWord(word *syntax.Word) bool {
 		}
 	}
 	return true
-}
-
-// noDereferenceTouchPattern keeps quoted pattern characters literal while
-// retaining the active glob characters in an unquoted part of the same word.
-func noDereferenceTouchPattern(word *syntax.Word, home string) (string, bool) {
-	var out strings.Builder
-	quoted := func(value string) bool {
-		if runtime.GOOS == "windows" && strings.ContainsAny(value, "*?[]") {
-			return false
-		}
-		for _, r := range value {
-			if strings.ContainsRune("\\*?[]", r) {
-				out.WriteByte('\\')
-			}
-			out.WriteRune(r)
-		}
-		return true
-	}
-	for _, item := range word.Parts {
-		switch part := item.(type) {
-		case *syntax.Lit:
-			out.WriteString(part.Value)
-		case *syntax.SglQuoted:
-			if !quoted(part.Value) {
-				return "", false
-			}
-		case *syntax.DblQuoted:
-			fields, err := shellparse.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)},
-				&syntax.Word{Parts: []syntax.WordPart{part}})
-			if err != nil || len(fields) != 1 || !quoted(fields[0]) {
-				return "", false
-			}
-		default:
-			return "", false
-		}
-	}
-	pattern := out.String()
-	if actionWordTildePrefix(word) {
-		pattern = strings.TrimRight(home, "/") + pattern[1:]
-	}
-	return pattern, true
 }

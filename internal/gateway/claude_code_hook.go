@@ -260,6 +260,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "claudecode", runtime.GOOS),
 				SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 				ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: actionArgs}),
+				ShellStartup:                  shellStartupFromContext(ctx),
 				ActiveAgentFileIdentities:     activeAgentContext.identities,
 				SandboxGuestCWD:               req.guestCWD,
 				record:                        toolChainRecorderFromContext(ctx),

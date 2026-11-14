@@ -8,7 +8,7 @@ keywords:
   - OpenClaw transport coverage
 ---
 
-DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls through the guardrail proxy, which checks the request and the response, and asks the gateway about each tool call before it runs. This is a proxy connector. It is the only connector that ships a first-party plugin in this repository (`extensions/defenseclaw/`). The plugin owns the OpenClaw-side wiring. The gateway and CLI own everything else.
+DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls through the guardrail proxy, which checks the request and the response, and asks the gateway about each tool call before it runs. On Linux and macOS this is a proxy connector, with native plugin hooks on OpenClaw 2026.8.35 and later. It is the only connector that ships a first-party plugin in this repository (`extensions/defenseclaw/`). The plugin owns the OpenClaw-side wiring. The gateway and CLI own everything else.
 
 <Video
   src="openclaw"
@@ -20,7 +20,7 @@ DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls thr
 | Platform | Status | Notes |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | DefenseClaw hosts the required guardrail proxy and installs the first-party plugin. Subprocess policy is shell shims on both. |
-| Native Windows x64 | **Unsupported** | DefenseClaw is hook-only on Windows, while the OpenClaw connector requires the guardrail proxy, which DefenseClaw does not host on Windows. There is no supported WSL, Docker, VM or mixed workaround. |
+| Native Windows x64 | **Supported** | OpenClaw 2026.8.35 or later in native hook mode: the plugin under `%USERPROFILE%\.openclaw` blocks tool calls and prompts (the prompt gate is always on there) through its own hooks; finished model replies and tool results are scanned and audited but cannot be blocked. DefenseClaw hosts no guardrail proxy on Windows, so there is no provider-request scan, no streaming response scan and no PATH shims. Per-user installs only; managed Windows is not in this release. |
 
 ## Setup
 
@@ -52,7 +52,7 @@ The sequence of a model call and a tool call, with approvals, is on the [OpenCla
 
 ### Same user, own ports
 
-Run the DefenseClaw gateway and the OpenClaw gateway as the same OS user. The plugin runs inside OpenClaw and reads that user's `~/.defenseclaw`, and the DefenseClaw gateway connects to OpenClaw with that user's OpenClaw token.
+Run the DefenseClaw gateway and the OpenClaw gateway as the same OS user. This is the default layout. To run them as two accounts, see [Separate users](#separate-users-linux-and-macos). The plugin runs inside OpenClaw and reads that user's `~/.defenseclaw`, and the DefenseClaw gateway connects to OpenClaw with that user's OpenClaw token.
 
 Use one OS account for each DefenseClaw and OpenClaw pair. On a shared machine, give each account its own ports: `gateway.api_port` and `guardrail.port` for DefenseClaw, `gateway.port` in `openclaw.json` for OpenClaw.
 
@@ -63,15 +63,181 @@ DefenseClaw checks the listener before it sends a token. This protects against a
 - Tool checks and the plugin's other gateway calls prove the very connection that carries the token. Model calls, health checks and telemetry prove the listener right before each request. A process that takes the port in the gap between that proof and the request, well under a millisecond on loopback, could still receive that one request.
 - Before it connects to a loopback OpenClaw gateway port, the DefenseClaw gateway checks who owns the listener. On Linux it must be the same account or root; on macOS, the same account. Otherwise it sends nothing, keeps retrying, and `defenseclaw doctor` names the step.
 
+### Setup preflight
+
+Setup checks every file it is about to change before it changes any. When a check fails, setup stops, changes nothing and prints the reason and the fix. Run the same check yourself before setup or before an upgrade:
+
+```bash
+defenseclaw-gateway connector openclaw preflight
+```
+
+It prints `openclaw preflight: ok` and exits 0, or prints the reason on stderr and exits 1. Setup refuses in these cases.
+
+| Refusal | Fix |
+| --- | --- |
+| The OpenClaw home, its `extensions` folder, `openclaw.json` or the folder that holds it belongs to another account, or its owner cannot write it. | Run the gateway as the account that owns the OpenClaw home, or use the [separate-user layout](#separate-users-linux-and-macos). |
+| The folder `extensions/defenseclaw` belongs to another account. It looks like an administrator-installed plugin. | Set `connectors.openclaw.plugin_install` to `external` and `connectors.openclaw.plugin_dir` to it, or remove it. |
+| With `plugin_install: external`, the plugin folder or a folder above it is not owned by root (SYSTEM or Administrators on Windows), can be written by a group or others, or holds a link or a file that is not a plain file. | Run `export-plugin` again as root ([Administrator-installed plugin](#administrator-installed-plugin)). |
+| With `plugin_install: external`, the files are not exactly the plugin of this build: one is missing, added or different. | Run `export-plugin` again after the upgrade. |
+| `plugin_dir` is the folder DefenseClaw manages inside the OpenClaw home. | Put the administrator copy outside the OpenClaw home. |
+| The connector-scoped plugin credential cannot be issued, for example because the DefenseClaw data folder is not protected. | Run `defenseclaw doctor`. Setup does not fall back to the gateway token. |
+| On Windows, OpenClaw is older than 2026.8.35. | Run `npm install -g openclaw@latest`. |
+
+### Administrator-installed plugin
+
+By default setup writes the plugin into `extensions/defenseclaw` in the OpenClaw home. When the OpenClaw account must not be able to change the plugin code, an administrator installs the plugin once. DefenseClaw then checks it and registers it, and never writes or deletes it.
+
+1. As root, write the plugin of this build into a new or empty folder named `defenseclaw`. Use any folder outside the OpenClaw home.
+
+   ```bash
+   defenseclaw-gateway connector openclaw export-plugin --dir /opt/defenseclaw-openclaw/defenseclaw
+   ```
+
+   Keep the folder and every folder above it owned by root and not writable by group or others. Do not put links in it.
+
+2. As the DefenseClaw account, turn on the external plugin and run setup.
+
+   ```bash
+   defenseclaw config set connectors.openclaw.plugin_dir /opt/defenseclaw-openclaw/defenseclaw
+   defenseclaw config set connectors.openclaw.plugin_install external
+   defenseclaw setup openclaw --restart
+   ```
+
+3. After every DefenseClaw upgrade, as root, empty the folder and export again. Setup refuses a plugin that is not exactly the plugin of the gateway, and `export-plugin` refuses a folder that is not empty.
+
+   ```bash
+   rm -rf /opt/defenseclaw-openclaw/defenseclaw
+   defenseclaw-gateway connector openclaw export-plugin --dir /opt/defenseclaw-openclaw/defenseclaw
+   ```
+
+Rules:
+
+- `plugin_dir` is a clean absolute path that ends in a folder named `defenseclaw`, the plugin id. Config refuses anything else.
+- The files must match the build byte for byte, with no file missing and none added. A plugin from an older build fails the preflight and the message names both versions.
+- Teardown (`defenseclaw setup remove openclaw --force` for the last connector, `defenseclaw guardrail disable`) removes the DefenseClaw entries from `openclaw.json` and never deletes the folder. The administrator removes it.
+- A managed copy that an earlier setup left in `extensions/defenseclaw` is removed when the DefenseClaw account owns it, so OpenClaw does not load two plugins with one id. If another account owns it, setup leaves it and prints a notice.
+- To go back, run `defenseclaw config unset connectors.openclaw.plugin_install` and `defenseclaw config unset connectors.openclaw.plugin_dir`, then run setup again.
+- Known limit: the plugin code is protected, `openclaw.json` is not. The account that runs OpenClaw can still edit its own `openclaw.json`, for example to remove the plugin entry.
+
+### Separate users (Linux and macOS)
+
+Use this layout when OpenClaw runs as its own OS account and the DefenseClaw gateway runs as another. The OpenClaw account owns `openclaw.json` and cannot read the DefenseClaw data folder. The layout needs the [administrator-installed plugin](#administrator-installed-plugin), so the OpenClaw account cannot change plugin code. Native Windows does not support it: config refuses `plugin_account` there, and OpenClaw and DefenseClaw run as one account.
+
+The examples use `openclaw` for the OpenClaw account and `defenseclaw` for the DefenseClaw account. Both must be local accounts (in `/etc/passwd` and `/etc/group`, or the macOS local directory): the gateway does not resolve directory (AD, LDAP, SSSD) accounts for `plugin_account` and `plugin_token_group`.
+
+```yaml
+connectors:
+  openclaw:
+    plugin_install: external
+    plugin_dir: /opt/defenseclaw-openclaw/defenseclaw
+    plugin_account: openclaw
+    plugin_token_file: /etc/defenseclaw-openclaw/plugin.token
+    plugin_token_group: openclaw-plugin
+```
+
+Before the first setup, as root:
+
+```bash
+groupadd openclaw-plugin
+usermod -aG openclaw-plugin openclaw        # the plugin reads the credential
+usermod -aG openclaw-plugin defenseclaw     # the gateway gives the file to the group
+install -d -o defenseclaw -m 0755 /etc/defenseclaw-openclaw
+npm install -g --prefix /usr/local openclaw@2026.8.35   # both accounts can run it
+```
+
+Install OpenClaw where the DefenseClaw account can run it, such as `/usr/local/bin`: setup reads the OpenClaw version to choose the hook mode. An OpenClaw under the OpenClaw account's home (`npm -g --prefix ~/.local`) cannot be run by the DefenseClaw account, so setup uses the proxy mode, without the native hooks or the prompt gate, and says so.
+
+Edit these keys in `config.yaml` directly: `plugin_account`, `plugin_token_file` and `plugin_token_group` are valid only together, so `defenseclaw config set` refuses them one at a time. In the DefenseClaw `config.yaml` also set `claw.home_dir` and `claw.config_file` to the OpenClaw home and `openclaw.json` of the OpenClaw account. Put the OpenClaw gateway token (`gateway.auth.token` of the OpenClaw account) in the DefenseClaw account's `~/.defenseclaw/.env` as `OPENCLAW_GATEWAY_TOKEN=...`, mode 0600: the DefenseClaw gateway presents it to the OpenClaw gateway. It reads `openclaw.json` for the token only when that file is readable, which in this layout it usually is not.
+
+How it works:
+
+- DefenseClaw writes no file in the OpenClaw home. Setup publishes the plugin credential to `plugin_token_file`. When the DefenseClaw account can read `openclaw.json`, setup also checks that the block is merged. It usually cannot: OpenClaw rewrites the file with mode 0600 on every config change, so a group or ACL read grant does not last. Setup then says it did not check the file, and you make sure the block is merged.
+- The folder of `plugin_token_file` must exist, must not be a link, must be owned by the DefenseClaw account (it writes the credential there; never the OpenClaw account), and must not be writable by group or others. Create it as root with `install -d -o <defenseclaw account> -m 0755 /etc/defenseclaw-openclaw`.
+- The file is mode 0640. Its group is `plugin_token_group`, which is required. Both accounts must be in that group, and it must not be a group every account is in (such as `staff` or `users`). DefenseClaw writes a temporary file and renames it over the target, so the plugin never reads half a token and a link planted at the target is replaced, not followed.
+- The plugin cannot read `config.yaml`. It takes the gateway address, the port of the guardrail proxy and the credential file from its own entry in `openclaw.json`, and the guardrail mode, human approval, approval timeout, verdict wait and prompt gate from `GET /api/v1/openclaw/runtime`. Turning `connectors.openclaw.hooks.prompt_gate` on or off therefore needs no change to `openclaw.json`.
+- The listener proof answers the DefenseClaw account and `plugin_account`, and the DefenseClaw gateway accepts an OpenClaw gateway that listens as `plugin_account`.
+
+Setup in this layout does not edit `openclaw.json`. It always saves the block to merge in `openclaw-merge.json` in the DefenseClaw data folder. When it can read the file and the file lacks part of the DefenseClaw entry, setup fails, lists what is missing and prints the block on one line. For example:
+
+```json
+{
+  "plugins": {
+    "load": { "paths": ["/opt/defenseclaw-openclaw/defenseclaw"] },
+    "entries": {
+      "defenseclaw": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true },
+        "config": {
+          "tokenFile": "/etc/defenseclaw-openclaw/plugin.token",
+          "sidecarHost": "127.0.0.1",
+          "sidecarPort": 18970,
+          "guardrailPort": 4000,
+          "hookMode": "hybrid"
+        }
+      }
+    }
+  }
+}
+```
+
+The `hookMode` line and the `hooks` grant are absent in proxy mode, and an `approvals.plugin` block follows when human approval is on. If your `openclaw.json` has a `plugins.allow` list, add `defenseclaw` to it; do not create one, because it is an exclusive allowlist. The OpenClaw account, or an administrator, merges the block into `openclaw.json` and restarts the OpenClaw gateway. Then run `defenseclaw setup openclaw --no-restart` again and restart the DefenseClaw unit. The gateway checks the file when it starts, if it can read it. Either way, `defenseclaw status` shows the hook mode only once the plugin has called the gateway; until then it reads `unverified` and names the step.
+
+Two units, one for each account. Adjust the paths to your install. The DefenseClaw unit starts the gateway the way `defenseclaw setup` and `defenseclaw doctor` expect: as a daemon with its `gateway.pid`. Do not run `defenseclaw-gateway` in the foreground from a unit; setup then reports that another process holds the gateway port. Before you enable the unit, stop the gateway that `defenseclaw init` started (`defenseclaw-gateway stop` as the DefenseClaw account), so the unit starts it on the ports in `config.yaml`. With the unit in place, run `defenseclaw setup` and `defenseclaw setup remove` with `--no-restart`, then restart the gateway through systemd (`sudo systemctl restart defenseclaw-gateway`), so the gateway stays under the unit. The gateway watchdog, which runs in the unit, starts a crashed gateway again within about a minute; with a daemonizing start systemd does not track the gateway process itself. Setup never restarts the OpenClaw gateway in this layout: restart it as the OpenClaw account or with its unit.
+
+```ini
+# /etc/systemd/system/defenseclaw-gateway.service
+[Unit]
+Description=DefenseClaw gateway
+After=network-online.target
+
+[Service]
+Type=forking
+User=defenseclaw
+Group=defenseclaw
+ExecStart=/usr/local/bin/defenseclaw-gateway start
+ExecStop=/usr/local/bin/defenseclaw-gateway stop
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini
+# /etc/systemd/system/openclaw-gateway.service
+[Unit]
+Description=OpenClaw gateway
+After=defenseclaw-gateway.service
+Wants=defenseclaw-gateway.service
+
+[Service]
+User=openclaw
+Group=openclaw
+ExecStart=/usr/local/bin/openclaw gateway run
+# OpenClaw exits 0 when a config change needs a full restart.
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Teardown, in this order:
+
+1. As the DefenseClaw account, run `defenseclaw setup remove openclaw --yes --no-restart` (add `--force` when OpenClaw is the only connector), then `sudo systemctl restart defenseclaw-gateway`, or `defenseclaw-gateway connector teardown --connector openclaw`. It deletes the published credential and prints which entries to remove. It does not touch `openclaw.json`.
+2. As the OpenClaw account or an administrator, remove `plugins.entries.defenseclaw`, `defenseclaw` from a `plugins.allow` list if you added it there, and the `plugin_dir` path from `plugins.load.paths`, then restart the OpenClaw gateway. Until you do, the plugin has no credential and blocks every tool call.
+3. As an administrator, delete the `plugin_dir` folder when you no longer need it.
+
 ### Tested OpenClaw versions
 
-We test DefenseClaw with OpenClaw 2026.6.8, 2026.9.8 and 2026.10.9. We test against new OpenClaw releases as they come out.
+We test DefenseClaw with OpenClaw 2026.6.8, 2026.9.8 and 2026.10.9. DefenseClaw 1.0.10 adds 2026.8.35, the first release with the plugin hooks DefenseClaw uses (the hook floor), and 2026.11.3, the release `install.sh` installs. We test against new OpenClaw releases as they come out.
+
+{/* pending certification: the lead confirms the 1.0.10 OpenClaw version list after the final cert */}
 
 ### Device pairing
 
-DefenseClaw connects to the OpenClaw gateway as an operator device named `gateway-client`. OpenClaw approves a new device on a loopback connection by itself, so a normal single-user install needs no step. DefenseClaw never writes OpenClaw's pairing files.
+DefenseClaw connects to the OpenClaw gateway as the operator client `gateway-client`. With token authentication (`gateway.auth.mode: token`, what `install.sh` and setup use) OpenClaw accepts the connection on the token and keeps no device record: `openclaw devices list` stays empty and no step is needed. DefenseClaw never writes OpenClaw's pairing files.
 
-OpenClaw asks you to approve the device when the connection is not loopback, when `gateway.nodes.pairing.autoApproveLocal` is `false`, or when a device asks for more scopes than OpenClaw approved. DefenseClaw then keeps retrying. `defenseclaw doctor` and `defenseclaw-gateway status` show the device ID and the step:
+Device pairing applies only when OpenClaw pairs devices for the connection, for example a gateway without token authentication. OpenClaw then approves a new device on a loopback connection by itself, and asks you to approve it when the connection is not loopback, when `gateway.nodes.pairing.autoApproveLocal` is `false`, or when a device asks for more scopes than OpenClaw approved. DefenseClaw then keeps retrying. `defenseclaw doctor` and `defenseclaw-gateway status` show the device ID and the step:
 
 ```bash
 openclaw devices list
@@ -90,6 +256,8 @@ DefenseClaw asks OpenClaw for these scopes:
 | `operator.write` | Send DefenseClaw security notices into a session (`sessions.send`). |
 | `operator.approvals` | Answer OpenClaw exec approvals (`exec.approval.resolve`). |
 | `operator.admin` | Change OpenClaw's config to disable a blocked skill, plugin or MCP server (`config.patch`, `skills.update`). |
+
+`operator.admin` is optional. With `connectors.openclaw.operator_admin: false` DefenseClaw asks for the other three only. A blocked skill, plugin or MCP server is then still refused by DefenseClaw admission and inspection, but OpenClaw is not told to disable it: the alert and audit row say `openclaw_remediation_unavailable`, and `defenseclaw status` and `defenseclaw doctor` show `OpenClaw remediation: off (no operator.admin)`. The same happens when OpenClaw refuses `config.patch` or `skills.update` for the missing scope. With device pairing, if OpenClaw asks you to approve a scope upgrade for the admin scope, approve it with `openclaw devices approve`, or set `operator_admin: false` and restart the gateway.
 
 #### What this command sets vs. leaves at defaults
 
@@ -122,7 +290,7 @@ defenseclaw policy activate strict
 defenseclaw setup openclaw --mode action --rule-pack strict --restart
 ```
 
-Human approval needs OpenClaw 2026.3.28 or later. The OpenClaw that `install.sh` installs (2026.3.24) has no plugin approvals, so setup refuses `--human-approval` there and changes nothing. Upgrade OpenClaw first (`npm install -g openclaw@2026.3.28` or later), or set up without human approval.
+Human approval needs OpenClaw 2026.3.28 or later. On an older OpenClaw setup refuses `--human-approval` and changes nothing. Upgrade OpenClaw first (`npm install -g openclaw@latest`), or set up without human approval. `install.sh` installs OpenClaw 2026.11.3.
 
 An earlier setup with `--human-approval` may have written an `approvals.plugin` block (`enabled: true`, `mode: session`) into `openclaw.json`. An OpenClaw before 2026.3.28 rejects it and its gateway does not start. A setup without human approval, and teardown, take that exact block back when OpenClaw lacks plugin approvals. Any other `approvals.plugin` shape stays as you wrote it.
 
@@ -142,7 +310,9 @@ defenseclaw guardrail allow-private-upstream bedrock-runtime.us-east-1.amazonaws
 
 ### OpenClaw gateway token
 
-DefenseClaw also reads the gateway token from `openclaw.json` (`gateway.auth.token`):
+The DefenseClaw gateway connects to the OpenClaw gateway over a WebSocket. It signs in with the OpenClaw gateway token. This token is only for that connection. It is not the DefenseClaw API token (`DEFENSECLAW_GATEWAY_TOKEN`): the DefenseClaw API refuses it with 401, so an OpenClaw plugin or agent tool that reads `openclaw.json` cannot use it to allow a blocked tool or stop the gateway.
+
+DefenseClaw takes the OpenClaw gateway token from `OPENCLAW_GATEWAY_TOKEN` (the environment of the gateway, then `~/.defenseclaw/.env`). Without it, DefenseClaw reads `gateway.auth.token` from `openclaw.json`:
 
 - A plain string is used as it is.
 - A secret reference with `"source": "env"` is read from that variable in the environment of the shell that runs `init` or `setup`. DefenseClaw refuses a variable that holds one of its own credentials:
@@ -153,24 +323,43 @@ DefenseClaw also reads the gateway token from `openclaw.json` (`gateway.auth.tok
   - a name that starts with `DEFENSECLAW_`, or contains `API_KEY`, `SECRET`, `PASSWORD`, `ACCESS_KEY`, `PRIVATE_KEY` or `SESSION_TOKEN`.
 - DefenseClaw cannot read other secret sources, such as `"source": "store"`. For those, `init` and `setup` print a warning and finish.
 
-DefenseClaw saves a token it reads to `~/.defenseclaw/.env` (mode 0600). If it could not read the token, give it yourself:
+DefenseClaw saves a token it reads to `~/.defenseclaw/.env` (mode 0600) as `OPENCLAW_GATEWAY_TOKEN`. When OpenClaw rejects the token, DefenseClaw reads `openclaw.json` again and saves the new value under the same name only. If it could not read the token, give it yourself and restart the gateway:
 
 ```bash
-defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN
+defenseclaw keys set OPENCLAW_GATEWAY_TOKEN
+defenseclaw-gateway restart
 ```
 
-You can also set `OPENCLAW_GATEWAY_TOKEN` or `DEFENSECLAW_GATEWAY_TOKEN` in the environment of the gateway.
+You can also set `OPENCLAW_GATEWAY_TOKEN` in the environment of the gateway.
+
+#### Upgrade from 1.0.9 or earlier
+
+Before 1.0.10 the OpenClaw gateway token was also the DefenseClaw API token, and `gateway.token_env` could be `OPENCLAW_GATEWAY_TOKEN`. The upgrade separates them:
+
+- `defenseclaw migrate`, which the upgrade runs, and the gateway at first start create a new `DEFENSECLAW_GATEWAY_TOKEN` in `~/.defenseclaw/.env` when there is none, or when it holds the OpenClaw token.
+- `OPENCLAW_GATEWAY_TOKEN` stays in `.env`. The gateway still uses it to connect to OpenClaw.
+- `gateway.token_env: OPENCLAW_GATEWAY_TOKEN` is changed to `DEFENSECLAW_GATEWAY_TOKEN`. `defenseclaw doctor` warns about a config that still has it, and `defenseclaw doctor --fix` changes it.
+- Connector hooks keep working. They use their own connector tokens.
+
+A script that called the DefenseClaw API with `OPENCLAW_GATEWAY_TOKEN` must use `DEFENSECLAW_GATEWAY_TOKEN`.
 
 DefenseClaw 1.0.5 and 1.0.6 could save the secret reference text itself in `~/.defenseclaw/.env` when `init` failed. Later builds ignore that line. `init` and `defenseclaw doctor --fix` remove it and say so.
+
+DefenseClaw 1.0.10 separates the DefenseClaw gateway token from the OpenClaw gateway token. See the changelog.
 
 ## Files DefenseClaw will modify
 
 | What | Where |
 | --- | --- |
-| Plugin allow and load entries | `~/.openclaw/openclaw.json` |
-| Plugin | `~/.openclaw/extensions/defenseclaw/` (`openclaw.plugin.json`, `package.json`, `dist/index.js`) |
+| Plugin allow and load entries | `openclaw.json` in the OpenClaw home: `~/.openclaw/openclaw.json`, or the file that `claw.config_file` or `claw.home_dir` names |
+| Install admission (`security.installPolicy`), when on | `openclaw.json` in the OpenClaw home |
+| Plugin, managed install | `extensions/defenseclaw/` in the OpenClaw home (`openclaw.plugin.json`, `package.json`, `dist/index.js`) |
+| Plugin, administrator-installed | The folder in `connectors.openclaw.plugin_dir`. DefenseClaw reads it and never writes or deletes it |
+| Plugin credential | `~/.defenseclaw/hooks/.hook-openclaw.token`; with the separate-user layout also `connectors.openclaw.plugin_token_file` |
 | Hook scripts | `~/.defenseclaw/hooks` |
 | Subprocess shims | on `PATH`, for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` |
+
+Since 1.0.10, `claw.home_dir` and `claw.config_file` are honoured by the connector, the OpenClaw client and the gateway. Before, DefenseClaw always used `~/.openclaw` of the account that ran it. With `plugin_install: external` it changes no folder in the OpenClaw home. With the separate-user layout it writes no file there.
 
 DefenseClaw limits its OpenClaw-tree changes to `extensions/defenseclaw/` and its managed entries in `openclaw.json`. DefenseClaw backs up `openclaw.json` first. Backups are byte for byte and hash-checked. Teardown restores the file, or removes only DefenseClaw's entries when the file drifted. OpenClaw saves `openclaw.json` itself while it runs (it keeps its own metadata there), and DefenseClaw counts that as a change: the uninstall then keeps OpenClaw's version, takes out only DefenseClaw's entries, and prints a notice that the file is not byte for byte the copy from before setup. A file nobody changed comes back exactly.
 
@@ -191,6 +380,91 @@ Raw sockets, custom transports and libraries that bypass every patched entry poi
 The plugin patches the main thread of the OpenClaw process. A model call made from a Node worker thread is not redirected and not inspected. The **OpenClaw interception** row of `defenseclaw doctor` fails when the latest model call took no proxy hop, so it reports such a call.
 
 OpenClaw `>=2026.6.8` is the range that first required the Undici dispatcher layers. `defenseclaw doctor` fails the **OpenClaw interception** row when the plugin's sentinel self-test, which never leaves the host, cannot prove a rewrite onto the guardrail proxy, even if `/health` returns 200. The gateway pairs each model call OpenClaw completes with a proxy hop of its own. Doctor fails the row when the latest call took no hop, and warns when an earlier one did not but the calls after it did. Counts restart when `defenseclaw-gateway` restarts. If turns succeed while doctor says traffic is not intercepted, restart OpenClaw so the plugin reloads, then rerun doctor. Confirm a real `INCOMING REQUEST` delta in `gateway.log` only when that log can grow.
+
+## Hook modes
+
+OpenClaw 2026.8.35 added plugin hooks that DefenseClaw can use next to the guardrail proxy. Setup picks one of three modes and writes it to `plugins.entries.defenseclaw.config.hookMode` in `openclaw.json`. No key means proxy mode. Doctor and status show the mode (`OpenClaw hook mode` in doctor, `OpenClaw hooks` in status).
+
+| Mode | Setup picks it on | What guards OpenClaw |
+| --- | --- | --- |
+| `hybrid` | Linux and macOS, OpenClaw 2026.8.35 or later, `hooks.mode` `auto` | The guardrail proxy checks model requests and responses, and the `before_tool_call` hook checks each tool call, as in proxy mode. With `hooks.prompt_gate` on, the `before_agent_run` hook also checks each user prompt before the model reads it. |
+| `native` | Windows, OpenClaw 2026.8.35 or later | No guardrail proxy. The plugin hooks do everything: `before_tool_call` and the prompt gate decide, `after_tool_call` and `llm_output` send each tool result and each finished reply to the gateway for audit and findings. These two cannot block. |
+| `proxy` | Linux and macOS with OpenClaw before 2026.8.35, with a version setup cannot read, or with `hooks.mode` `proxy` | The 1.0.9 behaviour: the guardrail proxy and the `before_tool_call` check. |
+
+Two settings under `connectors.openclaw.hooks` change the choice. Both are optional.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `hooks.mode` | `auto` | `auto` picks the mode from the table. `proxy` keeps the 1.0.9 behaviour on Linux and macOS. Config refuses `proxy` on Windows, which has no guardrail proxy. |
+| `hooks.prompt_gate` | `false` | Check every user prompt in `before_agent_run` before the model reads it. |
+
+On Windows, setup refuses an OpenClaw older than 2026.8.35 and asks you to upgrade it. After you change `hooks.mode`, run `defenseclaw setup openclaw --restart` again so setup rewrites `hookMode`.
+
+
+### Prompt gate
+
+The prompt gate is off by default. Turn it on:
+
+```bash
+defenseclaw config set connectors.openclaw.hooks.prompt_gate true
+```
+
+The plugin reads the setting from the gateway about once a minute, so no restart is needed. The gate needs conversation access for the plugin hooks, which setup grants on OpenClaw 2026.4.24 and later unless you set `plugins.entries.defenseclaw.hooks.allowConversationAccess` yourself.
+
+The plugin sends the prompt (the first 256 KB) to the gateway, which judges it like any other request. In observe mode the prompt always runs and the finding is recorded. In action mode a block verdict stops the run. OpenClaw shows this message in place of the reply, and keeps only that message in the transcript of the blocked run:
+
+```text
+DefenseClaw blocked this message: <reason>
+```
+
+### Outage rule
+
+OpenClaw blocks a gate hook that throws or runs out of time, whatever the DefenseClaw policy says. The plugin therefore answers within its own budget and applies the rule itself. The same rule covers tool checks and prompt checks:
+
+- Only a gateway that does not answer follows the saved outage mode: nothing listens, the request times out, or the connection breaks off after the listener proved itself. The default and permissive policies let the call or the prompt run, with a warning in the OpenClaw log (prompt) or in the tool result (tool). Strict and managed block. The mode is shown by `defenseclaw status` and set with `defenseclaw guardrail fail-mode`.
+- A listener that does not prove it is the gateway of this account, a refused request, an answer that is not a valid verdict, a `gateway.host` that is not loopback and a missing credential block in every policy.
+
+### Verdict wait
+
+The plugin waits for a verdict as long as the gateway says: the hook judge budget (`guardrail.judge.hook_timeout`) plus 2 seconds, or the approval timeout plus 5 seconds when human approval is on. Before 1.0.10 the plugin waited 2 seconds without approval, so a judge verdict could arrive after the plugin had applied its outage mode. The budget that OpenClaw gives the hook is the approval timeout plus 15 seconds, at least 30 seconds and at most 600 seconds, and the plugin stops waiting 3 seconds before it ends.
+
+### Limits of the hook modes
+
+- The `before_agent_run` hook is not an input gate for Codex harness runs, GitHub Copilot harness runs, or OpenClaw node worker turns on older OpenClaw lines. The prompt gate does not see those prompts.
+- Native mode on Windows has no streaming response scan. The response scan sees the finished reply. The tool result scan runs after the tool ran. Neither can block.
+- In hybrid mode, model responses produced in Node worker threads are not scanned, as in proxy mode ([Transport coverage](#transport-coverage)).
+- The prompt gate checks the prompt only. Tool calls, tool results and model responses keep their own checks.
+
+{/* pending certification: confirm which OpenClaw lines run before_agent_run for Codex and Copilot harness runs and node worker turns */}
+
+## Plugin credential
+
+The plugin uses one credential: the connector-scoped token in `hooks/.hook-openclaw.token` in the DefenseClaw data folder (`~/.defenseclaw/hooks/.hook-openclaw.token`), which setup creates. In the [separate-user layout](#separate-users-linux-and-macos) it reads the copy at `plugin_token_file`. The plugin no longer reads the gateway token from `config.yaml`, `.env` or `OPENCLAW_GATEWAY_TOKEN`.
+
+The credential works on loopback only, for the routes in this table and for the listener proofs. Every other route needs the DefenseClaw gateway token.
+
+| Route | Method | Used for |
+| --- | --- | --- |
+| `/api/v1/inspect/*` with `X-DefenseClaw-Connector: openclaw` | POST | Tool, prompt, request, response and tool-result checks |
+| `/status` | GET | Health |
+| `/enforce/blocked`, `/enforce/allowed` | GET | Read the block and allow lists |
+| `/audit/event` | POST | Write an audit row |
+| `/policy/evaluate` | POST | Ask for a policy decision |
+| `/scan/result` | POST | Record a scan result |
+| `/v1/plugin/scan`, `/api/v1/scan/code` | POST | The `/scan` command |
+| `/api/v1/openclaw/runtime` | GET | Mode, human approval, approval timeout, verdict wait, prompt gate |
+
+A leaked plugin credential can read the lists, write audit and scan rows and ask for scans and decisions. It cannot block, allow or unblock anything, switch connectors, change config or stop the gateway.
+
+Because of that, the `/block` and `/allow` commands in OpenClaw chat no longer change a list. They print the command to run in a terminal:
+
+```bash
+defenseclaw skill block NAME
+defenseclaw mcp allow NAME
+defenseclaw plugin unblock NAME
+```
+
+Anyone who can message the agent can send a chat command. A terminal command needs the account that owns DefenseClaw.
 
 ## What the plugin does
 
@@ -229,21 +503,69 @@ The gateway answers allow, alert, confirm or block. In action mode a block stops
 
 ### Fail mode
 
-OpenClaw model requests use the proxy while the gateway is running. On a classified proxy outage (nothing listens on the gateway port, or the connection times out), the per-user default and permissive policies continue the original request to its configured provider with an agent warning; strict and managed policies block. The plugin's tool-inspection call follows the same saved mode: a default or permissive outage lets an ordinary tool run with a warning in its result, while strict and managed block. Direct protected targets remain blocked. A listener that answers without proving it is the account's gateway is not an outage: the plugin sends it nothing and blocks model requests and tool checks in every policy. `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN` is ignored by the 1.0.9 plugin. See [Fail modes](/docs/reference/fail-modes).
+OpenClaw model requests use the proxy while the gateway is running. On a classified proxy outage (nothing listens on the gateway port, or the connection times out), the per-user default and permissive policies continue the original request to its configured provider with an agent warning; strict and managed policies block. The plugin's tool-inspection call follows the same saved mode: a default or permissive outage lets an ordinary tool run with a warning in its result, while strict and managed block. Direct protected targets remain blocked. A listener that answers without proving it is the account's gateway is not an outage: the plugin sends it nothing and blocks model requests and tool checks in every policy. `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN` is ignored by the 1.0.9 plugin. The prompt gate follows the same rule ([Outage rule](#outage-rule)). See [Fail modes](/docs/reference/fail-modes).
 
 When the gateway cannot write the audit record of a tool check or a prompt, for example on a full disk, the strict policy blocks the call. The default and permissive policies allow it and say that DefenseClaw audit is degraded. Tool results and model responses keep their verdict.
 
 On OpenClaw 2026.4.24 and later, Setup grants the DefenseClaw prompt hook access so the model outage warning reaches the agent, unless the operator already set `plugins.entries.defenseclaw.hooks.allowConversationAccess`. If an operator disables prompt injection hooks, the warning still appears in the OpenClaw log.
 
+## Install admission
+
+OpenClaw 2026.8.35 and later can ask a local command before they install or update a skill or plugin (`security.installPolicy`). DefenseClaw can be that command. OpenClaw then installs a skill or plugin only when DefenseClaw admission allows it: the same scan, block list and allow list as for any other skill or plugin.
+
+Turn it on or off with `connectors.openclaw.install_policy`:
+
+| Value | Effect |
+| --- | --- |
+| `auto` (default) | On with the `strict` policy and on managed installs. Off with the `default` and `permissive` policies. |
+| `on` | Always on. |
+| `off` | Always off. |
+
+```bash
+defenseclaw config set connectors.openclaw.install_policy on
+defenseclaw setup openclaw --restart
+```
+
+When it is on, setup writes this block into `openclaw.json`. The command is the `defenseclaw-gateway` binary that ran setup, and its folder is the only trusted folder:
+
+```json
+"security": {
+  "installPolicy": {
+    "enabled": true,
+    "targets": ["skill", "plugin"],
+    "exec": {
+      "source": "exec",
+      "command": "/home/alice/.local/bin/defenseclaw-gateway",
+      "args": ["connector", "openclaw", "install-policy"],
+      "timeoutMs": 315000,
+      "noOutputTimeoutMs": 315000,
+      "trustedDirs": ["/home/alice/.local/bin"]
+    }
+  }
+}
+```
+
+The block also names a few environment variables (`passEnv`, `env`) that the command needs. The timeout is the longest skill or plugin scan plus 15 seconds.
+
+- Setup leaves an `installPolicy` you wrote yourself in place and does not add its own. It says so once.
+- Teardown removes the block only while it is exactly what setup wrote.
+- OpenClaw older than 2026.8.35 does not know the key, so setup does not write it there.
+
+The answer is allow or block. A block names the reason and the findings, and OpenClaw shows them. DefenseClaw never answers with a warning, because OpenClaw blocks a warning for installs that have no operator prompt.
+
+If the DefenseClaw gateway does not answer, the `strict` policy and managed installs block the install. The `default` and `permissive` policies allow it and print a warning. A missing credential, a listener that does not prove it is your gateway, or an error from the gateway blocks the install with every policy.
+
+OpenClaw runs only a command it trusts. The file and every folder above it must be owned by root or by the account that runs OpenClaw, and must not be writable by the group or by others (a sticky folder such as `/tmp` is accepted). A link is refused. A per-user install in `~/.local/bin` passes when your home folder and ~/.local are not group-writable. Setup checks the same rule and does not write a command that OpenClaw would refuse, because OpenClaw then blocks every install. In the separate-user layout the binary must be owned by root, and setup adds the block to the JSON it asks the administrator to merge.
+
 ## Subprocess policy
 
-The policy is `shims` on every platform. Setup installs PATH shims for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` that send each invocation to the gateway's tool-inspection endpoint before running the real binary. They inspect those command paths only and give no syscall, filesystem or network isolation. While the gateway is not running, the shims follow the policy: the default and permissive policies print `DefenseClaw warning: gateway peer is unverified or unavailable; running <tool> without inspection`, write a `hook-failures.jsonl` record and run the real tool; the strict policy refuses it (`DefenseClaw: gateway peer is unverified or unavailable — refusing to exec <tool>`, exit 1).
+The policy is `shims` on macOS and Linux. Setup installs PATH shims for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` that send each invocation to the gateway's tool-inspection endpoint before running the real binary. They inspect those command paths only and give no syscall, filesystem or network isolation. While the gateway is not running, the shims follow the policy: the default and permissive policies print `DefenseClaw warning: gateway peer is unverified or unavailable; running <tool> without inspection`, write a `hook-failures.jsonl` record and run the real tool; the strict policy refuses it (`DefenseClaw: gateway peer is unverified or unavailable — refusing to exec <tool>`, exit 1).
 
 OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox that ran it as a separate Linux user was removed. A host that still carries it removes what it left by hand ([remove a retired standalone sandbox](/docs/sandboxes/first-session)). OpenShell support for OpenClaw is pending in the [capability matrix](/docs/connectors/capability-matrix).
 
 ## Limits
 
-- Native Windows is unsupported: the connector needs the guardrail proxy, which DefenseClaw does not host on Windows.
+- Native Windows runs native hook mode only: no guardrail proxy, so no model response scan, no exact provider bytes and no PATH shims. OpenClaw older than 2026.8.35 is refused there, and managed Windows is not in this release.
 - Raw sockets, custom transports and libraries that bypass every patched entry point are outside the boundary. They are not inspected.
 - The shims inspect those six commands only. They give no syscall, filesystem or network isolation.
 - If a Bedrock endpoint resolves to a private VPC address, the proxy refuses it. Allow it with `defenseclaw guardrail allow-private-upstream <host>`.
@@ -251,7 +573,7 @@ OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox tha
 - The install watcher disables an OpenClaw skill it blocks without naming a connector. `defenseclaw skill enable <name> --connector openclaw` re-enables the skill in OpenClaw and clears that record, so `skill info` and `skill list` stop saying disabled. Another connector-wide disable stays, and the command names it.
 - If you move OpenClaw's gateway port, run `defenseclaw setup openclaw` again.
 - Model calls made from Node worker threads are not intercepted (see [Transport coverage](#transport-coverage)).
-- The DefenseClaw gateway and OpenClaw must run as the same OS user, one account per pair.
+- The DefenseClaw gateway and OpenClaw run as the same OS user, one account per pair, unless you use the [separate-user layout](#separate-users-linux-and-macos) on Linux or macOS.
 - OpenClaw does not run in an OpenShell sandbox. OpenShell support is pending in the [capability matrix](/docs/connectors/capability-matrix).
 
 ## Troubleshooting

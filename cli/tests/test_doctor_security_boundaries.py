@@ -283,7 +283,7 @@ def test_empty_data_dir_never_consumes_cwd_gateway_state(
 
 def test_fixer_blocker_reports_the_blocker_applicable_to_each_stage() -> None:
     cfg = SimpleNamespace(
-        gateway=SimpleNamespace(token_env="OPENCLAW_GATEWAY_TOKEN"),
+        gateway=SimpleNamespace(token_env="EXTERNAL_GATEWAY_TOKEN"),
         _doctor_gateway_token_was_rotated=True,
         _doctor_gateway_token_rotation_required=False,
     )
@@ -305,6 +305,10 @@ def test_fixer_blocker_reports_the_blocker_applicable_to_each_stage() -> None:
         )
         == "gateway.token_env did not converge on the rotated canonical provider"
     )
+    # R-TOK: no resolver reads a token_env naming OPENCLAW_GATEWAY_TOKEN, so the
+    # rotated canonical token has precedence there.
+    cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
+    assert cmd_doctor._fixer_blocker(cfg, "gateway token drift", dotenv_problem) == dotenv_problem
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode/owner regression")

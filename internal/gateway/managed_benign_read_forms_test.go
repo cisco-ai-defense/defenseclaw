@@ -69,6 +69,10 @@ func r106Reader2CheckWith(t *testing.T, rows []r106Reader2Row, setup func(*testi
 			perUser := "allow"
 			if body := recorder.Body.String(); strings.Contains(body, `"deny"`) || strings.Contains(body, `"block"`) {
 				perUser = "block"
+			} else if strings.HasPrefix(body, `{"action":"alert"`) {
+				// An alert is an allow with a finding; a row that wants "alert"
+				// asks for the finding, every other row reads it as an allow.
+				perUser = "alert"
 			}
 			managed := f.post(t, connector, payload, header)
 			if err := os.Chmod(f.homes, 0o700); err != nil {
@@ -80,6 +84,9 @@ func r106Reader2CheckWith(t *testing.T, rows []r106Reader2Row, setup func(*testi
 			wantPerUser, wantManaged, split := strings.Cut(row.want, "/")
 			if !split {
 				wantManaged = wantPerUser
+			}
+			if perUser == "alert" && wantPerUser == "allow" {
+				perUser = "allow"
 			}
 			if perUser != wantPerUser || managed != wantManaged {
 				t.Errorf("%s %s: per-user %s, managed %s, want %s", connector, row.name, perUser, managed, row.want)

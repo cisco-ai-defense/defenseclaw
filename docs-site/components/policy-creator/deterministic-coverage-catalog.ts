@@ -383,8 +383,8 @@ export const HIGH_ASSURANCE_PACKS = [
     id: 'privacy-high-assurance',
     title: 'Privacy high assurance',
     status: 'selectable',
-    ruleCount: 13,
-    coverage: 'Label-bound PII, payment-card, financial, identity, and medical-record signals.',
+    ruleCount: 14,
+    coverage: 'Label-bound PII, bulk email lists, payment-card, financial, identity, and medical-record signals.',
   },
   {
     id: 'cloud-production-protection',
@@ -421,6 +421,14 @@ export const HIGH_ASSURANCE_PACKS = [
     ruleCount: 0,
     coverage:
       'Exact authorized_keys write and fingerprint allowlist contract; activation awaits trusted content and outcome bindings.',
+  },
+  {
+    id: 'active-directory-protection',
+    title: 'Active Directory protection',
+    status: 'selectable',
+    ruleCount: 5,
+    coverage:
+      'Kerberos ticket requests, NTDS database export, NetExec/CrackMapExec credential use, bulk LDAP collection, and password spraying against a managed domain. Without the pack, the built-in default alerts on credentialed NetExec and strict blocks it.',
   },
 ] as const satisfies readonly HighAssurancePack[];
 

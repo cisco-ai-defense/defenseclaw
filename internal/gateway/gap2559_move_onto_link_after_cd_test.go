@@ -23,6 +23,10 @@ type r106HookRow struct {
 	command     string
 	block       bool
 	perUserOnly bool
+	// warn: the target stays UNCERTAIN (a link made at run time, a copy the
+	// walk cannot read): the per-user default pack alerts, a managed gateway
+	// with an incomplete client reading blocks (rel-1-0-10:GAP-0018, GAP-0350).
+	warn bool
 }
 
 // r106HookVerdict posts payload in action mode: managed is the hook peer
@@ -52,6 +56,8 @@ func r106HookVerdict(t *testing.T, f b36ManagedHookFixture, managed bool, connec
 		return "block"
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow"
+	case strings.HasPrefix(body, `{"action":"alert"`):
+		return "alert"
 	}
 	return fmt.Sprintf("status %d body %.200s", recorder.Code, body)
 }
@@ -81,6 +87,12 @@ func judgeR106HookRows(t *testing.T, rows []r106HookRow, prepare func(t *testing
 				want := "allow"
 				if row.block {
 					want = "block"
+				}
+				if row.warn {
+					want = "alert"
+					if mode.managed {
+						want = "block"
+					}
 				}
 				if got := r106HookVerdict(t, f, mode.managed, connector, payload, header); got != want {
 					t.Errorf("managed=%v header=%v %s %q: %s, want %s", mode.managed, mode.header, connector, row.command, got, want)

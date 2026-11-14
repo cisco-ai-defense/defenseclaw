@@ -15,7 +15,9 @@ import (
 // same way, so cp a.txt c.txt; cp c.txt d.txt $(true) blocked as an SSH
 // authorized_keys command (GAP-2585, cell L-mac-J3-011). The earlier copy
 // is judged as written; a write after the runtime-word copy, a copy into
-// the keys file or state, and a link the command makes still block.
+// the keys file or state, and a link the command makes still block. A write
+// after the runtime-word copy to a name that nothing proves protected is an
+// UNCERTAIN target: the default pack alerts, the strict pack blocks.
 func TestR106CopyBeforeARuntimeWordCopyStaysAllowed(t *testing.T) {
 	judgeR106HookRows(t, []r106HookRow{
 		{command: `cp a.txt c.txt; cp c.txt d.txt $(true)`},
@@ -31,7 +33,7 @@ func TestR106CopyBeforeARuntimeWordCopyStaysAllowed(t *testing.T) {
 		{command: `ln -s ../.ssh c; cp a.txt c/authorized_keys $(true)`, block: true},
 		{command: `cp -P keylink c.txt; cp a.txt c.txt $(true)`, block: true},
 		{command: `cp a.txt c.txt; cp c.txt d.txt $(true); echo x >> keylink`, block: true},
-		{command: `cp c.txt d.txt $(true); cp a.txt d.txt`, block: true},
+		{command: `cp c.txt d.txt $(true); cp a.txt d.txt`, warn: true},
 	}, func(t *testing.T, f b36ManagedHookFixture) {
 		for _, dir := range []string{filepath.Join(f.project, "ordinary"), filepath.Join(f.home, ".defenseclaw")} {
 			if err := os.MkdirAll(dir, 0o700); err != nil {

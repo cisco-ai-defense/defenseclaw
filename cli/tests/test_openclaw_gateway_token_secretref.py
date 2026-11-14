@@ -77,7 +77,8 @@ def token_env(monkeypatch):
 
 def _assert_plain_notice(notice: str) -> None:
     assert "gateway.auth.token" in notice
-    assert "OPENCLAW_GATEWAY_TOKEN" in notice and "DEFENSECLAW_GATEWAY_TOKEN" in notice
+    # The OpenClaw token goes in OPENCLAW_GATEWAY_TOKEN only, never the master (R-TOK).
+    assert "OPENCLAW_GATEWAY_TOKEN" in notice and "DEFENSECLAW_GATEWAY_TOKEN" not in notice
     assert ENV_VALUE not in notice and LITERAL not in notice
     assert "{" not in notice, "the SecretRef object is never echoed"
 
@@ -192,12 +193,14 @@ def test_bootstrap_apply_gateway_defaults(name, tmp_path, token_env, monkeypatch
     assert bool(report.openclaw_token_notice) is has_notice
     dotenv = _dotenv(cfg)
     assert "source" not in dotenv and "{" not in dotenv
+    assert cfg.gateway.token_env == "DEFENSECLAW_GATEWAY_TOKEN"
     if expected:
         assert detected is True
-        assert cfg.gateway.token_env == "OPENCLAW_GATEWAY_TOKEN"
         assert f"OPENCLAW_GATEWAY_TOKEN={expected}" in dotenv
+        # The gateway gets a master of its own (R-TOK).
+        assert cfg.gateway.resolved_token() not in ("", expected)
+        assert f"DEFENSECLAW_GATEWAY_TOKEN={cfg.gateway.resolved_token()}" in dotenv
     else:
-        assert cfg.gateway.token_env == "DEFENSECLAW_GATEWAY_TOKEN"
         assert "OPENCLAW_GATEWAY_TOKEN=" not in dotenv
 
 
@@ -234,11 +237,11 @@ def test_setup_guardrail_adopt_token_uses_an_env_ref(tmp_path, token_env, monkey
     token_env(ENV_VALUE)
     cfg = _openclaw_cfg(tmp_path, ENV_REF)
     with (
-        patch.object(cmd_setup, "_save_adopted_gateway_token") as save,
-        patch.object(cmd_setup, "keep_running_gateway_token"),
+        patch.object(cmd_setup, "_save_secret_to_dotenv") as save,
+        patch.object(cmd_setup, "_ensure_master_gateway_token", return_value=False),
     ):
         cmd_setup._adopt_openclaw_gateway_token(SimpleNamespace(cfg=cfg, logger=None))
-    assert {call.args[1] for call in save.call_args_list} == {ENV_VALUE}
+    assert [call.args[:2] for call in save.call_args_list] == [("OPENCLAW_GATEWAY_TOKEN", ENV_VALUE)]
 
 
 def test_doctor_fix_gateway_token_ignores_a_store_ref(tmp_path, token_env, monkeypatch):
@@ -320,11 +323,20 @@ def test_env_ref_naming_a_defenseclaw_credential_is_refused(name, monkeypatch):
     assert name in token.notice and "credential-value-gh1404" not in token.notice
 
 
-@pytest.mark.parametrize("name", ["OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN", "MY_OPENCLAW_TOKEN"])
+@pytest.mark.parametrize("name", ["OPENCLAW_GATEWAY_TOKEN", "MY_OPENCLAW_TOKEN"])
 def test_env_ref_naming_a_gateway_token_variable_resolves(name, monkeypatch):
     monkeypatch.setenv(name, ENV_VALUE)
     token = openclaw_gateway_token(_openclaw_json({"source": "env", "provider": "default", "id": name}))
     assert (token.value, token.notice) == (ENV_VALUE, "")
+
+
+def test_env_ref_naming_the_defenseclaw_master_is_refused(monkeypatch):
+    # OpenClaw must never resolve DefenseClaw's own master token (R-TOK).
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_TOKEN", ENV_VALUE)
+    ref = {"source": "env", "provider": "default", "id": "DEFENSECLAW_GATEWAY_TOKEN"}
+    token = openclaw_gateway_token(_openclaw_json(ref))
+    assert token.value == ""
+    _assert_plain_notice(token.notice.replace("DEFENSECLAW_GATEWAY_TOKEN for", "the variable for"))
 
 
 def test_resolved_token_ignores_secretref_text(token_env, monkeypatch):
@@ -394,8 +406,9 @@ def test_upgrade_retry_from_the_base_dotenv_line(setting, tmp_path, token_env, m
     warns = [s for s in report.setup if s.name == "OpenClaw token"]
     if setting == LITERAL:
         # The OpenClaw token resolves, so the cleanup is the only note: no token warning.
+        # It is saved as the OpenClaw credential; the master is a separate value (R-TOK).
         assert warns == []
-        assert cfg.gateway.resolved_token() == LITERAL
+        assert cfg.gateway.resolved_token() not in ("", LITERAL)
         assert f"OPENCLAW_GATEWAY_TOKEN={LITERAL}" in body
     else:
         assert cfg.gateway.resolved_token() == ""
@@ -466,7 +479,14 @@ def test_agent_fallback_ignores_secret_ref_text(monkeypatch):
         _host, _port, token = cmd_agent._resolve_gateway_target(
             SimpleNamespace(cfg=None), gateway_host=None, gateway_port=None, gateway_token_env=None
         )
-    assert token == "real-token-gh1404"
+    # OPENCLAW_GATEWAY_TOKEN is never the DefenseClaw token (R-TOK).
+    assert token == ""
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_TOKEN", "master-gh1404")
+    with patch("defenseclaw.config.load", side_effect=RuntimeError("no config")):
+        _host, _port, token = cmd_agent._resolve_gateway_target(
+            SimpleNamespace(cfg=None), gateway_host=None, gateway_port=None, gateway_token_env=None
+        )
+    assert token == "master-gh1404"
 
 
 def _cfg_with_keys(tmp_path, dotenv_body: str, llm_env: str = ""):
@@ -507,7 +527,10 @@ def test_credential_names_are_exact(tmp_path):
         "DEFENSECLAW_LLM_KEY",
     ):
         assert name in names, name
-    for name in ("OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN", "COMMENTED", "# COMMENTED"):
+    # DEFENSECLAW_GATEWAY_TOKEN is DefenseClaw's master, which an OpenClaw
+    # SecretRef must never name (R-TOK).
+    assert "DEFENSECLAW_GATEWAY_TOKEN" in names
+    for name in ("OPENCLAW_GATEWAY_TOKEN", "COMMENTED", "# COMMENTED"):
         assert name not in names, name
 
 

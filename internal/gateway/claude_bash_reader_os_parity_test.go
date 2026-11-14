@@ -23,6 +23,8 @@ type claudeBashParityRow struct {
 	name, command string
 	block         bool
 	windowsOnly   bool
+	// warn: the target stays UNCERTAIN, so the default pack alerts, not blocks.
+	warn bool
 }
 
 // judgeClaudeBashParityRows runs rows through the Claude Code hook of a
@@ -75,6 +77,13 @@ func judgeClaudeBashParityRows(t *testing.T, rows []claudeBashParityRow) {
 			api.handleAgentHook("claudecode").ServeHTTP(recorder, req)
 			got := recorder.Body.String()
 			blocked := strings.Contains(got, `"action":"block"`)
+			if row.warn {
+				// UNCERTAIN target: the default pack alerts (rel-1-0-10:GAP-0350).
+				if blocked || !strings.HasPrefix(got, `{"action":"alert"`) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+					t.Fatalf("%q: want an alert on the keys rule: %.400s", command, got)
+				}
+				return
+			}
 			if blocked != row.block {
 				t.Fatalf("%q: block=%v, want %v: %.400s", command, blocked, row.block, got)
 			}
@@ -132,7 +141,7 @@ func TestClaudeBashDirectoryStackCopyMatchesAcrossOS(t *testing.T) {
 		{name: "pushd rsync through the link", command: `pushd src && rsync -a ~1/a.txt ~1/alias`, block: true},
 		{name: "rsync out of .ssh by the stack", command: `pushd ~/.ssh && pushd ~/project && rsync -a ~1/ k/`, block: true},
 		{name: "cp out of .ssh by the stack", command: `pushd ~/.ssh && pushd ~/project && cp -r ~1 k`, block: true},
-		{name: "rsync after a cd that may fail", command: `cd /nonexistent-zz && true; rsync -a ~-/ x/`, block: true},
+		{name: "rsync after a cd that may fail", command: `cd /nonexistent-zz && true; rsync -a ~-/ x/`, warn: true},
 	})
 }
 

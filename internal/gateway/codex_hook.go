@@ -49,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
 // runGitListMaxBytes caps the bytes we will read from a `git`
@@ -333,6 +334,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			EnforcementCapable:            true,
 			ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "codex", runtime.GOOS),
 			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionInput),
+			ShellStartup:                  shellStartupFromContext(ctx),
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			DowngradeReadOnlyDataArgs:     mode != "action",
 			SandboxGuestCWD:               req.guestCWD,
@@ -2455,7 +2457,7 @@ func codexStaticReaderShellStructureSafe(command string) bool {
 		return false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(
-		strings.NewReader(command), "",
+		shellparse.Reader(command), "",
 	)
 	if err != nil {
 		return false
