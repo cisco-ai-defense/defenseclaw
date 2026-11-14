@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -167,16 +168,19 @@ func gap0437AssertParserFaultReason(t *testing.T, where string, out map[string]a
 	}
 }
 
-// gap0486ControlRule is the rule id that blocks a control alone ("rule ID:
-// title" in the action-mode answer's reason).
+// gap0486RuleInReason is the first "rule ID" a block reason names.
+var gap0486RuleInReason = regexp.MustCompile(`\brules? ([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)`)
+
+// gap0486ControlRule is the rule id that blocks a control alone, from the
+// action-mode answer's reason.
 func gap0486ControlRule(t *testing.T, where string, out map[string]any) string {
 	t.Helper()
 	reason, _ := out["reason"].(string)
-	rule, _, _ := strings.Cut(strings.TrimPrefix(reason, "rule "), ":")
-	if out["action"] != "block" || rule == "" {
+	match := gap0486RuleInReason.FindStringSubmatch(reason)
+	if out["action"] != "block" || match == nil {
 		t.Fatalf("%s: the control must block alone with a rule: %v", where, out)
 	}
-	return rule
+	return match[1]
 }
 
 // gap0437PowerShellExec reports whether the OpenClaw exec call is read in
