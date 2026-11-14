@@ -69,14 +69,22 @@ func spinSlowdown() float64 {
 	return worst
 }
 
-// sleepSlowdown sleeps 2 ms ten times and reports how much later than 2.5 ms
-// (an idle host's 2 ms sleep, with its usual wake-up lateness) the average
-// sleep ended.
+// sleepSlowdown sleeps 2 ms twelve times and reports how much later the
+// average sleep ended than the shortest one did. The shortest is the host's own
+// timer granularity (about 2.1 ms on Linux, up to 15.6 ms on a Windows host
+// with the default timer), so an idle host reads 1 on any platform, and a host
+// that wakes some sleeps late reads how late.
 func sleepSlowdown() float64 {
-	const sleeps = 10
-	started := time.Now()
+	const sleeps = 12
+	var total, shortest time.Duration
 	for range sleeps {
+		started := time.Now()
 		time.Sleep(2 * time.Millisecond)
+		took := time.Since(started)
+		total += took
+		if shortest == 0 || took < shortest {
+			shortest = took
+		}
 	}
-	return float64(time.Since(started)/sleeps) / float64(2500*time.Microsecond)
+	return float64(total/sleeps) / float64(max(shortest, 2*time.Millisecond))
 }
