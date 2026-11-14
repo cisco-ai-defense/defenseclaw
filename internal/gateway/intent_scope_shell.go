@@ -36,9 +36,10 @@ import (
 // here-document name no destination. Where actionfacts has no network fact for
 // a sending program (mail, rsync, httpie, aws s3, gsutil, az, a curl -X POST),
 // the program's parsed argv is read. A command that may send and cannot be read
-// (a host the shell builds, a syntax error, a parse past its limits) is reported
-// as unreadable: the floor then applies the unknown tier to the send, never a
-// text scan.
+// (a host the shell builds, a syntax error) is reported as unreadable: the floor
+// then applies the unknown tier to the send, never a text scan. A command past
+// shellparse's reading bounds is not parsed at all; it is a cap hit, recorded in
+// the reading's bounded.Truncated (the unknown tier, named by its cap).
 
 var (
 	scopeRemoteOperand  = lazyregexp.New(`^(?:[^@\s/:]+@)?(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9][A-Za-z0-9._-]*):`)
@@ -82,14 +83,36 @@ func shellSendDestinations(toolName, rawArgs string, commands []string, trunc *b
 }
 
 func (r *shellSendReader) readFacts(facts actionfacts.Facts, commands []string, depth int) {
-	switch facts.Parse.Status {
+	// A value past shellparse's reading bounds is read by no reader: actionfacts
+	// projects none of its commands (its status is then partial or
+	// limit_exceeded) and the parser refuses it. That is a cap hit (the unknown
+	// tier, the bound rule), never "no sender" (GAP-0483), whatever the status.
+	readable := make([]string, 0, len(commands))
+	for _, command := range commands {
+		if command == "" {
+			continue
+		}
+		if c := scopeShellBoundCap(command); c != 0 {
+			r.trunc.Hit(c)
+			continue
+		}
+		readable = append(readable, command)
+	}
+	status := facts.Parse.Status
+	if status == actionfacts.StatusPartial && len(facts.Commands) == 0 {
+		// partial with nothing projected (an operand grammar actionfacts does
+		// not know, e.g. curl -d @file) is a projection that failed, not a
+		// command with no sender
+		status = actionfacts.StatusUnsupported
+	}
+	switch status {
 	case actionfacts.StatusInvalid, actionfacts.StatusLimitExceeded, actionfacts.StatusUnsupported:
 		// actionfacts could not project the command. A send is still a command
 		// whose name is a sending program, read from the syntax tree (not the
 		// text); a command that does not parse is not one the shell runs.
 		// Every shell value of the call is read, not the first alone.
-		for _, command := range commands {
-			if command != "" && scopeSyntaxHasSender(command) {
+		for _, command := range readable {
+			if scopeSyntaxHasSender(command) {
 				r.sends, r.unreadable = true, true
 				break
 			}
@@ -341,7 +364,7 @@ func (r *shellSendReader) readMail(args []string, here string) {
 	add := func(text string) {
 		// The capped scanner: a repeat is not a destination, and more matches than
 		// the scan allows is a cap hit (GAP-0341).
-		for _, m := range scanScopeStrings(scopeShellEmailWord, text, r.trunc) {
+		for _, m := range scanScopeStrings(scopeShellEmailWord, text, maxScopeMailMatches, r.trunc) {
 			found = true
 			r.add(scopeDest{mailbox: strings.ToLower(m)})
 		}
@@ -494,13 +517,34 @@ func scopeHasRemoteOperand(prog string, args []string) bool {
 	return false
 }
 
+// scopeShellBoundCap returns the cap a shell value past shellparse's reading
+// bounds hit (shellparse.BudgetExceeded, NestedBodiesOverBudget), or 0 for a
+// value within them. Such a value is refused unparsed, so whether it sends is
+// unknown: its reading is cut short at that cap.
+func scopeShellBoundCap(command string) bounded.Cap {
+	switch reason := shellparse.BudgetExceeded(command); reason {
+	case "":
+		if shellparse.NestedBodiesOverBudget(command) {
+			return bounded.Bytes
+		}
+		return 0
+	case shellparse.BudgetNesting, shellparse.BudgetDepth:
+		return bounded.Depth
+	case shellparse.BudgetBytes, shellparse.BudgetUnparsed:
+		return bounded.Bytes
+	case shellparse.BudgetNodes:
+		return bounded.Nodes
+	default: // chain operators, tokens, brace expansion, and any reason added later
+		return bounded.Items
+	}
+}
+
 // scopeSyntaxHasSender reports whether the parsed command contains a command
 // whose name is a sending program and whose static arguments may send. It reads
-// the shell syntax tree, not the text.
+// the shell syntax tree, not the text. The caller has checked the reading
+// bounds (scopeShellBoundCap): a command that does not parse here is a syntax
+// error, not one the shell runs.
 func scopeSyntaxHasSender(command string) bool {
-	if shellparse.PastReadingBounds(command) {
-		return false
-	}
 	file, ok := shellparse.Parse(command)
 	if !ok || file == nil {
 		return false

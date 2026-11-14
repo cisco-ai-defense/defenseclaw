@@ -56,12 +56,18 @@ import (
 const scopeUnreadableReason = "the call may send data and its destination cannot be read, so it is judged as outside the user's task (unreadable_send)"
 
 const (
-	intentScopeFinding     = "INTENT-SCOPE-SEND"
-	maxNamedScopeTargets   = 20
-	maxScopeDestinations   = 16
-	maxScopeDepth          = 10
-	maxScopeValues         = 1024
-	maxScopeScanMatches    = 4096
+	intentScopeFinding   = "INTENT-SCOPE-SEND"
+	maxNamedScopeTargets = 20
+	maxScopeDestinations = 16
+	maxScopeDepth        = 10
+	maxScopeValues       = 1024
+	maxScopeScanMatches  = 4096
+	// maxScopeMailMatches bounds the recipients read from one argv word or
+	// here-document of a mail program (readMail). actionfacts refuses a mail
+	// word of about 300 addresses, so a cap of maxScopeScanMatches was never
+	// reached on that path (round 6 P4-3); this one is, and the shadow-lane
+	// registry exercises it.
+	maxScopeMailMatches    = 128
 	maxScopeGitConfigBytes = 64 << 10
 	maxScopeGitDepth       = 12
 )
@@ -318,10 +324,14 @@ const scopeKeyPrecheckBytes = 32 << 10
 
 // scopeMayHaveDestination reports whether a JSON object argument text names, as an
 // object key, one of the keys callSendDestinations reads (a shell key, a sink key
-// or an ambiguous key); arguments that are not an object are always read.
+// or an ambiguous key); arguments that are not an object are always read. The
+// search is over the raw text, so a text where a key could be written another
+// way is always read too: one with a JSON escape ("to" decodes to "to",
+// GAP-0484), and one that is not valid JSON (scopeStrings reads it as one shell
+// value, whatever keys it seems to have).
 func scopeMayHaveDestination(args string) bool {
 	trimmed := strings.TrimLeft(args, " \t\r\n")
-	if !strings.HasPrefix(trimmed, "{") {
+	if !strings.HasPrefix(trimmed, "{") || strings.Contains(args, `\u`) || !json.Valid([]byte(args)) {
 		return true
 	}
 	lower := strings.ToLower(args)
@@ -335,12 +345,13 @@ func scopeMayHaveDestination(args string) bool {
 	return false
 }
 
-// scanScopeStrings is scanScopeMatches for the whole match text.
-func scanScopeStrings(re *lazyregexp.Regexp, t string, trunc *bounded.Truncated) []string {
-	ms := re.FindAllString(t, maxScopeScanMatches+1)
-	if len(ms) > maxScopeScanMatches {
+// scanScopeStrings returns the whole-match texts of re in t, at most limit of
+// them; more is a cap hit (the bound rule), and the scan stops there.
+func scanScopeStrings(re *lazyregexp.Regexp, t string, limit int, trunc *bounded.Truncated) []string {
+	ms := re.FindAllString(t, limit+1)
+	if len(ms) > limit {
 		trunc.Hit(bounded.Items)
-		ms = ms[:maxScopeScanMatches]
+		ms = ms[:limit]
 	}
 	return ms
 }

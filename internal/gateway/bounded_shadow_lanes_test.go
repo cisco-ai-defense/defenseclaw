@@ -162,7 +162,15 @@ func TestBoundRuleShadowLaneTableRejectsMisuse(t *testing.T) {
 	noRoute := ok
 	noRoute.route = nil
 	twice := []boundedShadowLane{ok, ok}
-	for name, lanes := range map[string][]boundedShadowLane{"no route": {noRoute}, "twice": twice} {
+	noLimit := ok
+	noLimit.limit = 0
+	cases := map[string][]boundedShadowLane{"no route": {noRoute}, "twice": twice, "no limit": {noLimit}}
+	if len(boundedLanes) > 0 {
+		deciding := ok
+		deciding.lane = boundedLanes[0].lane
+		cases["also deciding"] = []boundedShadowLane{deciding}
+	}
+	for name, lanes := range cases {
 		if errs := boundedShadowLaneTableErrors(lanes); len(errs) == 0 {
 			t.Errorf("%s: accepted", name)
 		}
