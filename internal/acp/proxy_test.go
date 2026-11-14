@@ -1112,3 +1112,288 @@ func TestCopyFramesGatewayRefusalIsNotReportedAsNoAnswer(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-0297: the guard remembers the directory the editor gave each
+// session and sends it with the agent frames of that session, so the gateway
+// judges a terminal/create that names no directory where the editor runs it.
+func TestCopyFramesSendsTheSessionDirectoryWithAgentFrames(t *testing.T) {
+	evaluator := &recordingEvaluator{}
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	opts := ProxyOptions{Mode: ModeAction, Evaluator: evaluator, Stderr: io.Discard}
+	clientFrames := `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp/x","mcpServers":[]}}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"loaded","cwd":"/tmp/y","mcpServers":[]}}` + "\n"
+	if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(clientFrames), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	agentFrames := `{"jsonrpc":"2.0","id":1,"result":{"sessionId":"new1"}}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"result":null}` + "\n" +
+		`{"jsonrpc":"2.0","id":9,"method":"terminal/create","params":{"sessionId":"new1","command":"echo ok"}}` + "\n" +
+		`{"jsonrpc":"2.0","id":10,"method":"terminal/create","params":{"sessionId":"loaded","command":"echo ok"}}` + "\n" +
+		`{"jsonrpc":"2.0","id":11,"method":"terminal/create","params":{"sessionId":"unknown","command":"echo ok"}}` + "\n"
+	if err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(agentFrames), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, seen := range evaluator.seen {
+		if seen.Direction == AgentToClient && seen.Method == "terminal/create" {
+			msg, err := ParseMessage(seen.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got[promptSessionID(msg)] = seen.SessionCWD
+		}
+	}
+	want := map[string]string{"new1": "/tmp/x", "loaded": "/tmp/y", "unknown": ""}
+	for session, cwd := range want {
+		if value, ok := got[session]; !ok || value != cwd {
+			t.Errorf("session %s: session_cwd %q (seen %v), want %q", session, value, ok, cwd)
+		}
+	}
+	for _, seen := range evaluator.seen {
+		if seen.Direction == ClientToAgent && seen.SessionCWD != "" {
+			t.Errorf("an editor frame carries session_cwd %q", seen.SessionCWD)
+		}
+	}
+}
+
+func TestProxyStateBoundsTheSessionDirectoriesItKeeps(t *testing.T) {
+	state := &proxyState{}
+	load := func(session string) {
+		state.noteSessionCWD(Message{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "session/load",
+			Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"%s","cwd":"/tmp/%s"}`, session, session))}, ClientToAgent, "")
+	}
+	load("first")
+	for i := 0; i < maxTrackedSessions-1; i++ {
+		load(fmt.Sprintf("s%d", i))
+	}
+	if state.sessionCWDs.len() != maxTrackedSessions {
+		t.Fatalf("%d session directories kept, want %d", state.sessionCWDs.len(), maxTrackedSessions)
+	}
+	// A session that is in use stays; the least recently used one goes.
+	if state.sessionCWD("first") != "/tmp/first" {
+		t.Fatal("first session lost before the bound")
+	}
+	load("one-more")
+	if state.sessionCWDs.len() != maxTrackedSessions {
+		t.Fatalf("%d session directories kept after the bound, want %d", state.sessionCWDs.len(), maxTrackedSessions)
+	}
+	if state.sessionCWD("one-more") != "/tmp/one-more" || state.sessionCWD("first") != "/tmp/first" {
+		t.Fatal("the new session and the one in use must be kept")
+	}
+	if state.sessionCWD("s0") != "" {
+		t.Fatal("the least recently used session kept its directory")
+	}
+}
+
+// An answer settles its request whatever method the agent answered as, and an
+// answer naming a tracked session does not re-point it (GAP-0297 review).
+func TestProxyStateSessionAnswersSettleAndNeverRepoint(t *testing.T) {
+	state := &proxyState{}
+	request := func(id, cwd string) Message {
+		return Message{JSONRPC: "2.0", ID: json.RawMessage(id), Method: "session/new", Params: json.RawMessage(`{"cwd":"` + cwd + `"}`)}
+	}
+	answer := func(id, result string) Message {
+		return Message{JSONRPC: "2.0", ID: json.RawMessage(id), Result: json.RawMessage(result)}
+	}
+	state.noteSessionCWD(request("1", "/tmp/a"), ClientToAgent, "")
+	state.noteSessionCWD(answer("1", `{"sessionId":"a"}`), AgentToClient, "session/new")
+	state.noteSessionCWD(request("2", "/tmp/b"), ClientToAgent, "")
+	state.noteSessionCWD(answer("2", `{"sessionId":"a"}`), AgentToClient, "session/new") // names a tracked session
+	if state.sessionCWD("a") != "/tmp/a" {
+		t.Fatalf("session a re-pointed to %q", state.sessionCWD("a"))
+	}
+	state.noteSessionCWD(request("3", "/tmp/c"), ClientToAgent, "")
+	state.noteSessionCWD(answer("3", `{"stopReason":"end_turn"}`), AgentToClient, "session/prompt") // answered as another method
+	if len(state.newSessionCWDs) != 0 {
+		t.Fatalf("%d pending session directories left after their answers", len(state.newSessionCWDs))
+	}
+	// An agent that sends session/load itself records nothing.
+	state.noteSessionCWD(Message{JSONRPC: "2.0", ID: json.RawMessage("9"), Method: "session/load",
+		Params: json.RawMessage(`{"sessionId":"x","cwd":"/tmp/x"}`)}, AgentToClient, "")
+	if state.sessionCWD("x") != "" {
+		t.Fatal("a session/load from the agent set a directory")
+	}
+}
+
+// GAP-0330: the guard keeps the fields of each tool call the agent reports and
+// hands the state before a frame to the gateway, which merges the frame onto it.
+func TestToolCallTrackerFoldsToolCallsAsTheEditorMergesThem(t *testing.T) {
+	var tracker ToolCallTracker
+	update := func(kind, fields string) Message {
+		return Message{JSONRPC: "2.0", Method: "session/update", Params: json.RawMessage(
+			`{"sessionId":"s","update":{"sessionUpdate":"` + kind + `","toolCallId":"t1"` + fields + `}}`)}
+	}
+	first := update("tool_call", `,"kind":"execute","title":"Run ls","rawInput":{"command":"ls"}`)
+	if before := tracker.Peek(first); before != nil {
+		t.Fatalf("state before the first report: %s", before)
+	}
+	tracker.Commit(first)
+	status := update("tool_call_update", `,"status":"in_progress"`)
+	var got toolCallFields
+	if err := json.Unmarshal(tracker.Peek(status), &got); err != nil || string(got.Kind) != `"execute"` || string(got.RawInput) != `{"command":"ls"}` {
+		t.Fatalf("state before the update: %s (%v)", tracker.Peek(status), err)
+	}
+	tracker.Commit(status)
+	permission := Message{JSONRPC: "2.0", ID: json.RawMessage("5"), Method: "session/request_permission",
+		Params: json.RawMessage(`{"sessionId":"s","toolCall":{"toolCallId":"t1","title":"Run ls"},"options":[]}`)}
+	if err := json.Unmarshal(tracker.Peek(permission), &got); err != nil || string(got.Kind) != `"execute"` {
+		t.Fatalf("a permission without a kind does not get the kind of its call: %s", tracker.Peek(permission))
+	}
+	// A later field replaces the kept one; a null does not.
+	tracker.Commit(update("tool_call_update", `,"rawInput":{"command":"pwd"},"kind":null`))
+	got = toolCallFields{}
+	if err := json.Unmarshal(tracker.Peek(status), &got); err != nil || string(got.Kind) != `"execute"` || string(got.RawInput) != `{"command":"pwd"}` {
+		t.Fatalf("merged state: %s", tracker.Peek(status))
+	}
+	// The first report of a call is the call: it replaces what was kept, as the editor does.
+	tracker.Commit(update("tool_call", `,"title":"Read it"`))
+	got = toolCallFields{}
+	if err := json.Unmarshal(tracker.Peek(status), &got); err != nil || len(got.Kind) != 0 || len(got.RawInput) != 0 || string(got.Title) != `"Read it"` {
+		t.Fatalf("a repeated tool_call merged onto the old state: %s", tracker.Peek(status))
+	}
+	// Another session has its own state; a frame that is no tool call has none.
+	other := Message{JSONRPC: "2.0", Method: "session/update", Params: json.RawMessage(`{"sessionId":"s2","update":{"sessionUpdate":"tool_call_update","toolCallId":"t1"}}`)}
+	if before := tracker.Peek(other); before != nil {
+		t.Fatalf("state leaked across sessions: %s", before)
+	}
+	if before := tracker.Peek(Message{Method: "session/update", Params: json.RawMessage(`{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk"}}`)}); before != nil {
+		t.Fatalf("state for a frame that is no tool call: %s", before)
+	}
+}
+
+// A cut command keeps its prefix, so what the guard saw is still judged; the
+// state says it was cut. The least recently used call is dropped, and the
+// frame that names it says so.
+func TestToolCallTrackerBoundsAreMarked(t *testing.T) {
+	var tracker ToolCallTracker
+	report := func(id, fields string) Message {
+		return Message{JSONRPC: "2.0", Method: "session/update", Params: json.RawMessage(
+			`{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"` + id + `"` + fields + `}}`)}
+	}
+	later := func(id string) Message {
+		return Message{JSONRPC: "2.0", Method: "session/update", Params: json.RawMessage(
+			`{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"` + id + `"}}`)}
+	}
+	big := strings.Repeat("a", MaxToolCallStateBytes)
+	tracker.Commit(report("big", `,"kind":"execute","rawInput":{"command":"echo `+big+`","description":"x"}`))
+	var got toolCallFields
+	if err := json.Unmarshal(tracker.Peek(later("big")), &got); err != nil || !got.Truncated || string(got.Kind) != `"execute"` {
+		t.Fatalf("oversize state: %s (%v)", tracker.Peek(later("big")), err)
+	}
+	var input struct{ Command string }
+	if err := json.Unmarshal(got.RawInput, &input); err != nil || !strings.HasPrefix(input.Command, "echo aaaa") || len(input.Command) > maxToolCallInputText {
+		t.Fatalf("the command was not kept as a prefix: %d bytes (%v)", len(input.Command), err)
+	}
+	// An input of nothing that can be cut is left out.
+	tracker.Commit(report("blob", `,"kind":"execute","rawInput":{"items":[`+strings.Repeat(`"`+strings.Repeat("b", 100)+`",`, 1000)+`"x"]}`))
+	if err := json.Unmarshal(tracker.Peek(later("blob")), &got); err != nil || !got.Truncated || len(got.RawInput) > 2 {
+		t.Fatalf("oversize list input: %s", tracker.Peek(later("blob")))
+	}
+	for i := 0; i < MaxTrackedToolCalls+5; i++ {
+		tracker.Commit(report(fmt.Sprintf("c%d", i), `,"kind":"read"`))
+	}
+	if tracker.calls.len() != MaxTrackedToolCalls {
+		t.Fatalf("%d tool calls kept, want %d", tracker.calls.len(), MaxTrackedToolCalls)
+	}
+	if err := json.Unmarshal(tracker.Peek(later("big")), &got); err != nil || !got.Dropped {
+		t.Fatalf("a dropped call is not marked: %s", tracker.Peek(later("big")))
+	}
+	if tracker.Peek(later("never-reported")) != nil {
+		t.Fatalf("a call never reported has state: %s", tracker.Peek(later("never-reported")))
+	}
+	// A dropped call reported again is kept again.
+	tracker.Commit(report("big", `,"kind":"read"`))
+	got = toolCallFields{}
+	if err := json.Unmarshal(tracker.Peek(later("big")), &got); err != nil || got.Dropped || string(got.Kind) != `"read"` {
+		t.Fatalf("a call reported again: %s", tracker.Peek(later("big")))
+	}
+}
+
+// End to end through the guard: a tool_call report followed by a permission
+// that names only the id reaches the gateway with the state of the call, and a
+// frame the guard refuses does not change it.
+func TestCopyFramesSendsToolCallStateAndKeepsItOnlyForForwardedFrames(t *testing.T) {
+	evaluator := &recordingEvaluator{}
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	opts := ProxyOptions{Mode: ModeAction, Evaluator: evaluator, Stderr: io.Discard}
+	agentFrames := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"t","kind":"execute","rawInput":{"command":"ls"}}}}` + "\n" +
+		`{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t","title":"Run ls"},"options":[]}}` + "\n"
+	if err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(agentFrames), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if len(evaluator.seen) != 2 || evaluator.seen[0].ToolCallState != nil {
+		t.Fatalf("evaluations: %+v", evaluator.seen)
+	}
+	var got toolCallFields
+	if err := json.Unmarshal(evaluator.seen[1].ToolCallState, &got); err != nil || string(got.Kind) != `"execute"` || string(got.RawInput) != `{"command":"ls"}` {
+		t.Fatalf("the permission reached the gateway with state %s", evaluator.seen[1].ToolCallState)
+	}
+	// A report the gateway refuses is not part of the call.
+	refusing := &sequenceBlockEvaluator{blockMethod: "session/update"}
+	state2 := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	opts2 := ProxyOptions{Mode: ModeAction, Evaluator: refusing, Stderr: io.Discard}
+	if err := copyFrames(context.Background(), opts2, state2, AgentToClient, strings.NewReader(agentFrames[:strings.Index(agentFrames, "\n")+1]), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := state2.peekToolCall(Message{Method: "session/request_permission", Params: json.RawMessage(`{"sessionId":"s","toolCall":{"toolCallId":"t"}}`)}); got != nil {
+		t.Fatalf("a refused report changed the state: %s", got)
+	}
+}
+
+// sequenceBlockEvaluator blocks one method and allows the rest.
+type sequenceBlockEvaluator struct{ blockMethod string }
+
+func (e *sequenceBlockEvaluator) Evaluate(_ context.Context, in Evaluation) (Verdict, error) {
+	if in.Method == e.blockMethod {
+		return Verdict{Action: "block", Reason: "no"}, nil
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+// strictEvaluator is a gateway that predates session_cwd and tool_call_state:
+// it refuses an evaluation that holds either as invalid.
+type strictEvaluator struct{ seen []Evaluation }
+
+func (e *strictEvaluator) Evaluate(_ context.Context, in Evaluation) (Verdict, error) {
+	e.seen = append(e.seen, in)
+	if in.SessionCWD != "" || in.ToolCallState != nil {
+		return Verdict{}, &GatewayRefusedError{Status: 400, Message: "invalid ACP evaluation body"}
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+func TestCopyFramesAgainstAGatewayThatPredatesTheContextFields(t *testing.T) {
+	evaluator := &strictEvaluator{}
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	opts := ProxyOptions{Mode: ModeAction, Evaluator: evaluator, Stderr: io.Discard}
+	if err := copyFrames(context.Background(), opts, state, ClientToAgent,
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"s","cwd":"/tmp/x"}}`+"\n"), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	frames := `{"jsonrpc":"2.0","id":9,"method":"terminal/create","params":{"sessionId":"s","command":"echo ok"}}` + "\n" +
+		`{"jsonrpc":"2.0","id":10,"method":"terminal/create","params":{"sessionId":"s","command":"echo ok"}}` + "\n"
+	var forwarded bytes.Buffer
+	if err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(frames), &forwarded, io.Discard); err != nil {
+		t.Fatalf("a gateway that predates the fields ended the session: %v", err)
+	}
+	if strings.Count(forwarded.String(), "terminal/create") != 2 {
+		t.Fatalf("frames forwarded: %q", forwarded.String())
+	}
+	// The first frame is sent with the field and refused (the evaluator sends a
+	// refused evaluation twice), then sent again without it; the second frame is
+	// sent without it at once.
+	var withField, without int
+	for _, seen := range evaluator.seen {
+		if seen.Method != "terminal/create" {
+			continue
+		}
+		if seen.SessionCWD != "" {
+			withField++
+		} else {
+			without++
+		}
+	}
+	if withField != 2 || without != 2 {
+		t.Fatalf("%d evaluations with session_cwd and %d without, want 2 and 2", withField, without)
+	}
+}

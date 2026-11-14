@@ -272,8 +272,9 @@ type trustedActionRequest struct {
 	// has its hint inferred again from that command (GAP-0686).
 	windowsShellDialect bool
 	// windowsDialectReadings is set by the Windows hooks, which choose one shell
-	// dialect per call: a call whose chosen reading is not complete is also judged
-	// as the other shell and as its readable statements (windowsReadingTwinRequests).
+	// dialect per call: a call whose PowerShell reading is partial is also judged
+	// as its readable statements (windowsReadingTwinRequests), never as another
+	// shell.
 	windowsDialectReadings bool
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
@@ -378,8 +379,23 @@ func dispatchTrustedAction(
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
+	defer recoverTrustedActionFault(request, &findings)
+	if trustedActionFaultHook != nil {
+		trustedActionFaultHook(request)
+	}
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
+	if _, ok := managedHookPeerFromContext(parent); ok {
+		request.ProtectedHomeHook = true
+	}
+	// A call the shell parser failed on (the hook client's evidence, or the
+	// same reading here) blocks in every pack, with its own reason, before
+	// any bound or reader decides (rel-1-0-10:GAP-0486). The readers still
+	// run: a finding of theirs stays on the verdict.
+	shellReason := trustedCallShellParseReason(request)
+	if shellReason == hookpaths.UnprovenParserFault {
+		defer func() { findings = withParserFaultFinding(findings, request.EnforcementCapable) }()
+	}
 	if ManagedEnterpriseActive() {
 		return nil
 	}
@@ -398,9 +414,6 @@ func dispatchTrustedAction(
 			findings = shareBodyUnreadFindings(parent, findings, request.EnforcementCapable, budget, linkBound)
 		}
 	}()
-	if _, ok := managedHookPeerFromContext(parent); ok {
-		request.ProtectedHomeHook = true
-	}
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
@@ -440,7 +453,7 @@ func dispatchTrustedAction(
 		// finding.
 		return trustedActionLimitFindings(request.EnforcementCapable)
 	}
-	if request.EnforcementCapable && trustedCallShellParseBound(request) {
+	if request.EnforcementCapable && shellReason == "shell-parse-bound" {
 		return trustedActionLimitFindings(true)
 	}
 	if bound == shellReadingNestedProof {
@@ -5485,6 +5498,69 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 		requiresExactDetectionProof: true,
 	},
+	"exec.escaped_binary_write": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.EscapedBinaryFileWrite(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.EscapedBinaryFileWrite(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"account.literal_password_change_via_stdin": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.LiteralStdinPasswordChange(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.LiteralStdinPasswordChange(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"exec.download_then_run_fetched_file": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.BareAddressDownloadThenRunFetchedFile(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.BareAddressDownloadThenRunFetchedFile(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"source_control.clone_then_run_or_adhoc_push": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.GitCloneThenRunOrAdHocPush(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.GitCloneThenRunOrAdHocPush(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"exec.inline_code_network_and_exec": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.InlineCodeNetworkAndExec(facts) || actionfacts.RemoteRunnerURL(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.InlineCodeNetworkAndExec(facts) || actionfacts.RemoteRunnerURL(facts)
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
 	"exec.remote_ip_download_execute_same_artifact": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return actionfacts.StaticRemoteIPDownloadExecuteSameArtifact(facts)
@@ -9775,17 +9851,24 @@ func trustedActionCommandBound(input actionfacts.Input) shellReadingBound {
 	return shellReadingWithinBounds
 }
 
-// trustedCallShellParseBound reports a call whose reading ends at the
-// recovered-parse proof bound. The hook client evidence tells it; a call
-// without that evidence on a gateway that reads the home (per-user: no hook
-// client sends it) is read here with the client reader, so both take the
-// same evaluation-limit path (rel-1-0-6:GAP-0534).
-func trustedCallShellParseBound(request trustedActionRequest) bool {
+// trustedCallShellParseReason is the recovered-parse reading of a call:
+// "shell-parse-bound" (the proof bound, the evaluation-limit path),
+// hookpaths.UnprovenParserFault (the parser failed on the text), or "". The
+// hook client evidence tells it; a call without that evidence on a gateway
+// that reads the home (per-user: no hook client sends it) is read here with
+// the client reader, so both decide the same (rel-1-0-6:GAP-0534).
+func trustedCallShellParseReason(request trustedActionRequest) string {
 	if reason := request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]; reason != "" || request.ProtectedHomeHook {
-		return reason == "shell-parse-bound"
+		if reason == "shell-parse-bound" || reason == hookpaths.UnprovenParserFault {
+			return reason
+		}
+		return ""
 	}
 	command, ok := trustedBashCommandInput(request.Input)
-	return ok && hookpaths.ShellParseBound(request.Connector, request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome)
+	if !ok {
+		return ""
+	}
+	return hookpaths.ShellParseReason(request.Connector, request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome)
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {

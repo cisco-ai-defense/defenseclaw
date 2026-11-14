@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"os/exec"
 	"slices"
 	"strings"
@@ -184,6 +185,19 @@ type proxyState struct {
 	// failClosed is the last authenticated verdict's "closed".
 	openSessions map[string]bool
 	failClosed   bool
+	// sessionCWDs are the working directories the editor gave its sessions,
+	// by session ID, and newSessionCWDs those of a session/new (or fork)
+	// still waiting for its answer, by request ID. A frame that names no
+	// directory of its own is judged in its session's (GAP-0297).
+	sessionCWDs    *lruMap[string]
+	newSessionCWDs map[string]string
+	// toolCalls holds, per session and toolCallId, the fields of the tool
+	// call the agent has reported so far, as the editor merges them
+	// (ToolCallTracker, GAP-0330).
+	toolCalls ToolCallTracker
+	// legacyGateway: the gateway refused an evaluation that held session_cwd
+	// or tool_call_state (it predates them).
+	legacyGateway bool
 	// silenceGen and silenceTimer drive the notice for an agent that does
 	// not answer a prompt (armSilenceNotice).
 	silenceGen   uint64
@@ -265,6 +279,114 @@ func (s *proxyState) recordFailMode(session string, verdict Verdict) {
 		}
 		s.openSessions[session] = true
 	}
+}
+
+// maxTrackedSessions bounds the session directories one guard remembers; the
+// least recently used goes first. The gateway judges a frame of an unknown
+// session at the unknown tier, never as clean.
+const maxTrackedSessions = 1024
+
+// noteSessionCWD remembers the working directory of a session the editor
+// starts: session/load and session/resume name the session and its directory;
+// session/new and session/fork name the directory and the answer names the
+// session. matched is the method of the request a response answers.
+func (s *proxyState) noteSessionCWD(msg Message, direction Direction, matched string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if direction == ClientToAgent && msg.IsRequest() {
+		var params struct {
+			SessionID string `json:"sessionId"`
+			CWD       string `json:"cwd"`
+		}
+		if json.Unmarshal(msg.Params, &params) != nil || strings.TrimSpace(params.CWD) == "" {
+			return
+		}
+		switch msg.Method {
+		case "session/new", "session/fork":
+			if len(s.newSessionCWDs) < MaxPendingIDs {
+				if s.newSessionCWDs == nil {
+					s.newSessionCWDs = map[string]string{}
+				}
+				s.newSessionCWDs[msg.IDKey()] = params.CWD
+			}
+		case "session/load", "session/resume":
+			s.setSessionCWDLocked(params.SessionID, params.CWD, true)
+		}
+		return
+	}
+	if direction == AgentToClient && msg.Method == "" {
+		// Any answer settles its request: a pending directory never outlives
+		// it, whatever method the agent answered as.
+		cwd, ok := s.newSessionCWDs[msg.IDKey()]
+		delete(s.newSessionCWDs, msg.IDKey())
+		if !ok || (matched != "session/new" && matched != "session/fork") {
+			return
+		}
+		var result struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(msg.Result, &result) == nil {
+			// An answer naming a session the guard already tracks does not
+			// re-point it: the editor gave that session its directory.
+			s.setSessionCWDLocked(result.SessionID, cwd, false)
+		}
+	}
+}
+
+// setSessionCWDLocked records the directory of session. replace is true for
+// a request the editor sent for that session (session/load), false for an
+// agent's answer, which never changes a tracked session.
+func (s *proxyState) setSessionCWDLocked(session, cwd string, replace bool) {
+	if session == "" {
+		return
+	}
+	if s.sessionCWDs == nil {
+		s.sessionCWDs = newLRUMap[string](maxTrackedSessions)
+	}
+	if !replace && s.sessionCWDs.has(session) {
+		return
+	}
+	s.sessionCWDs.put(session, cwd)
+}
+
+// sessionCWD is the directory the editor gave session, or "".
+func (s *proxyState) sessionCWD(session string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionCWDs == nil {
+		return ""
+	}
+	cwd, _ := s.sessionCWDs.get(session)
+	return cwd
+}
+
+// gatewayIgnoresContext reports that the gateway refused an evaluation that
+// held session_cwd or tool_call_state, so they are no longer sent.
+func (s *proxyState) gatewayIgnoresContext() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.legacyGateway
+}
+
+func (s *proxyState) setGatewayIgnoresContext() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.legacyGateway = true
+}
+
+// peekToolCall is the state of the tool call a frame names, before the frame.
+func (s *proxyState) peekToolCall(msg Message) json.RawMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.toolCalls.Peek(msg)
+}
+
+// commitToolCall applies a frame that is being forwarded to the state of its
+// tool call.
+func (s *proxyState) commitToolCall(msg Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.toolCalls.Commit(msg)
 }
 
 // forgetFailOpen drops every open fail mode: an answer that failed
@@ -1097,10 +1219,27 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			}
 			continue
 		}
-		verdict, evalErr := evaluate(ctx, opts, Evaluation{
+		state.noteSessionCWD(msg, direction, matchedMethod)
+		evaluation := Evaluation{
 			Profile: opts.Profile, Mode: opts.Mode, AgentID: opts.AgentID, ClientID: opts.ClientID,
 			Direction: direction, Surface: Classify(msg, direction), Method: msg.Method, Payload: msg.Raw,
-		})
+		}
+		if direction == AgentToClient && msg.Method != "" && !state.gatewayIgnoresContext() {
+			evaluation.SessionCWD = state.sessionCWD(promptSessionID(msg))
+			evaluation.ToolCallState = state.peekToolCall(msg)
+		}
+		verdict, evalErr := evaluate(ctx, opts, evaluation)
+		var refused *GatewayRefusedError
+		if errors.As(evalErr, &refused) && refused.Status == http.StatusBadRequest &&
+			(evaluation.SessionCWD != "" || evaluation.ToolCallState != nil) {
+			// A gateway that predates session_cwd and tool_call_state (it has
+			// not restarted since an upgrade) refuses an evaluation that holds
+			// them as invalid. The frame is evaluated again without them, as
+			// that gateway judges frames, and so are the rest of the session's.
+			state.setGatewayIgnoresContext()
+			evaluation.SessionCWD, evaluation.ToolCallState = "", nil
+			verdict, evalErr = evaluate(ctx, opts, evaluation)
+		}
 		if evalErr != nil && state.peerProtocolFixes && ctx.Err() != nil {
 			// The session is ending: an evaluation the shutdown cancelled
 			// is not a gateway problem to report (GAP-0351).
@@ -1156,6 +1295,10 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 				continue
 			}
 			logf(opts.Stderr, "[defenseclaw-acp] would block %s %s: %s\n", direction, msg.Method, verdict.Reason)
+		}
+		if direction == AgentToClient {
+			// The frame is going on to the editor: it is part of the call now.
+			state.commitToolCall(msg)
 		}
 		if opts.Mode == ModeAction {
 			out, aggregate, session, delivered, bufferErr := state.bufferOrFlush(msg, direction, matchedMethod, frame)

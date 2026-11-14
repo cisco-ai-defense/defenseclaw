@@ -65,6 +65,9 @@ _MAX_ROWS = 1000
 LEGACY_HOOK_EVENT_NAME = "legacy.audit.connector.hook"
 _MAX_PAYLOAD_BYTES = 64 * 1024
 _MAX_FINDING_TAGS_BYTES = 16 * 1024
+# A legacy.audit.* compatibility row keeps no payload_json since 1.0.10 (S8 R4,
+# #1384): its body is the canonical record body (projected_record_json $.body).
+_COMPATIBILITY_EVENT_PREFIX = "legacy.audit."
 # After a full alert scan the reader scans only rows added since, plus the
 # alerts it already holds (GAP-1816). Audit rows are append-only and acks
 # are never removed, so an older row can't become an alert again; there is
@@ -783,6 +786,7 @@ def _decode_v8_event_history_rows(rows: list[tuple[Any, ...]]) -> tuple[V8EventH
         raw_projection = str(row[18] or "")
         outcome = ""
         span_id = ""
+        projection: object = None
         if raw_projection and int(row[19] or 0) <= _MAX_PAYLOAD_BYTES:
             try:
                 projection = json.loads(raw_projection)
@@ -802,6 +806,12 @@ def _decode_v8_event_history_rows(rows: list[tuple[Any, ...]]) -> tuple[V8EventH
                 decoded = None
             if isinstance(decoded, Mapping):
                 payload = decoded
+        payload_truncated = int(row[21] or 0) > _MAX_PAYLOAD_BYTES
+        if not raw_payload and str(row[3] or "").startswith(_COMPATIBILITY_EVENT_PREFIX):
+            payload_truncated = int(row[19] or 0) > _MAX_PAYLOAD_BYTES
+            body = projection.get("body") if isinstance(projection, Mapping) else None
+            if isinstance(body, Mapping):
+                payload = body
         finding_tags = _decode_finding_tags(row[22], row[23])
         result.append(
             V8EventHistoryRow(
@@ -826,7 +836,7 @@ def _decode_v8_event_history_rows(rows: list[tuple[Any, ...]]) -> tuple[V8EventH
                 finding_id=str(row[17] or ""),
                 outcome=outcome,
                 payload=payload,
-                payload_truncated=int(row[21] or 0) > _MAX_PAYLOAD_BYTES,
+                payload_truncated=payload_truncated,
                 finding_tags=finding_tags,
                 hook_decision=str(row[24] or ""),
                 target=str(row[25] or "") if len(row) > 25 else "",

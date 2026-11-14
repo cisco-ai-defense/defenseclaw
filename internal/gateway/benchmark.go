@@ -184,8 +184,9 @@ func EvaluateDeterministicAction(
 }
 
 // evaluateDeterministicAction is EvaluateDeterministicAction, and with
-// windowsReadings the call as a Windows hook judges it: a partial reading is
-// also judged as the other shell and as its readable statements.
+// windowsReadings the call as a Windows hook judges it: a partial PowerShell
+// reading is also judged as its readable statements
+// (windowsReadingTwinRequests).
 func evaluateDeterministicAction(
 	ctx context.Context,
 	input actionfacts.Input,

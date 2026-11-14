@@ -19,6 +19,14 @@ import (
 // twin proves (withTwinProvenBlocks): no finding of the chosen reading is
 // dropped and a twin only adds.
 //
+// The hook's selection (selectWindowsShellDialect) places such a call in no
+// dialect, and its unhinted reading is then an ambiguous PowerShell reading.
+// That reading is kept as the call's own: it enforces findings the hinted
+// partial reading leaves detection-only, so the call is not moved to
+// PowerShell. Its readable statements are taken from the PowerShell reading
+// of the same call, made only when that reading is partial (not invalid, not
+// a cap), so it is still one extra reading at most (rel-1-0-10:GAP-0405).
+//
 // The call is deliberately not also judged as the other shell. A Git Bash call
 // read as PowerShell, or a PowerShell call read as POSIX, gains findings the
 // shell that runs it never has: TestR105GAP2304WindowsGitBashHomeDrivePaths
@@ -29,7 +37,13 @@ func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.
 		facts.Authoritative() || facts.Parse.Status == actionfacts.StatusLimitExceeded {
 		return nil
 	}
-	readable, ok := actionfacts.PowerShellReadableStatementsTwin(request.Input, facts)
+	input := request.Input
+	if facts.Parse.Dialect == actionfacts.DialectPowerShell && facts.Parse.Status == actionfacts.StatusAmbiguous &&
+		input.DialectHint == "" {
+		input.DialectHint = actionfacts.DialectPowerShell
+		facts = actionfacts.Analyze(input)
+	}
+	readable, ok := actionfacts.PowerShellReadableStatementsTwin(input, facts)
 	if !ok {
 		return nil
 	}

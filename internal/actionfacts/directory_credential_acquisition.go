@@ -666,6 +666,14 @@ var netExecDirectoryPrograms = map[string]struct{}{
 	"nxc": {}, "netexec": {}, "crackmapexec": {},
 }
 
+// netExecProgramNames maps every installed base name of a NetExec /
+// CrackMapExec program to its family in netExecDirectoryPrograms. CrackMapExec
+// installs both crackmapexec and cme (rel-1-0-10:GAP-0406); an alias is a row
+// here, never a branch in a recognizer.
+var netExecProgramNames = map[string]string{
+	"nxc": "nxc", "netexec": "netexec", "crackmapexec": "crackmapexec", "cme": "crackmapexec",
+}
+
 // netExecProgramFamily is the one identity of a NetExec / CrackMapExec
 // executable word, whatever the shell: the base name of the word, in either
 // slash spelling, case-folded, without one launcher extension (.exe, .cmd,
@@ -689,10 +697,11 @@ func netExecProgramFamily(executable string) (string, bool) {
 			break
 		}
 	}
-	if _, ok := netExecDirectoryPrograms[base]; !ok {
+	family, ok := netExecProgramNames[base]
+	if !ok {
 		return "", false
 	}
-	return base, true
+	return family, true
 }
 
 var netExecDirectoryProtocols = map[string]struct{}{

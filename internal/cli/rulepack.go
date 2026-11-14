@@ -61,6 +61,12 @@ var shippedToolCallRegexIDs = map[string]bool{
 	"lateral.workload_exec":                           true,
 	"impact.fork_bomb":                                true,
 	"impact.unbounded_cpu_fanout":                     true,
+	// Shell recall alert-only rules (s7/shellrecall): detection-only by design.
+	"account.literal_password_change_via_stdin":   true,
+	"exec.download_then_run_fetched_file":         true,
+	"exec.escaped_binary_write":                   true,
+	"exec.inline_code_network_and_exec":           true,
+	"source_control.clone_then_run_or_adhoc_push": true,
 }
 
 type rulePackWireDiagnostic struct {
