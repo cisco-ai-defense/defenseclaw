@@ -493,7 +493,7 @@ func TestCursorRollbackRestoresUneditedHooksFileExactly(t *testing.T) {
 func TestRollbackPutsBackAnUneditedKiroHooksFileByteForByte(t *testing.T) {
 	pinWindowsSystemDirectoryForTest(t)
 	const launcher = `C:\Users\dcw std1\.local\bin\defenseclaw-hook.exe`
-	pairs := kiroWindowsHookFormPairs([]string{launcher})
+	pairs := kiroWindowsHookFormPairs([]string{launcher}, "1.0.8", true)
 	for _, variant := range rollbackPristineVariants {
 		for _, edited := range []bool{false, true} {
 			name := variant.name + "/unedited"
