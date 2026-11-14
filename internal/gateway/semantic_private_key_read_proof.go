@@ -19,6 +19,18 @@ func appendTrustedPrivateKeyReaderFinding(
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
+	if trustedActionOwnSSHFolderCopy(request, request.Input) {
+		// A copy of the user's own SSH folder content to a private place of the
+		// same home: the key is read only to be copied there, which alerts and does
+		// not block, however the path scan read the operands (a glob of the folder
+		// included; rel-1-0-10:GAP-0018).
+		for index := range findings {
+			if findings[index].RuleID == "PATH-SSH-KEY" || findings[index].RuleID == "PATH-WIN-SSH-KEY" {
+				findings[index].enforcement = findingEnforcementAlertOnly
+			}
+		}
+		return appendTrustedPrivateKeyHomeCopyAlert(findings, generation, request)
+	}
 	proved := facts.Authoritative() && facts.EnforcementEligible() &&
 		trustedActionActiveSSHPrivateKeyContentRead(facts.EnforcementProjection())
 	if !proved {
