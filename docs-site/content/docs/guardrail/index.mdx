@@ -346,12 +346,13 @@ regex_only`), and nothing calls a model until you turn the judge on. When you
 do, use Gemma 4 31B (`google.gemma-4-31b`) on Amazon Bedrock. DefenseClaw
 benchmarks the judge and tunes its prompt against this model.
 
-In the S7 judge bake-off (default pack, `regex_judge`, the 3.4 second hook
-window), Gemma 4 31B was the only judge that blocked no benign call while
-blocking more attacks than the rules alone. It answered in under a second at
-the median and cost about USD 0.30 per 1,000 tool calls. The
-[LLM judge benchmark](/docs/guardrail/llm-judge-benchmark) has the current
-numbers.
+On the S7 judge benchmark (default pack, `regex_judge`, the hook answer
+window, three fresh rounds), rules plus Gemma 4 31B blocked no benign call on
+two public agent-trace corpora (1,200 benign calls) and alerted on 6 or 7 of
+694 benign calls of one of them. On a Windows shell corpus, 6 to 9 of 2,459
+benign calls were blocked (about 0.3%; one of them by the rules alone). It answered in about 0.85 seconds at the median and 1.7 seconds at
+the 95th percentile, and cost about USD 0.3 per 1,000 tool calls. The
+[LLM judge benchmark](/docs/guardrail/llm-judge-benchmark) has more numbers.
 
 Gemma 4 runs on the `bedrock-mantle` endpoint and only under the `/openai/v1`
 path. The `/v1` path refuses it with "isn't supported on this route", and
