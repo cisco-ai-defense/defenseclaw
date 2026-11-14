@@ -2205,8 +2205,8 @@ func credentialFileContentReadCommand(
 // credentialFileReadDerivesFile reports a call that reads a credentials
 // file and also writes, appends, copies, moves or links any file anywhere in
 // the call: in any pipeline stage or list member, by any redirect kind (>,
-// >>, >|, &>, an fd opened by exec), by tee, dd, an archiver, rsync, cp, mv
-// or ln. The read's bytes may be in that file, so a later upload of it joins
+// >>, >|, an fd opened by exec), by tee, dd, an archiver, rsync, cp, mv or
+// ln. The read's bytes may be in that file, so a later upload of it joins
 // the read: the read carries the file-unknown marker instead of its own
 // identity (GAP-0410). It errs towards the marker: an unrelated write in the
 // same call gives the marker too, which only joins more.
@@ -2218,29 +2218,166 @@ func credentialFileReadDerivesFile(facts actionfacts.Facts) bool {
 }
 
 // callWritesAnyFile reports a write, an append, a copy, a move or a link of a
-// file by any command of the call or by any of their redirects.
+// file by any command of the call: by its own operands (cp, mv, ln, install,
+// dd, tee, an archiver, rsync, an -o writer) or by its redirects (>, >>, >|,
+// an fd opened by exec). A redirect to the null device or to another
+// descriptor, and a redirect of stderr (fd 2) to a file in a command that
+// duplicates no descriptor, write no file the call's bytes reach. The
+// classifier still gives the command a write op and a write path for it, so
+// both are set aside for such a redirect (GAP-0479).
 func callWritesAnyFile(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
-		if hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend,
-			actionfacts.OperationCopy, actionfacts.OperationMove, actionfacts.OperationDiskWrite) {
+		if hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove,
+			actionfacts.OperationDiskWrite) {
 			return true
 		}
 		switch command.Program {
 		case "tee", "ln", "link", "install", "dd":
 			return true
 		}
+		quietRedirect := false
 		for _, redirect := range command.Redirects {
-			if (redirect.Access == actionfacts.PathAccessWrite || redirect.Access == actionfacts.PathAccessAppend) &&
-				redirect.FD != 2 && redirect.Target != "" && redirect.Target != "/dev/null" &&
-				!strings.HasPrefix(redirect.Target, "&") {
-				return true
+			if !writesFile(redirect.Access) {
+				continue
 			}
+			if redirectWritesNoFile(command, redirect) {
+				quietRedirect = true
+				continue
+			}
+			return true
+		}
+		if !quietRedirect &&
+			hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend) {
+			return true
 		}
 	}
 	for _, candidate := range facts.Paths {
-		if (candidate.Access == actionfacts.PathAccessWrite || candidate.Access == actionfacts.PathAccessAppend) &&
-			candidate.Value != "/dev/null" {
+		if writesFile(candidate.Access) && !quietRedirectTarget(facts, candidate) {
 			return true
+		}
+	}
+	return false
+}
+
+func writesFile(access actionfacts.PathAccess) bool {
+	return access == actionfacts.PathAccessWrite || access == actionfacts.PathAccessAppend
+}
+
+// wordsMayNameDerivedSource reports a command whose words, not its path
+// facts, may name the source of a derived file: the target of a link (ln -s
+// records no path for it), or an operand the classifier does not model (gzip
+// -c .env records no read) of a command that writes its output to a file or
+// into a pipeline. A command that has a read path, echo and printf (they
+// print their words) are not tested: a pattern (grep -q .env), an exclusion
+// (tar --exclude=.env) or an ignore entry (echo .env >> .gitignore) derives
+// nothing (GAP-0479).
+func wordsMayNameDerivedSource(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	switch command.Program {
+	case "echo", "printf":
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID == command.ID && candidate.Access == actionfacts.PathAccessRead {
+			return false
+		}
+	}
+	switch command.Program {
+	case "ln", "link":
+		return true
+	}
+	if command.PipelineID != 0 {
+		return true
+	}
+	for _, redirect := range command.Redirects {
+		if (redirect.FD == 1 || redirect.FD == -1) && writesFile(redirect.Access) &&
+			!redirectWritesNoFile(command, redirect) {
+			return true
+		}
+	}
+	return false
+}
+
+// redirectWritesNoFile reports a redirect of command to the null device or
+// to another descriptor (>&3, 2>&1), or of its stderr to a file when the
+// command duplicates no descriptor: with >&2 the output reaches the stderr
+// file too.
+func redirectWritesNoFile(command actionfacts.CommandFact, redirect actionfacts.RedirectFact) bool {
+	if redirectDuplicatesDescriptor(redirect) || redirect.Target == "/dev/null" {
+		return true
+	}
+	if redirect.FD != 2 {
+		return false
+	}
+	for _, other := range command.Redirects {
+		if redirectDuplicatesDescriptor(other) {
+			return false
+		}
+	}
+	return true
+}
+
+func redirectDuplicatesDescriptor(redirect actionfacts.RedirectFact) bool {
+	return redirect.Target == "" || strings.HasPrefix(redirect.Target, "&")
+}
+
+// quietRedirectTarget reports a written path that is the null device or the
+// target of a redirectWritesNoFile redirect of its own command.
+func quietRedirectTarget(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	if candidate.Value == "/dev/null" {
+		return true
+	}
+	command, ok := integrityCommandByID(facts, candidate.CommandID)
+	if !ok {
+		return false
+	}
+	for _, redirect := range command.Redirects {
+		if redirect.Target == candidate.Value && writesFile(redirect.Access) &&
+			redirectWritesNoFile(command, redirect) {
+			return true
+		}
+	}
+	return false
+}
+
+// uploadCallDerivesCredentialFile reports an upload call that also copies,
+// moves, links, archives or redirects a credentials file to a new name: a
+// command other than the uploaders (uploads, by command ID) takes a file of
+// a credentials-file shape or a file a secret-read rule names
+// (matchesAnySensitivePathCandidate; not a repository fixture) as a path, or
+// as a word where no path is recorded (wordsMayNameDerivedSource), and the
+// call writes a file (callWritesAnyFile). The file it
+// uploads may be that copy, so the upload names no one file (GAP-0445). Any
+// other write in an upload call (a response redirect, -o, a log tee, a
+// build archive, a stamp file) leaves the uploaded file named, so an upload
+// of a different, known file does not complete the chain (GAP-0479).
+func uploadCallDerivesCredentialFile(facts actionfacts.Facts, uploads map[int64]struct{}) bool {
+	if !callWritesAnyFile(facts) {
+		return false
+	}
+	source := func(command actionfacts.CommandFact, value string) bool {
+		if _, upload := uploads[command.ID]; upload || command.Effect != actionfacts.EffectExecute ||
+			sshIdentityConsumer(command) && command.Program != "rsync" {
+			return false
+		}
+		return matchesAnySensitivePathCandidate(value) && !credentialFileFixturePath(value)
+	}
+	for _, candidate := range facts.Paths {
+		if writesFile(candidate.Access) {
+			continue
+		}
+		if command, ok := integrityCommandByID(facts, candidate.CommandID); ok &&
+			source(command, semanticPathValue(candidate)) {
+			return true
+		}
+	}
+	for _, command := range facts.Commands {
+		if !wordsMayNameDerivedSource(facts, command) {
+			continue
+		}
+		for _, argument := range command.Argv[min(1, len(command.Argv)):] {
+			if !strings.HasPrefix(argument, "-") && source(command, argument) {
+				return true
+			}
 		}
 	}
 	return false
@@ -2250,12 +2387,16 @@ func callWritesAnyFile(facts actionfacts.Facts) bool {
 // cannot change the directory the next command runs in: external programs
 // the chain reads or sends with, and the shell builtins that only print or
 // test. A cd, pushd, popd, source, `.`, eval, trap, alias, a function call or
-// any program not named here is not proven (GAP-0418).
+// any program not named here is not proven (GAP-0418). tar is not named: -C,
+// a bundled -cC, --directory, --dir= and bsdtar --cd move its members. awk is
+// named only because the reader records an awk read solely for a plain print
+// program with no options: a gawk -f, -i, -l or @load script can chdir()
+// before awk opens its operand, so keep that restriction.
 var directoryKeepingPrograms = map[string]struct{}{
 	"cat": {}, "head": {}, "tail": {}, "less": {}, "more": {}, "grep": {}, "egrep": {}, "fgrep": {},
 	"rg": {}, "uniq": {}, "tr": {}, "wc": {}, "base64": {}, "openssl": {}, "sed": {}, "awk": {},
 	"cp": {}, "mv": {}, "ln": {}, "rm": {}, "mkdir": {}, "touch": {}, "tee": {}, "dd": {}, "install": {},
-	"tar": {}, "zip": {}, "unzip": {}, "gzip": {}, "gunzip": {}, "bzip2": {}, "xz": {},
+	"zip": {}, "unzip": {}, "gzip": {}, "gunzip": {}, "bzip2": {}, "xz": {},
 	"rsync": {}, "scp": {}, "curl": {}, "wget": {}, "jq": {}, "yq": {}, "find": {}, "ls": {}, "stat": {}, "file": {},
 	"echo": {}, "printf": {}, "true": {}, "false": {}, ":": {}, "test": {}, "[": {}, "sleep": {}, "date": {},
 	"pwd": {}, "whoami": {}, "id": {}, "uname": {}, "hostname": {},
@@ -2264,13 +2405,13 @@ var directoryKeepingPrograms = map[string]struct{}{
 // callProvenToKeepDirectory reports a call proven not to change the
 // directory its commands run in: a complete parse in which every command is a
 // known program that cannot change it (the reader table, an upload or copy
-// tool, a printing builtin) and none may (callMayChangeDirectory). Anything
+// tool, a printing builtin). Anything
 // else (a function or alias the call defines, `.`, `source`, `eval`, `trap`,
 // an unknown program that may be a function of the agent's shell, a call the
 // parser cannot finish) is not proven: a relative operand in it is unnamed and
 // the chain joins on the marker (GAP-0418).
 func callProvenToKeepDirectory(facts actionfacts.Facts) bool {
-	if facts.Parse.Status != actionfacts.StatusComplete || callMayChangeDirectory(facts) {
+	if facts.Parse.Status != actionfacts.StatusComplete {
 		return false
 	}
 	for _, command := range facts.Commands {
@@ -2281,35 +2422,6 @@ func callProvenToKeepDirectory(facts actionfacts.Facts) bool {
 		return false
 	}
 	return true
-}
-
-// callMayChangeDirectory reports a call in which a command may change the
-// directory the later commands run in: cd, pushd, popd, or tar -C. An env -C
-// or sudo -D is not listed: the wrapper unwrap refuses it, so no read or
-// upload sits under it and naming the other operands of the call unnamed
-// would only add false joins (PROVEN-or-UNCERTAIN: no read is recorded). A
-// relative operand in such a call is
-// not the file the path fact names: the fact keeps the call's starting
-// directory (GAP-0409).
-func callMayChangeDirectory(facts actionfacts.Facts) bool {
-	for _, command := range facts.Commands {
-		switch command.Program {
-		case "cd", "pushd", "popd", "chdir", "set-location", "push-location", "sl":
-			return true
-		case "tar", "bsdtar":
-			// -C or --directory (a traditional bundle such as cf names it
-			// with a C): the members are relative to that directory.
-			for index, argument := range command.Argv[1:] {
-				if argument == "-C" || argument == "--directory" ||
-					strings.HasPrefix(argument, "--directory=") ||
-					len(argument) > 2 && strings.HasPrefix(argument, "-C") ||
-					index == 0 && !strings.HasPrefix(argument, "-") && strings.ContainsRune(argument, 'C') {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 // secretReadPathIdentity is exactPathIdentity, except that a relative
@@ -2341,7 +2453,6 @@ func exactSecretReadChainDigest(facts actionfacts.Facts) (string, bool) {
 // files).
 func externalUploadProofDigest(facts actionfacts.Facts) (string, bool) {
 	uploads := make(map[int64]struct{})
-	writes := callWritesAnyFile(facts)
 	for _, command := range facts.Commands {
 		if command.Effect != actionfacts.EffectExecute ||
 			!hasOperation(command, actionfacts.OperationUpload) ||
@@ -2356,8 +2467,9 @@ func externalUploadProofDigest(facts actionfacts.Facts) (string, bool) {
 	if len(uploads) == 0 {
 		return "", false
 	}
-	if writes {
-		// The upload call derives a file: it names no one file (GAP-0445).
+	if uploadCallDerivesCredentialFile(facts, uploads) {
+		// The upload call derives a file from a credentials file: it names
+		// no one file (GAP-0445, GAP-0479).
 		return guardrail.ToolChainFileUnknownDigest, true
 	}
 	selected, exact := "", true
@@ -2441,12 +2553,6 @@ func exactSingleReadPathDigest(facts actionfacts.Facts) (string, bool) {
 }
 
 func exactExternalUploadPathDigest(facts actionfacts.Facts) (string, bool) {
-	if callWritesAnyFile(facts) {
-		// The upload call itself links, moves, copies or redirects a file to a
-		// new name: the file it uploads may be a copy of the one read earlier,
-		// so it names no one file (GAP-0445, the upload-side twin of GAP-0410).
-		return "", false
-	}
 	externalUploadCommands := make(map[int64]struct{})
 	for _, command := range facts.Commands {
 		if command.Effect == actionfacts.EffectExecute &&
@@ -2456,6 +2562,13 @@ func exactExternalUploadPathDigest(facts actionfacts.Facts) (string, bool) {
 		}
 	}
 	if len(externalUploadCommands) == 0 {
+		return "", false
+	}
+	if uploadCallDerivesCredentialFile(facts, externalUploadCommands) {
+		// The upload call itself copies, moves, links, archives or redirects a
+		// credentials file to a new name: the file it uploads may be that
+		// copy, so it names no one file (GAP-0445, the upload-side twin of
+		// GAP-0410; GAP-0479 keeps any other write out of it).
 		return "", false
 	}
 	return exactSinglePathDigestBy(facts, func(candidate actionfacts.PathFact) bool {

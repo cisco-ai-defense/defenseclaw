@@ -160,8 +160,9 @@ func tarCreateSources(argv []string) []string {
 			return nil
 		}
 		// A -C or --directory among the members (with its directory) is no
-		// member: the members after it are relative to that directory, which
-		// the chain reads as "may change directory" (callMayChangeDirectory).
+		// member: the members after it are relative to that directory, so
+		// the chain never counts tar as a program that keeps its directory
+		// (callProvenToKeepDirectory).
 		var members []string
 		for index := operandIndex; index < len(argv); index++ {
 			switch operand := argv[index]; {

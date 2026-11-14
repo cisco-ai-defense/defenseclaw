@@ -23,6 +23,8 @@ import "testing"
 // connectors enforce a custom provider on the agent's own model
 // traffic; every hook connector applies it to the judge/aux model only.
 func TestLLMTrafficModeForConnector(t *testing.T) {
+	restore := PinOpenClawHooksGOOSForTest("linux")
+	defer restore()
 	proxy := []string{"openclaw", "zeptoclaw"}
 	hooks := []string{
 		"claudecode", "codex", "hermes", "cursor", "devin",
@@ -47,6 +49,12 @@ func TestLLMTrafficModeForConnector(t *testing.T) {
 	// can't prove a proxy data path).
 	if got := LLMTrafficModeForConnector("made-up"); got != LLMTrafficModeHooksOnly {
 		t.Errorf("unknown connector mode=%q, want hooks-only", got)
+	}
+	// Native Windows OpenClaw has no proxy data path.
+	restore()
+	defer PinOpenClawHooksGOOSForTest("windows")()
+	if got := LLMTrafficModeForConnector("openclaw"); got != LLMTrafficModeHooksOnly {
+		t.Errorf("native Windows openclaw mode=%q, want hooks-only", got)
 	}
 }
 
