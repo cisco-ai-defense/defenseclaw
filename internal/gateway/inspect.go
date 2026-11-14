@@ -119,11 +119,6 @@ type ToolInspectRequest struct {
 	// the legacy public inspect API; native adapters opt in after establishing a
 	// prompt or tool-result boundary.
 	contentScope ruleContentScope
-	// textOrigin is who wrote Content. Like contentScope it is set only by a
-	// connector adapter that knows the surface (the turn-start prompt event), and
-	// never accepted from the public inspect wire, where a caller could otherwise
-	// label its own content user-typed to lower the severity of trust findings.
-	textOrigin ruleTextOrigin
 	// callerCWD is the agent's working folder from a connector adapter's
 	// typed hook payload (never from the public inspect wire). It picks the
 	// project of an enrolled account's MCP server (mcpAccountRuntimeBlock).
@@ -1597,7 +1592,7 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 			folded = view
 		}
 	}
-	ruleFindings := messageRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, folded, req.contentScope, req.textOrigin, !ManagedEnterpriseActive())
+	ruleFindings := messageRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, folded, req.contentScope, !ManagedEnterpriseActive())
 
 	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 {
@@ -2738,11 +2733,11 @@ func (a *APIServer) emitCodeGuardTelemetry(
 // combination of profiles runs it with each member's own rules and keeps
 // every member's finding, so even distinct definitions of one rule ID keep
 // their separate audit provenance.
-func messageRuleFindings(generation *compiledRulePackCategories, content, folded string, scope ruleContentScope, origin ruleTextOrigin, scanRaw bool) []RuleFinding {
+func messageRuleFindings(generation *compiledRulePackCategories, content, folded string, scope ruleContentScope, scanRaw bool) []RuleFinding {
 	if generation != nil && len(generation.members) > 0 {
 		var out []RuleFinding
 		for i, member := range generation.members {
-			findings := messageRuleFindings(member, content, folded, scope, origin, scanRaw)
+			findings := messageRuleFindings(member, content, folded, scope, scanRaw)
 			if i < len(generation.memberNames) {
 				for j := range findings {
 					findings[j].profile = generation.memberNames[i]
@@ -2755,9 +2750,9 @@ func messageRuleFindings(generation *compiledRulePackCategories, content, folded
 	var findings []RuleFinding
 	if scanRaw {
 		if scope != ruleContentScopeAll {
-			findings = scanContentRuleCategoryFromOrigin(generation, content, "message", scope, "", origin)
+			findings = scanContentRuleCategoryWithGeneration(generation, content, "message", scope, "")
 		} else {
-			findings = scanRuleGeneration(generation, content, "message", ruleScanOptions{origin: origin})
+			findings = scanRuleGeneration(generation, content, "message", ruleScanOptions{})
 		}
 	}
 	if folded == "" {
@@ -2768,7 +2763,7 @@ func messageRuleFindings(generation *compiledRulePackCategories, content, folded
 		seen[finding.RuleID] = true
 	}
 	for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
-		contentScope: scope, onlyCategory: "trust-exploit", origin: origin,
+		contentScope: scope, onlyCategory: "trust-exploit",
 	}) {
 		if !seen[finding.RuleID] {
 			findings = append(findings, finding)

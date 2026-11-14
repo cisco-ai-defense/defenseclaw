@@ -853,18 +853,6 @@ func scanContentRuleCategoryWithGeneration(
 	scope ruleContentScope,
 	category string,
 ) []RuleFinding {
-	return scanContentRuleCategoryFromOrigin(generation, text, toolName, scope, category, ruleTextOriginUnspecified)
-}
-
-// scanContentRuleCategoryFromOrigin is scanContentRuleCategoryWithGeneration for
-// text whose author the caller knows (ruleTextOrigin).
-func scanContentRuleCategoryFromOrigin(
-	generation *compiledRulePackCategories,
-	text, toolName string,
-	scope ruleContentScope,
-	category string,
-	origin ruleTextOrigin,
-) []RuleFinding {
 	if scope == ruleContentScopeSource {
 		text = neutralizeKnownFixtureDataLiterals(text)
 	}
@@ -872,7 +860,7 @@ func scanContentRuleCategoryFromOrigin(
 		generation,
 		text,
 		toolName,
-		ruleScanOptions{contentScope: scope, onlyCategory: category, origin: origin},
+		ruleScanOptions{contentScope: scope, onlyCategory: category},
 	)
 	if scope == ruleContentScopeSource {
 		// Physically verified test, fixture, and bundled rule sources are useful
@@ -888,45 +876,6 @@ func scanContentRuleCategoryFromOrigin(
 		}
 	}
 	return findings
-}
-
-// ruleTextOrigin says who wrote the text a scan reads. It is a property of the
-// surface the text arrived on, set by the adapter that owns that surface, and
-// never read from the public inspect wire.
-type ruleTextOrigin uint8
-
-const (
-	// ruleTextOriginUnspecified is text of any origin: tool results, model
-	// responses, files, and every caller that has not established who wrote it.
-	ruleTextOriginUnspecified ruleTextOrigin = iota
-	// ruleTextOriginUserTyped is the prompt the user typed to the agent: the
-	// user messages of the current turn of an /llm request, which the proxy
-	// call sites pass in (llmTypedPromptParts), and the prompt of the turn-start
-	// hook of a connector (UserPromptSubmit and its spellings). It is the
-	// principal own instruction, not content that reached the agent from a
-	// third party. System, developer and instruction fields, history, tool
-	// results and OpenClaw context are not typed.
-	ruleTextOriginUserTyped
-)
-
-// userTypedTrustCeiling is the highest severity a trust-exploit rule keeps on
-// user-typed text. A rule that reads an override or a persona in a tool result
-// or a web page is catching an injection; the same words in the prompt the
-// user wrote are the user own request (a preamble pasted from a template, a
-// role-play opener), and blocking the user for their own instruction is wrong
-// in the default and permissive packs. HIGH is the level below the block level
-// of those packs (CRITICAL) and above the block level of the strict pack
-// (MEDIUM), so the default pack alerts and strict still blocks.
-const userTypedTrustCeiling = "HIGH"
-
-// applyUserTypedTrustCeiling caps a trust-exploit finding on user-typed text at
-// userTypedTrustCeiling. The category and the origin decide, never a rule ID.
-func applyUserTypedTrustCeiling(options ruleScanOptions, category string, finding RuleFinding) RuleFinding {
-	if options.origin == ruleTextOriginUserTyped && category == "trust-exploit" &&
-		guardrailSeverityRank(finding.Severity) > guardrailSeverityRank(userTypedTrustCeiling) {
-		finding.Severity = userTypedTrustCeiling
-	}
-	return finding
 }
 
 type ruleContentScope uint8
@@ -946,8 +895,6 @@ type ruleScanOptions struct {
 	onlyRule     func(ruleID string) bool
 	contentScope ruleContentScope
 	onlyCategory string
-	// origin is who wrote the scanned text (ruleTextOrigin).
-	origin ruleTextOrigin
 }
 
 func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
@@ -1164,7 +1111,6 @@ func scanRuleCategoriesWithOptions(
 
 			f = adjustConfidence(toolName, f)
 			f = applyTrustLiteralContext(generation, cat.Name, rule, text, f)
-			f = applyUserTypedTrustCeiling(options, cat.Name, f)
 			findings = append(findings, f)
 			seen[rule.ID] = true
 		}
@@ -1207,7 +1153,6 @@ func scanRuleCategoriesWithOptions(
 
 				f = adjustConfidence(toolName, f)
 				f = applyTrustLiteralContext(generation, cat.Name, rule, normalized, f)
-				f = applyUserTypedTrustCeiling(options, cat.Name, f)
 				findings = append(findings, f)
 			}
 		}

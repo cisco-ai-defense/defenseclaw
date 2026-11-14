@@ -354,16 +354,7 @@ func (e *S7Engine) InspectText(ctx context.Context, direction, text string) *Sca
 	// Pin the generation as the proxy does for every request (proxy.go withPinnedGeneration), so the content rules and
 	// thresholds come from the pack under test, not the process-wide rule set.
 	ctx = withPinnedGeneration(ctx, e.sc.Generation())
-	messages := []ChatMessage{{Role: "user", Content: text}}
-	var v *ScanVerdict
-	if isPromptDirection(direction) {
-		// The prompt goes through the proxy's prompt entry, with the user turn
-		// attributed as typed (llmTypedPromptParts), as handleChatCompletion does.
-		raw := promptInspectText(messages)
-		v = inspectPromptWithRawRecheck(ctx, e.insp, promptInspectionText(raw), raw, llmTypedPromptParts(llmFieldMessages, messages), messages, "s7bench", "action")
-	} else {
-		v = e.insp.Inspect(ctx, direction, text, messages, "s7bench", "action")
-	}
+	v := e.insp.Inspect(ctx, direction, text, []ChatMessage{{Role: "user", Content: text}}, "s7bench", "action")
 	if v == nil {
 		v = &ScanVerdict{Action: "allow", Severity: "NONE"}
 	}
