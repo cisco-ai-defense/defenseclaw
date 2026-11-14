@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -71,10 +72,22 @@ func TestLLMJudgeUsesItsIntentStore(t *testing.T) {
 		t.Fatalf("store calls: appends %v resets %v", store.appends, store.resets)
 	}
 
+	var logged bytes.Buffer
+	previous := defaultLogWriter
+	defaultLogWriter = &logged
+	t.Cleanup(func() { defaultLogWriter = previous })
 	store.fail = true
 	sample = judge.toolJudgeContextSample(ctx, "Bash", `{"command":"ls"}`)
 	if strings.Contains(sample, "SESSION_USER_INTENT") || strings.Contains(sample, "RECENT_TOOL_CALL") || !strings.Contains(sample, "ls") {
 		t.Fatalf("failed store sample:\n%s", sample)
+	}
+	// The failure is reported once per interval, not once per call.
+	_ = judge.toolJudgeContextSample(ctx, "Bash", `{"command":"pwd"}`)
+	if n := strings.Count(logged.String(), "intent store AppendToolCall failed"); n != 1 {
+		t.Fatalf("store failure reported %d times:\n%s", n, logged.String())
+	}
+	if !strings.Contains(logged.String(), "leader unreachable") {
+		t.Fatalf("warning lacks the cause: %s", logged.String())
 	}
 
 	// A judge built as a literal keeps its own process-local context.
