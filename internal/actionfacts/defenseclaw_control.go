@@ -566,9 +566,13 @@ func (r *controlReader) read(facts Facts, text string, depth int) {
 	}
 	unresolved := false
 	switch facts.Parse.Status {
-	case StatusInvalid, StatusLimitExceeded, StatusAmbiguous, StatusUnsupported:
-		// The parse did not read the call (or only a part of it).
+	case StatusInvalid, StatusLimitExceeded:
+		// The parse did not read the call, or a bound cut it (ONE BOUND rule).
 		unresolved = true
+	case StatusAmbiguous, StatusUnsupported:
+		// A construct the parse does not model: unresolved when it left no
+		// command to judge.
+		unresolved = len(facts.Commands) == 0
 	}
 	commands := facts.Commands
 	needTwin := false
@@ -646,7 +650,11 @@ func (r *controlReader) script(facts Facts, script string, depth int) bool {
 func (r *controlReader) command(facts Facts, text string, command CommandFact, argv []string, depth, hops int) bool {
 	for ; hops < maxControlNesting && len(argv) > 0; hops++ {
 		if argv[0] == "" {
-			return true
+			// The program is a word the parse could not resolve (a variable, a
+			// substitution): the call is unresolved when what follows reads as
+			// a DefenseClaw stop, disable or uninstall (or is itself open).
+			kind, decided := judgeDefenseClawCLI(argv[1:], defenseClawNamespace, slices.Contains(argv[1:], ""))
+			return kind != "" || !decided
 		}
 		name := commandBaseName(argv[0])
 		if shellProgram(name) {
@@ -787,11 +795,24 @@ func (r *controlReader) judge(facts Facts, text string, command CommandFact, arg
 		}
 	default:
 		if inlineCodeRunner(name, argv[1:]) {
-			// Inline interpreter code is not shell: its effect is unproven.
-			return true
+			// Inline interpreter code is not shell. Each string literal of the
+			// code, and the literals joined (an argument list), is read as a
+			// command line; what a literal does to DefenseClaw is the unknown
+			// tier at best, and code that only names the product (an import,
+			// a version print) is not a finding.
+			r.remote++
+			defer func() { r.remote-- }()
+			literals := codeStringLiterals(strings.Join(argv[1:], " "))
+			candidates := append([]string{strings.Join(literals, " ")}, literals...)
+			for _, candidate := range candidates {
+				if containsFold(candidate, defenseClawNamespace) {
+					r.script(facts, candidate, depth)
+				}
+			}
+			return false
 		}
 		if (shellProgram(name) || name == "at" || name == "batch") && stdinRunner(argv[1:]) &&
-			(command.PipelineID != 0 || strings.Contains(text, "<<")) {
+			(command.PipelineID != 0 || strings.Contains(text, "<<")) && len(facts.Network) == 0 {
 			// A shell fed a script on stdin (a pipe, a here-document or
 			// here-string): the script is not in the parse.
 			return true
@@ -1254,4 +1275,31 @@ func tildeProgramText(text, home string) (string, int, bool) {
 		text = text[:offset] + home + text[offset+1:]
 	}
 	return text, len(offsets), true
+}
+
+// codeStringLiterals returns the single- and double-quoted string literals of
+// an inline program, without escapes resolved.
+func codeStringLiterals(code string) []string {
+	var literals []string
+	for index := 0; index < len(code); index++ {
+		quote := code[index]
+		if quote != '\'' && quote != '"' {
+			continue
+		}
+		end := index + 1
+		for end < len(code) && code[end] != quote {
+			if code[end] == '\\' {
+				end++
+			}
+			end++
+		}
+		if end > len(code) {
+			end = len(code)
+		}
+		if index+1 <= end {
+			literals = append(literals, code[index+1:end])
+		}
+		index = end
+	}
+	return literals
 }
