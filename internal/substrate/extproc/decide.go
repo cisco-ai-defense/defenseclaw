@@ -504,6 +504,13 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 		return v
 	}
 	switch outcome {
+	case chainClear:
+		if len(cv.Detected) > 0 {
+			v.Alert = true
+			for _, id := range cv.Detected {
+				v.Findings = append(v.Findings, "chain_detected:"+id)
+			}
+		}
 	case chainHit:
 		reason := cv.Reason
 		if reason == "" {

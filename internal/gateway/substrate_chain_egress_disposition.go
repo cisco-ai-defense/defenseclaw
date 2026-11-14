@@ -17,17 +17,19 @@ import (
 // completes a chain the callout refuses (chainstate.RefusesEgress: a secret
 // read, or a secret-manager read, then external egress) is refused in every
 // tier, the open source default pack as well as strict and managed. The one
-// setting is the gateway serve flag --chain-egress-action (block, the
-// default, or alert, the operator's opt-in; chart value gateway.extraArgs),
-// the flag the leader's callout reads too. Host and OpenShell hooks keep the
-// pack's disposition: an alert in the default pack.
+// setting is the config key substrate.chain_egress_action: block (the
+// default) or alert (an opt-in that only alerts), set with the chart value
+// config.substrate.chain_egress_action, which the gateway and the leader both
+// read (cfg.Substrate.EffectiveChainEgressAction, GAP-0250). Host and
+// OpenShell hooks keep the pack's disposition: an alert in the default pack.
 
-// substrateChainEgressAlert is true only after `serve --substrate` read
-// --chain-egress-action=alert. Unset is block.
+// substrateChainEgressAlert is true only after the gateway role read
+// substrate.chain_egress_action=alert. Unset is block.
 var substrateChainEgressAlert atomic.Bool
 
 // SetSubstrateChainEgressAction sets the chain egress action of verified
-// actors' hook calls from the serve flag: "" or block refuses, alert alerts.
+// actors' hook calls from cfg.Substrate.EffectiveChainEgressAction(): "" or
+// block refuses, alert alerts.
 func SetSubstrateChainEgressAction(action string) error {
 	switch action {
 	case "", chainstate.EgressBlock:

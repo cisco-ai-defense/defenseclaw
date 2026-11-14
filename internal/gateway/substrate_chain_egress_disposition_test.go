@@ -19,7 +19,7 @@ import (
 // Owner decision 2026-11-13: Substrate refuses egress after a secret read by
 // default, in every mode. A verified actor's hook call that uploads after a
 // credentials-file read is refused in the open source default pack, strict
-// and managed; --chain-egress-action=alert is the operator's opt-in. The
+// and managed; substrate.chain_egress_action=alert is the operator's opt-in. The
 // callout refuses the actor's next request the same way. Reads are the
 // substrate-1:GAP-0210 / GAP-0226 shapes: the home copy, a project file, a
 // pipeline and a command list.
@@ -94,7 +94,7 @@ func TestSetSubstrateChainEgressAction(t *testing.T) {
 
 // substrateEgressReplica is one gateway replica and its leader for tier
 // (oss: the default pack; strict; managed_enterprise; alert: the default pack
-// with --chain-egress-action=alert on the gateway and the leader), with the
+// with substrate.chain_egress_action=alert on the gateway and the leader), with the
 // attested registration of alice-1 so her hook steps reach the actor window.
 func substrateEgressReplica(t *testing.T, tier string) (chartReplica, *chainstate.Service) {
 	t.Helper()

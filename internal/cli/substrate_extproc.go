@@ -69,7 +69,7 @@ func (c substrateChainChecker) CheckEgress(ctx context.Context, step extproc.Cha
 		Actor: chainstate.Actor{Atespace: step.Actor.Atespace, UID: step.Actor.UID}, Name: step.Actor.Name,
 		Host: step.Host, Method: step.Method,
 	})
-	return extproc.ChainVerdict{Stale: v.Stale, Deny: v.Deny, Rule: v.Rule, Reason: v.Reason}, err
+	return extproc.ChainVerdict{Stale: v.Stale, Deny: v.Deny, Rule: v.Rule, Reason: v.Reason, Detected: v.Detected}, err
 }
 
 // substrateActorDirectory resolves the actor name atenet-egress gives the
