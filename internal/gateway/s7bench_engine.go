@@ -204,10 +204,9 @@ func (e *S7Engine) DeterministicFor(ctx context.Context, connectorName, toolName
 	return out
 }
 
-// S7SetDecisionRouting sets the bench-only replay switch (see
-// decisionBenchNoBreaker). The routing itself is product config.
-func S7SetDecisionRouting(noBreaker bool) {
-	decisionBenchNoBreaker = noBreaker
+// S7SetDecisionRouting sets the bench-only switches (see decisionBench).
+func S7SetDecisionRouting(noBreaker, mediumAlerts, allowRiskVeto bool) {
+	decisionBench.noBreaker, decisionBench.mediumAlerts, decisionBench.allowRiskVeto = noBreaker, mediumAlerts, allowRiskVeto
 }
 
 // S7DM is one decision-model answer.

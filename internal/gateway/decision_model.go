@@ -83,10 +83,14 @@ var decisionModelQuestions = map[string]any{
 	},
 }
 
-// decisionBenchNoBreaker (s7/sysone-bench only; set by S7SetDecisionRouting
-// under -tags s7bench, never in the product): an offline replay counts each
-// cache miss once instead of pausing the model after three of them.
-var decisionBenchNoBreaker bool
+// decisionBench holds bench-only switches (s7/sysone-bench only; set by
+// S7SetDecisionRouting under -tags s7bench, never in the product).
+//   - noBreaker: an offline replay counts each cache miss once.
+//   - mediumAlerts: a judge lone MEDIUM review finding on a call the
+//     decision model escalated is not made audit-only (variant b).
+//   - allowRiskVeto: a risk score at or above block_risk_score turns a
+//     confident allow into an escalation.
+var decisionBench struct{ noBreaker, mediumAlerts, allowRiskVeto bool }
 
 // decisionRoute is what the guardrail does with one decision-model answer.
 type decisionRoute int
@@ -249,7 +253,7 @@ func (d *decisionModel) budget(ctx context.Context) time.Duration {
 func (d *decisionModel) breakerOpen(now time.Time) bool {
 	d.breakerMu.Lock()
 	defer d.breakerMu.Unlock()
-	if decisionBenchNoBreaker {
+	if decisionBench.noBreaker {
 		return false
 	}
 	if now.Before(d.openUntil) {
@@ -334,7 +338,7 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	res.risk = 1 - probs["allow"]
 	res.riskScore = score
 	switch {
-	case choice == "allow" && res.risk <= d.allowAt:
+	case choice == "allow" && res.risk <= d.allowAt && !(decisionBench.allowRiskVeto && score >= d.blockRiskScore):
 		res.route = decisionAllow
 	case choice == "block" && res.risk >= d.blockAt && score >= d.blockRiskScore && !d.ruleFlagEscalates(ctx):
 		// A confident block needs the disposition AND the risk score (R4),
@@ -657,7 +661,13 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 		if !res.skipped {
 			emitDecisionModel(ctx, dm.model, toolName, args, res, nil)
 		}
-		return j.runToolJudgeLLM(ctx, toolName, args, sample)
+		judged := j.runToolJudgeLLM(ctx, toolName, args, sample)
+		if decisionBench.mediumAlerts && judged != nil && judged.reviewOnly && !res.skipped && res.failure == "" {
+			c := *judged
+			c.reviewOnly = false
+			return &c
+		}
+		return judged
 	}
 }
 
