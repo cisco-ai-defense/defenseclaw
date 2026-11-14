@@ -49,6 +49,88 @@ attributes:
       - panic
     notes: ok|panic
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.hook.rule_pack_dir
+  type: string
+  brief: Rule pack directory the connector hook decision was evaluated with
+  examples:
+  - /etc/defenseclaw/rule-packs/default
+  stability: stable
+  owner: defenseclaw
+  field_class: path
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: path-v1
+    overrides:
+      max_utf8_bytes: 8192
+    notes: Centrally normalized and redacted local path; never use as a metric label or span name
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.hook.raw_origin
+  type: string
+  brief: Origin of the raw hook payload the decision answered
+  examples:
+  - hook
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - hook
+    notes: hook; absent when the call has no raw event id
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.hook.raw_event_ids
+  type: string[]
+  brief: Bounded raw hook event IDs the decision answered
+  examples:
+  - - raw-8066606f06875ce8
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 2048
+      max_item_utf8_bytes: 256
+      max_items: 8
+    notes: at most eight raw event IDs
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.hook.body_bytes
+  type: int64
+  brief: Size in bytes of the hook request body the decision answered
+  examples:
+  - 196
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: non-negative byte count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.hook.bounded_prefix_review
+  type: boolean
+  brief: The decision reviewed only a bounded prefix of the request
+  examples:
+  - true
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: boolean; present only when true
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.connector.step_idx
   type: int64
   brief: One-based connector step shared by hook events in the same reported turn.
@@ -2385,6 +2467,16 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.guardrail.judge_fallback
     requirement_level: recommended
+  - ref: defenseclaw.hook.rule_pack_dir
+    requirement_level: optional
+  - ref: defenseclaw.hook.raw_origin
+    requirement_level: optional
+  - ref: defenseclaw.hook.raw_event_ids
+    requirement_level: optional
+  - ref: defenseclaw.hook.body_bytes
+    requirement_level: optional
+  - ref: defenseclaw.hook.bounded_prefix_review
+    requirement_level: optional
   x-defenseclaw:
     legacy_bindings:
     - source: 'PR #403 gatewaylog.HookDecisionPayload'
@@ -3808,7 +3900,7 @@ groups:
     event_name: hook_decision
   x-defenseclaw:
     bucket: guardrail.evaluation
-    family_schema_version: 1
+    family_schema_version: 2
     outcome_requirement: required
     allowed_outcomes:
     - allowed

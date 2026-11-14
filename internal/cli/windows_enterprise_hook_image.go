@@ -174,9 +174,13 @@ type windowsHookImageFS interface {
 
 // windowsHookImageStart is one start of a staged image.
 type windowsHookImageStart struct {
-	Path    string
-	Args    []string
-	Stdin   []byte
+	Path  string
+	Args  []string
+	Stdin []byte
+	// Env, when set, is added to this process's environment for the image
+	// (tests). Left empty, the image gets the default environment of its
+	// token, as Windows gives any process started under another token.
+	Env     []string
 	Timeout time.Duration
 }
 

@@ -233,8 +233,8 @@ func TestGAP0151LongOperandListKeepsProtectedTarget(t *testing.T) {
 			// Past the operand bound the ordinary twin is unresolved: the
 			// default tier allows it with the alert that names the bound
 			// (GAP-0943).
-			if !strings.HasPrefix(call.body, `{"action":"alert"`) || !strings.Contains(call.body, operandBoundRuleID) {
-				t.Errorf("%s: want an allowing alert %s; verdict %s", call.name, operandBoundRuleID, call.verdict)
+			if !strings.HasPrefix(call.body, `{"action":"alert"`) || !strings.Contains(call.body, operandBoundReason) {
+				t.Errorf("%s: want an allowing alert %s; verdict %s", call.name, operandBoundReason, call.verdict)
 			}
 			continue
 		}

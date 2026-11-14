@@ -521,6 +521,17 @@ func (owner *sidecarOwnedObservabilityV8Runtime) LatestLifecycleProjection(
 	return owner.runtime.LatestLifecycleProjection(ctx, query)
 }
 
+// LogsCollected reports whether the active plan collects the logs of
+// bucket (hookDecisionRecordsKept).
+func (owner *sidecarOwnedObservabilityV8Runtime) LogsCollected(bucket observability.Bucket) bool {
+	if owner == nil || owner.runtime == nil {
+		return false
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	return !owner.closed && owner.runtime.LogsCollected(bucket)
+}
+
 func (owner *sidecarOwnedObservabilityV8Runtime) EmitLocalOnly(
 	ctx context.Context,
 	metadata router.Metadata,
