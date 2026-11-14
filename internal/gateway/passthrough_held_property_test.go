@@ -229,8 +229,11 @@ func TestPassthroughCoverageHeldCallProperty(t *testing.T) {
 	leads, sizes := []int{10, 2000}, []int{0, 1300 << 10} // text before the call: inside, and past, the initial buffer; text inside the open call: none, and past the 1 MiB cap
 	pick := covPick(covSample(t, "TestPassthroughCoverageHeldCallProperty",
 		[]string{"wire", "lead", "size", "framing", "mode"}, []int{len(cases), len(leads), len(sizes), len(covFramings), 2},
-		func(c []int) bool { return !(c[2] == 1 && c[4] == 0) }, // past the cap an OSS install may release the call with an alert
+		func(c []int) bool { return c[2] != 1 || c[4] != 0 }, // past the cap an OSS install may release the call with an alert
 		nil))
+	// One proxy serves every combination (it opens an audit store, the dearest
+	// part of a case); covHeldRun registers the upstream and sets the seam per run.
+	shared := covHeldProxy(t)
 	for ci, c := range cases {
 		for li, lead := range leads {
 			for zi, size := range sizes {
@@ -242,7 +245,7 @@ func TestPassthroughCoverageHeldCallProperty(t *testing.T) {
 						c, lead, size, fr, managed := c, lead, size, fr, managed
 						t.Run(fmt.Sprintf("%s/lead=%d/size=%d/%s/managed=%v", c.name, lead, size, fr, managed), func(t *testing.T) {
 							covSetManaged(t, managed)
-							proxy := covHeldProxy(t)
+							proxy := shared
 							pad := strings.Repeat("padding text. ", 40)
 							early, final := covHeldRun(t, proxy, c.path, c.wire, "text/event-stream", req,
 								func(w io.Writer, flush func()) int {

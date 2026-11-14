@@ -94,8 +94,7 @@ func covPairwise(test string, dims []int, all [][]int, pairs func(a, b int) bool
 	type key struct{ a, b, va, vb int }
 	covered := map[key]bool{}
 	seenVal := map[[2]int]bool{}
-	var keys func(c []int) (vals [][2]int, prs []key)
-	keys = func(c []int) ([][2]int, []key) {
+	keys := func(c []int) ([][2]int, []key) {
 		var vals [][2]int
 		var prs []key
 		for i := range c {

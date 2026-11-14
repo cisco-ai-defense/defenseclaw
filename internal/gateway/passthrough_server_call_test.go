@@ -109,7 +109,11 @@ func TestPassthroughServerSideCallsAreNotHeld(t *testing.T) {
 		[]string{"item", "framing", "size", "mode"}, []int{len(cases), len(frs), len(sizes), 2}, nil,
 		// The 1.3 MiB runs are the costly ones: they are paired with each item, and every
 		// other pair is covered by the small runs.
-		func(a, b int) bool { return !(a == 1 && b == 2) && !(a == 2 && b == 3) }))
+		func(a, b int) bool { return (a != 1 || b != 2) && (a != 2 || b != 3) }))
+	// One proxy serves every combination (it opens an audit store, the dearest
+	// part of a case).
+	insp := &covInspector{}
+	sharedProxy := covServerHeldProxy(t, insp)
 	for ci, c := range cases {
 		for fi, fr := range frs {
 			for zi, size := range sizes {
@@ -120,8 +124,10 @@ func TestPassthroughServerSideCallsAreNotHeld(t *testing.T) {
 					c, fr, size, managed := c, fr, size, managed
 					t.Run(fmt.Sprintf("%s/%s/size=%d/managed=%v", c.name, fr, size, managed), func(t *testing.T) {
 						covSetManaged(t, managed)
-						insp := &covInspector{}
-						proxy := covServerHeldProxy(t, insp)
+						insp.mu.Lock()
+						insp.completes = nil
+						insp.mu.Unlock()
+						proxy := sharedProxy
 						text := []string{`{"type":"response.output_text.delta","item_id":"msg_0","delta":"` + strings.Repeat("working on it. ", 150) + `"}`}
 						if strings.HasPrefix(c.name, "anthropic") {
 							text = []string{`{"type":"content_block_start","index":9,"content_block":{"type":"text","text":""}}`,
