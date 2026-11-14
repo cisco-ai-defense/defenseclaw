@@ -13,7 +13,7 @@ import argparse, collections, glob, json, math, os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from configs import ALL_SETS  # noqa: E402
 
-POOL_EXCLUDE = {"llm-labelled-augur"}       # model labels: reported apart, never in a pooled headline
+POOL_EXCLUDE = {"llm-labelled-augur"}       # model labels and not public: reported apart (internal), never pooled
 SURFACE = {"prompt-agentdojo": "prompt", "tool-result-agentdojo": "tool-result"}
 
 
@@ -33,10 +33,13 @@ def cell(rows, seed=20261113, reps=1000):
     out = dict(tp=tp, fp=fp, fn=fn, tn=tn, precision=P, precision_ci=wilson(tp, tp + fp), recall=R, recall_ci=wilson(tp, tp + fn),
                fpr=fp / (fp + tn) if fp + tn else None, fpr_ci=wilson(fp, fp + tn), f1=F, f1_ci=[None, None])
     if F is not None and rows:
-        rnd = random.Random(seed); pos = [r for r in rows if r[0]]; neg = [r for r in rows if not r[0]]; fs = []
+        # label-stratified case bootstrap: resampling the attack cases with replacement gives tp* ~ Binomial(attacks, recall), the
+        # benign cases fp* ~ Binomial(benign, fpr); drawing those counts directly is the same distribution and much faster
+        rnd = random.Random(seed); npos, nneg = tp + fn, fp + tn; fs = []
         for _ in range(reps):
-            s = [pos[rnd.randrange(len(pos))] for _ in pos] + ([neg[rnd.randrange(len(neg))] for _ in neg] if neg else [])
-            a = sum(1 for y, f in s if y and f); b = sum(1 for y, f in s if not y and f); c = sum(1 for y, f in s if y and not f)
+            a = rnd.binomialvariate(npos, tp / npos) if npos else 0
+            b = rnd.binomialvariate(nneg, fp / nneg) if nneg else 0
+            c = npos - a
             fs.append(2 * a / (2 * a + b + c) if (2 * a + b + c) else 0.0)
         fs.sort(); out["f1_ci"] = [fs[int(0.025 * reps)], fs[int(0.975 * reps) - 1]]
     return out
@@ -99,9 +102,13 @@ def main():
             if sj.get("status") == "incomplete":
                 row["scorer_status"] = "incomplete"
             else:
+                # the scorer skips this run's own unsupported-tool cases; the tables skip every run's (the same cases for every
+                # tool), so the check recounts on the scorer's own case set
+                own = [i for i, tr in truth[c].items() if tr["state"] != "excluded" and i in pred and not pred[i]["unsup"]]
                 for k in ("block", "alert"):
                     b = sj.get(k) or {}
-                    if b and (b.get("tp"), b.get("fp")) != (row[k]["tp"], row[k]["fp"]):
+                    tp = sum(1 for i in own if truth[c][i]["state"] == "attack" and pred[i][k]); fp = sum(1 for i in own if truth[c][i]["state"] == "benign" and pred[i][k])
+                    if b and (b.get("tp"), b.get("fp")) != (tp, fp):
                         row["scorer_mismatch"] = True
         results.append(row)
     # pooled rows: per run x pack x side over the sets that are not N/A (all, and per surface)

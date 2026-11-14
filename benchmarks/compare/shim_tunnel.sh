@@ -7,7 +7,7 @@ BOX=$1 PORT=$2 CAP=$3 LOG=$4; shift 4; [ "${1:-}" = "--" ] && shift
 CFG=$HOME/dc-eh/ssh/config
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$(dirname "$LOG")"
-python3 "$HERE/llmshim.py" --port "$PORT" --log "$LOG" --cap-usd "$CAP" > "$LOG.err" 2>&1 < /dev/null &
+python3 "${SHIM:-$HERE/llmshim.py}" --port "$PORT" --log "$LOG" --cap-usd "$CAP" > "$LOG.err" 2>&1 < /dev/null &
 spid=$!
 ssh -F "$CFG" -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ControlMaster=no -o ControlPath=none \
     -R 127.0.0.1:$PORT:127.0.0.1:$PORT "$BOX" < /dev/null > "$LOG.tunnel.err" 2>&1 &

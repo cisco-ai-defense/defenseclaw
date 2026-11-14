@@ -9,7 +9,14 @@ CMP=${CMP:-$HOME/cmp}; export HF_HOME=$CMP/hf TOKENIZERS_PARALLELISM=false   # p
 export EMBEDDING_CLASSIFIER_PATH=$CMP/hf/nemoguard-jailbreakdetect
 SETS=agentdojo,mcptox,injecagent,mcphunt,dtap,agentic-redteam,nemotron-terminal,extra-public,llm-labelled-augur,prompt-agentdojo,tool-result-agentdojo,windows-shell-public
 LOGS=$HOME/s7c/compare/logs; mkdir -p $LOGS
-py() { set -- "$@" ${RUN_EXTRA:-}; PATH="$CMP/venv/$1/bin:$PATH" "$CMP/venv/$1/bin/python" "${@:2}"; }   # semgrep (CodeShield, Invariant) is a venv console script
+py() {   # exit 3 = a worker died and the run stopped for a resume: rerun (rows and the answer cache are kept), at most 8 times
+  set -- "$@" ${RUN_EXTRA:-}
+  for try in 1 2 3 4 5 6 7 8; do
+    PATH="$CMP/venv/$1/bin:$PATH" "$CMP/venv/$1/bin/python" "${@:2}" && return 0
+    rc=$?; [ $rc = 3 ] || return $rc
+  done
+  return 3
+}   # semgrep (CodeShield, Invariant) is a venv console script
 steps=${*:-pg86 pg22 codeshield llmguard nemo invariant gr}
 for s in $steps; do
   case $s in

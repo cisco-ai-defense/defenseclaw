@@ -11,16 +11,16 @@ for spec in "$@"; do
   python3 -I dcview.py --gate-label "$g" --name "$n" --score > /dev/null
   runs+=("$n")
 done
-for cfg in $(python3 -I -c 'from configs import CONFIGS; print(" ".join(CONFIGS))'); do
-  raws=$(python3 -I -c "from configs import CONFIGS; print(' '.join(sorted({r['raw'] for r in CONFIGS['$cfg']['rules']})))")
+for cfg in $(python3 -I -c 'import sys; sys.path.insert(0, "."); from configs import CONFIGS; print(" ".join(sorted(CONFIGS, key=lambda c: bool(CONFIGS[c].get("thresholds_from")))))'); do
+  raws=$(python3 -I -c "import sys; sys.path.insert(0, '.'); from configs import CONFIGS; print(' '.join(sorted({r['raw'] for r in CONFIGS['$cfg']['rules']})))")
   ok=1; for r in $raws; do [ -d "$RAW/$r" ] || ok=0; done
   [ $ok = 1 ] || { echo "skip $cfg (no raw output yet)"; continue; }
   hold_only=0; for r in $raws; do ls $RAW/$r/*.tune.jsonl >/dev/null 2>&1 || hold_only=1; done
   sides=holdout,tune; [ $hold_only = 1 ] && sides=holdout
   python3 -I materialize.py --config "$cfg" --sides $sides --score > $S7C/compare/logs/mat-$cfg.log 2>&1 && runs+=("$cfg") || echo "materialize $cfg failed (see logs/mat-$cfg.log)"
-  tunable=$(python3 -I -c "from configs import CONFIGS; print(int(any(r.get('tune') for r in CONFIGS['$cfg']['rules'])))")
-  if [ "$tunable" = 1 ] && [ $hold_only = 0 ]; then
-    python3 -I materialize.py --config "$cfg" --tuned --sides holdout,tune --score > $S7C/compare/logs/mat-$cfg-tuned.log 2>&1 && runs+=("$cfg-tuned") || echo "materialize $cfg --tuned failed"
+  tunable=$(python3 -I -c "import sys; sys.path.insert(0, '.'); from configs import CONFIGS; c=CONFIGS['$cfg']; print(int(any(r.get('tune') for r in c['rules'])) + int(bool(c.get('thresholds_from'))))")
+  if { [ "$tunable" = 1 ] && [ $hold_only = 0 ]; } || [ "$tunable" = 2 ]; then
+    python3 -I materialize.py --config "$cfg" --tuned --sides $sides --score > $S7C/compare/logs/mat-$cfg-tuned.log 2>&1 && runs+=("$cfg-tuned") || echo "materialize $cfg --tuned failed"
   fi
 done
 IFS=,; python3 -I aggregate.py --runs "${runs[*]}" --out $S7C/compare/results.json

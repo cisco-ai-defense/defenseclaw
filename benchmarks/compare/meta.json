@@ -1,48 +1,293 @@
 {
  "tools": [
-  {"id": "defenseclaw", "name": "DefenseClaw", "license": "Apache-2.0",
-   "surfaces": {"prompt": true, "tool_call": true, "tool_result": true, "model_response": true, "mcp": true, "acp": true},
-   "connectors": 10, "integration": "agent hooks / plugins for 10 coding agents, LLM proxy, MCP and ACP routes",
-   "needs": {"rules": "none (one Go binary, local, no model download)", "system_one": "Gemini API key (gemini-decision-1)", "judge": "an OpenAI-compatible LLM endpoint (here Gemma 4 31B on Amazon Bedrock)"},
-   "gpu": false, "download_gb": 0},
-  {"id": "llamafirewall", "name": "Meta LlamaFirewall", "license": "MIT (code); Llama 4 Community Licence (Prompt Guard 2)",
-   "surfaces": {"prompt": true, "tool_call": true, "tool_result": true, "model_response": true, "mcp": false, "acp": false},
-   "connectors": 0, "integration": "Python library: the application calls scan() on each message",
-   "needs": {"promptguard": "Hugging Face token with the Meta licence accepted; 1.1 GB (86M) or 0.3 GB (22M); CPU is enough", "alignmentcheck": "an LLM API key (Together by default; Llama 4 Maverick); self-hosting Maverick needs a multi-GPU server", "codeshield": "semgrep"},
-   "gpu": false, "download_gb": 1.1},
-  {"id": "llama-guard-4", "name": "Meta Llama Guard 4 12B", "license": "Llama 4 Community Licence",
-   "surfaces": {"prompt": true, "tool_call": true, "tool_result": false, "model_response": true, "mcp": false, "acp": false},
-   "connectors": 0, "integration": "a model: serve it (vLLM) and call it per message",
-   "needs": {"model": "Hugging Face token with the Meta licence accepted; 23 GB of weights; a GPU with 24 GB+ (here one L40S 48 GB)"},
-   "gpu": true, "download_gb": 23},
-  {"id": "nemo-guardrails", "name": "NVIDIA NeMo Guardrails", "license": "Apache-2.0",
-   "surfaces": {"prompt": true, "tool_call": "structural (schema) only; injection YARA on arguments", "tool_result": "context bloat only", "model_response": true, "mcp": false, "acp": false},
-   "connectors": 0, "integration": "Python library or guardrails server in front of the LLM",
-   "needs": {"jailbreak": "gpt2-large (3.1 GB) for the heuristics, NemoGuard JailbreakDetect + Snowflake embedder (2 GB); the docs advise a separate server for production", "injection": "yara-python"},
-   "gpu": false, "download_gb": 5.1},
-  {"id": "invariant", "name": "Invariant Guardrails", "license": "Apache-2.0",
-   "surfaces": {"prompt": true, "tool_call": true, "tool_result": true, "model_response": true, "mcp": true, "acp": false},
-   "connectors": 0, "integration": "rules evaluated in the Invariant Gateway (LLM / MCP proxy) or with the Python analyzer; the package's default Policy class is the hosted service",
-   "needs": {"prompt_injection": "deberta-v3-base-prompt-injection-v2 (0.7 GB)", "code": "semgrep"},
-   "gpu": false, "download_gb": 0.7},
-  {"id": "llm-guard", "name": "ProtectAI LLM Guard", "license": "MIT",
-   "surfaces": {"prompt": true, "tool_call": false, "tool_result": true, "model_response": true, "mcp": false, "acp": false},
-   "connectors": 0, "integration": "Python library or API server: scan_prompt / scan_output",
-   "needs": {"prompt_injection": "deberta-v3-base-prompt-injection-v2 ONNX (0.7 GB)"},
-   "gpu": false, "download_gb": 0.7},
-  {"id": "guardrails-ai", "name": "Guardrails AI", "license": "Apache-2.0",
-   "surfaces": {"prompt": true, "tool_call": "argument text only", "tool_result": true, "model_response": true, "mcp": false, "acp": false},
-   "connectors": 0, "integration": "Python library (Guard().use(...)) around LLM calls",
-   "needs": {"detect_jailbreak": "three models (about 3 GB)", "secrets_present": "detect-secrets"},
-   "gpu": false, "download_gb": 3.0},
-  {"id": "granite-guardian-3.3", "name": "IBM Granite Guardian 3.3 8B", "license": "Apache-2.0",
-   "surfaces": {"prompt": true, "tool_call": true, "tool_result": false, "model_response": true, "mcp": false, "acp": false},
-   "connectors": 0, "integration": "a model: serve it (vLLM) and call it per message with a criteria id",
-   "needs": {"model": "16 GB of weights; a GPU with 24 GB+"}, "gpu": true, "download_gb": 16},
-  {"id": "qwen3guard-8b", "name": "Qwen3Guard-Gen 8B", "license": "Apache-2.0",
-   "surfaces": {"prompt": true, "tool_call": true, "tool_result": false, "model_response": true, "mcp": false, "acp": false},
-   "connectors": 0, "integration": "a model: serve it (vLLM / SGLang) and call it per message",
-   "needs": {"model": "16 GB of weights; a GPU with 24 GB+"}, "gpu": true, "download_gb": 16}
+  {
+   "id": "defenseclaw",
+   "name": "DefenseClaw",
+   "license": "Apache-2.0",
+   "surfaces": {
+    "prompt": true,
+    "tool_call": true,
+    "tool_result": true,
+    "model_response": true,
+    "mcp": true,
+    "acp": true
+   },
+   "connectors": 10,
+   "integration": "agent hooks / plugins for 10 coding agents, LLM proxy, MCP and ACP routes",
+   "needs": {
+    "rules": "none (one Go binary, local, no model download)",
+    "system_one": "Gemini API key (gemini-decision-1)",
+    "judge": "an OpenAI-compatible LLM endpoint (here Gemma 4 31B on Amazon Bedrock)"
+   },
+   "gpu": false,
+   "download_gb": 0
+  },
+  {
+   "id": "llamafirewall",
+   "name": "Meta LlamaFirewall",
+   "license": "MIT (code); Llama 4 Community Licence (Prompt Guard 2)",
+   "surfaces": {
+    "prompt": true,
+    "tool_call": true,
+    "tool_result": true,
+    "model_response": true,
+    "mcp": false,
+    "acp": false
+   },
+   "connectors": 0,
+   "integration": "Python library: the application calls scan() on each message",
+   "needs": {
+    "promptguard": "Hugging Face token with the Meta licence accepted; 1.1 GB (86M) or 0.3 GB (22M); CPU is enough",
+    "alignmentcheck": "an LLM API key (Together by default; Llama 4 Maverick); self-hosting Maverick needs a multi-GPU server",
+    "codeshield": "semgrep"
+   },
+   "gpu": false,
+   "download_gb": 1.1
+  },
+  {
+   "id": "llama-guard-4",
+   "name": "Meta Llama Guard 4 12B",
+   "license": "Llama 4 Community Licence",
+   "surfaces": {
+    "prompt": true,
+    "tool_call": true,
+    "tool_result": false,
+    "model_response": true,
+    "mcp": false,
+    "acp": false
+   },
+   "connectors": 0,
+   "integration": "a model: serve it (vLLM) and call it per message",
+   "needs": {
+    "model": "Hugging Face token with the Meta licence accepted; 23 GB of weights; a GPU with 24 GB+ (here one L40S 48 GB)"
+   },
+   "gpu": true,
+   "download_gb": 23
+  },
+  {
+   "id": "nemo-guardrails",
+   "name": "NVIDIA NeMo Guardrails",
+   "license": "Apache-2.0",
+   "surfaces": {
+    "prompt": true,
+    "tool_call": "structural (schema) only; injection YARA on arguments",
+    "tool_result": "context bloat only",
+    "model_response": true,
+    "mcp": false,
+    "acp": false
+   },
+   "connectors": 0,
+   "integration": "Python library or guardrails server in front of the LLM",
+   "needs": {
+    "jailbreak": "gpt2-large (3.1 GB) for the heuristics, NemoGuard JailbreakDetect + Snowflake embedder (2 GB); the docs advise a separate server for production",
+    "injection": "yara-python"
+   },
+   "gpu": false,
+   "download_gb": 5.1
+  },
+  {
+   "id": "invariant",
+   "name": "Invariant Guardrails",
+   "license": "Apache-2.0",
+   "surfaces": {
+    "prompt": true,
+    "tool_call": true,
+    "tool_result": true,
+    "model_response": true,
+    "mcp": true,
+    "acp": false
+   },
+   "connectors": 0,
+   "integration": "rules evaluated in the Invariant Gateway (LLM / MCP proxy) or with the Python analyzer; the package's default Policy class is the hosted service",
+   "needs": {
+    "prompt_injection": "deberta-v3-base-prompt-injection-v2 (0.7 GB)",
+    "code": "semgrep"
+   },
+   "gpu": false,
+   "download_gb": 0.7
+  },
+  {
+   "id": "llm-guard",
+   "name": "ProtectAI LLM Guard",
+   "license": "MIT",
+   "surfaces": {
+    "prompt": true,
+    "tool_call": false,
+    "tool_result": true,
+    "model_response": true,
+    "mcp": false,
+    "acp": false
+   },
+   "connectors": 0,
+   "integration": "Python library or API server: scan_prompt / scan_output",
+   "needs": {
+    "prompt_injection": "deberta-v3-base-prompt-injection-v2 ONNX (0.7 GB)"
+   },
+   "gpu": false,
+   "download_gb": 0.7
+  },
+  {
+   "id": "guardrails-ai",
+   "name": "Guardrails AI",
+   "license": "Apache-2.0",
+   "surfaces": {
+    "prompt": true,
+    "tool_call": "argument text only",
+    "tool_result": true,
+    "model_response": true,
+    "mcp": false,
+    "acp": false
+   },
+   "connectors": 0,
+   "integration": "Python library (Guard().use(...)) around LLM calls",
+   "needs": {
+    "detect_jailbreak": "three models (about 3 GB)",
+    "secrets_present": "detect-secrets"
+   },
+   "gpu": false,
+   "download_gb": 3.0
+  },
+  {
+   "id": "granite-guardian-3.3",
+   "name": "IBM Granite Guardian 3.3 8B",
+   "license": "Apache-2.0",
+   "surfaces": {
+    "prompt": true,
+    "tool_call": true,
+    "tool_result": false,
+    "model_response": true,
+    "mcp": false,
+    "acp": false
+   },
+   "connectors": 0,
+   "integration": "a model: serve it (vLLM) and call it per message with a criteria id",
+   "needs": {
+    "model": "16 GB of weights; a GPU with 24 GB+"
+   },
+   "gpu": true,
+   "download_gb": 16
+  },
+  {
+   "id": "qwen3guard-8b",
+   "name": "Qwen3Guard-Gen 8B",
+   "license": "Apache-2.0",
+   "surfaces": {
+    "prompt": true,
+    "tool_call": true,
+    "tool_result": false,
+    "model_response": true,
+    "mcp": false,
+    "acp": false
+   },
+   "connectors": 0,
+   "integration": "a model: serve it (vLLM / SGLang) and call it per message",
+   "needs": {
+    "model": "16 GB of weights; a GPU with 24 GB+"
+   },
+   "gpu": true,
+   "download_gb": 16
+  }
  ],
- "selection": "Competitors: the six named by the owner plus every open-source guard that, on 2026-11-13, had a release in the last 12 months, an OSI licence or open weights, wide use (Hugging Face downloads or GitHub stars) and documentation for prompt injection, jailbreak or agent / tool-call safety: IBM Granite Guardian 3.3 and Qwen3Guard-Gen. Not included: hosted-only services (Lakera, Azure Prompt Shields, Bedrock Guardrails), archived projects (Rebuff, Vigil), ShieldGemma and WildGuard (content moderation only, no agent placement), gpt-oss-safeguard (a bring-your-own-policy reasoning model with no published agent-security policy: any result would measure our policy text, not the tool)."
+ "selection": "Competitors: the six named by the owner plus every open-source guard that, on 2026-11-13, had a release in the last 12 months, an OSI licence or open weights, wide use (Hugging Face downloads or GitHub stars) and documentation for prompt injection, jailbreak or agent / tool-call safety: IBM Granite Guardian 3.3 and Qwen3Guard-Gen. Not included: hosted-only services (Lakera, Azure Prompt Shields, Bedrock Guardrails), archived projects (Rebuff, Vigil), ShieldGemma and WildGuard (content moderation only, no agent placement), gpt-oss-safeguard (a bring-your-own-policy reasoning model with no published agent-security policy: any result would measure our policy text, not the tool).",
+ "datasets": {
+  "agentdojo": {
+   "source": "ethz-spylab/agentdojo",
+   "url": "https://github.com/ethz-spylab/agentdojo",
+   "license": "MIT",
+   "revision": "089ed468cf3e",
+   "surface": "tool call (single calls and call windows), with the user's task",
+   "tests": "prompt-injection hijacking of a tool-using agent (workspace, travel, banking, slack): does the guard flag the calls of a compromised run? Outcome labels, alert-scored"
+  },
+  "mcptox": {
+   "source": "MCPTox (zhiqiangwang4/MCPTox, paper v1)",
+   "url": "https://github.com/zhiqiangwang4/MCPTox",
+   "license": "review-required (research use; cases not redistributed)",
+   "revision": "f85189f9ad12",
+   "surface": "MCP tool call, with the user's task",
+   "tests": "tool poisoning through MCP tool descriptions: the call a poisoned server induces (the description itself is not in the case)"
+  },
+  "injecagent": {
+   "source": "uiuc-kang-lab/InjecAgent",
+   "url": "https://github.com/uiuc-kang-lab/InjecAgent",
+   "license": "MIT",
+   "revision": "f19c9f2c79a4",
+   "surface": "tool call, with the user's task",
+   "tests": "indirect prompt injection in tool output leading to direct harm or data stealing calls"
+  },
+  "mcphunt": {
+   "source": "lihaonan0716/mcphunt-agent-traces (Hugging Face)",
+   "url": "https://huggingface.co/datasets/lihaonan0716/mcphunt-agent-traces",
+   "license": "CC-BY-4.0",
+   "revision": "c4c69322bf9e",
+   "surface": "MCP tool calls with real tool results and the user's task",
+   "tests": "executed MCP agent traces: unsafe data flows and actions next to safe controls"
+  },
+  "dtap": {
+   "source": "AI-Secure/DTap-Bench-Agent-Trajectories (Hugging Face)",
+   "url": "https://huggingface.co/datasets/AI-Secure/DTap-Bench-Agent-Trajectories",
+   "license": "Apache-2.0",
+   "revision": "836caf2fdd78",
+   "surface": "tool calls with real tool results and the user's task (benign runs only)",
+   "tests": "false positives on benign, judge-confirmed agent trajectories with long tool output"
+  },
+  "agentic-redteam": {
+   "source": "Alkur123/agentic-redteam-benchmark",
+   "url": "https://github.com/Alkur123/agentic-redteam-benchmark",
+   "license": "CC-BY-4.0",
+   "revision": "12ddc82333e5",
+   "surface": "tool-call sequences with observations and the declared goal",
+   "tests": "structured agent attack sequences (detect-only labels)"
+  },
+  "nemotron-terminal": {
+   "source": "nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1 (Hugging Face)",
+   "url": "https://huggingface.co/datasets/nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1",
+   "license": "CC-BY-4.0",
+   "revision": "eaef26944643",
+   "surface": "shell commands and command windows (benign only)",
+   "tests": "false positives on ordinary terminal-agent work; fixed-seed sample of 1,000 cases per side"
+  },
+  "extra-public": {
+   "source": "Shell Attack Evolution (zyw-286), yoonholee/terminalbench-trajectories, agent-trace",
+   "url": "https://huggingface.co/datasets/zyw-286/shell-attack-evolution-dataset",
+   "license": "CC-BY-4.0 / Apache-2.0",
+   "revision": "d201aafbbcbb, 04e8940f5b67, 4b05b2f00eea",
+   "surface": "shell commands and terminal windows",
+   "tests": "malicious shell commands (block truth where an exact effect is proven) against successful TerminalBench runs",
+   "note": "Shell Attack Evolution (the attack half) was public on Hugging Face when it was pinned (revision d201aafb); on 2026-11-13 the repo is no longer listed, so reproducing these attack rows needs that revision. TerminalBench and agent-trace (the benign half) are public."
+  },
+  "llm-labelled-augur": {
+   "source": "robustintelligence/augur_unsafe_tool_input_eval (Hugging Face)",
+   "url": "https://huggingface.co/datasets/robustintelligence/augur_unsafe_tool_input_eval",
+   "license": "see dataset card",
+   "revision": "toolcall-security-intent-v1",
+   "surface": "shell, git and package-manager commands",
+   "tests": "unsafe tool inputs; labels are gpt-oss-120b model labels (low confidence), so the set is reported apart and never pooled",
+   "public": false,
+   "note": "not publicly downloadable (the Hugging Face repo answers 401 to an anonymous request and is not found with our token, 2026-11-13): internal only, never on the docs page"
+  },
+  "prompt-agentdojo": {
+   "source": "ethz-spylab/agentdojo",
+   "url": "https://github.com/ethz-spylab/agentdojo",
+   "license": "MIT",
+   "revision": "089ed468cf3e",
+   "surface": "user prompt",
+   "tests": "prompts that carry injected instructions against clean user prompts"
+  },
+  "tool-result-agentdojo": {
+   "source": "ethz-spylab/agentdojo",
+   "url": "https://github.com/ethz-spylab/agentdojo",
+   "license": "MIT",
+   "revision": "089ed468cf3e",
+   "surface": "tool result",
+   "tests": "tool output that carries an injection against clean tool output"
+  },
+  "windows-shell-public": {
+   "source": "redcanaryco/atomic-red-team, trace-commons/agent-traces",
+   "url": "https://github.com/redcanaryco/atomic-red-team",
+   "license": "MIT / CC-BY-4.0",
+   "revision": "cb486d9a888e, 112ebd4d03ce",
+   "surface": "PowerShell, cmd and Git Bash commands",
+   "tests": "Windows attack-emulation commands against real Windows agent shell commands"
+  }
+ }
 }

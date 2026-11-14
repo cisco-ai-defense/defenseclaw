@@ -87,6 +87,8 @@ def limit_onnx_threads(threads):
 
 def init_worker(adapter, opts, cache_path, threads):
     global _A, _S, _DB, _OPTS
+    import faulthandler, signal
+    faulthandler.register(signal.SIGUSR1, all_threads=True)   # kill -USR1 <worker pid> dumps every thread's stack to the log
     os.environ.setdefault("OMP_NUM_THREADS", str(threads))
     os.environ.setdefault("MKL_NUM_THREADS", str(threads))
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -111,10 +113,33 @@ def init_worker(adapter, opts, cache_path, threads):
 _INIT_ERR = None
 
 
+class CaseTimeout(Exception):
+    pass
+
+
+def _alarm(signum, frame):
+    raise CaseTimeout()
+
+
 def do_case(line):
     case = json.loads(line)
     if _INIT_ERR:
         return case["id"], None, _INIT_ERR
+    if _OPTS.get("_case_timeout"):
+        import signal
+        signal.signal(signal.SIGALRM, _alarm)
+        signal.alarm(int(_OPTS["_case_timeout"]))
+    try:
+        return _do_case(case)
+    except CaseTimeout:
+        return case["id"], None, f"case timed out after {_OPTS['_case_timeout']} s (the case stays undecided; rerun to fill it)"
+    finally:
+        if _OPTS.get("_case_timeout"):
+            import signal
+            signal.alarm(0)
+
+
+def _do_case(case):
     rows = []
     try:
         evs = caseview.events(case)
@@ -157,21 +182,28 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="first N cases per file (smoke tests)")
     ap.add_argument("--no-cache", action="store_true")
     ap.add_argument("--redo-errors", action="store_true", help="run again every case with a scanner error (errors are never cached)")
+    ap.add_argument("--case-timeout", type=int, default=0, help="seconds per case before the worker gives up on it (0: none); the case stays undecided")
+    ap.add_argument("--maxtasks", type=int, default=0, help="recycle each worker after this many chunks (0: never)")
+    ap.add_argument("--give-up", action="store_true", help="on an idle timeout, record the outstanding cases as no verdict instead of exiting")
+    ap.add_argument("--idle-timeout", type=int, default=1200, help="exit (code 3, for a resume) when no case result arrives for this many seconds")
     a = ap.parse_args()
     opts = dict(o.split("=", 1) for o in a.opt)
+    if a.case_timeout:
+        opts["_case_timeout"] = a.case_timeout
     mod = importlib.import_module(a.adapter)
     name = mod.NAME + (("-" + opts["variant"]) if opts.get("variant") else "")
+    opts_public = {k: v for k, v in opts.items() if not k.startswith("_")}
     od = os.path.join(a.out, name)
     os.makedirs(od, exist_ok=True)
     cache_path = None if a.no_cache else os.path.join(od, "cache.sqlite")
-    ver = dict(adapter=a.adapter, name=name, options=opts, started=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), host=host_info())
+    ver = dict(adapter=a.adapter, name=name, options=opts_public, started=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), host=host_info())
     try:
         ver.update(mod.version(opts))
     except Exception as e:
         ver["version_error"] = str(e)[:200]
     json.dump(ver, open(os.path.join(od, "VERSION.json"), "w"), indent=1)
     ctx = mp.get_context("spawn")
-    with ctx.Pool(a.workers, initializer=init_worker, initargs=(a.adapter, opts, cache_path, a.threads)) as pool:
+    with ctx.Pool(a.workers, initializer=init_worker, initargs=(a.adapter, opts, cache_path, a.threads), maxtasksperchild=a.maxtasks or None) as pool:
         for s in a.sets.split(","):
             for side in a.sides.split(","):
                 src = os.path.join(a.sets_dir, f"{s}.{side}.cases.jsonl")
@@ -201,16 +233,43 @@ def main():
                     lines = lines[: a.limit]
                 t0 = time.time(); n = 0; errs = 0
                 with open(dst, "a") as f:
-                    for cid, rows, err in pool.imap_unordered(do_case, lines, chunksize=4):
+                    seen = set()
+                    it = pool.imap_unordered(do_case, lines, chunksize=1)   # chunksize 1: the iterator then supports next(timeout)
+                    while True:
+                        try:
+                            cid, rows, err = it.next(timeout=a.idle_timeout) if a.idle_timeout else it.next()
+                        except StopIteration:
+                            break
+                        except mp.TimeoutError:
+                            # no result for idle_timeout seconds: either a worker died mid-task (the pool then waits forever) or the
+                            # tool itself never returns on a case. With --give-up the outstanding cases get a "no verdict" row per
+                            # event (counted and reported; materialize treats it as allow); without it the run exits for a resume.
+                            f.flush()
+                            left = [l for l in lines if json.loads(l)["id"] not in seen]
+                            if a.give_up:
+                                for l in left:
+                                    c = json.loads(l)
+                                    for i, ev in enumerate(caseview.events(c)):
+                                        f.write(json.dumps(dict(case=c["id"], idx=i, kind=ev["kind"], scanners={}, ms=None, timeout=True,
+                                                                note=f"no verdict within {a.idle_timeout} s")) + "\n")
+                                print(f"[{name}] {s}.{side}: no result for {a.idle_timeout} s; {len(left)} cases recorded as no verdict", flush=True)
+                                pool.terminate()
+                                pool = ctx.Pool(a.workers, initializer=init_worker, initargs=(a.adapter, opts, cache_path, a.threads), maxtasksperchild=a.maxtasks or None)
+                                break
+                            print(f"[{name}] {s}.{side}: no result for {a.idle_timeout} s, {len(left)} cases outstanding; exiting for a rerun", flush=True)
+                            pool.terminate()
+                            sys.exit(3)
                         n += 1
+                        seen.add(cid)
                         if err:
                             errs += 1
                             print(f"[{name}] {s}.{side} case {cid} failed: {err[:400]}", file=sys.stderr, flush=True)
                             continue
                         for r in rows:
                             f.write(json.dumps(r) + "\n")
-                        if n % 200 == 0:
+                        if n % 20 == 0:
                             f.flush()
+                        if n % 200 == 0:
                             print(f"[{name}] {s}.{side} {n}/{len(lines)} cases {time.time() - t0:.0f}s", flush=True)
                 if errs and errs == n:
                     sys.exit(f"[{name}] {s}.{side}: every case failed; stopping")

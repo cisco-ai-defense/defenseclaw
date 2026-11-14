@@ -11,6 +11,7 @@ import json, os
 NAME = "llama-guard-4"
 CACHE_VERSION = 1
 MODEL = "meta-llama/Llama-Guard-4-12B"
+LOCAL = os.path.expanduser("~/cmp/models/Llama-Guard-4-12B")   # the gated weights copied from the downloading host (revision 87acb4b9)
 MAX_CALL_CHARS = 8000
 cached = None
 
@@ -29,37 +30,36 @@ def version(opts):
 
 def setup(opts):
     import torch
-    from transformers import AutoProcessor, Llama4ForConditionalGeneration
+    from transformers import AutoTokenizer, Llama4ForConditionalGeneration
     dev = opts.get("device", "auto")
     if dev == "auto":
         dev = "cuda" if torch.cuda.is_available() else "cpu"
     dt = getattr(torch, opts.get("dtype", "bfloat16"))
-    proc = AutoProcessor.from_pretrained(MODEL)
-    model = Llama4ForConditionalGeneration.from_pretrained(MODEL, torch_dtype=dt, device_map=dev)
+    path = LOCAL if os.path.isdir(LOCAL) else MODEL
+    proc = AutoTokenizer.from_pretrained(path)   # text only: the tokenizer carries the chat template (no image processor)
+    from transformers import AutoConfig
+    cfg = AutoConfig.from_pretrained(path)
+    tc = getattr(cfg, "text_config", cfg)
+    if getattr(tc, "attention_chunk_size", None) is None:   # dense model: no chunked attention; transformers 4.57 needs a value
+        tc.attention_chunk_size = 1 << 20
+    model = Llama4ForConditionalGeneration.from_pretrained(path, config=cfg, torch_dtype=dt, device_map=dev)
     model.eval()
-    tok = proc.tokenizer
+    tok = proc
     ids = {w: tok.encode(w, add_special_tokens=False) for w in ("safe", "unsafe")}
     return dict(proc=proc, model=model, dev=dev, ids=ids, torch=torch)
 
 
 def _classify(st, messages):
+    """One forward pass: the first generated token decides (safe / unsafe), as greedy decoding would; P(unsafe) is its
+    probability. (transformers' generate() on the Llama 4 hybrid cache fails on CPU in 4.57; the label is the first token.)"""
     torch = st["torch"]; proc = st["proc"]; model = st["model"]
     inputs = proc.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(st["dev"])
     with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=10, do_sample=False, output_scores=True, return_dict_in_generate=True)
-    gen = out.sequences[0, inputs["input_ids"].shape[-1]:]
-    text = proc.tokenizer.decode(gen, skip_special_tokens=True).strip()
-    score = None
-    first_u, first_s = st["ids"]["unsafe"][0], st["ids"]["safe"][0]
-    for step, tid in enumerate(gen.tolist()):
-        if tid in (first_u, first_s):
-            p = torch.softmax(out.scores[step][0].float(), dim=-1)
-            score = float(p[first_u])
-            break
-    label = text.split()[0].lower() if text else ""
-    cats = text.split("\n", 1)[1].strip() if "\n" in text else ""
-    return dict(score=score if score is not None else (1.0 if label == "unsafe" else 0.0), decision="block" if label == "unsafe" else "allow",
-                categories=cats, tokens=int(inputs["input_ids"].shape[-1]))
+        logits = model(**inputs, use_cache=False).logits[0, -1].float()
+    p = torch.softmax(logits, dim=-1)
+    u, sf = st["ids"]["unsafe"][0], st["ids"]["safe"][0]
+    score = float(p[u])
+    return dict(score=score, decision="block" if p[u] > p[sf] else "allow", tokens=int(inputs["input_ids"].shape[-1]), mode="first-token")
 
 
 def _call_str(ev):

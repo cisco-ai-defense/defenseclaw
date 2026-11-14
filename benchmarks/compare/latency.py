@@ -45,6 +45,13 @@ def direct(scanner, payload, fn):
     return r
 
 
+def _version(mod, opts):
+    try:
+        return mod.version(opts)
+    except Exception as e:   # version() may look a model revision up online; the run's VERSION.json has it
+        return dict(version_error=f"{type(e).__name__}: {str(e)[:120]}")
+
+
 def pct(xs, q):
     xs = sorted(xs)
     return xs[min(len(xs) - 1, int(q * len(xs)))] if xs else None
@@ -101,7 +108,7 @@ def main():
     mod = importlib.import_module(a.adapter)
     name = mod.NAME + (("-" + opts["variant"]) if opts.get("variant") else "")
     res = dict(name=name, adapter=a.adapter, options=opts, host=RUN.host_info(), threads=a.threads, load_before=load0, load_after=os.getloadavg(),
-               single_stream_ms=single, throughput=thr, version=mod.version(opts), sample=a.sample, sample_events=len(sample))
+               single_stream_ms=single, throughput=thr, version=_version(mod, opts), sample=a.sample, sample_events=len(sample))
     os.makedirs(a.out, exist_ok=True)
     json.dump(res, open(os.path.join(a.out, name + ".json"), "w"), indent=1)
     print(json.dumps(dict(name=name, single=single.get("all"), throughput=thr)))

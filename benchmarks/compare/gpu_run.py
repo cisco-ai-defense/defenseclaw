@@ -25,8 +25,13 @@ MAX_CALL_CHARS = 8000
 MAX_PROMPT_CHARS = 32000
 
 
+RENDER = os.environ.get("CMP_CALL_RENDER", "text")   # text: "Tool call: X / Arguments: {...}"; json: Llama's tool-call JSON {"name", "parameters"}
+
+
 def call_str(ev):
     a = ev["args"]
+    if RENDER == "json":
+        return json.dumps({"name": ev["tool"], "parameters": a}, ensure_ascii=False)[:MAX_CALL_CHARS]
     s = json.dumps(a, ensure_ascii=False) if not isinstance(a, str) else a
     return f"Tool call: {ev['tool']}\nArguments: {s}"[:MAX_CALL_CHARS]
 
@@ -146,8 +151,9 @@ def main():
         ver["model_revision"] = "87acb4b94e930c3d679e6e7ee9d57e2feab9ea71" if a.model == "llama-guard-4" else HfApi().model_info(MODELS[a.model]).sha
     except Exception:
         pass
-    od = os.path.join(a.out, a.model); os.makedirs(od, exist_ok=True)
-    json.dump(dict(ver, name=a.model, scans=["prompt", "tool-call (agent turn)"]), open(os.path.join(od, "VERSION.json"), "w"), indent=1)
+    name = a.model + ("-" + RENDER if RENDER != "text" else "")
+    od = os.path.join(a.out, name); os.makedirs(od, exist_ok=True)
+    json.dump(dict(ver, name=name, call_render=RENDER, scans=["prompt", "tool-call (agent turn)"]), open(os.path.join(od, "VERSION.json"), "w"), indent=1)
     if a.latency:
         sample = [json.loads(l) for l in open(a.latency)]
         reqs = [(r, q) for r in sample for q in requests_for(a.model, r["ev"], tok)]
