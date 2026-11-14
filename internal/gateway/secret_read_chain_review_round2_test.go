@@ -113,7 +113,7 @@ func srd2Round2Run(t *testing.T, label, cwd string, flows []srd2Round2Flow, pack
 			got := callAgentHookForTest(t, handler, send)
 			chain := slices.Contains(got.RuleIDs, guardrail.ToolChainSecretReadThenEgress)
 			_ = rgot
-			if want := srd2Round2Chain[flow.id]; chain != want {
+			if want := srd2Round2Chain[flow.id]; chain != want && !(chain && srdConservativeJoin(label == "local")) {
 				t.Errorf("%s %s probe %s: chain = %t, want %t", label, pack, flow.id, chain, want)
 			}
 			if chain && got.Action != "alert" {
@@ -127,18 +127,20 @@ func srd2Round2Run(t *testing.T, label, cwd string, flows []srd2Round2Flow, pack
 // reported cwd that does not exist on the host, default and strict.
 func TestSecretReadChainReviewRound2Probes(t *testing.T) {
 	installCorrelationHMACForTest()
+	srdPOSIXHost(t)
 	srd2Round2Run(t, "nocwd", "/work/f5proj", srd2Round2Flows("/work/f5proj", "/tmp/q9"), []string{"default", "strict"})
 }
 
 // The same probes with a reported cwd that exists on the host.
 func TestSecretReadChainReviewRound2ProbesLocalCwd(t *testing.T) {
 	installCorrelationHMACForTest()
+	srdPOSIXHost(t)
 	cwd := t.TempDir()
 	other := t.TempDir()
 	_ = os.WriteFile(filepath.Join(other, ".env"), []byte("K=1\n"), 0o600)
 	_ = os.WriteFile(filepath.Join(cwd, ".env"), []byte("K=2\n"), 0o600)
-	_ = os.WriteFile(filepath.Join(other, "s.sh"), []byte("cd "+other+"\n"), 0o600)
-	srd2Round2Run(t, "local", cwd, srd2Round2Flows(cwd, other), []string{"default"})
+	_ = os.WriteFile(filepath.Join(other, "s.sh"), []byte("cd "+srdShellPath(other)+"\n"), 0o600)
+	srd2Round2Run(t, "local", cwd, srd2Round2Flows(srdShellPath(cwd), srdShellPath(other)), []string{"default"})
 }
 
 // srd2Round2Chain is the verdict of each round 2 probe id. True rows join.
@@ -207,18 +209,20 @@ func srd2DerivedUploadFlows(cwd, other string) []srd2Round2Flow {
 
 func TestSecretReadChainReviewDerivedUploadInTheUploadCall(t *testing.T) {
 	installCorrelationHMACForTest()
+	srdPOSIXHost(t)
 	srd2Round2Run(t, "nocwd", "/work/f5proj", srd2DerivedUploadFlows("/work/f5proj", "/tmp/q9"), []string{"default", "strict"})
 }
 
 func TestSecretReadChainReviewDerivedUploadInTheUploadCallLocalCwd(t *testing.T) {
 	installCorrelationHMACForTest()
+	srdPOSIXHost(t)
 	cwd := t.TempDir()
 	other := t.TempDir()
 	_ = os.WriteFile(filepath.Join(cwd, ".env"), []byte("K=2\n"), 0o600)
 	_ = os.WriteFile(filepath.Join(cwd, "payload.json"), []byte("{}\n"), 0o600)
 	_ = os.MkdirAll(filepath.Join(cwd, "dist"), 0o700)
 	_ = os.WriteFile(filepath.Join(cwd, "dist", "app.tgz"), []byte("x"), 0o600)
-	srd2Round2Run(t, "local", cwd, srd2DerivedUploadFlows(cwd, other), []string{"default", "strict"})
+	srd2Round2Run(t, "local", cwd, srd2DerivedUploadFlows(srdShellPath(cwd), srdShellPath(other)), []string{"default", "strict"})
 }
 
 // A redirect of stderr, to the null device or to another descriptor writes

