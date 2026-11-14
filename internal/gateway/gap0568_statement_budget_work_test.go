@@ -168,7 +168,8 @@ func BenchmarkGAP0568HookAssignmentChain(b *testing.B) {
 // call is; only the whole-call state check runs (linear work), so a state
 // tail also takes tamper.detector_state_write. Before, no reading finished, no budget applied, and the call was
 // allowed after about 4 s of reading on Windows. One long PowerShell
-// statement past the bound is not over the statement budget.
+// statement past the bound is not over the statement budget: it is
+// TRUNCATED at the input bound (cap=bytes, rel-1-0-10:GAP-0611).
 func TestGAP0318StatementBudgetOnEveryDialectRoute(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -231,7 +232,6 @@ func TestGAP0318StatementBudgetOnEveryDialectRoute(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: "codex", EnforcementCapable: true, targetMemo: memo,
 			})
-			limited := findingWithID(findings, "ACTION-COMPOUND-LIMIT") != nil
 			ids := findingIDs(findings)
 			slices.Sort(ids)
 			ids = slices.Compact(ids)
@@ -239,8 +239,14 @@ func TestGAP0318StatementBudgetOnEveryDialectRoute(t *testing.T) {
 			switch {
 			case tc.over && (!slices.Equal(ids, tc.want) || walked > 2*3001+64 || candidates > 2*3001+64):
 				t.Errorf("%s: 3000 statements: findings %v after %d walked and %d candidate units of work, want %v with linear work", route.name, ids, walked, candidates, tc.want)
-			case !tc.over && limited:
-				t.Errorf("%s: one long statement took the statement budget: %v", route.name, findingIDs(findings))
+			case !tc.over:
+				// One long statement is under the statement budget; past the
+				// input bound it is TRUNCATED at cap=bytes (the one bound
+				// rule, rel-1-0-10:GAP-0611), not refused by the budget.
+				limit := findingWithID(findings, "ACTION-COMPOUND-LIMIT")
+				if limit == nil || !strings.HasPrefix(limit.Title, boundedTruncatedTitle) || !strings.Contains(limit.Evidence, "cap=bytes") {
+					t.Errorf("%s: one long statement past the input bound is not TRUNCATED at cap=bytes (or took the statement budget): %v", route.name, findingIDs(findings))
+				}
 			}
 		}
 	}
@@ -371,27 +377,34 @@ func TestGAP0331PowerShellReadingRoutes(t *testing.T) {
 		}
 		return strings.Join(parts, "\n")
 	}
+	// The 70-line scripts are read as 70 statements, under the statement
+	// budget, and their PowerShell reading stops at its command cap (an
+	// assigned & call is two commands): they are TRUNCATED, judged at the
+	// unknown tier of the pack (an alert in default and permissive, a block
+	// in strict), and nothing else in them blocks (the one bound rule,
+	// rel-1-0-10:GAP-0589; the five tiers: TestGAP0589PowerShellCappedReadingFiveTiers).
 	for _, tc := range []struct {
 		name, command string
 		block         bool
+		truncated     bool
 	}{
-		{"assigned call operator, 70 lines", lines(70, "$o%d = & git rev-parse HEAD"), false},
-		{"assigned call operator, no blank, 70 lines", lines(70, "$o%d=& git rev-parse HEAD"), false},
-		{"assigned call operator after a block comment, 70 lines", lines(70, "$o%d = <#c#> & git rev-parse HEAD"), false},
+		{"assigned call operator, 70 lines", lines(70, "$o%d = & git rev-parse HEAD"), false, true},
+		{"assigned call operator, no blank, 70 lines", lines(70, "$o%d=& git rev-parse HEAD"), false, true},
+		{"assigned call operator after a block comment, 70 lines", lines(70, "$o%d = <#c#> & git rev-parse HEAD"), false, true},
 		// rel-1-0-6:GAP-0412: = and == ending a bare word, with and
 		// without a block comment, at 200 and 3000 statements with a
 		// destructive tail: refused in all 12 cells.
-		{"key= background chain, 200", strings.Repeat("Write-Output key= & ", 200) + "Remove-Item -Recurse -Force " + home, true},
-		{"key= background chain, 3000", strings.Repeat("Write-Output key= & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
-		{"== background chain, 200", strings.Repeat("Write-Output YWJjZA== & ", 200) + "Remove-Item -Recurse -Force " + home, true},
-		{"== background chain, 3000", strings.Repeat("Write-Output YWJjZA== & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
-		{"key= block comment background chain, 200", strings.Repeat("Write-Output key= <#c#> & ", 200) + "Remove-Item -Recurse -Force " + home, true},
-		{"key= block comment background chain, 3000", strings.Repeat("Write-Output key= <#c#> & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
-		{"== block comment background chain, 200", strings.Repeat("Write-Output YWJjZA== <#c#> & ", 200) + "Remove-Item -Recurse -Force " + home, true},
-		{"== block comment background chain, 3000", strings.Repeat("Write-Output YWJjZA== <#c#> & ", 3000) + "Remove-Item -Recurse -Force " + home, true},
-		{"block comments, 5 lines", lines(5, "Write-Output %d <# , #>"), false},
-		{"block comments, 5 lines, destructive tail", lines(5, "Write-Output %d <# , #>") + "\nRemove-Item -Recurse -Force " + home, true},
-		{"block comments, 200 lines, destructive tail", lines(200, "Write-Output %d <# , #>") + "\nRemove-Item -Recurse -Force " + home, true},
+		{"key= background chain, 200", strings.Repeat("Write-Output key= & ", 200) + "Remove-Item -Recurse -Force " + home, true, false},
+		{"key= background chain, 3000", strings.Repeat("Write-Output key= & ", 3000) + "Remove-Item -Recurse -Force " + home, true, false},
+		{"== background chain, 200", strings.Repeat("Write-Output YWJjZA== & ", 200) + "Remove-Item -Recurse -Force " + home, true, false},
+		{"== background chain, 3000", strings.Repeat("Write-Output YWJjZA== & ", 3000) + "Remove-Item -Recurse -Force " + home, true, false},
+		{"key= block comment background chain, 200", strings.Repeat("Write-Output key= <#c#> & ", 200) + "Remove-Item -Recurse -Force " + home, true, false},
+		{"key= block comment background chain, 3000", strings.Repeat("Write-Output key= <#c#> & ", 3000) + "Remove-Item -Recurse -Force " + home, true, false},
+		{"== block comment background chain, 200", strings.Repeat("Write-Output YWJjZA== <#c#> & ", 200) + "Remove-Item -Recurse -Force " + home, true, false},
+		{"== block comment background chain, 3000", strings.Repeat("Write-Output YWJjZA== <#c#> & ", 3000) + "Remove-Item -Recurse -Force " + home, true, false},
+		{"block comments, 5 lines", lines(5, "Write-Output %d <# , #>"), false, false},
+		{"block comments, 5 lines, destructive tail", lines(5, "Write-Output %d <# , #>") + "\nRemove-Item -Recurse -Force " + home, true, false},
+		{"block comments, 200 lines, destructive tail", lines(200, "Write-Output %d <# , #>") + "\nRemove-Item -Recurse -Force " + home, true, false},
 	} {
 		for _, route := range []struct {
 			tool string
@@ -416,8 +429,12 @@ func TestGAP0331PowerShellReadingRoutes(t *testing.T) {
 					if err := os.Chmod(homes, 0o700); err != nil {
 						t.Fatal(err)
 					}
-					if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != tc.block {
+					judged, truncated := withoutBoundedTruncation(findings)
+					if got := buildVerdict(judged, "tool_call").Action == guardrailActionBlock; got != tc.block {
 						t.Errorf("%s: %s/%s %s managed=%t: findings %v, want block=%t", tc.name, route.tool, route.hint, connector, managed, findingIDs(findings), tc.block)
+					}
+					if truncated != tc.truncated && !tc.block {
+						t.Errorf("%s: %s/%s %s managed=%t: TRUNCATED=%t, want %t (findings %v)", tc.name, route.tool, route.hint, connector, managed, truncated, tc.truncated, findingIDs(findings))
 					}
 				}
 			}

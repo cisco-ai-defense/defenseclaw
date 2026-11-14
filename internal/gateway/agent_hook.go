@@ -4005,7 +4005,23 @@ func selectWindowsShellDialectReading(tool, command string, input actionfacts.In
 			return actionfacts.DialectCMD, nil
 		}
 	}
+	if cappedPowerShellReading(powerShell) {
+		return actionfacts.DialectPowerShell, nil
+	}
 	return "", &windowsHintedReading{input: powerShellInput, facts: powerShell}
+}
+
+// cappedPowerShellReading reports a PowerShell reading that stopped at its
+// command cap: PowerShell read the call up to the cap, so the call is
+// PowerShell code, judged truncated in that dialect. The selection read only a
+// complete reading as PowerShell, so a script of `$o = & git rev-parse HEAD`
+// lines (two commands a statement, the cap at about 64 statements) fell to the
+// inferred POSIX reading on the Codex Windows hook, where & is a background
+// operator, and was judged as POSIX statements no shell runs there, while the
+// same text on the PowerShell tool was a PowerShell reading
+// (rel-1-0-10:GAP-0590).
+func cappedPowerShellReading(facts actionfacts.Facts) bool {
+	return facts.Parse.Dialect == actionfacts.DialectPowerShell && facts.Parse.Status == actionfacts.StatusLimitExceeded
 }
 
 // agentHookWindowsShellDialect reads only the server-projected shell arguments.
