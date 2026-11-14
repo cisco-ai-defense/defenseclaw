@@ -287,16 +287,20 @@ func TestCascadeSchemaRefusesOnForShadowOnlyLanes(t *testing.T) {
 		t.Fatal(err)
 	}
 	var doc struct {
-		Defs map[string]struct {
-			Properties map[string]struct {
-				Ref string `json:"$ref"`
-			} `json:"properties"`
-		} `json:"$defs"`
+		Defs map[string]json.RawMessage `json:"$defs"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
-	props := doc.Defs["cascadeLanes"].Properties
+	var lanes struct {
+		Properties map[string]struct {
+			Ref string `json:"$ref"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(doc.Defs["cascadeLanes"], &lanes); err != nil {
+		t.Fatal(err)
+	}
+	props := lanes.Properties
 	for _, lane := range CascadeLanes() {
 		if lane.ShadowOnly == "" || strings.HasPrefix(lane.Name, "test_") {
 			continue
