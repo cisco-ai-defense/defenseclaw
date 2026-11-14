@@ -196,7 +196,7 @@ type proxyState struct {
 	// (ToolCallTracker, GAP-0330).
 	toolCalls ToolCallTracker
 	// legacyGateway: the gateway refused an evaluation that held session_cwd
-	// or tool_call_state (it predates them).
+	// or tool_call_state and judged it without them (it predates them).
 	legacyGateway bool
 	// silenceGen and silenceTimer drive the notice for an agent that does
 	// not answer a prompt (armSilenceNotice).
@@ -361,17 +361,18 @@ func (s *proxyState) sessionCWD(session string) string {
 }
 
 // gatewayIgnoresContext reports that the gateway refused an evaluation that
-// held session_cwd or tool_call_state, so they are no longer sent.
+// held session_cwd or tool_call_state and judged it without them, so they
+// are not sent until the gateway may have changed.
 func (s *proxyState) gatewayIgnoresContext() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.legacyGateway
 }
 
-func (s *proxyState) setGatewayIgnoresContext() {
+func (s *proxyState) setGatewayIgnoresContext(ignores bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.legacyGateway = true
+	s.legacyGateway = ignores
 }
 
 // peekToolCall is the state of the tool call a frame names, before the frame.
@@ -382,11 +383,11 @@ func (s *proxyState) peekToolCall(msg Message) json.RawMessage {
 }
 
 // commitToolCall applies a frame that is being forwarded to the state of its
-// tool call.
-func (s *proxyState) commitToolCall(msg Message) {
+// tool call; blocked is the gateway's verdict of it (Verdict.JudgedBlock).
+func (s *proxyState) commitToolCall(msg Message, blocked bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.toolCalls.Commit(msg)
+	s.toolCalls.Commit(msg, blocked)
 }
 
 // forgetFailOpen drops every open fail mode: an answer that failed
@@ -1235,10 +1236,21 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			// A gateway that predates session_cwd and tool_call_state (it has
 			// not restarted since an upgrade) refuses an evaluation that holds
 			// them as invalid. The frame is evaluated again without them, as
-			// that gateway judges frames, and so are the rest of the session's.
-			state.setGatewayIgnoresContext()
+			// that gateway judges frames. Only when that works are they left
+			// out of the session's next frames: a refusal for another reason
+			// does not switch them off.
 			evaluation.SessionCWD, evaluation.ToolCallState = "", nil
 			verdict, evalErr = evaluate(ctx, opts, evaluation)
+			if evalErr == nil {
+				state.setGatewayIgnoresContext(true)
+			}
+		} else if evalErr != nil && !errors.As(evalErr, &refused) {
+			// The gateway did not give its own refusal (it is stopped,
+			// restarting or unreachable, or its answer failed a check): the
+			// gateway that answers next may be a newer one, so the next frame
+			// carries the fields again. One that still predates them refuses
+			// them once more, as above.
+			state.setGatewayIgnoresContext(false)
 		}
 		if evalErr != nil && state.peerProtocolFixes && ctx.Err() != nil {
 			// The session is ending: an evaluation the shutdown cancelled
@@ -1297,8 +1309,9 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			logf(opts.Stderr, "[defenseclaw-acp] would block %s %s: %s\n", direction, msg.Method, verdict.Reason)
 		}
 		if direction == AgentToClient {
-			// The frame is going on to the editor: it is part of the call now.
-			state.commitToolCall(msg)
+			// The frame is going on to the editor: it is part of the call now,
+			// with the gateway's verdict of it.
+			state.commitToolCall(msg, verdict.JudgedBlock())
 		}
 		if opts.Mode == ModeAction {
 			out, aggregate, session, delivered, bufferErr := state.bufferOrFlush(msg, direction, matchedMethod, frame)

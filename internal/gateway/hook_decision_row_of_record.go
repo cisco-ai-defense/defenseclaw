@@ -85,7 +85,9 @@ func (a *APIServer) writeHookDecisionRowOfRecord(
 	if !built {
 		return ctx, nil, nil, false
 	}
-	attemptCtx, attemptOutcome := audit.WithCallWriteOutcome(observability.WithExportAfterCallCommit(ctx))
+	// The row of record is the decision's only local hook row: it is listed
+	// in audit_hook_lone with its write (rel-1-0-10:GAP-0316).
+	attemptCtx, attemptOutcome := audit.WithCallWriteOutcome(audit.WithLoneHookDecision(observability.WithExportAfterCallCommit(ctx)))
 	handedBack := false
 	defer func() {
 		if handedBack {
