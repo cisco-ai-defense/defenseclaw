@@ -15,10 +15,9 @@ import (
 // value, written as YAML, through the three loaders (LoadFromFile, the
 // gateway runtime load and the candidate check of a CLI save). A value is
 // accepted with its mode or refused with the lane key named; effects and
-// secret_flow are never on. LoadFromFile (CLI helpers only; the gateway
-// start and hot reload use the runtime loaders) runs no schema check, so a
-// null lane, or an empty string for a string lane, reads there as the
-// lane's shipped default instead of a refusal; never as a weaker mode.
+// secret_flow are never on. A null lane, or an empty string for a string lane,
+// is refused by all three loaders: LoadFromFile runs no schema pass, so it
+// checks the lane values itself (GAP-0545).
 func TestCascadeLaneSpellingMatrix(t *testing.T) {
 	spellings := []struct {
 		yaml string
@@ -68,15 +67,6 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 			for _, l := range loaders {
 				cfg, err := l.load()
 				label := lane + "=" + s.yaml + " via " + l.name
-				lenient := l.name == "LoadFromFile" && (s.yaml == "null" || s.yaml == "~" || s.yaml == "" || (s.yaml == `""` && lane != "nonshell"))
-				if !accept && lenient {
-					if err != nil {
-						t.Errorf("%s: %v (lenient loader)", label, err)
-					} else if got := cfg.Guardrail.Cascade.Lanes.value(lane); got != defaults[lane] {
-						t.Errorf("%s: mode %q, want the default %q", label, got, defaults[lane])
-					}
-					continue
-				}
 				if !accept {
 					if err == nil {
 						got := ""
@@ -134,6 +124,41 @@ func TestCascadeLanesUpgradeWithoutTheKey(t *testing.T) {
 			if l.NonShellMode() != CascadeLaneOn || l.EffectsMode() != CascadeLaneShadow || l.SecretFlowMode() != CascadeLaneShadow {
 				t.Errorf("%q via %s: nonshell %q effects %q secret_flow %q, want on shadow shadow", guardrail, name, l.NonShellMode(), l.EffectsMode(), l.SecretFlowMode())
 			}
+		}
+	}
+}
+
+// TestLoadFromFileRefusesALaneWithoutAValue (GAP-0545): the CLI helpers read
+// config.yaml with LoadFromFile, which runs no schema pass. A lane the source
+// names without a value used to read there as the shipped default while the
+// gateway refused the same file; LoadFromFile now refuses it with the key
+// named, and a lane that is absent still loads as the default.
+func TestLoadFromFileRefusesALaneWithoutAValue(t *testing.T) {
+	for _, lane := range CascadeLaneNames() {
+		for _, value := range []string{"null", "~", ""} {
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			path := filepath.Join(dir, DefaultConfigName)
+			raw := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  cascade:\n    lanes:\n      " + lane + ": " + value + "\nobservability: {}\n"
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadFromFile(path); err == nil {
+				t.Errorf("%s: %q accepted by LoadFromFile", lane, value)
+			} else if !strings.Contains(err.Error(), "guardrail.cascade.lanes."+lane) {
+				t.Errorf("%s: %q refusal %q does not name the key", lane, value, err)
+			}
+		}
+		// A source that does not name the lane loads (its default).
+		dir := t.TempDir()
+		t.Setenv("DEFENSECLAW_HOME", dir)
+		path := filepath.Join(dir, DefaultConfigName)
+		raw := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  mode: observe\nobservability: {}\n"
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadFromFile(path); err != nil {
+			t.Errorf("%s absent: %v", lane, err)
 		}
 	}
 }

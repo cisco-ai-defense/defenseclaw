@@ -2866,6 +2866,13 @@ func loadFileSource(configFile string, raw []byte, publishProvenance, enforceMan
 	if err != nil {
 		return nil, err
 	}
+	if publishProvenance {
+		// The strict loader (LoadFromFile) runs no schema pass; the gateway's does
+		// and refuses a lane without a value, so refuse it here the same way.
+		if err := checkCascadeLanesSource(document.Plain); err != nil {
+			return nil, err
+		}
+	}
 	candidate, err := loadConfigSourceChecked(configFile, raw, publishProvenance, enforceManagedTrust, checkPolicyInputs)
 	if err != nil {
 		return nil, err

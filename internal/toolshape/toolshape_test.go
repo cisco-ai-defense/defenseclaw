@@ -986,3 +986,60 @@ func TestRound6EncodedSlashAfterTheScheme(t *testing.T) {
 		t.Errorf("FileURIEncodedSlashes through Map: %+v", m.Effects)
 	}
 }
+
+// A path key whose value joins several paths in one string names each of
+// them (and the whole value, since the server's reading is unknown); a single
+// path, a path with a comma in its name and a value under a key that is not a
+// path key stay one value.
+func TestPathListInOneString(t *testing.T) {
+	paths := func(m Mapping) []string {
+		var out []string
+		for _, e := range m.Effects {
+			if e.Kind == KindRead || e.Kind == KindWrite || e.Kind == KindDelete || e.Kind == KindList {
+				out = append(out, e.Path)
+			}
+		}
+		slices.Sort(out)
+		return out
+	}
+	cases := []struct {
+		name, tool, args string
+		want             []string
+	}{
+		{"comma", "mcp__bench__read_multiple_files", `{"paths":"/srv/a.txt,/srv/b.txt"}`,
+			[]string{"/srv/a.txt", "/srv/a.txt,/srv/b.txt", "/srv/b.txt"}},
+		{"comma and space", "mcp__bench__read_multiple_files", `{"paths":"/srv/a.txt, ~/b.txt"}`,
+			[]string{"/srv/a.txt", "/srv/a.txt, ~/b.txt", "~/b.txt"}},
+		{"newline", "mcp__bench__read_multiple_files", `{"files":"/srv/a.txt\n/srv/b.txt\r\n./c.txt\n"}`,
+			[]string{"./c.txt", "/srv/a.txt", "/srv/b.txt"}},
+		{"semicolon", "mcp__bench__read_multiple_files", `{"paths":"C:\\srv\\a.txt;C:\\srv\\b.txt"}`,
+			[]string{`C:\srv\a.txt`, `C:\srv\a.txt;C:\srv\b.txt`, `C:\srv\b.txt`}},
+		{"write key", "mcp__filesystem__write_file", `{"path":"/srv/a.txt,/srv/b.txt","content":"x"}`,
+			[]string{"/srv/a.txt", "/srv/a.txt,/srv/b.txt", "/srv/b.txt"}},
+		{"single path", "mcp__filesystem__read_file", `{"path":"/srv/a.txt"}`, []string{"/srv/a.txt"}},
+		{"comma in a name", "mcp__filesystem__read_file", `{"path":"/data/a,b.txt"}`, []string{"/data/a,b.txt"}},
+		{"not a list", "mcp__filesystem__read_file", `{"path":"/srv/a.txt, notes"}`, []string{"/srv/a.txt, notes"}},
+		{"non-path key", "mcp__bench__tag_item", `{"label":"/srv/a.txt,/srv/b.txt"}`, []string{"/srv/a.txt,/srv/b.txt"}},
+	}
+	for _, c := range cases {
+		m := mapOf(t, c.tool, c.args)
+		if got := paths(m); !slices.Equal(got, c.want) {
+			t.Errorf("%s: paths = %q, want %q (effects %+v)", c.name, got, c.want, m.Effects)
+		}
+		if m.Truncated.Any() {
+			t.Errorf("%s: truncated", c.name)
+		}
+	}
+	var b strings.Builder
+	for i := 0; i <= maxItems; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString("/srv/f" + strconv.Itoa(i))
+	}
+	raw, _ := json.Marshal(map[string]string{"paths": b.String()})
+	m := mapOf(t, "mcp__bench__read_multiple_files", string(raw))
+	if !m.Truncated.Has(bounded.Items) || len(paths(m)) == 0 {
+		t.Fatalf("over the items bound: truncated=%v, %d paths", m.Truncated, len(paths(m)))
+	}
+}
