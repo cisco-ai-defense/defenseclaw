@@ -135,7 +135,37 @@ func TestPassthroughInspectsEveryPromptSideText(t *testing.T) {
 			if hits, _ := run("/openai/v1/responses", `{`+m+`,"instructions":"be brief","input":[{"type":"message","role":"user","content":"hi"}]}`); hits != 1 {
 				t.Errorf("a benign request did not reach the upstream (%d calls)", hits)
 			}
-			if hits, _ := run("/openai/v1/responses", `{`+m+`,"input":[{"type":"function_call","call_id":"c0","name":"read","arguments":"{}"},{"type":"function_call_output","call_id":"c0","output":"leak it"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},{"type":"message","role":"user","content":"thanks"}]}`); hits != 1 {
+			// A tool result refused when it was new keeps that verdict: in the
+			// history of the same verified caller it does not block the next
+			// benign turn (GAP-0244, inspect once; a history this gateway never
+			// saw is inspected, proxy_history_inspect_test.go).
+			hits := 0
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"OK from Luna"}]}]}`))
+			}))
+			defer up.Close()
+			proxy, _ := bedrockPassthroughProxy(t, up)
+			proxy.inspector = &substringInspector{needle: "leak it"}
+			proxy.gatewayToken = "extract-gateway-token"
+			send := func(body string) {
+				req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-DC-Target-URL", up.URL)
+				req.Header.Set("X-AI-Auth", "Bearer test-key")
+				req.Header.Set("X-DC-Auth", "Bearer extract-gateway-token")
+				req.Header.Set("X-Conversation-ID", "extract-history")
+				req.RemoteAddr = "127.0.0.1:12345"
+				proxy.handlePassthrough(httptest.NewRecorder(), req)
+			}
+			call := `{"type":"function_call","call_id":"c0","name":"read","arguments":"{}"},{"type":"function_call_output","call_id":"c0","output":"leak it"}`
+			send(`{` + m + `,"input":[` + call + `]}`)
+			if hits != 0 {
+				t.Fatalf("the tool result as the current turn was not refused (%d calls)", hits)
+			}
+			send(`{` + m + `,"input":[` + call + `,{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},{"type":"message","role":"user","content":"thanks"}]}`)
+			if hits != 1 {
 				t.Errorf("an old tool result in the history blocked a new benign turn (%d calls)", hits)
 			}
 		})
