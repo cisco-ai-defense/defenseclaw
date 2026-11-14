@@ -484,8 +484,8 @@ func gap0548Filler(n int) string { return strings.Repeat("a&\\\n&", n) + "a" }
 func gap0548Differential() string { return strings.Replace(boundedShellSeen, ">>", ">\\\n>", 1) }
 
 // rel-1-0-10:GAP-0548. A proven finding on the readable text of a call the
-// parser rejects decides, at every filler size; a listing of the SSH folder
-// beside the filler is not a keys mutation; and text the parser rejects but
+// parser rejects decides, at every filler size (the listing rows of the gap
+// belong to lane s7-sshfp, GAP-0570); and text the parser rejects but
 // a shell runs, writing the DefenseClaw state, is recorded in every pack and
 // alerted by the strict and managed raw-text check of the unread part.
 func TestGAP0548ProvenFindingSurvivesAParseFailure(t *testing.T) {
@@ -501,17 +501,6 @@ func TestGAP0548ProvenFindingSurvivesAParseFailure(t *testing.T) {
 				if out := gap0437Hook(t, hook, home, p.name+"seen"+string(rune('a'+n%26)), command); out["action"] != "block" {
 					t.Errorf("%s state write + filler %d: action %v, want block: %v", p.name, n, out["action"], out["rule_ids"])
 				}
-			}
-			for _, command := range []string{"ls ~/.ssh; " + gap0548Filler(3), "ls ~/.ssh; " + gap0548Filler(256), "ls ~/.ssh; a", "a; ls ~/.ssh"} {
-				out := gap0437Hook(t, hook, home, p.name+"ls"+command[len(command)-1:], command)
-				if gap0526Names(out, "persistence.ssh_authorized_keys_command") {
-					t.Errorf("%s listing %q: named a keys mutation: %v", p.name, command[:min(len(command), 20)], out["rule_ids"])
-				}
-			}
-			// A directory change into the folder before an unknown program
-			// keeps its reading.
-			if out := gap0437Hook(t, hook, home, p.name+"cd", "cd ~/.ssh; a"); out["action"] != "block" {
-				t.Errorf("%s cd into the folder: action %v, want block", p.name, out["action"])
 			}
 			// The strict and managed raw-text check of the unread part ships
 			// alert-only in 1.0.10 (owner traces: a blocking check added 150
@@ -529,5 +518,23 @@ func TestGAP0548ProvenFindingSurvivesAParseFailure(t *testing.T) {
 				t.Errorf("%s parser differential: no %s record: %v", p.name, parseFailureRuleID, differential)
 			}
 		})
+	}
+}
+
+// rel-1-0-10:GAP-0643. The listing skip of 90e6605b8a dropped the keys file
+// named by a listing and read back through $_ by the next statement; it is
+// reverted (the listing class is lane s7-sshfp, GAP-0570). The row of
+// TestGAP0570SSHFolderReadsLinksAndCheckoutAreNotKeyOrHookWrites (s7/sshfp)
+// blocks in every tier, as on rel.
+func TestGAP0643ListedKeysNameReadBackStillBlocks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fixtures are POSIX shell text")
+	}
+	command := "ls ~/.ssh/authorized_keys; echo marker >> $_"
+	for _, p := range gap0437Packs {
+		hook := gap0437Server(t, p, "claudecode", "action")
+		if out := gap0437Hook(t, hook, t.TempDir(), p.name+"g643", command); out["action"] != "block" {
+			t.Errorf("%s: action %v, want block: %v", p.name, out["action"], out["rule_ids"])
+		}
 	}
 }
