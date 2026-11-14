@@ -18,7 +18,14 @@ import (
 // calls already answered, which wait for that writer, get it back within a
 // few milliseconds of work. Code constants, not configuration; tests change
 // them.
-var hookCorrelationGroupLimits = audit.CorrelationGroupLimits{Occurrences: 64, Hold: 20 * time.Millisecond}
+//
+// Occurrences is 1: every occurrence commits its own transaction, as before
+// the group. Measured in process (S8 design 17.5), sharing a transaction
+// saves only its BEGIN and COMMIT, about 12% of the writer time of a hook,
+// and holds the writer across turn hand-offs: no gain at one session and
+// longer tails at ten. 64 turns grouping on if a host measurement shows a
+// gain.
+var hookCorrelationGroupLimits = audit.CorrelationGroupLimits{Occurrences: 1, Hold: 20 * time.Millisecond}
 
 // correlateHookOccurrenceInTurn runs one correlation attempt of a hook in the
 // store's correlation turn (S8 design section 13). It waits for the turn
@@ -32,8 +39,9 @@ var hookCorrelationGroupLimits = audit.CorrelationGroupLimits{Occurrences: 64, H
 //
 // The turn replaces the per-session turn of rel-1-0-6 GAP-0490: the hooks of
 // one session still correlate one at a time and in arrival order, and the
-// occurrences of every session that queue behind each other now share one
-// baton turn, one BEGIN and one COMMIT instead of one each (issue #1384).
+// occurrences of every session that queue behind each other can share one
+// baton turn, one BEGIN and one COMMIT instead of one each (issue #1384),
+// up to hookCorrelationGroupLimits.
 func (a *APIServer) correlateHookOccurrenceInTurn(
 	ctx context.Context,
 	profile connector.HookProfile,

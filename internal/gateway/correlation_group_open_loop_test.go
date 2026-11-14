@@ -29,10 +29,10 @@ import (
 // way the installed hook does (one PreToolUse per tool call, the answer
 // within 3.5 s, a new connection per call) at 100 calls a second for 20 s:
 // one session at 100/s, and ten sessions at 10/s each (S8 bar H1, rel-1-0-6
-// GAP-0558 to GAP-0560, issue #1384). Each test first runs a serial leg in
-// which every correlation occurrence has its own transaction (groups of one,
-// the 1.0.9 shape: one baton turn and one COMMIT per hook) and logs it, then
-// the grouped leg with the production limits, which is judged:
+// GAP-0558 to GAP-0560, issue #1384). Each test first runs a grouped leg in
+// which up to 64 correlation occurrences share a transaction and logs it
+// (diagnosis: production runs groups of one, S8 design 17.5), then the leg
+// with the production limits (hookCorrelationGroupLimits), which is judged:
 //   - the single-stream baseline of the real path and the measured cadence
 //     are judged as in TestGAP0490OpenLoop* (judgeOpenLoopBaseline,
 //     judgeOpenLoopStream): an overloaded box or a launcher that fell behind
@@ -67,8 +67,8 @@ func runHookPerUserOpenLoop(t *testing.T, sessions, perSecond int) {
 		judged      bool
 		duration    time.Duration
 	}{
-		{"serial", 1, false, perUserOpenLoopDuration},
-		{"grouped", 0, true, perUserOpenLoopDuration},
+		{"grouped", 64, false, perUserOpenLoopDuration},
+		{"production", 0, true, perUserOpenLoopDuration},
 	}
 	// Diagnosis only: a longer stream (S8_OPEN_LOOP_SECONDS) shows the writer
 	// time that grows with the length of a session, and S8_OPEN_LOOP_LEG
@@ -87,7 +87,7 @@ func runHookPerUserOpenLoop(t *testing.T, sessions, perSecond int) {
 			if leg.occurrences > 0 {
 				setHookCorrelationGroupOccurrences(t, leg.occurrences)
 			}
-			if hold, err := time.ParseDuration(os.Getenv("S8_OPEN_LOOP_GROUP_HOLD")); err == nil && leg.occurrences == 0 {
+			if hold, err := time.ParseDuration(os.Getenv("S8_OPEN_LOOP_GROUP_HOLD")); err == nil && leg.occurrences > 1 {
 				// Diagnosis only: another hold for the grouped leg.
 				limits := hookCorrelationGroupLimits
 				limits.Hold = hold

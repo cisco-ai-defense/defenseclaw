@@ -453,6 +453,7 @@ func TestHookCorrelationGroupVerdictIdentity(t *testing.T) {
 		// under -race the wave's tool calls then wait past the session start
 		// gate (refused SESSION-START-PENDING).
 		{"groups-of-4", audit.CorrelationGroupLimits{Occurrences: 4, Hold: hookCorrelationGroupLimits.Hold}},
+		{"groups-of-64", audit.CorrelationGroupLimits{Occurrences: 64, Hold: hookCorrelationGroupLimits.Hold}},
 		{"production-limits", hookCorrelationGroupLimits},
 	} {
 		var got groupLeg
