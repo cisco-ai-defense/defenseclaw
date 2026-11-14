@@ -14,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // ACP frames that perform an action (rel-1-0-10:GAP-0176).
@@ -614,16 +615,18 @@ func acpQuoteWord(word, goos string) string {
 	if acpPlainWord.MatchString(word) {
 		return word
 	}
-	if goos == "windows" {
-		return "'" + strings.ReplaceAll(word, "'", "''") + "'"
-	}
-	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
+	return acpQuoteAlways(word, goos)
 }
 
-// acpQuoteAlways quotes a value even when it is a plain word.
+// acpQuoteAlways quotes a value even when it is a plain word. On Windows it
+// is managed.PowerShellLiteral, the one PowerShell quoting rule: the value
+// is agent text (a terminal/create argument or env value, an execute argv
+// word), and the typographic single quotes PowerShell and the guard's lexer
+// also read as quotes are doubled with the apostrophe, so no value ends the
+// literal early.
 func acpQuoteAlways(word, goos string) string {
 	if goos == "windows" {
-		return "'" + strings.ReplaceAll(word, "'", "''") + "'"
+		return managed.PowerShellLiteral(word)
 	}
 	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
 }
