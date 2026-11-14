@@ -98,7 +98,7 @@
       "id": 3,
       "type": "stat",
       "title": "Routed (applied) share",
-      "description": "Share of decisions that sent the call to a routed model. The rest fell back to the original request or were refused.",
+      "description": "Share of decisions that chose a routed model and sent the call there. The rest fell back to the original request or were refused. A routed model that then fails before its first byte is counted under Calls that fell back, not here.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -282,7 +282,7 @@
       "id": 6,
       "type": "stat",
       "title": "Sensitive requests kept local",
-      "description": "Requests narrowed by routing.sensitive (a sensitive keyword or guardrail severity) that were routed to a local model.",
+      "description": "Requests narrowed by routing.sensitive (a sensitive keyword or guardrail severity) that were sent to a local model.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1412,7 +1412,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "((sum((((increase(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))) or 0 * sum((((increase(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range)))) - (sum((((increase(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))) or 0 * sum((((increase(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))))) / (sum((((increase(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))) or 0 * sum((((increase(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))))",
+          "expr": "((sum((((increase(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))) or 0 * sum((((increase(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range)))) - (sum((((increase(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_model_cost_compared_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))) or 0 * sum((((increase(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))))) / (sum((((increase(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_model_cost_baseline_USD_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))) > 0)",
           "refId": "A",
           "instant": true
         }
@@ -2456,18 +2456,18 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "max by (budget_id) (defenseclaw_budget_spend_USD{budget_id=~\"$budget\",host_name=~\"$host\"})",
+          "expr": "max by (budget_id, host_name) (defenseclaw_budget_spend_USD{budget_id=~\"$budget\",host_name=~\"$host\"})",
           "refId": "A",
-          "legendFormat": "{{budget_id}} spend"
+          "legendFormat": "{{budget_id}} {{host_name}} spend"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "max by (budget_id) (defenseclaw_budget_limit_USD{budget_id=~\"$budget\",host_name=~\"$host\"})",
+          "expr": "max by (budget_id, host_name) (defenseclaw_budget_limit_USD{budget_id=~\"$budget\",host_name=~\"$host\"})",
           "refId": "B",
-          "legendFormat": "{{budget_id}} limit"
+          "legendFormat": "{{budget_id}} {{host_name}} limit"
         }
       ],
       "fieldConfig": {
@@ -2596,9 +2596,9 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "max by (budget_id) (defenseclaw_budget_subjects_exceeded{budget_id=~\"$budget\",host_name=~\"$host\"})",
+          "expr": "max by (budget_id, host_name) (defenseclaw_budget_subjects_exceeded{budget_id=~\"$budget\",host_name=~\"$host\"})",
           "refId": "A",
-          "legendFormat": "{{budget_id}}"
+          "legendFormat": "{{budget_id}} {{host_name}}"
         }
       ],
       "fieldConfig": {

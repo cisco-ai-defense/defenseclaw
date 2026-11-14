@@ -296,9 +296,6 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The verified caller (OSS gateway owner or managed kernel peer).
 	original.usage.Subject = subject
 	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body, engine.Caller{Verified: true, Key: subject, Source: subjectSourceKernelPeer})
-	if routedOutcome.Result != "" && s.metrics != nil {
-		recordSemanticRoutingDecisionMetricsV8(r.Context(), s.metrics(), connector, "route_only", routedOutcome)
-	}
 	original.usage.Route = usageDecision(usageRouteFacts(routedOutcome, true), false)
 	if routedOutcome.Result == "" {
 		original.usage.Route.Decision = modelusage.DecisionPassthrough
@@ -321,12 +318,14 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		original.usage.Route.Decision = modelusage.DecisionFallback
 	}
 	if routedOutcome.Result == SemanticRouteDenied {
+		s.recordDecision(r, connector, routedOutcome, false)
 		routeOnlyErrorFor(w, family, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
 		return
 	}
 	if attempt != nil && custody && attempt.keepInbound && attempt.signer == nil && !s.holdCredential(cfg, attempt, attempt.provider) {
 		attempt = nil
 	}
+	s.recordDecision(r, connector, routedOutcome, attempt != nil)
 	if attempt == nil {
 		s.forward(w, r, original, body, nil)
 		return
@@ -337,6 +336,17 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Semantic-Router", "routed")
 	s.forwardWithRetry(w, r, *attempt, retry, body)
+}
+
+// recordDecision records the routing decision metric of one request with
+// what the listener finally did: routed is true only when the call goes to the
+// routed model. A request the router never looked at (no outcome) records
+// nothing.
+func (s *routeOnlyServer) recordDecision(r *http.Request, connector string, outcome SemanticRouteOutcome, routed bool) {
+	if outcome.Result == "" || s.metrics == nil {
+		return
+	}
+	recordSemanticRoutingDecisionMetricsV8(r.Context(), s.metrics(), connector, "route_only", routedMetricOutcome(outcome, routed))
 }
 
 // routeOnlyOverloaded answers a signed call the buffer budget cannot hold.

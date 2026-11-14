@@ -4443,8 +4443,11 @@ def test_routing_board_saving_survives_a_one_sided_counter() -> None:
     for title in ("Saved (USD)", "Saved (share of counterfactual)", "Saved per interval (USD)", "Saved by routed model (range)", "Saved by route decision (range)"):
         expression = _panel(dashboard, title)["targets"][0]["expr"]
         assert "defenseclaw_model_cost_baseline_USD_total" in expression and "defenseclaw_model_cost_compared_USD_total" in expression, title
-        # Both operands are guarded by an `or ... * 0` over the other counter.
-        assert expression.count("* 0)") + expression.count("0 * ") >= 2, title
+        # Both operands are guarded by an `or 0 * <other counter>` (or `or <other> * 0`) over the other counter.
+        assert expression.count(" or 0 * ") + expression.count(") or sum by") >= 2, title
+        if title == "Saved (share of counterfactual)":
+            # The denominator is unguarded and must be positive: with no baseline the panel is blank, not -Inf.
+            assert expression.rstrip().endswith("> 0)") or "> 0" in expression.split(" / ")[-1], title
 
 
 def test_routing_board_fail_closed_panel_is_not_a_made_up_zero() -> None:

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -449,5 +450,53 @@ func TestModelUsageSinkAFreeRequestedModelStillCountsTheCompareSide(t *testing.T
 	}
 	if _, ok := names[observability.TelemetryInstrumentDefenseClawModelCostBaseline]; ok {
 		t.Fatal("a baseline of 0 adds nothing to the baseline counter")
+	}
+}
+
+func TestRoutedMetricOutcomeReportsWhatTheCallDid(t *testing.T) {
+	applied := SemanticRouteOutcome{Result: SemanticRouteApplied, FailureCode: SemanticRouteFailureNone,
+		Decision: &ModelRouterDecision{Model: "m"}, Route: &engine.Decision{FilteredBy: "sensitive"}}
+	if got := routedMetricOutcome(applied, true); got.Result != SemanticRouteApplied || got.Decision == nil {
+		t.Fatalf("a call that went to the routed model stays applied: %+v", got)
+	}
+	got := routedMetricOutcome(applied, false)
+	if got.Result != SemanticRouteFallback || got.FailureCode != SemanticRouteFailureFiltered || got.Decision != nil {
+		t.Fatalf("an applied decision that did not route is a fallback: %+v", got)
+	}
+	if got.Route == nil || got.Route.FilteredBy != "sensitive" {
+		t.Fatalf("the sensitive filter must survive on the fallback so the leak panel counts it: %+v", got.Route)
+	}
+	withCause := applied
+	withCause.FailureCode = SemanticRouteFailureCredential
+	if got := routedMetricOutcome(withCause, false); got.FailureCode != SemanticRouteFailureCredential {
+		t.Fatalf("a known cause is kept: %+v", got)
+	}
+	for _, o := range []SemanticRouteOutcome{
+		{Result: SemanticRouteFallback, FailureCode: SemanticRouteFailureTimeout},
+		{Result: SemanticRouteDenied, FailureCode: SemanticRouteFailureFiltered},
+	} {
+		if got := routedMetricOutcome(o, false); got.Result != o.Result || got.FailureCode != o.FailureCode {
+			t.Fatalf("outcome %+v changed to %+v", o, got)
+		}
+	}
+}
+
+func TestRouteOnlyDecisionMetricFollowsTheFinalRouteChoice(t *testing.T) {
+	f := newRouteOnlyFixture(t)
+	runtime, capture := newProxyGeneratedMetricRuntime(t)
+	f.srv.metrics = func() hookLifecycleMetricV8Runtime { return runtime }
+	req := httptest.NewRequest(http.MethodPost, "/r/claudecode/v1/messages", nil)
+	applied := SemanticRouteOutcome{Result: SemanticRouteApplied, FailureCode: SemanticRouteFailureNone,
+		Decision: &ModelRouterDecision{Model: "m"}, Route: &engine.Decision{Source: "rules", FilteredBy: "sensitive"}}
+	f.srv.recordDecision(req, "claudecode", applied, false) // credential could not cross: the original model got the call
+	f.srv.recordDecision(req, "claudecode", applied, true)
+	f.srv.recordDecision(req, "claudecode", SemanticRouteOutcome{}, false) // the router never looked at it
+	got := capturedMetrics(capture, observability.TelemetryInstrumentDefenseClawSemanticRoutingDecision)
+	if len(got) != 2 {
+		t.Fatalf("decision metrics = %d, want 2 (an unrouted request records none)", len(got))
+	}
+	results := []string{fmt.Sprint(got[0].Attributes()["defenseclaw.metric.result"]), fmt.Sprint(got[1].Attributes()["defenseclaw.metric.result"])}
+	if !(results[0] == "fallback" && results[1] == "applied") && !(results[0] == "applied" && results[1] == "fallback") {
+		t.Fatalf("results = %v", results)
 	}
 }

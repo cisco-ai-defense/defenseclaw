@@ -142,6 +142,22 @@ func routeDenyClass(d *engine.DenyReason) (class, budgetID string) {
 	return "other", ""
 }
 
+// routedMetricOutcome is the outcome a decision metric reports: the decision
+// said applied, but when the call was not in the end sent to the routed model
+// (a credential that cannot cross providers, a stored response id, a missing
+// origin, a failed custody check) it is a fallback, like its usage record.
+// Any other outcome is reported as decided.
+func routedMetricOutcome(o SemanticRouteOutcome, routed bool) SemanticRouteOutcome {
+	if o.Result != SemanticRouteApplied || routed {
+		return o
+	}
+	o.Result, o.Decision = SemanticRouteFallback, nil
+	if o.FailureCode == "" || o.FailureCode == SemanticRouteFailureNone {
+		o.FailureCode = SemanticRouteFailureFiltered
+	}
+	return o
+}
+
 // recordSemanticRoutingDecisionMetricsV8 is the one place a routing decision
 // becomes defenseclaw.semantic_routing.decision and .latency, whichever
 // listener decided it. It carries no prompt, model alias, endpoint, user or
