@@ -39,6 +39,12 @@ import (
 // children (/usr/lib, /usr/bin, /boot/grub) are critical delete scope.
 var criticalPayloadParents = []string{"/bin", "/boot", "/lib", "/lib64", "/sbin", "/usr"}
 
+// nonPayloadChildren are children of a payload folder that hold locally
+// installed or source files an administrator or a developer removes on
+// purpose (/usr/local, /usr/src, /usr/include); they keep rel's verdict
+// (rel-1-0-10:GAP-0695, lead ruling).
+var nonPayloadChildren = []string{"/usr/include", "/usr/local", "/usr/src"}
+
 // criticalDeleteScope reports whether removing value (a canonical, lower
 // case slash path) removes a host or an account: the filesystem or a drive
 // root, a top-level system folder, the active home, or a direct child of a
@@ -63,16 +69,95 @@ func criticalDeleteScope(value, home string) bool {
 	// offboarding of an account (userdel -r, dscl -delete) and owner traces
 	// carry it as benign. Only the active home is critical.
 	return strings.HasPrefix(trimmed, "/") &&
-		slices.Contains(criticalPayloadParents, path.Dir(trimmed))
+		slices.Contains(criticalPayloadParents, path.Dir(trimmed)) &&
+		!slices.Contains(nonPayloadChildren, trimmed)
 }
 
 // forkBombProof is forkBombFallbackProof for a call whose command text is in
 // the tool arguments (a Bash hook call) as well as in Input.Command.
+//
+// The bomb is also proven when it is the last statement of a script (`echo
+// x; :(){ :|:& };:`) and when a shell -c script of a top-level command, behind
+// a transparent wrapper or not, is the bomb or ends with it (rel-1-0-10:
+// GAP-0696). The scan allocates nothing and stops at the first byte that
+// cannot be part of the bomb.
 func forkBombProof(input actionfacts.Input, facts actionfacts.Facts) bool {
-	if command, known := trustedBashCommandInput(input); known && canonicalShellForkBomb(command) {
+	if command, known := trustedBashCommandInput(input); known && endsWithForkBomb(command) {
 		return true
 	}
-	return forkBombFallbackProof(input, facts)
+	if forkBombFallbackProof(input, facts) {
+		return true
+	}
+	for _, command := range facts.Commands {
+		if command.ParentCommandID != 0 || command.Dialect != actionfacts.DialectPOSIX {
+			continue
+		}
+		words, ok := stateOperandWords(command)
+		if !ok {
+			continue
+		}
+		inner, innerWords := unwrapStateWrapper(command, words)
+		if !shellProgram(inner.Program) {
+			continue
+		}
+		for index, word := range innerWords {
+			if index+1 < len(innerWords) && shellCommandOption(word) && endsWithForkBomb(innerWords[index+1]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// shellCommandOption reports a shell option word that takes the script as
+// its next word: -c, or a cluster of single-letter options that ends in c.
+func shellCommandOption(word string) bool {
+	return len(word) >= 2 && word[0] == '-' && word[1] != '-' &&
+		strings.HasSuffix(word, "c") && strings.Trim(word[1:], "abefhikmnptuvxBCHPcl") == ""
+}
+
+// forkBombText is the canonical fork bomb with every blank removed.
+const forkBombText = ":(){:|:&};:"
+
+// matchesForkBomb reports whether text is the fork bomb, blanks aside.
+func matchesForkBomb(text string) bool {
+	matched := 0
+	for index := 0; index < len(text); index++ {
+		switch character := text[index]; character {
+		case ' ', '\t', '\r', '\n':
+		default:
+			if matched >= len(forkBombText) || character != forkBombText[matched] {
+				return false
+			}
+			matched++
+		}
+	}
+	return matched == len(forkBombText)
+}
+
+// endsWithForkBomb reports a script whose last statement is the fork bomb:
+// the whole text, or a tail that starts after a statement separator.
+func endsWithForkBomb(text string) bool {
+	if matchesForkBomb(text) {
+		return true
+	}
+	for index := 0; index < len(text); index++ {
+		switch text[index] {
+		case ';', '&', '|', '\n', '(', '{':
+		default:
+			continue
+		}
+		next := index + 1
+		for next < len(text) && (text[next] == ' ' || text[next] == '\t' || text[next] == '\r' || text[next] == '\n') {
+			next++
+		}
+		// A tail can only be the bomb when it starts with its first byte.
+		if next < len(text) && text[next] == ':' && matchesForkBomb(text[next:]) {
+			return true
+		}
+		index = next - 1
+	}
+	return false
 }
 
 // matchesEveryEntry reports whether a glob's last component names every
@@ -142,21 +227,40 @@ func criticalScopeHome(facts actionfacts.Facts) string {
 	return strings.TrimRight(canonicalSemanticPath(facts.ActiveHome), "/")
 }
 
+// criticalWrappedChild reports a child fact that runs because of its parents
+// only: a script of a shell -c or a command behind a transparent wrapper
+// (sudo, env, nohup, ...), at any depth (rel-1-0-10:GAP-0694). A child of
+// find -exec, xargs, ssh, a container run or another program stays out: the
+// program it runs is not this host's shell.
+func criticalWrappedChild(command actionfacts.CommandFact) bool {
+	for _, wrapper := range command.Wrappers {
+		base := strings.ToLower(path.Base(wrapper.Executable))
+		if _, transparent := stateWrapperValueOptions[base]; !transparent && !shellProgram(base) {
+			return false
+		}
+	}
+	return true
+}
+
 // criticalScopeCommands calls visit with the program a top-level POSIX
-// command runs (through a transparent wrapper such as sudo) and its static
-// operand words, for each command whose words are readable. A parse that is
+// command, or a child of a shell -c or of a transparent wrapper, runs
+// (through a transparent wrapper such as sudo) and its static operand words,
+// for each command whose words are readable. A parse that is
 // not complete (a glob, or any other word the parser could not read) is
 // judged only on a command with no unreadable word beside the glob, and only
 // the glob targets count: a root or a folder named next to an unrelated
 // dynamic word stays at the unknown tier of the pack, as before.
 func criticalScopeCommands(facts actionfacts.Facts, visit func(program string, words []string, partial bool) bool) bool {
-	partial := !facts.Authoritative()
 	for _, command := range facts.Commands {
-		if command.ParentCommandID != 0 ||
+		if command.ParentCommandID != 0 && !criticalWrappedChild(command) ||
 			command.Effect == actionfacts.EffectPreview ||
 			command.Dialect != actionfacts.DialectPOSIX {
 			continue
 		}
+		// A command whose own argv is complete (an option the parser does
+		// not model, such as `chmod -R -x /usr`, makes the call partial)
+		// is read like a call that parsed in full.
+		partial := !facts.Authoritative() && !command.ArgvComplete
 		words, ok := stateOperandWords(command)
 		if !ok || partial && slices.Contains(words, "") {
 			continue
@@ -175,18 +279,47 @@ func criticalTarget(word, home string, partial bool) bool {
 	return (!partial || hasGlobMeta(word)) && criticalDeleteWord(word, home)
 }
 
-// criticalGlobDeleteProof proves a recursive force `rm` of the contents of a
-// critical scope from the words of the call: the shell expands the glob
-// after the hook reads it, so the parse is partial, but the directory part
-// and the match-everything last component are static. A complete parse is
-// judged by the CMD-RM-RF owner itself.
-func criticalGlobDeleteProof(_ actionfacts.Input, facts actionfacts.Facts) bool {
-	if facts.Authoritative() {
-		return false
+// rmRecursiveOptions reads the options of an rm call: whether it recurses
+// (-r, -R, --recursive), forces (-f, --force) and is interactive (-i, -I,
+// --interactive).
+func rmRecursiveOptions(words []string) (recursive, force, interactive bool) {
+	for _, word := range words {
+		if word == "--" {
+			break
+		}
+		if len(word) < 2 || word[0] != '-' {
+			continue
+		}
+		switch {
+		case word == "--recursive":
+			recursive = true
+		case word == "--force":
+			force = true
+		case word == "--interactive" || strings.HasPrefix(word, "--interactive="):
+			interactive = true
+		case strings.HasPrefix(word, "--"):
+		default:
+			for _, flag := range word[1:] {
+				recursive = recursive || flag == 'r' || flag == 'R'
+				force = force || flag == 'f'
+				interactive = interactive || flag == 'i' || flag == 'I'
+			}
+		}
 	}
+	return recursive, force, interactive
+}
+
+// criticalDeleteProof proves a recursive `rm` of a critical scope from the
+// words of the call: the shell expands a glob after the hook reads it, so the
+// parse is partial, but the directory part and the match-everything last
+// component are static. A recursive delete that does not force (`rm -r ~`)
+// is the same removal unless it asks first (-i, -I, with no -f after it).
+// A complete parse with -f is judged by the CMD-RM-RF owner itself.
+func criticalDeleteProof(_ actionfacts.Input, facts actionfacts.Facts) bool {
 	home := criticalScopeHome(facts)
 	return criticalScopeCommands(facts, func(program string, words []string, partial bool) bool {
-		if program != "rm" || !posixRecursiveForceFlags(append([]string{"rm"}, words...)) {
+		recursive, force, interactive := rmRecursiveOptions(words)
+		if program != "rm" || !recursive || interactive && !force || force && facts.Authoritative() {
 			return false
 		}
 		options := true
@@ -239,7 +372,7 @@ func unrestrictedFindDelete(command actionfacts.CommandFact) bool {
 // file its read or write) or opens it to every user for writing.
 func chmodLocksOut(mode string) bool {
 	if parsed, err := strconv.ParseUint(mode, 8, 16); err == nil {
-		if len(mode) < 3 || len(mode) > 4 {
+		if len(mode) > 4 {
 			return false
 		}
 		return parsed&0700 != 0700 || parsed&0002 != 0
@@ -317,7 +450,7 @@ type provenScopeRule struct {
 }
 
 var provenScopeRules = []provenScopeRule{
-	{ruleID: "CMD-RM-RF", proves: criticalGlobDeleteProof},
+	{ruleID: "CMD-RM-RF", proves: criticalDeleteProof},
 	{ruleID: "CMD-CHMOD-WORLD", proves: criticalRecursiveLockoutProof, tiered: true},
 	{ruleID: "impact.fork_bomb", proves: forkBombProof, tiered: true},
 }

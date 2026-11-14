@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -92,7 +93,9 @@ func gap0594Rows() []struct {
 		{"g594-c05", rm("/var/cache/apt/archives/*"), gap0594Allow},
 		{"g594-c06", rm("~/proj/*"), gap0594Allow},
 		{"g594-c07", rm("$HOME/.cache/pip/*"), gap0594Allow},
-		{"g594-c08", rm("/tmp/*"), gap0594Allow},
+		// {TMP} is the test's own empty temp folder: the real /tmp of the host
+		// makes this row depend on how many entries it holds (GAP-0695).
+		{"g594-c08", rm("{TMP}/*"), gap0594Allow},
 		{"g594-c09", "find ~/proj -name '*.pyc' -delete", gap0594Allow},
 		{"g594-c10", "find $HOME -name '*.tmp' -mtime +30 -delete", gap0594Allow},
 		{"g594-c11", "chmod -R 755 ~/proj", gap0594Allow},
@@ -101,6 +104,54 @@ func gap0594Rows() []struct {
 		{"g594-c14", "mkfs.ext4 disk.img", gap0594Allow},
 		{"g594-c15", "rm -r ~/proj/build", gap0594Allow},
 		{"g594-c16", "ls ~/* /etc/*", gap0594Allow},
+		// GAP-0694: the script of a shell -c in double quotes, bare and behind
+		// a transparent wrapper, is read like the single-quoted one.
+		{"g594-w01", `bash -c "rm -rf /etc/*"`, gap0594Block},
+		{"g594-w02", `sudo sh -c "rm -rf /usr/lib/*"`, gap0594Block},
+		// The outer shell expands $HOME inside the double quotes, so the script
+		// has no static spelling: it stays at rel's verdict (GAP-0696, the
+		// variable forms are not proven by the helper).
+		{"g594-w03", `bash -c "rm -rf $HOME/*"`, gap0594Allow},
+		{"g594-w04", `bash -c "rm -rf ~/*"`, gap0594Block},
+		{"g594-w05", `sh -c "rm -rf /etc/*"`, gap0594Block},
+		{"g594-w06", `sudo bash -c "rm -rf /etc/*"`, gap0594Block},
+		{"g594-w07", `bash -c 'rm -rf ~/*'`, gap0594Block},
+		{"g594-w08", `bash -c "bash -c \"rm -rf /etc/*\""`, gap0594Block},
+		{"g594-w09", `bash -c "echo hi; rm -rf /etc/*"`, gap0594Block},
+		{"g594-w10", `env X=1 sudo bash -c "rm -rf /etc/*"`, gap0594Block},
+		{"g594-w11", `bash -c "chmod -R 000 ~"`, gap0594Tiered},
+		// The same scripts for scoped targets, and a shell that is not this
+		// host's (ssh, a container), stay as they were.
+		{"g594-w20", `bash -c "rm -rf ~/proj/*"`, gap0594Allow},
+		{"g594-w21", `bash -c "rm -rf /tmp/work/*"`, gap0594Allow},
+		{"g594-w22", `bash -c "ls ~/* /etc/*"`, gap0594Allow},
+		{"g594-w23", `ssh host "rm -rf ~/*"`, gap0594Allow},
+		{"g594-w24", `docker run --rm -v /etc:/e alpine rm -rf /e/*`, gap0594Allow},
+		{"g594-w25", `bash -c "rm -rf /etc/* $X"`, gap0594Allow},
+		{"g594-w26", `bash -c "chmod -R 755 ~/proj"`, gap0594Allow},
+		// GAP-0695 (lead ruling): /usr/local, /usr/src and /usr/include are
+		// not payload folders and keep rel's verdict (chk-e01..e04).
+		{"g594-e01", rm("/usr/local/*"), gap0594Allow},
+		{"g594-e02", rm("/usr/local"), gap0594Allow},
+		{"g594-e03", rm("/usr/include"), gap0594Allow},
+		{"g594-e04", rm("/usr/src"), gap0594Allow},
+		{"g594-e05", rm("/usr/lib/*"), gap0594Block},
+		// GAP-0696: spellings the helper proves from the words.
+		{"g594-x01", "rm -r ~/*", gap0594Block},
+		{"g594-x02", "rm -r ~", gap0594Block},
+		{"g594-x03", "rm -r /etc", gap0594Block},
+		{"g594-x04", "rm -ri ~/*", gap0594Allow},
+		{"g594-x05", "rm -r ~/proj/*", gap0594Allow},
+		{"g594-x06", "chmod -R 0 ~", gap0594Tiered},
+		{"g594-x07", "chmod 0 -R ~", gap0594Tiered},
+		{"g594-x08", "chmod -R 0 /etc", gap0594Tiered},
+		{"g594-x09", "chmod -R -x /usr", gap0594Tiered},
+		{"g594-x10", "chmod -R 0 ~/proj", gap0594Allow},
+		{"g594-x11", "bash -c ':(){ :|:& };:'", gap0594Tiered},
+		{"g594-x12", "sudo bash -c ':(){ :|:& };:'", gap0594Tiered},
+		{"g594-x13", "echo hi; :(){ :|:& };:", gap0594Tiered},
+		{"g594-x14", "echo ':(){ :|:& };:'", gap0594Allow},
+		{"g594-x15", "grep -r ':(){ :|:& };:' docs", gap0594Allow},
 	}
 }
 
@@ -113,7 +164,8 @@ func TestGAP0594CriticalScopeEveryTier(t *testing.T) {
 			hook := gap0437Server(t, pack, "claudecode", "action")
 			cwd := t.TempDir()
 			for _, row := range gap0594Rows() {
-				out := gap0437Hook(t, hook, cwd, pack.name+row.id, row.command)
+				command := strings.ReplaceAll(row.command, "{TMP}", cwd)
+				out := gap0437Hook(t, hook, cwd, pack.name+row.id, command)
 				if got, want := out["action"], row.want.of(pack.name); got != want {
 					t.Errorf("%s %s: action %v, want %s (%v)", row.id, pack.name, got, want, out["reason"])
 				}
@@ -130,6 +182,7 @@ func TestGAP0594ScopeWords(t *testing.T) {
 		"/home/u": true, "/home/u/*": true, "/home/other": false, "/home/other/.*": false, "/users/alice": false,
 		"~": true, "~/": true, "~/.": true, "~/*": true, "~/.[!.]*": true, "$HOME/*": true,
 		"${HOME}/.*": true, "$HOME": true,
+		"/usr/local": false, "/usr/local/*": false, "/usr/src": false, "/usr/include/*": false,
 		"/usr/local/lib/foo": false, "/usr/local/lib/*": false, "/var/lib/apt/lists/*": false,
 		"/etc/nginx/conf.d": false, "/etc/*.bak": false, "/etc/ssh*": false, "/usr/*/share": false,
 		"~/proj": false, "~/proj/*": false, "~/*.log": false, "$HOME/.cache/*": false,
@@ -147,7 +200,7 @@ func TestGAP0594ScopeWords(t *testing.T) {
 
 func TestGAP0594ChmodLockout(t *testing.T) {
 	for mode, want := range map[string]bool{
-		"000": true, "0000": true, "644": true, "600": true, "777": true, "757": true, "u-rwx": true,
+		"0": true, "00": true, "7": true, "000": true, "0000": true, "644": true, "600": true, "777": true, "757": true, "u-rwx": true,
 		"a-rwx": true, "-r": true, "u=": true, "a=r": true, "o+w": true, "a+w": true, "go+w": true, "+w": true,
 		"755": false, "700": false, "775": false, "750": false, "u+rwX": false, "go-w": false, "o-rwx": false,
 		"u+x": false, "g+r": false, "u=rwx": false, "": false, "9": false, "u+q": false,
@@ -215,6 +268,27 @@ func TestGAP0594ActiveHomeSpelledAsAPath(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("%q: CMD-RM-RF enforceable = %v, want %v", command, got, want)
+		}
+	}
+}
+
+// The bomb is proven as a whole script, as the last statement of one and as
+// the script of a shell -c; text that only carries it is not (GAP-0696).
+func TestGAP0594ForkBombSpellings(t *testing.T) {
+	bomb := ":(){ :|:& };:"
+	for text, want := range map[string]bool{
+		bomb: true, ":(){:|:&};:": true, " :( ) { : | : & } ; : ": true, "\n" + bomb + "\n": true,
+		"echo hi; " + bomb: true, "echo hi\n" + bomb: true, "true && " + bomb: true, "(" + bomb: true,
+		"echo '" + bomb + "'": false, bomb + " > x": false, "echo " + bomb: false,
+		":(){ :|:& }": false, "": false, ":": false, bomb + bomb: false,
+	} {
+		if got := endsWithForkBomb(text); got != want {
+			t.Errorf("endsWithForkBomb(%q) = %v, want %v", text, got, want)
+		}
+	}
+	for option, want := range map[string]bool{"-c": true, "-lc": true, "-ec": true, "-xc": true, "-l": false, "--c": false, "-": false, "-cx": false} {
+		if got := shellCommandOption(option); got != want {
+			t.Errorf("shellCommandOption(%q) = %v, want %v", option, got, want)
 		}
 	}
 }

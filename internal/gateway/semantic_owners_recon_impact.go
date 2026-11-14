@@ -2323,18 +2323,7 @@ func forkBombFallbackProof(
 	return false
 }
 
-func canonicalShellForkBomb(value string) bool {
-	var compact strings.Builder
-	for _, character := range strings.TrimSpace(value) {
-		switch character {
-		case ' ', '\t', '\r', '\n':
-			continue
-		default:
-			compact.WriteRune(character)
-		}
-	}
-	return compact.String() == ":(){:|:&};:"
-}
+func canonicalShellForkBomb(value string) bool { return matchesForkBomb(value) }
 
 func exactInterpreterProgram(argv []string, expected string) bool {
 	if len(argv) != 3 || argv[1] != "-e" {
