@@ -47,10 +47,25 @@ func TestSecretReadChainEgressStepReadsTheSharedSenderReader(t *testing.T) {
 				t.Fatalf("egress step detected = %v, want %v (status %s, projection %+v)",
 					got, test.detect, facts.Parse.Status, projection)
 			}
-			// A projected rsync of local sources to a remote host is itself an
-			// exact upload (GAP-0595), so it keeps its own enforcement step.
-			if test.name != "projected rsync" && projection.EnforcementStepMask&step != 0 {
-				t.Fatalf("egress step enforcement from the sender reader: %+v", projection)
+			// A sender the reader cannot read in full is the unknown tier: it
+			// carries the unread-sender join (an egress that joins any exact
+			// credentials read and may block in strict, GAP-0672). A projected
+			// rsync of local sources to a remote host is itself an exact
+			// upload (GAP-0595) and keeps its own enforcement step. Any other
+			// reader sender detects only.
+			index, _ := guardrail.ToolChainIndexByID(guardrail.ToolChainSecretReadThenEgress)
+			enforced := projection.EnforcementStepMask&step != 0
+			unknown := actionfacts.ReadSenders(facts).UnknownDestination()
+			switch {
+			case unknown:
+				if !enforced || projection.EnforcementJoinDigests[index] != guardrail.ToolChainUnreadSenderDigest {
+					t.Fatalf("unknown-destination sender: want the unread-sender enforcement step: %+v", projection)
+				}
+			case test.name == "projected rsync":
+			default:
+				if enforced {
+					t.Fatalf("egress step enforcement from the sender reader: %+v", projection)
+				}
 			}
 		})
 	}

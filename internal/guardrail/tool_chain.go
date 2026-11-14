@@ -667,6 +667,17 @@ func ToolChainIDs(mask uint32) ([]string, error) {
 	return ids, nil
 }
 
+// ToolChainUnreadSenderDigest is the join digest of a final call whose sender
+// the shared sender reader (actionfacts.ReadSenders) could not read in full: a
+// sender in a function, trap or coprocess, in interpreter code, or one whose
+// destination the shell builds. It is the SHA-256 of the label defenseclaw:tool-chain:unread-sender:v1, not a hash of any
+// input. For chain.secret_read_then_egress it stands for "an egress whose
+// destination is unknown" (the unknown tier of the one bound rule, GAP-0672):
+// it joins any exact credentials read and is never a mismatch, the call may
+// be a partial parse, and with an enforcement predecessor it can block where
+// the tier blocks unknown (the strict pack).
+const ToolChainUnreadSenderDigest = "c33c6d22134f957c4f4a37b06adfd254652ddbc67210c8b0b0a75cc8c0e8bd00"
+
 // ValidateToolChainProjection enforces the persisted projection ABI.
 func ValidateToolChainProjection(projection ToolChainProjection) error {
 	switch projection.ParseStatus {
@@ -790,6 +801,11 @@ func MatchToolChains(
 			}
 			predecessorDigest := event.Projection.EnforcementJoinDigests[i]
 			finalDigest := final.Projection.EnforcementJoinDigests[i]
+			// An egress the sender reader could not read in full is the
+			// unknown tier (GAP-0672): it joins any identity and may be a
+			// partial parse.
+			unreadFinal := definition.ID == ToolChainSecretReadThenEgress &&
+				finalDigest == ToolChainUnreadSenderDigest
 			detectionJoinPossible := true
 			if definition.RequiresValueJoin {
 				detectionJoinPossible =
@@ -818,12 +834,12 @@ func MatchToolChains(
 						event.Projection.ParseStatus == actionfacts.StatusPartial &&
 						predecessorDigest != ""
 				if !eventParseProven ||
-					final.Projection.ParseStatus != actionfacts.StatusComplete {
+					(final.Projection.ParseStatus != actionfacts.StatusComplete && !unreadFinal) {
 					// Conditional, dynamic, or unresolved parsing does not create a
 					// new chain alert. Atomic findings retain their own posture.
 					detectionJoinPossible = false
 				} else if predecessorDigest != "" && finalDigest != "" &&
-					predecessorDigest != finalDigest {
+					predecessorDigest != finalDigest && !unreadFinal {
 					// Exact, unequal identities disprove this chain. Missing identity
 					// on an otherwise complete parse remains detection-only.
 					detectionJoinPossible = false
@@ -864,7 +880,8 @@ func MatchToolChains(
 				joinSafe = joinSafe && predecessorDigest != "" &&
 					predecessorDigest == finalDigest
 			} else if definition.RequiresEnforcementJoin {
-				joinSafe = joinSafe && predecessorDigest != "" && predecessorDigest == finalDigest
+				joinSafe = joinSafe && predecessorDigest != "" &&
+					(predecessorDigest == finalDigest || unreadFinal)
 			}
 			if joinSafe && final.Projection.EnforcementStepMask&definition.Step2Bit != 0 &&
 				event.Projection.EnforcementStepMask&definition.Step1Bit != 0 &&
