@@ -71,3 +71,18 @@ func TestGAP0272StartNamesAnyRefusedDestination(t *testing.T) {
 		t.Fatalf("start reason %q", reason)
 	}
 }
+
+// GAP-0287: allow_cgnat alone does not admit a private ClusterIP, and a
+// signal override's Service host is checked too.
+func TestGAP0287ValidateWarnsForCGNATOnlyAndForOverrideHosts(t *testing.T) {
+	warnings := configValidateDestinationWarnings(gap0272Loaded(t,
+		"    - name: split\n      kind: otlp\n      protocol: http/protobuf\n"+
+			"      endpoint: http://collector.example.com:4318\n      tls: {insecure: true}\n"+
+			"      network_safety: {allow_cgnat: true}\n"+
+			"      signal_overrides:\n        logs: {endpoint: http://logs.otel-system.svc:4318}\n"))
+	joined := strings.Join(warnings, "\n")
+	if !strings.Contains(joined, `private_service_endpoint: observability destination "split": logs.otel-system.svc is a Kubernetes Service name`) ||
+		strings.Contains(joined, "collector.example.com is") {
+		t.Fatalf("warnings %q", joined)
+	}
+}

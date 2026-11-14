@@ -394,7 +394,7 @@ func (factory *Factory) prepareOTLPLogs(
 	if prepareErr != nil {
 		return nil, noResource, adapterPrepareError(prepareErr)
 	}
-	factory.noteDeferred(destination, prepared.Deferred())
+	factory.noteOTLPDeferrals(destination, prepared)
 	adapter, adapterErr := newOTLPLogAdapterSafely(ctx, prepared, otlp.LogResourceSnapshot{
 		SchemaURL: resourceContext.SchemaURL(), Values: resourceContext.Values(),
 		DroppedAttributesCount: resourceContext.ResourceDroppedAttributesCount(),

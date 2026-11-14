@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -27,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 var (
@@ -274,12 +276,28 @@ func configValidateDestinationWarnings(loaded *loadedConfigV8File) []string {
 		}
 		host, port := configValidateEndpointHostPort(destination.Transport.Endpoint)
 		safety := destination.Transport.NetworkSafety
-		allowed := safety != nil && (safety.AllowPrivateNetworks || safety.AllowCGNAT)
-		if !allowed && configValidateKubernetesServiceHost(host) {
-			warnings = append(warnings, fmt.Sprintf(
-				"private_service_endpoint: observability destination %q: %s is a Kubernetes Service name, which resolves to a cluster address; "+
-					"set network_safety.allow_private_networks: true on it, or the gateway runs without it and refuses that address on every delivery",
-				destination.Name, host))
+		// Only allow_private_networks admits a private ClusterIP; allow_cgnat
+		// alone does not (GAP-0287). Every endpoint counts: the main one and
+		// each signal override.
+		if safety == nil || !safety.AllowPrivateNetworks {
+			hosts := []string{host}
+			for _, signal := range configValidateOverrideSignals(destination.Transport.SignalOverrides) {
+				if endpoint := destination.Transport.SignalOverrides[signal].Endpoint; endpoint != "" {
+					overrideHost, _ := configValidateEndpointHostPort(endpoint)
+					hosts = append(hosts, overrideHost)
+				}
+			}
+			seen := map[string]bool{}
+			for _, candidate := range hosts {
+				if seen[candidate] || !configValidateKubernetesServiceHost(candidate) {
+					continue
+				}
+				seen[candidate] = true
+				warnings = append(warnings, fmt.Sprintf(
+					"private_service_endpoint: observability destination %q: %s is a Kubernetes Service name, which resolves to a cluster address; "+
+						"set network_safety.allow_private_networks: true on it, or the gateway runs without it and refuses that address on every delivery",
+					destination.Name, candidate))
+			}
 		}
 		if destination.Kind == config.ObservabilityV8DestinationOTLP && port == "4318" &&
 			(destination.Transport.Protocol == "grpc" || destination.Transport.Protocol == "grpc/protobuf") {
@@ -289,6 +307,16 @@ func configValidateDestinationWarnings(loaded *loadedConfigV8File) []string {
 		}
 	}
 	return warnings
+}
+
+// configValidateOverrideSignals returns the override signals in a stable order.
+func configValidateOverrideSignals(overrides map[observability.Signal]config.ObservabilityV8SignalOverrideSource) []observability.Signal {
+	signals := make([]observability.Signal, 0, len(overrides))
+	for signal := range overrides {
+		signals = append(signals, signal)
+	}
+	sort.Slice(signals, func(i, j int) bool { return signals[i] < signals[j] })
+	return signals
 }
 
 // configValidateKubernetesServiceHost reports a Service DNS name of the

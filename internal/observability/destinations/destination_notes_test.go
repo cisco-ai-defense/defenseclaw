@@ -22,6 +22,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/galileo"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/localobservability"
@@ -312,5 +313,42 @@ func TestV8ProhibitedOptionNamesTheOptionOnly(t *testing.T) {
 		if !strings.Contains(err.Error(), "prohibited") || netguard.V8ProhibitedOption(err) != want {
 			t.Fatalf("%s: error=%v option=%q, want %q", address, err, netguard.V8ProhibitedOption(err), want)
 		}
+	}
+}
+
+// hostResolver answers per host: a Service name a ClusterIP, others public.
+type hostResolver struct{}
+
+func (hostResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	if strings.HasSuffix(host, ".svc") {
+		return []net.IPAddr{{IP: net.ParseIP("10.96.7.8")}}, nil
+	}
+	return []net.IPAddr{{IP: net.ParseIP("34.1.2.3")}}, nil
+}
+
+// GAP-0287: a signal override on another host is checked on its own, and the
+// deferred line names that host, not the main endpoint's.
+func TestGAP0287DeferredLineNamesTheOverrideHost(t *testing.T) {
+	var stderr bytes.Buffer
+	factory := newClusterFactory(t, &stderr, "", false)
+	factory.resolver = hostResolver{}
+	destination := compileDestination(t, config.ObservabilityV8DestinationSource{
+		Name: "split", Kind: config.ObservabilityV8DestinationOTLP, Protocol: "http/protobuf",
+		Endpoint: "http://collector.example.com:4318", TLS: config.ObservabilityV8TLSSource{Insecure: true},
+		NetworkSafety: config.ObservabilityV8NetworkSafetySource{AllowCGNAT: true},
+		SignalOverrides: map[observability.Signal]config.ObservabilityV8SignalOverrideSource{
+			observability.SignalLogs: {Endpoint: "http://logs.otel-system.svc:4318"},
+		},
+	})
+	adapter, cleanup, err := factory.PrepareDestination(t.Context(), destination, testResourceContext(t))
+	if err != nil || adapter == nil {
+		t.Fatalf("adapter=%T error=%v", adapter, err)
+	}
+	_ = cleanup(context.Background())
+	line := stderr.String()
+	if !strings.Contains(line, "endpoint host logs.otel-system.svc resolves") ||
+		!strings.Contains(line, "network_safety.allow_private_networks: true") ||
+		strings.Contains(line, "collector.example.com") {
+		t.Fatalf("deferred line %q", line)
 	}
 }

@@ -66,16 +66,19 @@ func (factory *Factory) noteFailure(
 	factory.writeNote(fmt.Sprintf("%s%q: %s or remove the destination", destinationNotePrefix, destination.Name, problem))
 }
 
-// noteDeferred writes why a destination started without a usable endpoint
-// address (otlp.Factory.Deferred): the gateway runs, and every delivery
+// noteDeferred writes why one endpoint host of a destination started without
+// a usable address (otlp.Factory.Deferrals, or a push activation warning):
+// the gateway runs, and every delivery
 // re-resolves the host and refuses an address its network_safety does not
 // allow, so the destination delivers nothing until the answer or the config
 // changes.
-func (factory *Factory) noteDeferred(destination config.ObservabilityV8EffectiveDestination, cause error) {
+func (factory *Factory) noteDeferred(destination config.ObservabilityV8EffectiveDestination, host string, cause error) {
 	if factory == nil || factory.secureClient || cause == nil {
 		return
 	}
-	host := endpointHost(destination.Transport.Endpoint)
+	if host == "" {
+		host = "(unparsed)"
+	}
 	switch {
 	case errors.Is(cause, netguard.ErrV8AddressProhibited):
 		factory.writeNote(fmt.Sprintf("%s%q: endpoint host %s resolves to an address %s; the gateway runs without this destination and refuses that address on every delivery",
@@ -105,9 +108,10 @@ func (factory *Factory) destinationWarnings(destination config.ObservabilityV8Ef
 	return push.WarningObserverFunc(func(warning push.Warning) {
 		switch warning.Code {
 		case push.WarningActivationAddressProhibited:
-			factory.noteDeferred(destination, &netguard.V8AddressProhibitedError{Option: warning.Option})
+			factory.noteDeferred(destination, endpointHost(destination.Transport.Endpoint),
+				&netguard.V8AddressProhibitedError{Option: warning.Option})
 		case push.WarningActivationDNSDegraded:
-			factory.noteDeferred(destination, netguard.ErrV8ResolutionFailed)
+			factory.noteDeferred(destination, endpointHost(destination.Transport.Endpoint), netguard.ErrV8ResolutionFailed)
 		}
 		emitFactoryWarning(factory.warnings, warning)
 	})
@@ -198,4 +202,13 @@ func endpointHost(endpoint string) string {
 		return host
 	}
 	return "(unparsed)"
+}
+
+// noteOTLPDeferrals writes one line per deferred endpoint of an otlp
+// destination, naming the host that was refused (an override's, not the
+// main endpoint's, when it is the override that failed; GAP-0287).
+func (factory *Factory) noteOTLPDeferrals(destination config.ObservabilityV8EffectiveDestination, prepared *otlp.Factory) {
+	for _, deferral := range prepared.Deferrals() {
+		factory.noteDeferred(destination, deferral.Host, deferral.Cause)
+	}
 }

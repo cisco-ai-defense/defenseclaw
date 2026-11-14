@@ -172,7 +172,7 @@ type signalConfig struct {
 	// destination: its loopback collector gets no byte until
 	// verifyBundledCollector proves the listener's account (GAP-1087).
 	bundledStack bool
-	// deferred is why activation-time resolution did not pass (Factory.Deferred).
+	// deferred is why activation-time resolution did not pass (Factory.Deferrals).
 	deferred error
 }
 
@@ -182,21 +182,29 @@ type signalConfig struct {
 type Factory struct {
 	config  Config
 	signals map[observability.Signal]signalConfig
-	// deferred is the activation error a deferred signal started with
-	// (a netguard sentinel, never an address), or nil.
-	deferred error
-	mu       sync.Mutex
-	created  map[observability.Signal]bool
+	// deferrals are the endpoints that started deferred (Deferrals).
+	deferrals []Deferral
+	mu        sync.Mutex
+	created   map[observability.Signal]bool
 }
 
-// Deferred returns why a selected signal started deferred: a
+// Deferral is one endpoint of the destination that started deferred: its
+// host (the main endpoint's, or a signal override's) and why, a
 // netguard.ErrV8ResolutionFailed or netguard.ErrV8AddressProhibited
-// (V8ProhibitedOption names the fix), or nil when every signal resolved.
-func (factory *Factory) Deferred() error {
+// (V8ProhibitedOption names the fix). It never holds an address.
+type Deferral struct {
+	Host  string
+	Cause error
+}
+
+// Deferrals returns every endpoint that started deferred, one per host and
+// cause (an override on another host is checked on its own, GAP-0287), or
+// nil when every signal resolved.
+func (factory *Factory) Deferrals() []Deferral {
 	if factory == nil {
 		return nil
 	}
-	return factory.deferred
+	return append([]Deferral(nil), factory.deferrals...)
 }
 
 // Prepare performs offline validation, exact TLS preparation, and guarded
@@ -236,7 +244,7 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 	}
 	seen := make(map[observability.Signal]bool, len(config.Selected))
 	signals := make(map[observability.Signal]signalConfig, len(config.Selected))
-	var deferred error
+	var deferrals []Deferral
 	for _, signal := range config.Selected {
 		if seen[signal] || (signal != observability.SignalLogs && signal != observability.SignalTraces && signal != observability.SignalMetrics) {
 			return nil, newError(ErrorInvalidConfig, nil)
@@ -253,9 +261,11 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 		if resolveErr != nil {
 			return nil, resolveErr
 		}
-		// A prohibited answer is the stronger reason to report.
-		if resolved.deferred != nil && (deferred == nil || errors.Is(resolved.deferred, netguard.ErrV8AddressProhibited)) {
-			deferred = resolved.deferred
+		if resolved.deferred != nil {
+			deferral := Deferral{Host: resolved.url.Hostname(), Cause: resolved.deferred}
+			if !containsDeferral(deferrals, deferral) {
+				deferrals = append(deferrals, deferral)
+			}
 		}
 		resolved.signal = signal
 		resolved.tls = cloneTLS(tlsConfig)
@@ -286,7 +296,17 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 	config.Headers = cloneHeaders(config.Headers)
 	config.SignalOverride = cloneOverrides(config.SignalOverride)
 	config.TLS.CABundle = append([]byte(nil), config.TLS.CABundle...)
-	return &Factory{config: config, signals: signals, deferred: deferred, created: make(map[observability.Signal]bool)}, nil
+	return &Factory{config: config, signals: signals, deferrals: deferrals, created: make(map[observability.Signal]bool)}, nil
+}
+
+func containsDeferral(deferrals []Deferral, candidate Deferral) bool {
+	for _, deferral := range deferrals {
+		if deferral.Host == candidate.Host && deferral.Cause.Error() == candidate.Cause.Error() &&
+			netguard.V8ProhibitedOption(deferral.Cause) == netguard.V8ProhibitedOption(candidate.Cause) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeProtocol(value string) (string, bool) {

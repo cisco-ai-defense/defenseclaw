@@ -41,3 +41,23 @@ func TestGAP0275SubstrateGatewayWarnsWithoutAnExportDestination(t *testing.T) {
 		})
 	}
 }
+
+// GAP-0286: the chart's try-out collector keeps nothing, so it is not an
+// audit record: alone it gets its own warning; next to a real one, none.
+func TestGAP0286ChartCollectorIsNotADurableExport(t *testing.T) {
+	dataDir := t.TempDir()
+	collector := "    - name: chart-collector\n      kind: otlp\n      protocol: http/protobuf\n" +
+		"      endpoint: http://defenseclaw-otel-collector.dc.svc:4318\n      tls: {insecure: true}\n" +
+		"      network_safety: {allow_private_networks: true}\n"
+	only := substrateAuditExportWarningFor("config.yaml",
+		[]byte(fmt.Sprintf("config_version: 9\ndata_dir: %q\nobservability:\n  destinations:\n%s", dataDir, collector)), dataDir)
+	if !strings.Contains(only, "the only export destination is chart-collector") || !strings.Contains(only, "keeps nothing") {
+		t.Fatalf("chart-collector alone: %q", only)
+	}
+	both := substrateAuditExportWarningFor("config.yaml",
+		[]byte(fmt.Sprintf("config_version: 9\ndata_dir: %q\nobservability:\n  destinations:\n%s"+
+			"    - name: siem\n      kind: otlp\n      endpoint: collector.example.com:4317\n", dataDir, collector)), dataDir)
+	if both != "" {
+		t.Fatalf("with a real destination: %q", both)
+	}
+}

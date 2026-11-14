@@ -182,7 +182,7 @@ func (factory *Factory) PrepareOTLPGenerationPipelines(
 			factory.noteFailure(ctx, candidate.destination, err)
 			return fail(err)
 		}
-		factory.noteDeferred(candidate.destination, prepared.Deferred())
+		factory.noteOTLPDeferrals(candidate.destination, prepared)
 		if containsSignal(candidate.signals, observability.SignalTraces) && candidate.galileo {
 			if traceProjection == nil {
 				evaluator, evaluatorErr := router.New(plan)
