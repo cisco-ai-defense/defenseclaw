@@ -2003,6 +2003,7 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseAccountFolders(result)
 		if result.Action == "status" || result.Action == "verify" {
 			applyWindowsEnterpriseShippedRulePacks(result)
+			applyWindowsEnterpriseHookImage(result)
 			applyWindowsEnterpriseHookRuntimeAccess(result)
 			applyWindowsEnterpriseGuardianTargets(result)
 			applyWindowsEnterpriseUserCleanupFailures(result)
@@ -3714,6 +3715,22 @@ var windowsEnterpriseKnownCodes = []string{
 	// A Setup-owned record another account owns or can write: a repair that
 	// carries the payload keeps it aside and writes it again (GAP-0602).
 	"untrusted_record",
+	// The launch images of the new release could not be staged or did not
+	// start (GAP-0751). The rollback text follows the throw, so the code is
+	// not at the start of the message. Exit 1603: every agent hook config
+	// still names the installed image.
+	"hook_image_start_failed",
+	"hook_image_digest_mismatch",
+	"hook_image_stage_failed",
+	// The new launch folder stayed busy (an antivirus or EDR scan of the new
+	// image) through the publish retries: retryable, exit 1618, nothing
+	// switched.
+	"hook_image_publish_busy",
+	// hook-image retire (before a rollback to 1.0.9 or earlier, GAP-0751):
+	// refused (the transition image is not the recorded one; nothing
+	// changed) or pending (a config still names a launch folder; rerun).
+	"hook_image_retire_refused",
+	"hook_image_retire_pending",
 }
 
 // windowsEnterpriseBundleRefusalCodes are the bundle refusals a retry of the
@@ -3738,13 +3755,15 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			return enterprisestatus.WindowsExitBusy
 		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
 			return enterprisestatus.WindowsExitBusy
-		case "hook_calls_running", "hook_in_use", "codex_state_held", "codex_requirements_held":
+		case "hook_calls_running", "hook_in_use", "codex_state_held", "codex_requirements_held", "hook_image_publish_busy":
 			// The lifecycle deferred before it changed anything, while hook
 			// calls of the installed release still run (GAP-1124), another
 			// program holds the installed hook open (GAP-2001) or a user
 			// holds the Codex state of 1.0.8 or the Codex requirements open
 			// in a way that would fail the run after the services stopped
-			// (GAP-0765, g582 round 11c).
+			// (GAP-0765, g582 round 11c), or an antivirus or EDR scan kept
+			// the new hook launch folder busy and the run rolled back
+			// (GAP-0751).
 			return enterprisestatus.WindowsExitBusy
 		case "guardian_state_held":
 			// A program holds a hook guardian state file open: the run
@@ -4834,6 +4853,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				coworkReason, coworkDetail = windowsEnterpriseShippedRulePacksEnsureDrift()
 			}
 			if !pending && coworkReason == "" {
+				// The launch folder agent hooks start is missing or changed
+				// (GAP-0751): PowerShell verify does not check it.
+				coworkReason, coworkDetail = windowsEnterpriseHookImageEnsureDrift()
+			}
+			if !pending && coworkReason == "" {
 				// The module can set ok:false for security_incomplete with no
 				// failed check. Keep its warning, without turning that into a
 				// synthetic not_ready error during result translation.
@@ -4918,6 +4942,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				// A shipped rule pack the config selects that is missing or
 				// changed: PowerShell verify does not check it (#1445).
 				coworkReason, coworkDetail = windowsEnterpriseShippedRulePacksEnsureDrift()
+			}
+			if coworkReason == "" {
+				// The launch folder agent hooks start is missing or changed
+				// (GAP-0751): PowerShell verify does not check it.
+				coworkReason, coworkDetail = windowsEnterpriseHookImageEnsureDrift()
 			}
 		}
 		switch {

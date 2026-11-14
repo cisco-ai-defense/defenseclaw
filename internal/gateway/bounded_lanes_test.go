@@ -49,9 +49,9 @@ import (
 //	}
 //
 // Inputs come from generator functions of size and shape, never from literal
-// attack text. A known violation is an OPEN entry: it is logged, the case
-// must still fail (an OPEN entry that passes fails the test: delete it), and
-// it names one tier and an open gap id.
+// attack text. A known violation is an OPEN entry keyed "<tier>/<shape>": it
+// waives that tier and shape only, the case must still fail (an OPEN entry
+// that passes fails the test: delete it), and it names an open gap id.
 
 // boundedLaneCap is one cap of one lane.
 type boundedLaneCap struct {
@@ -66,19 +66,50 @@ type boundedLaneCap struct {
 	// from its existing fixtures, that gen places before or after the
 	// capped part.
 	seen func() boundedLaneCall
-	// legacy names the lane that will move a cap still on the old
-	// evaluation-limit path to the helper. Only the rel shell rows have one;
-	// every other lane is adopted: past the cap its reason names the cap.
-	legacy string
+	// path is boundedAdopted (past the cap the reason names the cap) or, for
+	// the rel shell reading bounds only (boundedLegacyLanes), the old
+	// evaluation-limit path that s7/parselimits moves to the helper.
+	path boundedPath
 	// work marks a Time cap counted in work units: size is the units, never
-	// wall-clock time (which no generator can drive reliably).
+	// wall-clock time (which no generator can drive reliably). The test
+	// checks that the answer is the same on a second run.
 	work bool
+	// connector is the connector the lane's route judges for (claudecode
+	// when empty; required with decide); its tier is asserted at the route
+	// and the judge stub is enabled for it.
+	connector string
 	// decide runs one call through the lane's route; nil is the Claude Code
 	// PreToolUse hook.
 	decide func(t *testing.T, api *APIServer, env boundedEnv, call boundedLaneCall) (string, []string)
-	// open maps a tier name to the gap of a known violation not yet fixed in
-	// this tree. The lane's fix deletes the entry.
+	// judge is the lane's judge row, required with decide: it runs one call
+	// through the lane's route on an API with the regex_judge stub
+	// (boundedJudgeAPI). TestBoundRuleJudgeStillDecides checks that a
+	// truncated call reaches the judge where the floor alerts and keeps the
+	// floor when the judge fails.
+	judge func(t *testing.T, api *APIServer, env boundedEnv, call boundedLaneCall) (string, []string)
+	// open maps "<tier>/<shape>" to the gap of a known violation not yet
+	// fixed in this tree. The lane's fix deletes the entry.
 	open map[string]string
+}
+
+// boundedPath is how a lane's cap reaches the decision.
+type boundedPath uint8
+
+const (
+	boundedAdopted boundedPath = iota
+	// boundedLegacyShellReading: trustedActionLimitFindings, to be moved to
+	// withBoundedTruncation by s7/parselimits.
+	boundedLegacyShellReading
+)
+
+// boundedLegacyLanes are the only lanes allowed on the legacy path.
+var boundedLegacyLanes = map[string]bool{"shell-parse nesting": true, "shell-parse statements": true}
+
+func (lane boundedLaneCap) connectorName() string {
+	if lane.connector == "" {
+		return "claudecode"
+	}
+	return lane.connector
 }
 
 // boundedShape is the shape of a generated input.
@@ -120,15 +151,15 @@ func registerBoundedLane(caps ...boundedLaneCap) { boundedLanes = append(bounded
 func init() {
 	registerBoundedLane(
 		boundedLaneCap{lane: "shell-parse nesting", cap: bounded.Depth, limit: shellparse.MaxNestingDepth,
-			gen:    boundedShellLane(boundedNestedSubshells, boundedNestedAssignments),
-			seen:   boundedShellSeenCall,
-			legacy: "s7/parselimits",
-			open: map[string]string{"default": "rel-1-0-10:GAP-0312", "permissive": "rel-1-0-10:GAP-0312",
-				"managed": "rel-1-0-10:GAP-0312"}},
+			gen:  boundedShellLane(boundedNestedSubshells, boundedNestedAssignments),
+			seen: boundedShellSeenCall,
+			path: boundedLegacyShellReading,
+			open: map[string]string{"default/seen": "rel-1-0-10:GAP-0312", "permissive/seen": "rel-1-0-10:GAP-0312",
+				"managed/seen": "rel-1-0-10:GAP-0312"}},
 		boundedLaneCap{lane: "shell-parse statements", cap: bounded.Items, limit: boundedShellStatements,
-			gen:    boundedShellLane(gap0568Assignments, boundedListStatements),
-			seen:   boundedShellSeenCall,
-			legacy: "s7/parselimits"},
+			gen:  boundedShellLane(gap0568Assignments, boundedListStatements),
+			seen: boundedShellSeenCall,
+			path: boundedLegacyShellReading},
 		boundedLaneCap{lane: "shell operands", cap: bounded.Items, limit: actionfacts.MaxOperandsPerCall,
 			gen:  boundedShellLane(boundedListOperands, boundedSplitOperands),
 			seen: boundedShellSeenCall},
@@ -308,13 +339,78 @@ func boundedTierAPI(t *testing.T, posture string, managedInstall bool, want boun
 		api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
 		api.scannerCfg.Enterprise.Profile = managed.ProfileStandalone
 	}
-	if got := api.scannerCfg.HookPolicyTierForConnector("claudecode"); got != posture {
-		t.Fatalf("pack %s: the route reads posture %q", posture, got)
-	}
-	if got := api.boundedTier(context.Background(), "claudecode"); got != want {
-		t.Fatalf("pack %s managed=%t: the route judges in tier %d, want %d", posture, managedInstall, got, want)
+	for _, connector := range boundedTierConnectors() {
+		if got := api.scannerCfg.HookPolicyTierForConnector(connector); got != posture {
+			t.Fatalf("pack %s: the %s route reads posture %q", posture, connector, got)
+		}
+		if got := api.boundedTier(context.Background(), connector); got != want {
+			t.Fatalf("pack %s managed=%t: the %s route judges in tier %d, want %d", posture, managedInstall, connector, got, want)
+		}
 	}
 	return api
+}
+
+// boundedTierConnectors are the connectors whose route tier is asserted:
+// claudecode and codex always, and every lane's own connector.
+func boundedTierConnectors() []string {
+	connectors := []string{"claudecode", "codex"}
+	for _, lane := range boundedLanes {
+		if !slices.Contains(connectors, lane.connectorName()) {
+			connectors = append(connectors, lane.connectorName())
+		}
+	}
+	return connectors
+}
+
+// boundedValidateLanes checks the lane table itself.
+func boundedValidateLanes(t *testing.T) {
+	t.Helper()
+	for _, err := range boundedLaneTableErrors(boundedLanes) {
+		t.Error(err)
+	}
+}
+
+// boundedLaneTableErrors are the misuses of a lane table.
+func boundedLaneTableErrors(lanes []boundedLaneCap) []string {
+	var errs []string
+	tierNames, shapeNames := map[string]bool{}, map[string]bool{}
+	for _, tier := range boundedTestTiers {
+		tierNames[tier.name] = true
+	}
+	for _, s := range boundedShapes {
+		shapeNames[s.name] = true
+	}
+	for _, lane := range lanes {
+		name := lane.lane + "/" + lane.cap.String()
+		if lane.gen == nil || lane.seen == nil || lane.limit <= 0 {
+			errs = append(errs, fmt.Sprintf("%s: a lane registers gen, seen and a positive limit", name))
+		}
+		if lane.path == boundedLegacyShellReading && !boundedLegacyLanes[lane.lane] {
+			errs = append(errs, fmt.Sprintf("%s: only the rel shell reading bounds may stay on the legacy path; adopt withBoundedTruncation", name))
+		}
+		if lane.path > boundedLegacyShellReading {
+			errs = append(errs, fmt.Sprintf("%s: unknown path %d", name, lane.path))
+		}
+		if (lane.cap == bounded.Time) != lane.work {
+			errs = append(errs, fmt.Sprintf("%s: a time cap, and only a time cap, is registered in work units (work: true)", name))
+		}
+		if lane.decide != nil && lane.judge == nil {
+			errs = append(errs, fmt.Sprintf("%s: lane %s has its own route and no judge row", name, lane.lane))
+		}
+		if lane.decide == nil && lane.judge != nil {
+			errs = append(errs, fmt.Sprintf("%s: a judge row without its own route (decide) would never run", name))
+		}
+		if lane.decide != nil && lane.connector == "" {
+			errs = append(errs, fmt.Sprintf("%s: a lane with its own route names its connector", name))
+		}
+		for key, gap := range lane.open {
+			tier, shape, ok := strings.Cut(key, "/")
+			if !ok || !tierNames[tier] || !shapeNames[shape] || !boundedOpenGap.MatchString(gap) {
+				errs = append(errs, fmt.Sprintf("%s: OPEN entry %q: %q needs a \"<tier>/<shape>\" key and one open gap id", name, key, gap))
+			}
+		}
+	}
+	return errs
 }
 
 func TestBoundRuleEveryLaneCap(t *testing.T) {
@@ -322,24 +418,7 @@ func TestBoundRuleEveryLaneCap(t *testing.T) {
 		t.Fatal("no lane registered a cap")
 	}
 	env := boundedLaneEnv(t)
-	tierNames := map[string]bool{}
-	for _, tier := range boundedTestTiers {
-		tierNames[tier.name] = true
-	}
-	for _, lane := range boundedLanes {
-		if lane.gen == nil || lane.seen == nil || lane.limit <= 0 {
-			t.Errorf("%s/%s: a lane registers gen, seen and a positive limit", lane.lane, lane.cap)
-		}
-		if lane.cap == bounded.Time && !lane.work {
-			t.Errorf("%s: a time cap is registered in work units (work: true), never wall-clock", lane.lane)
-		}
-		for key, gap := range lane.open {
-			if !tierNames[key] || !boundedOpenGap.MatchString(gap) {
-				t.Errorf("%s/%s: OPEN entry %q: %q needs a tier name and one open gap id", lane.lane, lane.cap, key, gap)
-			}
-		}
-	}
-	if t.Failed() {
+	if boundedValidateLanes(t); t.Failed() {
 		return
 	}
 	for _, tier := range boundedTestTiers {
@@ -351,11 +430,15 @@ func TestBoundRuleEveryLaneCap(t *testing.T) {
 			if decide == nil {
 				decide = boundedDecideClaudeCode
 			}
-			adopted := lane.legacy == ""
-			var violations []string
-			fail := func(format string, args ...any) { violations = append(violations, fmt.Sprintf(format, args...)) }
+			adopted := lane.path == boundedAdopted
+			violations := map[string][]string{} // by shape name
+			var shapeName string
+			fail := func(format string, args ...any) {
+				violations[shapeName] = append(violations[shapeName], fmt.Sprintf(format, args...))
+			}
 			seenAlone := boundedParse(first(decide(t, api, env, lane.seen())))
 			for _, s := range boundedShapes {
+				shapeName = s.name
 				at, ok := lane.gen(lane.limit, s.shape)
 				if !ok {
 					if s.required {
@@ -370,6 +453,12 @@ func TestBoundRuleEveryLaneCap(t *testing.T) {
 				for _, size := range []int{lane.limit + 1, 2 * lane.limit} {
 					call, _ := lane.gen(size, s.shape)
 					action, findings := decide(t, api, env, call)
+					if lane.work {
+						// Work units, not wall-clock: the same input gives the same answer.
+						if again, againFindings := decide(t, api, env, call); again != action || !slices.Equal(againFindings, findings) {
+							fail("%s %s size=%d: a work-unit cap answered %s then %s: not counted in work units", name, s.name, size, action, again)
+						}
+					}
 					got := boundedParse(action)
 					want := floor
 					switch {
@@ -386,16 +475,19 @@ func TestBoundRuleEveryLaneCap(t *testing.T) {
 					}
 				}
 			}
-			switch gap := lane.open[tier.name]; {
-			case gap != "" && len(violations) == 0:
-				t.Errorf("%s: OPEN entry %s passes: delete it", name, gap)
-			case gap != "":
-				for _, v := range violations {
-					t.Logf("OPEN %s: %s", gap, v)
-				}
-			default:
-				for _, v := range violations {
-					t.Error(v)
+			for _, s := range boundedShapes {
+				gap := lane.open[tier.name+"/"+s.name]
+				switch {
+				case gap != "" && len(violations[s.name]) == 0:
+					t.Errorf("%s %s: OPEN entry %s passes: delete it", name, s.name, gap)
+				case gap != "":
+					for _, v := range violations[s.name] {
+						t.Logf("OPEN %s: %s", gap, v)
+					}
+				default:
+					for _, v := range violations[s.name] {
+						t.Error(v)
+					}
 				}
 			}
 		}
@@ -407,12 +499,14 @@ func first(action string, _ []string) string { return action }
 // boundedJudgeAPI is a tier's test API with a regex_judge tool-call judge
 // for claudecode whose provider fails, so the test sees both that the judge
 // is asked and that the floor stands when it gives no verdict.
-func boundedJudgeAPI(t *testing.T, posture string, managedInstall bool, tier bounded.Tier) (*APIServer, *mockLLMProvider) {
+func boundedJudgeAPI(t *testing.T, posture string, managedInstall bool, tier bounded.Tier,
+) (*APIServer, *mockLLMProvider) {
 	t.Helper()
 	api := boundedTierAPI(t, posture, managedInstall, tier)
 	api.scannerCfg.DataDir = t.TempDir()
 	api.scannerCfg.Guardrail.DetectionStrategy = "regex_judge"
-	api.scannerCfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"claudecode"}}
+	api.scannerCfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, ToolInjection: true,
+		HookConnectors: boundedTierConnectors()}
 	mock := &mockLLMProvider{err: errors.New("judge down")}
 	api.SetHookJudge(&LLMJudge{cfg: &api.scannerCfg.Guardrail.Judge, model: "test-model", provider: mock, rp: &guardrail.RulePack{}})
 	return api, mock
@@ -428,12 +522,16 @@ func TestBoundRuleJudgeStillDecides(t *testing.T) {
 		api, mock := boundedJudgeAPI(t, tier.posture, tier.managed, tier.tier)
 		floor := bounded.Unknown(tier.tier)
 		for _, lane := range boundedLanes {
-			if lane.decide != nil {
-				continue // a lane on another route brings its own judge row
+			judge := lane.judge
+			if lane.decide == nil {
+				judge = boundedDecideClaudeCode
+			}
+			if judge == nil {
+				continue // the lane table check reports it
 			}
 			call, _ := lane.gen(lane.limit+1, boundedShape{})
 			asked := boundedJudgeCalls(mock)
-			action, findings := boundedDecideClaudeCode(t, api, env, call)
+			action, findings := judge(t, api, env, call)
 			got := boundedParse(action)
 			name := tier.name + "/" + lane.lane
 			// Where the floor alerts the judge must be asked (this also proves
@@ -452,4 +550,43 @@ func boundedJudgeCalls(mock *mockLLMProvider) int {
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
 	return len(mock.captured)
+}
+
+// The lane table rejects each misuse the review named: a legacy path outside
+// the rel shell rows, an own route without a judge row, a work flag on a
+// non-time cap (and a time cap without it), an OPEN entry for a whole tier
+// or with no gap id, a missing seen element.
+func TestBoundRuleLaneTableRejectsMisuse(t *testing.T) {
+	// A valid lane built here, not taken from the live table, so a lane an
+	// adopter registers does not change what each edit tests.
+	good := boundedLaneCap{lane: "table check", cap: bounded.Items, limit: 8,
+		gen: boundedShellLane(boundedListOperands, boundedSplitOperands), seen: boundedShellSeenCall}
+	if errs := boundedLaneTableErrors([]boundedLaneCap{good}); len(errs) != 0 {
+		t.Fatalf("a valid lane is rejected: %v", errs)
+	}
+	route := func(*testing.T, *APIServer, boundedEnv, boundedLaneCall) (string, []string) { return "", nil }
+	// Each edit is one defect, matched by the error it must raise.
+	for _, tc := range []struct {
+		name, want string
+		edit       func(*boundedLaneCap)
+	}{
+		{"legacy outside the shell rows", "only the rel shell reading bounds", func(l *boundedLaneCap) { l.path = boundedLegacyShellReading }},
+		{"unknown path", "unknown path", func(l *boundedLaneCap) { l.path = boundedLegacyShellReading + 1 }},
+		{"own route, no judge row", "has its own route and no judge row", func(l *boundedLaneCap) { l.decide, l.connector = route, "codex" }},
+		{"own route, no connector", "names its connector", func(l *boundedLaneCap) { l.decide, l.judge = route, route }},
+		{"judge row without own route", "judge row without its own route", func(l *boundedLaneCap) { l.judge = route }},
+		{"work on a non-time cap", "only a time cap", func(l *boundedLaneCap) { l.work = true }},
+		{"time cap without work", "only a time cap", func(l *boundedLaneCap) { l.cap = bounded.Time }},
+		{"OPEN for a whole tier", "OPEN entry", func(l *boundedLaneCap) { l.open = map[string]string{"default": "rel-1-0-10:GAP-0312"} }},
+		{"OPEN wildcard", "OPEN entry", func(l *boundedLaneCap) { l.open = map[string]string{"*/seen": "rel-1-0-10:GAP-0312"} }},
+		{"OPEN without a gap id", "OPEN entry", func(l *boundedLaneCap) { l.open = map[string]string{"default/seen": "later"} }},
+		{"no seen element", "registers gen, seen and a positive limit", func(l *boundedLaneCap) { l.seen = nil }},
+	} {
+		lane := good
+		tc.edit(&lane)
+		errs := boundedLaneTableErrors([]boundedLaneCap{lane})
+		if len(errs) != 1 || !strings.Contains(errs[0], tc.want) {
+			t.Errorf("%s: errors %q, want exactly one containing %q", tc.name, errs, tc.want)
+		}
+	}
 }

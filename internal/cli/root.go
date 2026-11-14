@@ -706,8 +706,6 @@ func loadDotEnvIntoOS(path string) {
 		return
 	}
 	managedHost := envvars.ManagedStandalone() || dotEnvManagedSource()
-	// An adopted gateway token copy never shadows the one the operator saved.
-	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -719,7 +717,7 @@ func loadDotEnvIntoOS(path string) {
 		}
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(v)
-		if !dotEnvKeyIsValid(k) || strings.IndexByte(v, 0) >= 0 || dotEnvKeyIsProcessControl(k) || shadowed.Has(k) {
+		if !dotEnvKeyIsValid(k) || strings.IndexByte(v, 0) >= 0 || dotEnvKeyIsProcessControl(k) {
 			continue
 		}
 		// A managed standalone host skips what the registry ignores there.

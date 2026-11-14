@@ -15,7 +15,11 @@
 // with Floor. Nothing here allocates on the hot path.
 package bounded
 
-import "time"
+import (
+	"math"
+	"sync/atomic"
+	"time"
+)
 
 // Cap is the kind of bound a reader hit.
 type Cap uint8
@@ -62,8 +66,12 @@ func Caps() []Cap {
 }
 
 // CapSet is the set of caps a reading hit: a plain value a reader returns in
-// its result. The zero value hit none.
+// its result. The zero value hit none. Bit 0 (no cap kind) marks an internal
+// bound misuse (see Misuse).
 type CapSet struct{ bits uint16 }
+
+// misuseBit marks a CapSet that holds the hit of a misused Counter.
+const misuseBit = 1
 
 // Of is the CapSet of the given caps. A cap with no kind (0 or out of range)
 // counts as Items: a reader that names no kind is still truncated.
@@ -89,8 +97,16 @@ func (s CapSet) Union(o CapSet) CapSet { return CapSet{s.bits | o.bits} }
 // Any reports that some cap was hit.
 func (s CapSet) Any() bool { return s.bits != 0 }
 
+// Misuse reports that the set holds the hit of a misused Counter (one never
+// bound with NewCounter, or one bound to another Truncated): an internal
+// error of the reader, named in the audit reason.
+func (s CapSet) Misuse() bool { return s.bits&misuseBit != 0 }
+
 // Has reports that cap c was hit.
 func (s CapSet) Has(c Cap) bool { return c != 0 && c < capEnd && s.bits&(1<<c) != 0 }
+
+// MisuseReason names an internal bound misuse in the audit reason.
+const MisuseReason = "internal bound misuse"
 
 // ReasonCode is the audit reason code of every truncated input.
 const ReasonCode = "bounded_truncated"
@@ -114,6 +130,9 @@ func (s CapSet) Reason() string {
 			buf = append(buf, capNames[c]...)
 			first = false
 		}
+	}
+	if s.Misuse() {
+		buf = append(buf, "; "+MisuseReason...)
 	}
 	return string(buf)
 }
@@ -163,11 +182,88 @@ func (t *Truncated) Before(now, deadline time.Time) bool {
 // Merge adds the caps of a nested reading.
 func (t *Truncated) Merge(s CapSet) { t.set = t.set.Union(s) }
 
-// Any reports that some cap was hit.
+// Any reports that some cap was hit. It sees this Truncated's own hits; the
+// hits of a misused Counter (unbound, or bound elsewhere) reach the result
+// only through Set(counters...).
 func (t *Truncated) Any() bool { return t.set.Any() }
 
-// Set is the caps hit so far, the value a reader returns.
-func (t *Truncated) Set() CapSet { return t.set }
+// Set is the caps hit so far, the value a reader returns. Pass the reader's
+// Counters: a misused one (never bound with NewCounter, or bound to another
+// Truncated) adds its hit and the misuse mark to THIS call's result, so the
+// call that was cut short floors and its reason names the misuse; no other
+// call is affected. With PanicOnMisuse on (go test), the misuse panics where
+// it is made instead. A Counter bound to another Truncated is read without a
+// lock, so share nothing between goroutines (go test catches it first).
+func (t *Truncated) Set(counters ...*Counter) CapSet {
+	set := t.set
+	for _, k := range counters {
+		if k == nil || k.t == t {
+			continue
+		}
+		if k.t == nil {
+			set = set.Union(k.own) // the misuse was reported at its take
+			continue
+		}
+		misuse(MisuseMisbound)
+		set = set.Union(k.t.set).with(k.cap).Union(CapSet{misuseBit})
+	}
+	return set
+}
+
+// Misuse is a kind of internal bound misuse.
+type Misuse uint8
+
+const (
+	// MisuseUnbound: a take on a Counter never bound with NewCounter.
+	MisuseUnbound Misuse = iota + 1
+	// MisuseMisbound: Set given a Counter bound to another Truncated.
+	MisuseMisbound
+)
+
+// String is the misuse's log name.
+func (m Misuse) String() string {
+	switch m {
+	case MisuseUnbound:
+		return "a take on a Counter never bound with NewCounter"
+	case MisuseMisbound:
+		return "a Counter passed to Truncated.Set is bound to another Truncated"
+	}
+	return "unknown misuse"
+}
+
+var (
+	misusePanics atomic.Bool
+	misuseHook   atomic.Pointer[func(Misuse)]
+)
+
+// misuse reports one misuse: a panic with PanicOnMisuse on, else the hook.
+func misuse(m Misuse) {
+	if misusePanics.Load() {
+		panic("bounded: " + m.String() + "; make every Counter with NewCounter(&thisTruncated, cap, max)")
+	}
+	if hook := misuseHook.Load(); hook != nil {
+		(*hook)(m)
+	}
+}
+
+// OnMisuse sets the function told about each misuse in production (the
+// gateway logs it once and counts it). The call is still floored: the hit
+// and the misuse mark are in its CapSet.
+func OnMisuse(hook func(Misuse)) {
+	if hook == nil {
+		misuseHook.Store(nil)
+		return
+	}
+	misuseHook.Store(&hook)
+}
+
+// PanicOnMisuse makes a misused Counter panic where the mistake is made (the
+// first take of an unbound Counter, Set with a Counter bound elsewhere)
+// instead of the production path (the hook, and the call floored). It is a
+// test hook: every package that imports this one calls it from a _test.go
+// file (func init() { bounded.PanicOnMisuse(true) }), which TestAdopters
+// checks; production code never does. This package does not import testing.
+func PanicOnMisuse(on bool) { misusePanics.Store(on) }
 
 // Counter counts one cap kind across a walk and records its hit in the
 // Truncated it was made for. Like Truncated it is used by pointer and never
@@ -179,9 +275,15 @@ func (t *Truncated) Set() CapSet { return t.set }
 // A Time cap counted in work units (one per node, statement or effect the
 // reader visits) trips on the same input on every host; prefer it to a
 // wall-clock deadline.
+//
+// NewCounter is the only way to make a Counter that counts. A zero Counter
+// (never set with NewCounter) refuses every take and keeps the hit, with the
+// misuse mark, for Truncated.Set(counters...), so the call it read floors;
+// under go test it panics. TestAdopters rejects a zero Counter in the code.
 type Counter struct {
 	_      noCopy
 	t      *Truncated
+	own    CapSet // the hits of an unbound Counter
 	n, max int
 	cap    Cap
 }
@@ -197,14 +299,29 @@ func NewCounter(t *Truncated, c Cap, max int) Counter {
 func (k *Counter) Take() bool { return k.TakeN(1) }
 
 // TakeN counts n items (the bytes of a string, for example). A negative n is
-// a reader error, never a refund: it records the cap and is false.
+// a reader error, never a refund: it records the cap and is false. The count
+// saturates instead of wrapping.
 func (k *Counter) TakeN(n int) bool {
-	if n < 0 {
-		k.t.Hit(k.cap)
+	if k.t == nil {
+		if !k.own.Misuse() {
+			misuse(MisuseUnbound)
+		}
+		k.own = k.own.with(k.cap).Union(CapSet{misuseBit})
 		return false
 	}
-	k.n += n
-	return k.t.Within(k.cap, k.n, k.max)
+	switch {
+	case n < 0:
+		k.n = math.MaxInt
+	case n > math.MaxInt-k.n:
+		k.n = math.MaxInt
+	default:
+		k.n += n
+	}
+	if k.n <= k.max {
+		return true
+	}
+	k.t.Hit(k.cap)
+	return false
 }
 
 // Action is a guardrail verdict, ordered from the weakest to the strictest.
@@ -228,14 +345,14 @@ func (a Action) String() string {
 }
 
 // ParseAction reads a gateway action name, in any case and with surrounding
-// space. "ask" is Confirm. An empty name is Allow. Any other name is Block
+// ASCII white space. "ask" is Confirm. An empty name is Allow. Any other name is Block
 // and known false: a verdict the floor cannot read is never lowered.
 func ParseAction(s string) (a Action, known bool) {
 	start, end := 0, len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t') {
+	for start < end && asciiSpace(s[start]) {
 		start++
 	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+	for end > start && asciiSpace(s[end-1]) {
 		end--
 	}
 	s = s[start:end]
@@ -251,6 +368,10 @@ func ParseAction(s string) (a Action, known bool) {
 		}
 	}
 	return Block, false
+}
+
+func asciiSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
 func equalFoldASCII(s, lower string) bool {

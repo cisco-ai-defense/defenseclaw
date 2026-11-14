@@ -4,6 +4,9 @@
 package bounded
 
 import (
+	"fmt"
+	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -45,6 +48,94 @@ func TestCounterRefusesANegativeTake(t *testing.T) {
 	}
 	if size.TakeN(500) {
 		t.Fatal("a negative take refunded 1000 bytes: 500 fit under a 10-byte cap")
+	}
+}
+
+// recordMisuse turns the panics off and records the hook calls for one test.
+func recordMisuse(t *testing.T) *[]Misuse {
+	t.Helper()
+	var seen []Misuse
+	PanicOnMisuse(false)
+	OnMisuse(func(m Misuse) { seen = append(seen, m) })
+	t.Cleanup(func() { OnMisuse(nil); PanicOnMisuse(true) })
+	return &seen
+}
+
+// A Counter bound to another Truncated than the reader returns is a panic
+// with PanicOnMisuse on (go test); in production the hook is told and the
+// hit, with the misuse mark, lands in this call's result (review V7).
+func TestSetCatchesAMisboundCounter(t *testing.T) {
+	var reader, other Truncated
+	items := NewCounter(&other, Items, 1)
+	items.Take()
+	items.Take()
+	func() {
+		defer func() {
+			if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), MisuseMisbound.String()) {
+				t.Fatalf("Set with a Counter bound to another Truncated: recovered %v, want the misbound panic", r)
+			}
+		}()
+		_ = reader.Set(&items)
+	}()
+	seen := recordMisuse(t)
+	got := reader.Set(&items)
+	if !got.Has(Items) || !got.Misuse() || !strings.HasSuffix(got.Reason(), "; "+MisuseReason) {
+		t.Fatalf("production Set: %+v reason %q, want items and the misuse named", got, got.Reason())
+	}
+	if len(*seen) != 1 || (*seen)[0] != MisuseMisbound {
+		t.Fatalf("hook calls %v, want one misbound", *seen)
+	}
+	bound := NewCounter(&reader, Paths, 0)
+	bound.Take()
+	if got := reader.Set(&bound, nil); got != Of(Paths) || got.Misuse() {
+		t.Fatalf("Set(bound counter): %+v", got)
+	}
+}
+
+// A zero Counter (a struct literal, no NewCounter) is never a silent unread,
+// and it floors only the call it read (review round 4 P3-1): under go test
+// its first take panics; in production it refuses every take, tells the hook
+// once, and Set(&zero) carries its hit and the misuse mark. Another call's
+// Truncated is not affected.
+func TestZeroCounterFloorsOnlyItsCall(t *testing.T) {
+	var zero Counter
+	func() {
+		defer func() {
+			if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), MisuseUnbound.String()) {
+				t.Fatalf("a take on an unbound Counter: recovered %v, want the unbound panic", r)
+			}
+		}()
+		zero.Take()
+	}()
+	seen := recordMisuse(t)
+	var reader, otherCall Truncated
+	for i := range 2 {
+		if zero.Take() {
+			t.Fatalf("take %d: a zero Counter allowed a take", i+1)
+		}
+	}
+	if got := reader.Set(&zero); !got.Has(Items) || !got.Misuse() {
+		t.Fatalf("Set(&zero) = %+v, want items and the misuse mark", got)
+	}
+	if otherCall.Any() || otherCall.Set().Any() {
+		t.Fatal("an unbound Counter's hit reached another call")
+	}
+	if len(*seen) != 1 || (*seen)[0] != MisuseUnbound {
+		t.Fatalf("hook calls %v, want one unbound (logged once per Counter)", *seen)
+	}
+}
+
+// The count saturates instead of wrapping.
+func TestTakeNSaturates(t *testing.T) {
+	var trunc Truncated
+	size := NewCounter(&trunc, Bytes, 10)
+	for i, n := range []int{math.MaxInt, math.MaxInt, 1} {
+		if size.TakeN(n) {
+			t.Fatalf("take %d of %d: a huge take wrapped the count back under the cap", i+1, n)
+		}
+	}
+	if !trunc.Set().Has(Bytes) {
+		t.Fatal("the saturated count lost its hit")
 	}
 }
 
@@ -144,6 +235,7 @@ func TestParseActionReadsEverySpelling(t *testing.T) {
 	for in, want := range map[string]Action{
 		"allow": Allow, "alert": Alert, "confirm": Confirm, "ask": Confirm, "block": Block,
 		"BLOCK": Block, "Block": Block, " block": Block, "block\t": Block, "ALERT": Alert, "": Allow,
+		"allow\n": Allow, "\r\nblock\v": Block, "\fconfirm": Confirm,
 	} {
 		if got, known := ParseAction(in); got != want || !known {
 			t.Errorf("ParseAction(%q) = %s known=%t, want %s", in, got, known, want)

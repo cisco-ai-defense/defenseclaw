@@ -261,6 +261,17 @@ type simpleLoopBind struct {
 	certain bool
 }
 
+// pipelineStage reports whether stmt is a bare pipeline: a pipe with no
+// negation, background, coprocess or redirect of its own, which is how the
+// parser nests the left stages of x | y | z.
+func pipelineStage(stmt *syntax.Stmt) bool {
+	if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown || len(stmt.Redirs) != 0 {
+		return false
+	}
+	binary, ok := stmt.Cmd.(*syntax.BinaryCmd)
+	return ok && (binary.Op == syntax.Pipe || binary.Op == syntax.PipeAll)
+}
+
 // sequenceStatementDetails is the one full-parser flattening step. The
 // reductions retain ordinary pipelines as a unit; simple-command policy
 // evaluation asks it to expose their individual stages too. Scope identifies
@@ -468,7 +479,18 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 				if _, loop := typed.Y.Cmd.(*syntax.WhileClause); loop && typed.Op == syntax.Pipe && len(typed.Y.Redirs) == 0 {
 					pipeInput = typed.X
 				}
-				return true, childScope('s', func() bool { return flatten(typed.X) }) &&
+				// A pipeline x | y | z is the tree ((x | y) | z) and its
+				// stages are siblings, each run by its own subshell. The
+				// inner pipeline is flattened in this scope, not in a child
+				// of it, so its stages take child scopes of this scope. A
+				// child scope per level made the name of a scope as long as
+				// the pipeline before it, and the names of n stages took
+				// n^2 bytes (GAP-0254: a 67 KB pipeline held 6 GiB).
+				left := func() bool { return childScope('s', func() bool { return flatten(typed.X) }) }
+				if pipelineStage(typed.X) {
+					left = func() bool { return flatten(typed.X) }
+				}
+				return true, left() &&
 					childScope('s', func() bool { return flatten(typed.Y) })
 			}
 			if !flatten(typed.X) {

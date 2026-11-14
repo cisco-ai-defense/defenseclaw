@@ -581,29 +581,11 @@ func (repo *CorrelationRepository) loadRelationships(
 	eventIDs []SemanticEventID,
 	observations []CorrelationObservation,
 ) ([]CorrelationRelationship, error) {
-	clauses := make([]string, 0, len(eventIDs)*2+4)
-	args := make([]any, 0, len(eventIDs)*2+4)
-	for _, eventID := range eventIDs {
-		clauses = append(clauses, `(from_kind='semantic_event' AND from_id=?)`,
-			`(to_kind='semantic_event' AND to_id=?)`)
-		args = append(args, string(eventID), string(eventID))
-	}
-	for _, observation := range observations {
-		clauses = append(clauses, `(from_kind='record' AND from_id=?)`, `(to_kind='record' AND to_id=?)`)
-		args = append(args, observation.RecordID, observation.RecordID)
-	}
-	if kind, id := anchorNode(anchor); kind != "" {
-		clauses = append(clauses, `(from_kind=? AND from_id=?)`, `(to_kind=? AND to_id=?)`)
-		args = append(args, string(kind), id, string(kind), id)
-	}
-	if len(clauses) == 0 {
+	statement, args := correlationRelationshipLoadStatement(anchor, eventIDs, observations)
+	if statement == "" {
 		return nil, nil
 	}
-	rows, err := repo.store.queryDB(ctx, "correlation_relationships_load", `SELECT
-		relationship_id, from_kind, from_id, to_kind, to_id, relationship_type, method,
-		confidence, rule_id, rule_version, status, created_time_unix_nano,
-		last_seen_time_unix_nano FROM correlation_relationships WHERE `+
-		strings.Join(clauses, " OR ")+` ORDER BY created_time_unix_nano, relationship_id`, args...)
+	rows, err := repo.store.queryDB(ctx, "correlation_relationships_load", statement, args...)
 	if err != nil {
 		return nil, fmt.Errorf("audit: load correlation relationships: %w", err)
 	}
@@ -623,6 +605,40 @@ func (repo *CorrelationRepository) loadRelationships(
 		result = append(result, relationship)
 	}
 	return result, rows.Err()
+}
+
+// correlationRelationshipLoadStatement is loadRelationships' query, "" when
+// it has no node to load; the index trim test runs EXPLAIN on it. Each node
+// term is one seek of the relationships' unique key (from) or of
+// idx_correlation_relationships_to.
+func correlationRelationshipLoadStatement(
+	anchor CorrelationAnchor,
+	eventIDs []SemanticEventID,
+	observations []CorrelationObservation,
+) (string, []any) {
+	clauses := make([]string, 0, len(eventIDs)*2+4)
+	args := make([]any, 0, len(eventIDs)*2+4)
+	for _, eventID := range eventIDs {
+		clauses = append(clauses, `(from_kind='semantic_event' AND from_id=?)`,
+			`(to_kind='semantic_event' AND to_id=?)`)
+		args = append(args, string(eventID), string(eventID))
+	}
+	for _, observation := range observations {
+		clauses = append(clauses, `(from_kind='record' AND from_id=?)`, `(to_kind='record' AND to_id=?)`)
+		args = append(args, observation.RecordID, observation.RecordID)
+	}
+	if kind, id := anchorNode(anchor); kind != "" {
+		clauses = append(clauses, `(from_kind=? AND from_id=?)`, `(to_kind=? AND to_id=?)`)
+		args = append(args, string(kind), id, string(kind), id)
+	}
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return `SELECT
+		relationship_id, from_kind, from_id, to_kind, to_id, relationship_type, method,
+		confidence, rule_id, rule_version, status, created_time_unix_nano,
+		last_seen_time_unix_nano FROM correlation_relationships WHERE ` +
+		strings.Join(clauses, " OR ") + ` ORDER BY created_time_unix_nano, relationship_id`, args
 }
 
 func (repo *CorrelationRepository) loadEvidence(
@@ -660,7 +676,43 @@ func (repo *CorrelationRepository) loadEvidence(
 		evidence.CreatedAt = time.Unix(0, created).UTC()
 		result = append(result, evidence)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return withImpliedCorrelationEvidence(result, relationships), nil
+}
+
+// withImpliedCorrelationEvidence adds the evidence each relationship implies
+// (impliedCorrelationEvidence) unless the store holds it, in the order of
+// loadEvidence's query.
+func withImpliedCorrelationEvidence(
+	stored []CorrelationRelationshipEvidence,
+	relationships []CorrelationRelationship,
+) []CorrelationRelationshipEvidence {
+	present := make(map[string]bool, len(stored))
+	for _, evidence := range stored {
+		present[evidence.EvidenceID] = true
+	}
+	result := stored
+	for _, relationship := range relationships {
+		implied, ok := impliedCorrelationEvidence(relationship)
+		if !ok || present[implied.EvidenceID] {
+			continue
+		}
+		present[implied.EvidenceID] = true
+		result = append(result, implied)
+	}
+	if len(result) == len(stored) {
+		return result
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := result[i].CreatedAt.UnixNano(), result[j].CreatedAt.UnixNano()
+		if left != right {
+			return left < right
+		}
+		return result[i].EvidenceID < result[j].EvidenceID
+	})
+	return result
 }
 
 func (repo *CorrelationRepository) ingestWatermark(ctx context.Context) (time.Time, error) {

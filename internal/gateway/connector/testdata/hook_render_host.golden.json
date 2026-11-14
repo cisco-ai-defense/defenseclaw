@@ -1400,8 +1400,8 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 20731,
-      "sha256": "fe3b555e071709d0536d9cb109e524492373287045849b0c082b3030288026e4"
+      "size": 21774,
+      "sha256": "93df4a19e0999cc2f2453383e86e81d026c5575e36a9eb573eb7ad344eaa2780"
     }
   },
   "kiro/managed=1/scoped=1/fail=open": {
@@ -1447,8 +1447,8 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 9947,
-      "sha256": "71f30058d0d7acc6760f77a06e30c01cb2d0021738a7f7a1eaae3d4f556334ee"
+      "size": 10990,
+      "sha256": "acfb15f6f34d867618566c11e2f6ad234798584ac0dbccbf98fa64e9acf3f753"
     }
   },
   "legacy/all-scripts": {
@@ -1534,8 +1534,8 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 20546,
-      "sha256": "5c9c0a20ac2d61c3d93ae6b380bfdb9081aef119a1adc80f733e06ca328e9415"
+      "size": 21589,
+      "sha256": "83c60f75af0ac23780c6244dc1b6832dbc9f8ca195646f0eabf6658cdf19800b"
     }
   },
   "legacy/all-scripts-no-token": {
@@ -1621,8 +1621,8 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 20546,
-      "sha256": "1a885759d00feeaaa4afbfc0197b6578acb9ab6105c9728e5fabd5c8e2d88bd1"
+      "size": 21589,
+      "sha256": "c36b691bf4fbf073a4aeae17607601158b1a5a0d87a2687f19aca42baf8d6a1b"
     }
   },
   "plugin/amp-plugin.ts/managed=0/fail=closed": {

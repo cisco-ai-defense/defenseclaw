@@ -179,9 +179,13 @@ function proveOnce(host: string, port: number, token: string, requestImpl: Reque
     const cancel = deadlineTimer(LISTENER_PROOF_DEADLINE_MS, () => req.destroy(notProven(host, port, true)));
     req.on("error", (err) => {
       cancel();
+      // Nothing listening is an outage, not a failed proof: say so plainly
+      // (rel-1-0-10 GAP-0064).
       reject(err instanceof ListenerProofError
         ? err
-        : new ListenerProofError(`${notProven(host, port).message}: ${err.message}`, nothingListens(err)));
+        : nothingListens(err)
+          ? new ListenerProofError(`the DefenseClaw gateway is not running (nothing listens on ${host}:${port})`, true)
+          : new ListenerProofError(`${notProven(host, port).message}: ${err.message}`, false));
     });
     req.end();
   });
@@ -321,7 +325,9 @@ export function provenCreateConnection(
     });
     const onConnectError = (err: Error) => {
       cancelConnect();
-      once(new ListenerProofError(`${notProven(host, port).message}: ${err.message}`, nothingListens(err)));
+      once(nothingListens(err)
+        ? new ListenerProofError(`the DefenseClaw gateway is not running (nothing listens on ${host}:${port})`, true)
+        : new ListenerProofError(`${notProven(host, port).message}: ${err.message}`, false));
     };
     socket.once("error", onConnectError);
     socket.once("connect", () => {
