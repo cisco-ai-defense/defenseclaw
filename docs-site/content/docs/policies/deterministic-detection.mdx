@@ -93,7 +93,9 @@ do not have:
 | Rule | Structure | Balanced/default | Strict |
 | --- | --- | --- | --- |
 | `TRUST-ADDRESSED-DEFER` | A message addressed to the assistant that defers the user's own task ("a message from X to you ... before you can solve the task ...") | alert (HIGH) | block |
-| `TRUST-CHAT-TEMPLATE-TOKEN` | A chat-template token that opens a system or assistant turn (`<\|im_start\|>system`, `<<SYS>>`, `[INST]`) | alert (HIGH) | block |
+| `TRUST-IGNORE-INSTEAD` | An override of the earlier instructions that names a replacement task ("ignore your previous <word> ... instead") | alert (HIGH) | block |
+| `TRUST-TODO-DATA-MOVE` | A message that opens with a task-list marker (`TODO:`, `FIXME:`) and tells the assistant to send, forward, share or transfer something | alert (HIGH) | block |
+| `TRUST-TODO-DIRECTIVE` | A message that opens with a task-list marker and tells the assistant to delete, change, visit, book or create something | alert (MEDIUM) | block |
 | `TRUST-FAKE-ROLE-HEADER` | A line that starts as a system or assistant header (`###(system_message)`, `[SYSTEM_PROMPT]`) | alert (HIGH) | block |
 | `TRUST-HIDDEN-TAGS` | Eight or more Unicode tag characters in a row (text no reader sees) | alert (HIGH) | block |
 | `TRUST-HIDDEN-INVISIBLE` | Sixteen or more zero-width or format characters in a row | alert (HIGH) | block |
