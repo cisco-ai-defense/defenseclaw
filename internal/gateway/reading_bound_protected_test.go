@@ -102,7 +102,8 @@ func readingBoundCellsIn(t *testing.T, rows []readingBoundRow, window time.Durat
 			// A protected deletion that the readers now read and prove
 			// (rel-1-0-10:GAP-0526: the statements of a text with a syntax
 			// error are judged) blocks: never below the evaluation limit.
-			if got != want && !(strings.HasPrefix(row.name, "protected ") && want == guardrailActionAlert && got == guardrailActionBlock) {
+			provedProtected := strings.HasPrefix(row.name, "protected ") && want == guardrailActionAlert && got == guardrailActionBlock
+			if got != want && !provedProtected {
 				t.Errorf("%s %s: action=%s, want %s", name, row.name, got, want)
 			}
 		}
