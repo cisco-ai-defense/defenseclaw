@@ -1160,8 +1160,15 @@ func TestManagedAIDOnly_NativeHookSelectedAllowAccountsAfterCancellation(t *test
 	if len(capture.deadlineRemaining) != 1 || capture.deadlineRemaining[0] <= 0 || capture.deadlineRemaining[0] > time.Second {
 		t.Fatalf("metric deadline remaining=%v, want one live <=1s bound", capture.deadlineRemaining)
 	}
-	if got := hookCapacity.snapshot().Window; got.DeadlineDenies != 1 {
-		t.Fatalf("hook capacity = %+v, want the call whose client left as one deadline deny", got)
+	// One deadline outcome by the no-answer fail mode of the connector on
+	// this OS (closed: a deadline deny; open, as hermes is on Windows: a late
+	// allow).
+	want := HookCapacityCounts{DeadlineDenies: 1}
+	if api.scannerCfg.EffectiveHookOutageFailModeForConnector("hermes") == "open" {
+		want = HookCapacityCounts{LateAllows: 1}
+	}
+	if got := hookCapacity.snapshot().Window; got != want {
+		t.Fatalf("hook capacity = %+v, want %+v for the call whose client left", got, want)
 	}
 }
 
