@@ -224,6 +224,9 @@ func writersAllProvenSafe(command, cwd, home string, memo *TargetMemo) bool {
 		if fixed && harmless[programBase(program)] {
 			continue // reads, lists or searches: no write to prove
 		}
+		if fixed && awkProgramWritesNothing(call, program, cwd, home) {
+			continue // an inline awk program with no file output: its operands are inputs
+		}
 		if !fixed || !writers[programBase(program)] {
 			return false
 		}
@@ -314,4 +317,41 @@ func capWriterPrograms(command, cwd, home string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// awkProgramWritesNothing reports an awk call whose one inline program the
+// output reader (awkOutputProof: strings, regular expression literals and
+// comments are data) proves has no file output and nothing it cannot prove.
+// Its operands are inputs, so a protected name in a regular expression or an
+// input operand is not a write (the managed carry, rel-1-0-10 GAP-0415).
+// A program file (-f, --file), an option the reader does not settle and a
+// program that is not fixed text are not proven.
+func awkProgramWritesNothing(call *syntax.CallExpr, program, cwd, home string) bool {
+	switch programBase(program) {
+	case "awk", "gawk", "mawk", "nawk":
+	default:
+		return false
+	}
+	words := make([]string, len(call.Args))
+	for i, arg := range call.Args {
+		text, fixed := StaticWord(arg, home)
+		if !fixed {
+			text = "\x00input" // an input operand or an assignment value, never program text
+		}
+		words[i] = text
+	}
+	for _, word := range words[1:] {
+		if word == "--" {
+			break
+		}
+		if strings.HasPrefix(word, "-f") || strings.HasPrefix(word, "--file") {
+			return false // a program file: its text is not read here
+		}
+	}
+	programs, _ := awkProgramWords(words)
+	if len(programs) != 1 || programs[0] == "\x00input" {
+		return false
+	}
+	output, unsafe, _ := awkOutputProof(programs[0], cwd, home)
+	return !output && !unsafe
 }
