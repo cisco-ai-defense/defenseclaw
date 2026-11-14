@@ -119,6 +119,7 @@ func TestWindowsHookCappedReadingIsAtLeastTheUnknownTier(t *testing.T) {
 			})
 			windowsHookHost = previous
 			got, _ := bounded.ParseAction(response.Action)
+			t.Logf("%d copies, %s pack: the Codex hook answers %s", copies, pack.name, response.Action)
 			if want := bounded.Unknown(pack.tier); got < want {
 				t.Errorf("%d copies, %s pack: action %q, want at least %s (the unknown tier of a capped reading)",
 					copies, pack.name, response.Action, want)
