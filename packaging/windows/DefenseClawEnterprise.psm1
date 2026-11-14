@@ -348,6 +348,13 @@ $script:DefenseClawRuntimeGenerationCollectError = ''
 # and whether this run did. Set per recovery; reset per lifecycle run.
 $script:DefenseClawRecoveryActivationDeferrable = $false
 $script:DefenseClawRecoveryActivationDeferred = $false
+# GAP-0601: set when the hook rollback copy of this run is this Setup's own
+# hook because the installed one did not have the recorded digest; the
+# result reports it as hook_rollback_copy_rederived.
+$script:DefenseClawHookRollbackCopyRederived = ''
+# GAP-0601: the services the restored release ran before a deferred
+# recovery (Complete-DefenseClawDeferredRecoveryActivation).
+$script:DefenseClawDeferredRecoveryServices = $null
 # A standalone uninstall with purge also removes each enrolled account's
 # per-user DefenseClaw folder when the managed-hook teardown finalizes
 # (Invoke-DefenseClawGatewayCommand tells the helper). Set per lifecycle run.
@@ -29040,13 +29047,21 @@ function Copy-DefenseClawRecordedHookPreimage {
         a rollback or a recovery puts back as a fresh, trusted object. When
         the installed hook does not have the recorded digest (or cannot be
         read), the copy is the guardian's protected copy, taken only when it
-        has that digest. When neither does, this throws, so the run stops
-        with the prior release intact. Nothing is written when Destination
-        is empty (a check before anything is stopped).
+        has that digest. When neither does, the rollback copy is this
+        Setup's own verified hook (ReplacementSource), and the notice says
+        so: the bytes that could not be checked are never kept, and the hook
+        a rollback puts back is the replacement the early-hook protocol
+        publishes anyway (GAP-0993). Before, this case threw on every Setup
+        run: a recovery that left the replacement hook in place over the
+        restored release's record then refused every /ensure, /repair,
+        /upgrade and /uninstall, with every service stopped (GAP-0601).
+        With no ReplacementSource it still throws. Nothing is written when
+        Destination is empty (a check before anything is stopped).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [AllowEmptyString()][string]$Destination = ''
+        [AllowEmptyString()][string]$Destination = '',
+        [AllowNull()][hashtable]$ReplacementSource
     )
     $expected = Get-DefenseClawRecordedHookSHA256 -Layout $Layout
     if ([string]::IsNullOrEmpty($expected)) {
@@ -29104,6 +29119,33 @@ function Copy-DefenseClawRecordedHookPreimage {
     }
     $installed = if ($liveProblem) { "cannot be read ($liveProblem)" } else { "has sha256 $live" }
     $protected = if ([string]::IsNullOrEmpty($guardianDigest)) { 'is missing or unreadable' } else { "has sha256 $guardianDigest" }
+    $replacementDigest = ''
+    if ($null -ne $ReplacementSource) {
+        $replacementDigest = ([string]$ReplacementSource.sha256).ToLowerInvariant()
+    }
+    if ($replacementDigest -cmatch '^[0-9a-f]{64}$') {
+        if ($write) {
+            Install-DefenseClawSourceDescriptor -Source $ReplacementSource -Destination $Destination
+            Assert-DefenseClawNoReparsePath -Path $Destination
+            $copied = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($copied -cne $replacementDigest) {
+                throw 'the replacement hook changed while its rollback copy was taken'
+            }
+            $notice = (
+                "the installed hook $installed and the guardian's protected copy $protected, " +
+                "not the $expected the deployment records; the rollback copy is this Setup's " +
+                "verified hook (sha256 $replacementDigest), and the hook record is written again " +
+                "when this run commits (GAP-0601)")
+            Write-DefenseClawLifecyclePhase -Stage "notice: $notice"
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+                subsystem = 'hook'
+                path      = [string]$Layout.HookPath
+                reason    = $notice
+            }
+            $script:DefenseClawHookRollbackCopyRederived = $notice
+        }
+        return $replacementDigest
+    }
     throw ("refusing to replace the installed hook: it $installed and the guardian's protected copy $protected, but the deployment records $expected, so no rollback copy can be checked. Nothing was stopped or changed. Next step: let the installed release's guardian restore its hook (about 5 seconds), or, for the installed release, run " + (Format-DefenseClawSetupAction -Action '/repair') + ", then " + (Format-DefenseClawRerunStep -SameSetupCommand))
 }
 
@@ -29124,7 +29166,7 @@ function Assert-DefenseClawHookPreimageAvailable {
         return
     }
     Assert-DefenseClawNoReparsePath -Path $Layout.HookPath
-    [void](Copy-DefenseClawRecordedHookPreimage -Layout $Layout)
+    [void](Copy-DefenseClawRecordedHookPreimage -Layout $Layout -ReplacementSource $Source)
 }
 
 function Publish-DefenseClawEarlyHook {
@@ -29160,7 +29202,10 @@ function Publish-DefenseClawEarlyHook {
         # records for the hook, not against itself, and a hook that does not
         # match is not the rollback copy: the guardian's protected copy is,
         # or the run throws before anything is stopped.
-        $preimageSHA256 = Copy-DefenseClawRecordedHookPreimage -Layout $Layout -Destination $preimage
+        $preimageSHA256 = Copy-DefenseClawRecordedHookPreimage `
+            -Layout $Layout `
+            -Destination $preimage `
+            -ReplacementSource $Source
         Assert-DefenseClawNoReparsePath -Path $preimage
     }
     else {
@@ -34065,6 +34110,8 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawRecoveryGatewayCandidate = $null
     $script:DefenseClawRecoveryGatewayRuns = @()
     $script:DefenseClawRecoveryGatewayRefusal = $null
+    $script:DefenseClawHookRollbackCopyRederived = ''
+    $script:DefenseClawDeferredRecoveryServices = $null
     $script:DefenseClawStaleLifecycleJournalRemoved = ''
     $script:DefenseClawStaleTeardownJournalRemoved = ''
     $script:DefenseClawCursorAdapterRestored = $false
@@ -34316,6 +34363,15 @@ function Complete-DefenseClawDeferredRecoveryActivation {
         [Parameter(Mandatory)][string]$SnapshotPath,
         [string]$SensorHelper
     )
+    # GAP-0601: what the restored release ran before the transaction, so a
+    # requested lifecycle that then fails can start it again
+    # (Restart-DefenseClawDeferredRecoveryRelease).
+    $script:DefenseClawDeferredRecoveryServices = [pscustomobject]@{
+        services = @($Snapshot.services)
+        gateway_service = [string]$Snapshot.gateway_service
+        guardian_service = [string]$Snapshot.guardian_service
+        sensor_helper = [string]$SensorHelper
+    }
     if (-not [string]::IsNullOrEmpty($SensorHelper)) {
         Stop-DefenseClawService -Name $SensorHelper
         Set-DefenseClawServiceStartMode -Name $SensorHelper -StartMode 4
@@ -34325,6 +34381,96 @@ function Complete-DefenseClawDeferredRecoveryActivation {
         -Path $SnapshotPath `
         -Phase quiesced `
         -ServicesQuiescedAt ([DateTime]::UtcNow.ToString('o'))
+}
+
+function Restart-DefenseClawDeferredRecoveryRelease {
+    <#
+        GAP-0601: a recovery that left the restored release stopped and
+        disabled (Test-DefenseClawRecoveryActivationDeferral) counts on this
+        Setup's own release to replace it. When the requested lifecycle then
+        fails with no transaction of its own left pending, the endpoint had
+        no DefenseClaw service at all, and every later Setup run refused.
+        This starts the restored release again with the service set and
+        boot policy it had before the transaction, and waits for readiness
+        accepting failed user targets, as a rollback does. A readiness that
+        does not come is reported, not a reason to stop the services again:
+        a running gateway and guardian enforce the installed policy, and the
+        guardian repairs what it can. Returns the note for the result, or ''
+        when this run deferred nothing.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $deferred = $script:DefenseClawDeferredRecoveryServices
+    if (-not [bool]$script:DefenseClawRecoveryActivationDeferred -or
+        $null -eq $deferred -or
+        -not (Test-DefenseClawStandaloneProfile) -or
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
+        return ''
+    }
+    $script:DefenseClawDeferredRecoveryServices = $null
+    $gatewayServiceName = [string]$deferred.gateway_service
+    $guardianServiceName = [string]$deferred.guardian_service
+    try {
+        $states = Get-DefenseClawTransactionServiceStates `
+            -Services $deferred.services `
+            -GatewayServiceName $gatewayServiceName `
+            -GuardianServiceName $guardianServiceName
+        $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $guardianServiceName
+        $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $gatewayServiceName
+        $sensorHelper = [string]$deferred.sensor_helper
+        if (-not [string]::IsNullOrEmpty($sensorHelper) -and
+            (Test-DefenseClawServiceExists -Name $sensorHelper)) {
+            Set-DefenseClawServiceStartMode -Name $sensorHelper -StartMode 3
+            Start-DefenseClawService -Name $sensorHelper
+        }
+        # The order of a rollback's restart: broker, guardian, gateway,
+        # enumerator; each demand-start first, boot policy after.
+        foreach ($name in @($brokerServiceName, $guardianServiceName, $gatewayServiceName, $enumeratorServiceName)) {
+            $state = $states[$name]
+            if ($null -ne $state -and [bool]$state.existed -and [bool]$state.running) {
+                Set-DefenseClawServiceStartMode -Name $name -StartMode 3
+                Start-DefenseClawService -Name $name
+            }
+        }
+        Restore-DefenseClawTransactionServiceStartModes `
+            -Services $deferred.services `
+            -GatewayServiceName $gatewayServiceName `
+            -GuardianServiceName $guardianServiceName
+        if (-not [string]::IsNullOrEmpty($sensorHelper) -and
+            (Test-DefenseClawServiceExists -Name $sensorHelper)) {
+            Set-DefenseClawServiceStartMode `
+                -Name $sensorHelper `
+                -StartMode ([int]$states[$gatewayServiceName].start_mode)
+        }
+        $note = 'Setup started the restored release again with the service set it had before the transaction'
+        try {
+            Wait-DefenseClawEnterpriseReadiness `
+                -Layout $Layout `
+                -GatewayServiceName $gatewayServiceName `
+                -GuardianServiceName $guardianServiceName `
+                -RequireBroker:([bool]$states[$brokerServiceName].existed) `
+                -RequireEnumerator:([bool]$states[$enumeratorServiceName].running) `
+                -AllowFailedTargets
+            $note += ', and it is ready'
+        }
+        catch {
+            $note += "; it is running, but its readiness was not proven: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message)"
+        }
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_recover -Fields @{
+            subsystem = 'lifecycle'
+            reason    = $note
+        }
+        return $note
+    }
+    catch {
+        $note = "Setup could not start the restored release again: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message)"
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'lifecycle'
+            reason    = $note
+        }
+        return $note
+    }
 }
 
 function Get-DefenseClawRecoveryGatewayAdmission {
@@ -36815,8 +36961,7 @@ function Get-DefenseClawGuardianReadinessProbe {
         # As in Wait-DefenseClawFreshGuardianReconcile: a complete reconcile
         # whose only problem is failed targets is accepted (rollback restores it;
         # activation runs degraded). With -LiveVerify, only Guardian-failed targets.
-        [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AllowFailedTargets
     )
     $service = Microsoft.PowerShell.Management\Get-Service -Name $GuardianServiceName -ErrorAction SilentlyContinue
     if ($null -eq $service -or
@@ -36839,9 +36984,7 @@ function Get-DefenseClawGuardianReadinessProbe {
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
-        if ((Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) -and
-            (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
-                -Report $report -AllowedSIDs $AllowedFailedTargetSIDs)) {
+        if (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) {
             $accepted = -not $LiveVerify
             if ($LiveVerify) {
                 # A live verify may fail only on the targets the Guardian
@@ -36901,16 +37044,14 @@ function Test-DefenseClawGuardianReady {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$LiveVerify,
-        [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AllowFailedTargets
     )
     $readiness = Get-DefenseClawGuardianReadinessProbe `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -LiveVerify:$LiveVerify `
-        -AllowFailedTargets:$AllowFailedTargets `
-        -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
+        -AllowFailedTargets:$AllowFailedTargets
     return [bool]$readiness.ready
 }
 
@@ -36924,7 +37065,6 @@ function Wait-DefenseClawEnterpriseReadiness {
         [int]$TimeoutSeconds = 90,
         # Rollback, recovery and activation; see Get-DefenseClawGuardianReadinessProbe.
         [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs,
         # GAP-0947: the guardian can neither prove coverage nor stay up until
         # a program lets go of the Codex requirements (rollback only).
         [switch]$GuardianCoverageDeferred
@@ -36966,8 +37106,7 @@ function Wait-DefenseClawEnterpriseReadiness {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$AllowFailedTargets `
-                -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
+                -AllowFailedTargets:$AllowFailedTargets
         }
         $enumerator = Microsoft.PowerShell.Management\Get-Service `
             -Name $enumeratorServiceName `
@@ -39602,8 +39741,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         # Install/Upgrade activation: live readiness accepts a completed
         # reconcile whose only failures are user targets the Guardian itself
         # reported failed (see Get-DefenseClawGuardianReadinessProbe).
-        [switch]$AcceptDegradedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AcceptDegradedTargets
     )
     if ($null -eq $ExpectedGatewayAccount -or $ExpectedGatewayAccount.Count -eq 0) {
         $ExpectedGatewayAccount = Get-DefenseClawAcceptedGatewayServiceAccounts `
@@ -40690,8 +40828,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -LiveVerify `
-            -AllowFailedTargets:$AcceptDegradedTargets `
-            -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
+            -AllowFailedTargets:$AcceptDegradedTargets
         if (-not [bool]$guardianReadiness.ready) {
             throw (
                 'guardian SCM process is running but protected target ' +
@@ -41693,8 +41830,7 @@ function Get-DefenseClawLifecycleStatus {
         # The result of an activation that accepted a completed reconcile
         # with failed user targets: those targets are logged as
         # defenseclaw_degraded instead of failing the result.
-        [switch]$AcceptDegradedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AcceptDegradedTargets
     )
     $errors = [Collections.Generic.List[string]]::new()
     $metadata = $null
@@ -41768,17 +41904,14 @@ function Get-DefenseClawLifecycleStatus {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$AcceptDegradedTargets `
-                -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
+                -AllowFailedTargets:$AcceptDegradedTargets
             $guardianReport = Get-DefenseClawGuardianStatusReport `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
             $generation = Get-DefenseClawGuardianGeneration -Report $guardianReport
             $guardianDegraded = [bool](
                 $AcceptDegradedTargets -and
-                (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $guardianReport) -and
-                (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
-                    -Report $guardianReport -AllowedSIDs $AllowedFailedTargetSIDs)
+                (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $guardianReport)
             )
             if ($guardianDegraded) {
                 Write-DefenseClawGuardianDegradedTargets -Report $guardianReport
@@ -41999,6 +42132,9 @@ function Get-DefenseClawLifecycleStatus {
         if ($recoveryRuns.Count -gt 0) {
             $status['recovery_gateway_runs'] = $recoveryRuns
         }
+        if (-not [string]::IsNullOrEmpty($script:DefenseClawHookRollbackCopyRederived)) {
+            $status['hook_rollback_copy_rederived'] = $script:DefenseClawHookRollbackCopyRederived
+        }
         if ($null -ne $script:DefenseClawRecoveryGatewayRefusal) {
             $status['recovery_gateway_refusal'] = [pscustomobject](
                 $script:DefenseClawRecoveryGatewayRefusal
@@ -42068,8 +42204,7 @@ function Test-DefenseClawGuardianCoverageReport {
         [AllowEmptyString()][string]$CurrentStateIdentity,
         [AllowEmptyString()][string]$ExpectedManifestSHA256,
         [Parameter(Mandatory)][DateTime]$StartedAfter,
-        [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AllowFailedTargets
     )
     $reject = {
         param([string]$Reason)
@@ -42083,9 +42218,7 @@ function Test-DefenseClawGuardianCoverageReport {
     # A digest-bound activation still has to prove its exact activation
     # identity below; only the report's ok=false is excused.
     $degradedAccepted = $AllowFailedTargets -and
-        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report) -and
-        (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
-            -Report $Report -AllowedSIDs $AllowedFailedTargetSIDs)
+        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report)
     if (-not $degradedAccepted -and
         ($null -eq $Report -or
         $null -eq $Report.PSObject.Properties['ok'] -or
@@ -42334,12 +42467,21 @@ function Test-DefenseClawGuardianReportCompletedWithFailedTargets {
 }
 
 # Degraded coverage is accepted only when every status error comes from the
-# failed targets themselves: one "last guardian reconcile failed for
-# <connector>@<sid>" line per failed row (the Windows Guardian names the
-# account "<connector>@<user> (<sid>)"), and the reconcile, authorization and
-# activation "is incomplete" lines carrying exactly the state's counts. Any
-# other error (a missing or unreadable authorization or activation, an
-# untrusted manifest, an unreadable state) rejects the report.
+# failed targets themselves: one line per failed row, and the reconcile,
+# authorization and activation "is incomplete" lines carrying exactly the
+# state's counts. A failed row is "last guardian reconcile failed for
+# <connector>@<sid>" (the Windows Guardian names the account
+# "<connector>@<user> (<sid>)"), or, for a signed-out account, one of the
+# three lines the gateway words it with (enterpriseHookGuardianFailureIssue):
+# "<connector> for <account> is pending until that account signs in: ...",
+# "<connector> for <account> is enrolled with the hook matrix of an earlier
+# DefenseClaw release ..." and "the guardian cannot repair <connector> for
+# <account> while that account is signed out: ...", the account "user (SID)"
+# or the SID alone. Without those three, no rollback or recovery accepted the
+# restored release's degraded reconcile while an account was signed out, and
+# every DefenseClaw service stayed stopped (GAP-0601). Any other error (a
+# missing or unreadable authorization or activation, an untrusted manifest,
+# an unreadable state) rejects the report.
 function Test-DefenseClawGuardianReportErrorsAttributable {
     param(
         [Parameter(Mandatory)]$Report,
@@ -42373,6 +42515,12 @@ function Test-DefenseClawGuardianReportErrorsAttributable {
         return $true
     }
     $countsPattern = '^(?:last guardian reconcile|protected guardian authorization|protected guardian activation) is incomplete \((\d+) succeeded, (\d+) pending, (\d+) total\)$'
+    $account = '(?:.+? \((?<sid>S-1-[0-9-]+)\)|(?<sid>S-1-[0-9-]+))'
+    $signedOutPattern = (
+        '^(?:the guardian cannot repair (?<connector>[^\s@]+) for ' + $account +
+        ' while that account is signed out: |(?<connector>[^\s@]+) for ' + $account +
+        ' is (?:pending until that account signs in: |enrolled with the hook matrix of an earlier DefenseClaw release ))'
+    )
     foreach ($entry in @($errorsProperty.Value)) {
         $text = ([string]$entry).Trim()
         # Windows names the account of a row as "user (SID)" on every profile
@@ -42385,6 +42533,14 @@ function Test-DefenseClawGuardianReportErrorsAttributable {
             if ($failed.Groups[2].Success) {
                 $label = $label.Split('@')[0] + '@' + $failed.Groups[2].Value
             }
+            if (-not $failedLabels.ContainsKey($label)) {
+                return $false
+            }
+            continue
+        }
+        $signedOut = [regex]::Match($text, $signedOutPattern)
+        if ($signedOut.Success) {
+            $label = $signedOut.Groups['connector'].Value + '@' + $signedOut.Groups['sid'].Value
             if (-not $failedLabels.ContainsKey($label)) {
                 return $false
             }
@@ -42470,46 +42626,6 @@ function Get-DefenseClawGuardianFailedTargets {
         $failed.Add([pscustomobject]$values)
     }
     return @($failed.ToArray())
-}
-
-# An activation that skipped account roots may accept Guardian failures only
-# for those accounts. An empty list preserves the existing Secure Client and
-# rollback behavior, where any completed per-target failure is reported as
-# degraded. The caller must first validate the report as complete.
-function Test-DefenseClawGuardianFailedTargetsWithinSIDs {
-    param(
-        [Parameter(Mandatory)]$Report,
-        [string[]]$AllowedSIDs
-    )
-    if ($null -eq $AllowedSIDs -or $AllowedSIDs.Count -eq 0) {
-        return $true
-    }
-    $allowed = [Collections.Generic.HashSet[string]]::new(
-        [StringComparer]::OrdinalIgnoreCase
-    )
-    foreach ($sid in $AllowedSIDs) {
-        if ([string]::IsNullOrWhiteSpace($sid)) {
-            return $false
-        }
-        [void]$allowed.Add($sid)
-    }
-    foreach ($target in @(Get-DefenseClawGuardianFailedTargets -Report $Report)) {
-        if (-not $allowed.Contains([string]$target.sid)) {
-            return $false
-        }
-    }
-    return $true
-}
-
-function Get-DefenseClawAllowedFailedTargetSIDs {
-    param([Parameter(Mandatory)]$Plan)
-    if (-not (Test-DefenseClawStandaloneProfile)) {
-        return , [string[]]@()
-    }
-    return , [string[]]@(
-        Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan |
-            Microsoft.PowerShell.Core\ForEach-Object { [string]$_.sid }
-    )
 }
 
 # Install and Upgrade succeed when the Guardian completed a fresh reconcile in
@@ -42628,8 +42744,7 @@ function Wait-DefenseClawFreshGuardianReconcile {
         # Upgrade activation the deployment is live and degraded (each
         # failed target is logged). A reconcile that never completes, or a
         # status that is not fresh, still fails.
-        [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [switch]$AllowFailedTargets
     )
     if (-not [string]::IsNullOrWhiteSpace($ExpectedManifestSHA256) -and
         $ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
@@ -42721,8 +42836,7 @@ function Wait-DefenseClawFreshGuardianReconcile {
             -CurrentStateIdentity $currentStateIdentity `
             -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
             -StartedAfter $startedAfter `
-            -AllowFailedTargets:$AllowFailedTargets `
-            -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
+            -AllowFailedTargets:$AllowFailedTargets
         if ([bool]$coverage.ok) {
             if ($AllowFailedTargets) {
                 Write-DefenseClawGuardianDegradedTargets -Report $report
@@ -42804,6 +42918,11 @@ function Wait-DefenseClawFreshGuardianReconcile {
     if ($null -ne $progress -and $progress.state -ceq 'reconciling') {
         $quiet = [int][Math]::Round(([DateTime]::UtcNow - $progress.updated_at).TotalSeconds)
         throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian's first reconcile is still running after $waited s ($($progress.targets_done) of $($progress.targets_total) targets done, last progress $quiet s ago); $guardianLog; last_status=$lastStatus"
+    }
+    if ($finishedRead) {
+        # GAP-0601: the first reconcile finished and published, so this is
+        # not a wait that ran out: its coverage is what was refused.
+        throw "LocalSystem guardian finished its first reconcile ($waited s after Setup started it), but its coverage was not accepted; $guardianLog; last_status=$lastStatus"
     }
     if ($extended -or $guardianProcessId -ne 0) {
         throw "LocalSystem guardian restarted but did not publish fresh required coverage within $([Math]::Max($TimeoutSeconds, $waited)) seconds; $guardianLog; last_status=$lastStatus"
@@ -50684,9 +50803,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [switch]$DeferredConfig,
         [switch]$NoStart
     )
-    # Secure Client activates degraded when the Guardian's fresh reconcile
-    # completed with failed user targets; standalone requires all of them.
-    $acceptDegradedTargets = -not (Test-DefenseClawStandaloneProfile)
+    # Both profiles activate degraded when the Guardian's fresh, digest-bound
+    # reconcile completed with failed user targets: one account's foreign hook
+    # file or signed-out profile is that account's failure, named in the
+    # result and logged as defenseclaw_degraded, never the machine's.
+    # Standalone used to require every target, so one such account failed
+    # the upgrade with 1603, and the rollback over the same account left every
+    # service stopped and disabled (GAP-0601).
+    $acceptDegradedTargets = $true
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
     $priorDeferredConfigPending = [bool](
         $null -ne $metadata -and
@@ -51347,13 +51471,6 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 $Action -eq 'Install' -and -not $reconcileInstall -and
                 $targetRuntimePreparationMode -ceq 'prepare'
             )
-        $allowedFailedTargetSIDs = [string[]](
-            Get-DefenseClawAllowedFailedTargetSIDs -Plan $targetRuntimePlan
-        )
-        if ((Test-DefenseClawStandaloneProfile) -and
-            $allowedFailedTargetSIDs.Count -gt 0) {
-            $acceptDegradedTargets = $true
-        }
         $expectedGuardianManifestSHA256 = [string]$targetRuntimePlan.manifest_sha256
         if ($expectedGuardianManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'target runtime plan did not bind an exact manifest SHA-256'
@@ -51677,16 +51794,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Name $GuardianServiceName `
                 -StartMode 3
             # A completed, fresh, digest-bound reconcile with failed targets
-            # activates degraded only for Secure Client or for accounts the
-            # standalone target runtime plan explicitly skipped.
+            # activates degraded on both profiles (GAP-0601).
             try {
                 [void](Wait-DefenseClawFreshGuardianReconcile `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName `
                     -ExpectedManifestSHA256 $expectedGuardianManifestSHA256 `
-                    -AllowFailedTargets:$acceptDegradedTargets `
-                    -AllowedFailedTargetSIDs $allowedFailedTargetSIDs)
+                    -AllowFailedTargets:$acceptDegradedTargets)
             }
             finally {
                 if (Test-DefenseClawStandaloneProfile) {
@@ -51738,8 +51853,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$acceptDegradedTargets `
-                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
+                -AllowFailedTargets:$acceptDegradedTargets
             # Canonicalize dynamic logs/authorization after the service-created
             # files exist, then verify exact effective rights.
             Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
@@ -51749,8 +51863,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
                 -PendingTransaction `
-                -AcceptDegradedTargets:$acceptDegradedTargets `
-                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
+                -AcceptDegradedTargets:$acceptDegradedTargets
             # Only fully verified live state may become boot-active. A crash
             # before pending cleanup can start only validated services.
             Set-DefenseClawVerifiedServiceBootPolicy `
@@ -51763,8 +51876,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
-                -AcceptDegradedTargets:$acceptDegradedTargets `
-                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
+                -AcceptDegradedTargets:$acceptDegradedTargets
             if ($priorDeferredConfigPending) {
                 # Keep the authenticated activation marker set through every
                 # mutable policy/runtime step and the complete live readiness
@@ -51911,8 +52023,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -AcceptDegradedTargets:$acceptDegradedTargets `
-        -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
+        -AcceptDegradedTargets:$acceptDegradedTargets
     if ($NoStart) {
         $result.ok = $true
     }
@@ -57649,6 +57760,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     catch {
         Add-DefenseClawRecoveryEvidenceToError -ErrorRecord $_ -Layout $layout
+        # GAP-0601: never end with the restored release stopped and disabled.
+        $restarted = Restart-DefenseClawDeferredRecoveryRelease -Layout $layout
+        if (-not [string]::IsNullOrEmpty($restarted)) {
+            throw ('{0}; {1}' -f [string]$_.Exception.Message, $restarted)
+        }
         if ($Action -ceq 'Uninstall') {
             # GAP-1042: a committed uninstall whose clean-up met a held file ends 1618, naming it.
             $committedHeld = ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message ([string]$_.Exception.Message)

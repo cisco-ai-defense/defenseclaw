@@ -137,6 +137,10 @@ type windowsEnterpriseInstallerReport struct {
 	// stale committed managed-hook lifecycle journal itself (GAP-1322); it
 	// holds the retire failure that made the journal stale.
 	StaleLifecycleJournalRemoved string `json:"stale_lifecycle_journal_removed"`
+	// HookRollbackCopyRederived is set when the installed hook did not have
+	// the digest the deployment records and no protected copy did, so this
+	// run's hook rollback copy is the Setup's own verified hook (GAP-0601).
+	HookRollbackCopyRederived string `json:"hook_rollback_copy_rederived"`
 	// StaleTeardownJournalRemoved names the managed-hook teardown journal the
 	// lifecycle removed because an earlier uninstall that was refused or
 	// rolled back left it (GAP-1041).
@@ -2527,6 +2531,15 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 				"then run " + windowsEnterpriseAdminCommand("ensure") + " again from an elevated PowerShell prompt: " + windowsEnterpriseBoundedLabels(skipped),
 		})
 	}
+	if rederived := strings.TrimSpace(report.HookRollbackCopyRederived); rederived != "" {
+		// A recovery or an earlier run left a hook the record does not name;
+		// the run went on with this Setup's hook as the rollback copy
+		// instead of refusing every lifecycle action (GAP-0601).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code:    windowsEnterpriseHookRollbackCopyRederived,
+			Message: windowsEnterpriseBoundedDiagnostic(rederived),
+		})
+	}
 	if removed := strings.TrimSpace(report.StaleLifecycleJournalRemoved); removed != "" {
 		// The lifecycle deleted a protected journal on its own; say so in
 		// the result and the lifecycle log (GAP-1680).
@@ -4323,6 +4336,10 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 	}
 	return enrollment, nil
 }
+
+// windowsEnterpriseHookRollbackCopyRederived is the warning code of a run
+// whose hook rollback copy is the Setup's own hook (GAP-0601).
+const windowsEnterpriseHookRollbackCopyRederived = "hook_rollback_copy_rederived"
 
 // readWindowsEnterpriseStandaloneEnrollmentAt counts the manifest's targets
 // and exempt rows, and as pending the targets the guardian's last reconcile
