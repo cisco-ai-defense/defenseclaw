@@ -92,7 +92,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "b82abc998f4b917dbbc856bda3bb4f9211ce829b3ab86a6464a031b6953b680a",
             # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
             "ab20b275b3c44a0ade2cc47942dbe18d40a4cadb5626315ecb097b905f110f76",
-            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN and the batch 9 shell recall rules.
+            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN
+            # and the batch 9 shell recall rules.
             "b5cd7987ebc0047977727d2ce6ed58bee849229f4b6b6e3a5e07f3d3e6275e79",
             # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
             # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
@@ -147,7 +148,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "969de899d5a8544152cd09ad05b1e67ac841a4da53c4bb1e992a3b55c796f7a1",
             # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
             "33c8403eee2442fcde01f22d118261ac3e8ded4d6652875d335ffaef70d823bc",
-            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN and the batch 9 shell recall rules.
+            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN
+            # and the batch 9 shell recall rules.
             "2bc8b27f12facb6c1b1356c52801fc529a39f63110e4d8ac6742acc9c3e25b41",
             # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
             # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
@@ -201,7 +203,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f6ba060634b55b87887932700fbd73cd7d658f175f2bc83a75b057e45e8355aa",
             # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
             "5353b7ce79f3fc38085c93b43cae0075973d4f38f34a0ebd7bc11b065f870caa",
-            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN and the batch 9 shell recall rules.
+            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN
+            # and the batch 9 shell recall rules.
             "67d67ccace7e9cac5dfdf024d9492b92917af77ca6795bd5f194765ec95814b7",
             # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
             # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
