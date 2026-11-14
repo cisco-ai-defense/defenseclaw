@@ -330,7 +330,7 @@ func secretAssignmentTokenLike(segment string) bool {
 		class := byte('l')
 		if segment[i] >= '0' && segment[i] <= '9' {
 			class = 'd'
-		} else if !(segment[i] >= 'a' && segment[i] <= 'z' || segment[i] >= 'A' && segment[i] <= 'Z') {
+		} else if !secretAssignmentLetter(segment[i]) {
 			continue
 		}
 		if prev != 0 && class != prev {
@@ -350,10 +350,14 @@ func secretAssignmentCounter(segment string) bool {
 	return len(segment) <= 10 || len(segment) == 13
 }
 
+func secretAssignmentLetter(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
 func countLetters(value string) int {
 	n := 0
 	for i := 0; i < len(value); i++ {
-		if value[i] >= 'a' && value[i] <= 'z' || value[i] >= 'A' && value[i] <= 'Z' {
+		if secretAssignmentLetter(value[i]) {
 			n++
 		}
 	}
