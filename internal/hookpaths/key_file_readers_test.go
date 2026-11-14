@@ -3,13 +3,19 @@
 
 package hookpaths
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // rel-1-0-10:GAP-0018: a call that only prints, checksums, compares or lists
 // the protected key file, with or without a sudo or env wrapper, writes
 // nothing and is not an authorized-keys mutation; every writer, a shell behind
 // the wrapper and an output option stay one.
 func TestKeyFileReadersAreNotWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell rows over a POSIX home")
+	}
 	_, home, cwd := globFactsFixture(t, false)
 	key := home + "/.ssh/authorized_keys"
 	for _, command := range []string{
