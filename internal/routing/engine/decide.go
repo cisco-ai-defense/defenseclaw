@@ -34,15 +34,19 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		return Decision{Outcome: OutcomePassthrough, FailureCode: FailureNone}
 	}
 	pol := e.policyFor(req)
-	signals := e.matcher.Match(req.Text)
+	text, signals, contextWarning := e.classifierText(req)
+	if contextWarning != "" {
+		d.Warnings = append(d.Warnings, contextWarning)
+	}
 	categories := make([]string, 0, len(pol.Categories))
 	for c := range pol.Categories {
 		categories = append(categories, c)
 	}
 	slices.Sort(categories)
 	in := ClassifyInput{
-		Text: req.Text, APIFamily: req.APIFamily, Connector: req.Connector, RequestedModel: req.RequestedModel,
+		Text: text, APIFamily: req.APIFamily, Connector: req.Connector, RequestedModel: req.RequestedModel,
 		HasTools: req.HasTools, ToolTurn: req.ToolTurn, HasImages: req.HasImages, LongContext: req.LongContext, Signals: signals,
+		ToolLoop:   req.ToolLoop && e.context.ToolNames,
 		Categories: categories,
 	}
 

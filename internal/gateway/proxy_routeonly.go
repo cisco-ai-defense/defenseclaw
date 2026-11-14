@@ -489,7 +489,7 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 		Model: model, RequestModel: model, APIFamily: family, Connector: connector,
 		Listener: engine.ListenerRouteOnly, RequestedProvider: inProvider, CredentialClass: inClass,
 		ConversationID: routeOnlyConversationID(r.Header), Text: text, HasImages: images, ToolTurn: toolTurn,
-		Caller: caller,
+		Caller: caller, Body: body,
 	}
 	if hasTools {
 		in.Tools = []interface{}{true}

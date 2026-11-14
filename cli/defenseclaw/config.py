@@ -4240,6 +4240,9 @@ class RoutingConfig:
     sensitive: dict[str, Any] = field(default_factory=dict)
     systemone: dict[str, Any] = field(default_factory=dict)
     route_only: dict[str, Any] = field(default_factory=dict)
+    # routing.context: bounded recent context for the router (recent_user_turns,
+    # include_first_user_turn, max_bytes, per_turn_bytes, include_tool_names).
+    context: dict[str, Any] = field(default_factory=dict)
     # routing.admin: the floor keys (S1) plus rules / budgets / visibility
     # (S11), kept as a mapping so every key round-trips.
     admin: dict[str, Any] = field(default_factory=dict)
@@ -4274,7 +4277,7 @@ class RoutingConfig:
 
 
 # Nested routing keys added in 1.0.10, kept as raw mappings.
-ROUTING_NESTED_1010_KEYS = ("categories", "sensitive", "systemone", "route_only", "admin")
+ROUTING_NESTED_1010_KEYS = ("categories", "sensitive", "systemone", "route_only", "admin", "context")
 
 
 @dataclass
@@ -8904,6 +8907,7 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
         systemone=mapping("systemone"),
         route_only=mapping("route_only"),
         admin=mapping("admin"),
+        context=mapping("context"),
     )
 
 

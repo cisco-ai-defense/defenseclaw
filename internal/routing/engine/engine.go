@@ -46,6 +46,8 @@ type Engine struct {
 	managed       bool
 	credentialOK  func(Backend, Request) bool
 	sticky        *StickyCache
+	// context is routing.context (zero = the newest turn only).
+	context ContextOptions
 	// capabilityFilter is off for vllm_sr, whose 1.0.9 configs used
 	// free-form capabilities.
 	capabilityFilter bool
@@ -77,6 +79,7 @@ func New(cfg *config.Config, opts Options) (*Engine, error) {
 		admin:         opts.Admin,
 		managed:       opts.Managed,
 		credentialOK:  opts.CredentialOK,
+		context:       contextOptionsOf(r),
 	}
 	if r.EffectiveClassifier() == config.RoutingClassifierSystemOne {
 		e.sticky = opts.Sticky

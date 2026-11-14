@@ -235,7 +235,7 @@ func RoutingMinVersionKeysInRaw(raw []byte) []string {
 	}
 	var keys []string
 	if routing, ok := doc["routing"].(map[string]any); ok {
-		for _, k := range []string{"classifier", "min_confidence", "on_classifier_error", "default_alias", "categories", "allow_user_override", "sensitive", "systemone", "route_only", "admin"} {
+		for _, k := range []string{"classifier", "min_confidence", "on_classifier_error", "default_alias", "categories", "allow_user_override", "sensitive", "systemone", "route_only", "admin", "context"} {
 			if _, set := routing[k]; set {
 				keys = append(keys, "routing."+k)
 			}

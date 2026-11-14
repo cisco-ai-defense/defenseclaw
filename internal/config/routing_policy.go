@@ -63,7 +63,7 @@ const (
 )
 
 // RoutingRequestConditions are the names a request condition accepts.
-var RoutingRequestConditions = []string{"has_tools", "tool_turn", "has_images", "long_context"}
+var RoutingRequestConditions = []string{"has_tools", "tool_turn", "has_images", "long_context", RoutingRequestToolLoop}
 
 // RoutingLockableKeys are the names routing.admin.locked accepts. The
 // first three are the keys a guardrail profile overlay may otherwise set;
@@ -71,7 +71,7 @@ var RoutingRequestConditions = []string{"has_tools", "tool_turn", "has_images", 
 var RoutingLockableKeys = []string{
 	"default_alias", "categories", "allow_user_override",
 	"classifier", "models", "min_confidence", "on_classifier_error",
-	"sensitive", "systemone", "route_only",
+	"sensitive", "systemone", "route_only", "context",
 }
 
 // RoutingPolicyConfig is the tighten-only overlay of

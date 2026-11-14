@@ -18,9 +18,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
-// routerClassifierTextLimit bounds the text a classifier sees.
-const routerClassifierTextLimit = 8 * 1024
-
 // engineRouter is the production ModelRouter: the routing engine of the
 // config generation a request pinned, built once per generation, so routing
 // policy changes apply without a restart (DESIGN 8.2). Only the vLLM
@@ -186,7 +183,9 @@ func (r *engineRouter) RouteDetailed(ctx context.Context, in *ModelRouterInput) 
 		out.Latency = time.Since(started)
 		return normalizeSemanticRouteOutcome(out)
 	}
-	d := eng.Decide(ctx, engineRequest(in))
+	req := engineRequest(in)
+	routeContext(eng, in, &req)
+	d := eng.Decide(ctx, req)
 	recordRoutingDecision(ctx, in, &d, cfg != nil && cfg.StandaloneEnterprise())
 	out.Route = &d
 	out.Latency = time.Since(started)
@@ -252,7 +251,7 @@ func engineRequest(in *ModelRouterInput) engine.Request {
 			}
 		}
 	}
-	req.Text = truncateUTF8(text, routerClassifierTextLimit)
+	req.Text = truncateUTF8(text, engine.ClassifierTextLimit)
 	return req
 }
 
