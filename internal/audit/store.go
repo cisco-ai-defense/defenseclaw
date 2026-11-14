@@ -256,6 +256,8 @@ type Store struct {
 	// secureClientSchema keeps the tables, columns and indexes main creates
 	// (WithSecureClientSchema).
 	secureClientSchema bool
+	// hookLoneTracked: the store keeps audit_hook_lone (ensureHookLoneTracking).
+	hookLoneTracked bool
 
 	// fieldClassSets: rows name their field class set (field_class_sets.go);
 	// fieldClassSetCount is the number of sets, for the table bound.
@@ -2369,6 +2371,12 @@ func (s *Store) Init() error {
 		return fmt.Errorf("audit: verify mandatory finding lifecycle identity: %w", err)
 	} else if !present {
 		return fmt.Errorf("audit: mandatory finding lifecycle identity is missing")
+	}
+	// After the mandatory schema checks: its reconcile reads
+	// correlation_observations, so a partial store fails on the missing
+	// table or column, not inside the lone-row reconcile.
+	if err := s.ensureHookLoneTracking(); err != nil {
+		return err
 	}
 	if err := s.verifyMandatoryPragmas(context.Background()); err != nil {
 		return err
