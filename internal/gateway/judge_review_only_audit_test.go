@@ -66,7 +66,7 @@ func TestJudgeReviewOnlyAuditOnlyInTheDefaultPack(t *testing.T) {
 		{"default HIGH", cfgFor("default"), false, toolInjectionToVerdict(parseJudgeJSON(escalationJudgeHigh)), false},
 		{"default two review findings", cfgFor("default"), false, toolInjectionToVerdict(parseJudgeJSON(reviewOnlyJudgeTwo)), false},
 	} {
-		lane := judgeReviewOnlyAudit(tc.cfg, "claudecode", tc.flagged, hookJudgeLaneVerdict(tc.cfg, "claudecode", "tool_call", tc.v))
+		lane := judgeReviewOnlyAudit(tc.cfg, "claudecode", tc.flagged, true, hookJudgeLaneVerdict(tc.cfg, "claudecode", "tool_call", tc.v))
 		if lane == nil {
 			t.Fatalf("%s: nil lane verdict", tc.name)
 		}
@@ -143,15 +143,74 @@ func TestJudgeReviewOnlyAuditKeepsMergedAndFlaggedVerdicts(t *testing.T) {
 	stale := *merged
 	stale.reviewOnly = true // a merge that copied the mark
 	for name, v := range map[string]*ScanVerdict{"merged": merged, "stale mark": &stale} {
-		lane := judgeReviewOnlyAudit(cfg, "claudecode", false, hookJudgeLaneVerdict(cfg, "claudecode", "tool_call", v))
+		lane := judgeReviewOnlyAudit(cfg, "claudecode", false, true, hookJudgeLaneVerdict(cfg, "claudecode", "tool_call", v))
 		if lane.Action != guardrailActionAlert {
 			t.Errorf("%s: HIGH decision-model floor over a lone review finding gave %s, want alert", name, lane.Action)
 		}
 	}
 	low := &ToolInspectVerdict{Action: "allow", Severity: "LOW",
 		DetailedFindings: []RuleFinding{{RuleID: "R-LOW", Severity: "LOW"}}}
-	lane := judgeReviewOnlyAudit(cfg, "claudecode", rulesFlagged(low), hookJudgeLaneVerdict(cfg, "claudecode", "tool_call", lone))
+	lane := judgeReviewOnlyAudit(cfg, "claudecode", rulesFlagged(low), true, hookJudgeLaneVerdict(cfg, "claudecode", "tool_call", lone))
 	if lane.Action != guardrailActionAlert {
 		t.Fatalf("a LOW rule finding plus a lone judge MEDIUM gave %s, want today's alert", lane.Action)
+	}
+}
+
+// rel-1-0-10:GAP-0397 (lead decision 2026-11-14): a lone review finding is
+// audit-only in the default pack only on a call whose effects the parser
+// models. A call it does not model keeps the alert, never a block; strict and
+// permissive keep their levels for both. Function level, the real packs.
+func TestJudgeReviewOnlyAuditKeepsUnmodeledCallsAlerted(t *testing.T) {
+	lone := toolInjectionToVerdict(parseJudgeJSON(reviewOnlyJudgeMedium))
+	for _, pack := range []string{"default", "strict", "permissive"} {
+		cfg := config.DefaultConfig()
+		cfg.DataDir = t.TempDir()
+		cfg.Guardrail.RulePack = pack
+		cfg.Guardrail.RulePackDir = ""
+		mapped := hookJudgeLaneVerdict(cfg, "claudecode", "tool_call", lone)
+		modeled := judgeReviewOnlyAudit(cfg, "claudecode", false, true, mapped)
+		unmodeled := judgeReviewOnlyAudit(cfg, "claudecode", false, false, mapped)
+		if pack == "default" {
+			if modeled.Action != guardrailActionAllow || unmodeled.Action != guardrailActionAlert {
+				t.Errorf("default: modeled=%s unmodeled=%s, want allow and alert", modeled.Action, unmodeled.Action)
+			}
+			continue
+		}
+		if modeled.Action != unmodeled.Action || modeled.Action != mapped.Action {
+			t.Errorf("%s: modeled=%s unmodeled=%s mapped=%s, want the pack's own level for both", pack, modeled.Action, unmodeled.Action, mapped.Action)
+		}
+	}
+}
+
+// End to end through the Claude Code hook (default and strict; the escalation
+// test server copies other packs into a folder whose posture reads default).
+func TestHookJudgeLoneReviewFindingUnmodeledCallAlerts(t *testing.T) {
+	const modeled = "make -C ./fixtures/reports"
+	for _, tc := range []struct {
+		pack, tool string
+		input      map[string]interface{}
+		want       string
+	}{
+		{"default", "Bash", map[string]interface{}{"command": modeled}, guardrailActionAllow},
+		{"default", "mcp__db__read_query", map[string]interface{}{"query": "select name from reports"}, guardrailActionAlert},
+		{"strict", "Bash", map[string]interface{}{"command": modeled}, guardrailActionBlock},
+		{"strict", "mcp__db__read_query", map[string]interface{}{"query": "select name from reports"}, guardrailActionBlock},
+	} {
+		t.Run(tc.pack+"/"+tc.tool, func(t *testing.T) {
+			if got := toolJudgeCallEffects(t.Context(), tc.tool, string(mustJSONMarshal(tc.input))).modeled; got != (tc.tool == "Bash") {
+				t.Fatalf("fixture: %s modeled=%v", tc.tool, got)
+			}
+			judge := &mockLLMProvider{response: &ChatResponse{Choices: []ChatChoice{{Message: &ChatMessage{Content: reviewOnlyJudgeMedium}}}}}
+			a := escalationHookServerWith(t, judge, tc.pack, nil)
+			resp := a.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+				HookEventName: "PreToolUse", SessionID: "s-gap0397", CWD: t.TempDir(), ToolName: tc.tool, ToolInput: tc.input,
+			})
+			if len(judge.captured) != 1 {
+				t.Fatalf("judge calls=%d, want 1", len(judge.captured))
+			}
+			if resp.RawAction != tc.want {
+				t.Fatalf("raw_action=%q findings=%v reason=%q, want %q", resp.RawAction, resp.Findings, resp.Reason, tc.want)
+			}
+		})
 	}
 }

@@ -1931,6 +1931,9 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	// verdict (an escalated fail-closed refusal included) into current while
 	// a late judge is still running.
 	ruleFloor := rulesFlagged(current)
+	// Whether the parser models this call's effects (judge_packet.go): a lone
+	// review finding is audit-only in the default pack only when it does.
+	effectsModeled := !strings.EqualFold(strategyDirection, "tool_call") || toolJudgeCallEffects(ctx, toolName, content).modeled
 	// The decision model answers before the judge's own gates (deadline,
 	// hook budget, judge slots), so a confident block exists under load
 	// (S7 sysone review round 3, P3-1). Action mode only: an observe answer
@@ -1948,7 +1951,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 			return nil
 		}
 		v := judge.runToolJudgeSample(withJudgeUnavailable(withDecisionRuleFloor(ctx, ruleFloor)), toolName, content, prepass.sample)
-		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, effectsModeled, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
 	}
 
 	// The generic /inspect handlers run under a 200ms deadline
@@ -2020,7 +2023,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	}
 	lateVerdict := func() *ScanVerdict {
 		if v := floorSlot.get(); v != nil {
-			return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+			return judgeReviewOnlyAudit(cfg, connector, ruleFloor, effectsModeled, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
 		}
 		return nil
 	}
@@ -2048,7 +2051,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		resume := yieldHookRunSlot(ctx)
 		v := call(ctx)
 		resume()
-		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, effectsModeled, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
 	}
 
 	// A bounded action hook cancels the model request when its answer
@@ -2089,7 +2092,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	defer resume()
 	select {
 	case v := <-done:
-		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, effectsModeled, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
 	case <-wait.C:
 	case <-ctx.Done():
 	}
@@ -2241,7 +2244,13 @@ func (a *APIServer) hookLaneJudge(ctx context.Context, cfg *config.Config, strat
 // the scan finding rows) without an alert. Strict and permissive keep their
 // levels, a call the rules flagged keeps the alert, and HIGH and CRITICAL
 // judge verdicts are unchanged. Secure Client keeps the judge action.
-func judgeReviewOnlyAudit(cfg *config.Config, connector string, ruleFlagged bool, v *ScanVerdict) *ScanVerdict {
+//
+// A call whose effects DefenseClaw's parser does not model (no CALL_EFFECTS:
+// MCP and other unmodeled tools) keeps the alert (rel-1-0-10:GAP-0397, lead
+// decision 2026-11-14): the judge read only the call text, and an unknown is
+// an alert in the default pack, never a block. effectsModeled is the parser's
+// own result for the call (judgeCallEffects.modeled), never the tool's name.
+func judgeReviewOnlyAudit(cfg *config.Config, connector string, ruleFlagged, effectsModeled bool, v *ScanVerdict) *ScanVerdict {
 	// The mark alone is not trusted: a merged verdict (the decision model's
 	// HIGH floor over a lone judge finding) can copy it, so the verdict must
 	// still be one MEDIUM finding.
@@ -2259,10 +2268,21 @@ func judgeReviewOnlyAudit(cfg *config.Config, connector string, ruleFlagged bool
 	if normalizedGuardrailAction(v.Action) != guardrailActionAlert {
 		return v
 	}
+	if !effectsModeled && reviewOnlyUnmodeledAlerts(cfg, connector) {
+		return v
+	}
 	out := *v
 	out.Action = guardrailActionAllow
 	out.Reason = strings.TrimSpace(out.Reason + " (audit only: a lone review finding of the judge in the default pack)")
 	return &out
+}
+
+// reviewOnlyUnmodeledAlerts reports whether a lone review finding on a call
+// with no modeled effects keeps its default-pack alert (rel-1-0-10:GAP-0397).
+// The switch belongs under guardrail.cascade (s7/cascade-config lanes, default
+// on); until that lane is registered it is on.
+func reviewOnlyUnmodeledAlerts(cfg *config.Config, connector string) bool {
+	return true
 }
 
 // hookJudgeLaneVerdict is the hook-lane verdict of judge result v: nil when
