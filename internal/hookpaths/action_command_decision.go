@@ -138,7 +138,8 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	if actionMakeProtectedRecipe(command, cwd, home) {
 		return "protected-target"
 	}
-	if actionConcreteProtectedWriteOnWith(command, cwd, home, false, memo) {
+	if actionConcreteProtectedWriteOnWith(command, cwd, home, false, memo) ||
+		actionSedInPlaceWrite(command, cwd, home, memo) {
 		return "protected-target"
 	}
 	return ""
