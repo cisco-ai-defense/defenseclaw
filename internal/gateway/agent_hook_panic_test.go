@@ -630,8 +630,8 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 			if row.Structured["result"] != "panic" || row.Structured["action"] != tc.wantAction || row.Structured["would_block"] != wantWouldBlock {
 				t.Fatalf("audit=%v, want panic/%s/would_block=%v", row.Structured, tc.wantAction, wantWouldBlock)
 			}
-			if tc.event == "PostToolUse" && (decisionIsDenied(response["claude_code_output"]) || row.Enforced) {
-				t.Fatalf("post-tool output=%v enforced=%v, want the advisory answer", response["claude_code_output"], row.Enforced)
+			if tc.event == "PostToolUse" && (!decisionIsDenied(response["claude_code_output"]) || !row.Enforced) {
+				t.Fatalf("post-tool output=%v enforced=%v, want the PostToolUse decision block (GAP-0605)", response["claude_code_output"], row.Enforced)
 			}
 			extra, _ := row.Structured["extra"].(map[string]any)
 			if extra["panic"] != "true" {
