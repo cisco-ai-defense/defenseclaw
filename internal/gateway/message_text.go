@@ -29,6 +29,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
 
 // The "message" tool call of OpenClaw (GAP-0177, GAP-0290..0292, GAP-0436).
@@ -37,9 +38,11 @@ import (
 // message, caption, or text nested in blocks and attachments. extractMessageArgs
 // reads every string in the args, once: the text, the routing values (the
 // recipient, target, channel ...) and the attachments. The OpenClaw plugin
-// reads none of it: it sends the params as they are, and cuts them only when
-// they do not fit the request body limit (extensions/defenseclaw/src/
-// inspect-body-limit.ts). The gateway's reading decides.
+// reads none of it: it sends the params as they are. Over the request body
+// limit it replaces only the attachments (by their size, type, hash and text)
+// and never cuts the text: a call whose text is over the limit is blocked
+// (extensions/defenseclaw/src/inspect-body-limit.ts). The gateway's reading
+// decides.
 //
 // A message call takes three checks, in this order:
 //  1. the tool's static block list and MCP block, as for every tool call;
@@ -337,12 +340,26 @@ func (w *messageWalk) fileRouting(path, s string) {
 // (an attachments[] entry names its own). A text field (message, text,
 // caption, content, body ...) is always text, whatever it holds.
 func messageAttachmentField(key string) bool {
-	switch asciiLowerPreservingBytes(key) {
-	case "buffer", "media":
-		return true
-	}
-	return false
+	return messageAttachmentKeys[asciiLowerPreservingBytes(key)]
 }
+
+// messageAttachmentKeys is message_attachment_keys of the embedded limits file.
+// The OpenClaw plugin reads the same list: over the body limit it replaces only
+// the values of these fields (by their size, type, hash and text), so the
+// plugin and the gateway agree on what an attachment is.
+var messageAttachmentKeys = func() map[string]bool {
+	var limits struct {
+		Keys []string `json:"message_attachment_keys"`
+	}
+	if err := json.Unmarshal(publicschemas.InspectToolRequestLimits, &limits); err != nil || len(limits.Keys) == 0 {
+		panic("gateway: schemas/inspect-tool-request-limits.json has no message_attachment_keys")
+	}
+	keys := make(map[string]bool, len(limits.Keys))
+	for _, k := range limits.Keys {
+		keys[asciiLowerPreservingBytes(k)] = true
+	}
+	return keys
+}()
 
 // attachment reads a long value of an attachment field that is base64 all
 // through (a data URL or the bare payload) and reports whether it did. It is

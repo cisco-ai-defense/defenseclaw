@@ -94,8 +94,8 @@ type ToolInspectRequest struct {
 	BoundedPrefixReview bool `json:"bounded_prefix_review,omitempty"`
 	// ArgsPartial is set by a caller that cut the call down to fit the request
 	// body limit (the OpenClaw plugin replaces an attachment's bytes with its
-	// size and hash, and shortens a very long text to its head and tail): the
-	// part that was not sent is unread. A message is judged at least at the
+	// size, hash and the text in it; it never cuts message text): the part
+	// that was not sent is unread. A message is judged at least at the
 	// unknown tier of the policy, any other tool is blocked as an oversize call
 	// is (rel-1-0-10:GAP-0356). It can only make a verdict stricter.
 	ArgsPartial bool `json:"args_partial,omitempty"`

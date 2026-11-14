@@ -637,9 +637,13 @@ export default function (api: DefenseClawPluginHost) {
     // The check goes over a connection that proved it reaches this account's
     // gateway, and its verdict comes back on that connection (GAP-0594). The
     // budget counts from the proven connection, so the proof does not use it.
-    // A call over the gateway body limit is cut down first (GAP-0356): an
-    // attachment sends its size and hash, and the request says it is partial.
-    const res = await daemonClient.postRaw("/api/v1/inspect/tool", fitInspectBody(bodyPayload).payload, {
+    // A message over the gateway body limit sends its attachments as their
+    // size, hash and text, and the request says it is partial (GAP-0356). Its
+    // text is never cut: a message whose text is over the limit is blocked
+    // here, as the gateway's refusal of it was.
+    const fitted = fitInspectBody(bodyPayload);
+    if (fitted.refused) return failClosedVerdict(fitted.refused);
+    const res = await daemonClient.postRaw("/api/v1/inspect/tool", fitted.payload, {
       timeoutMs: inspectTimeoutMs(),
       correlation: { runId: toolCtx?.runId, sessionId },
     });
@@ -707,9 +711,9 @@ export default function (api: DefenseClawPluginHost) {
     // GAP-0177: a message call keeps its text in any string field of the
     // params (message, text, caption, nested blocks, ...). The plugin sends
     // the params as they are and the gateway reads them: the text, the
-    // recipients and the attachments (GAP-0436). Nothing is read, cut or
-    // copied here unless the call does not fit the gateway's request limit
-    // (fitInspectBody).
+    // recipients and the attachments (GAP-0436). Nothing is read or copied
+    // here; only the attachments of a call over the gateway's request limit
+    // are replaced, and a call whose text is over it is blocked (fitInspectBody).
     if (event.toolName.toLowerCase() === "message") {
       const verdict = await inspectTool(
         {

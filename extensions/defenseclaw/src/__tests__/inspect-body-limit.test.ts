@@ -18,43 +18,63 @@
 
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { GATEWAY_BODY_LIMIT_BYTES, INSPECT_BODY_BUDGET_BYTES, fitInspectBody } from "../inspect-body-limit.js";
+import { GATEWAY_BODY_LIMIT_BYTES, MESSAGE_TEXT_OVER_LIMIT, fitInspectBody } from "../inspect-body-limit.js";
 
 const limits = JSON.parse(
   readFileSync(new URL("../../../../schemas/inspect-tool-request-limits.json", import.meta.url), "utf8"),
-) as { body_max_bytes: number; plugin_envelope_margin_bytes: number };
-const GATEWAY_BODY_LIMIT = limits.body_max_bytes;
+) as { body_max_bytes: number; message_attachment_keys: string[] };
+const LIMIT = limits.body_max_bytes;
 const bodyBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
 const KEY = "sk-ant-api03-" + "A7b9C2d4E6f8G1h3J5k7L9m2";
+const prose = (n: number) => "the quarterly plan is attached for review. ".repeat(Math.ceil(n / 43) + 1).slice(0, n);
+const wrap = (params: Record<string, unknown>) => ({ tool: "message", args: params, direction: "outbound", approval_surface: "native" });
+const rows = (n: number) => Array.from({ length: n }, (_, r) => Array.from({ length: 10 }, (_, c) => r * 10 + c));
+const b64 = (s: string | Buffer) => Buffer.from(s).toString("base64");
+/** Bytes with no run of text in them (a photo's pixels). */
+const noise = (n: number) => {
+  const out = Buffer.alloc(n);
+  for (let i = 0; i < n; i++) out[i] = (i * 7919 + 13) & 0xff;
+  return out;
+};
+/** The smallest params mk(n) whose call is at least `target` bytes. */
+const tune = (mk: (n: number) => Record<string, unknown>, target: number) => {
+  let lo = 0;
+  let hi = 2_000_000;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (bodyBytes(wrap(mk(mid))) < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return mk(lo);
+};
 
-// GAP-0356: an attachment over about 770 KB made the inspect request exceed the
-// gateway's 1 MiB body limit, and the call was blocked as a failed check.
-// GAP-0402, GAP-0436: a call the gateway reads whole is sent whole, and a cut is
-// as small as the call needs.
 describe("fitInspectBody", () => {
-  it("has one source for the limit: the file the gateway embeds", () => {
-    expect(INSPECT_BODY_BUDGET_BYTES).toBe(GATEWAY_BODY_LIMIT - limits.plugin_envelope_margin_bytes);
-    expect(limits.plugin_envelope_margin_bytes).toBeGreaterThan(0);
-    expect(limits.plugin_envelope_margin_bytes).toBeLessThan(GATEWAY_BODY_LIMIT / 100);
+  it("has one source for the limit and the attachment fields: the file the gateway embeds", () => {
+    expect(GATEWAY_BODY_LIMIT_BYTES).toBe(LIMIT);
+    expect(limits.message_attachment_keys).toEqual(["buffer", "media"]);
   });
 
-  it("sends a call that fits as it is, up to the gateway's limit", () => {
-    const text = "x".repeat(INSPECT_BODY_BUDGET_BYTES - 400);
-    const payload = { tool: "message", args: { message: text }, direction: "outbound" };
-    expect(bodyBytes(payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
-    const got = fitInspectBody(payload);
+  it("sends a call of exactly the limit whole and refuses one byte more of text", () => {
+    const text = "x".repeat(LIMIT - bodyBytes(wrap({ message: "" })));
+    const atLimit = wrap({ message: text });
+    expect(bodyBytes(atLimit)).toBe(LIMIT);
+    const whole = fitInspectBody(atLimit);
+    expect(whole.payload).toBe(atLimit);
+    expect(whole.partial).toBe(false);
+    expect(whole.refused).toBeUndefined();
+    const got = fitInspectBody(wrap({ message: `${text}x` }));
+    expect(got.refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
     expect(got.partial).toBe(false);
-    expect(got.payload).toBe(payload);
-    expect(got.payload).not.toHaveProperty("args_partial");
   });
 
   it.each([1, 4, 16])("replaces the bytes of a %i MB attachment with its size, type and hash", (mb) => {
     const data = `data:image/png;base64,${"AAEC".repeat((mb << 20) / 4)}`;
-    const payload = { tool: "message", args: { message: "here is the photo", buffer: data, filename: "a.png" }, direction: "outbound" };
+    const payload = wrap({ message: "here is the photo", buffer: data, filename: "a.png" });
     const got = fitInspectBody(payload);
+    expect(got.refused).toBeUndefined();
     expect(got.partial).toBe(true);
     expect(got.payload.args_partial).toBe(true);
-    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
+    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(LIMIT);
     const args = got.payload.args as Record<string, string>;
     expect(args.message).toBe("here is the photo");
     expect(args.buffer).toMatch(/^\[attachment bytes not sent: \d+ characters, image\/png, sha256 [0-9a-f]{64}\]$/);
@@ -62,64 +82,190 @@ describe("fitInspectBody", () => {
     expect((payload.args as Record<string, string>).buffer).toBe(data);
   });
 
-  it("cuts only the longest strings, as little as the call needs (GAP-0436)", () => {
-    // A call 500 bytes over the gateway limit: only the longest string is cut, by what is needed.
-    const long = `${"w ".repeat(60_000)}${KEY}${" w".repeat(60_000)}`;
-    const base = bodyBytes({ tool: "message", args: { message: long, caption: "" }, direction: "outbound" });
-    const text = "y".repeat(GATEWAY_BODY_LIMIT - base + 500);
-    const payload = { tool: "message", args: { message: long, caption: text }, direction: "outbound" };
-    expect(bodyBytes(payload)).toBe(GATEWAY_BODY_LIMIT + 500);
-    const got = fitInspectBody(payload);
+  // GAP-0356: a phone photo over the limit is sent as its descriptor and the
+  // text the gateway would read in it (the camera's metadata), never blocked
+  // for its size.
+  it("sends a phone photo with a short caption as its descriptor and its metadata text", () => {
+    const jpeg = Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0xe1, 0x10, 0x00]),
+      Buffer.from("Exif\0\0MM\0*\0\0\0\x08"),
+      Buffer.from("Apple\0iPhone 15 Pro Max\0"),
+      Buffer.from('<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:Description photoshop:DateCreated="2026-11-01T09:12:44"/></x:xmpmeta>'),
+      noise(3 << 20),
+    ]);
+    const params = { action: "sendAttachment", to: "+15550001111", caption: "the view from the office", buffer: `data:image/jpeg;base64,${b64(jpeg)}` };
+    const got = fitInspectBody(wrap(params));
+    expect(got.refused).toBeUndefined();
     expect(got.partial).toBe(true);
-    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
     const args = got.payload.args as Record<string, string>;
-    // The string that holds the key is shorter than the filler and is left whole.
-    expect(args.message).toBe(long);
-    expect(args.message).toContain(KEY);
-    expect(args.caption.length).toBeGreaterThan(text.length - 5000);
+    expect(args.caption).toBe(params.caption);
+    expect(args.to).toBe(params.to);
+    expect(args.buffer).toMatch(/^\[attachment bytes not sent: \d+ characters, image\/jpeg, sha256 [0-9a-f]{64}\]\n/);
+    expect(args.buffer).toContain("iPhone 15 Pro Max");
+    expect(args.buffer).toContain("x:xmpmeta");
+    expect(bodyBytes(got.payload)).toBeLessThan(8 * 1024);
   });
 
-  it("keeps the head and the tail of a very long text", () => {
-    const text = `HEAD${"x".repeat(3 << 20)}TAIL`;
-    const got = fitInspectBody({ tool: "message", args: { text } });
-    expect(got.partial).toBe(true);
-    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
-    const kept = (got.payload.args as Record<string, string>).text;
-    expect(kept.startsWith("HEAD")).toBe(true);
-    expect(kept.endsWith("TAIL")).toBe(true);
-    expect(kept).toMatch(/\[\.\.\. \d+ not sent \.\.\.\]/);
-  });
-
+  // The review's two over-limit shapes: rel's gateway refused them (400) and
+  // rel failed closed. The key sits in the middle of the text, which is never
+  // cut: the call is refused, so it is blocked in every pack.
   it.each([
-    ["24 x 50,000", 24, 50_000],
-    ["30 x 40,000", 30, 40_000],
-    ["60 x 33,000", 60, 33_000],
-    ["500 x 40,000", 500, 40_000],
-    ["1000 x 32 KiB", 1000, 32 * 1024],
-  ])("fits %s characters of filler in bounded time (GAP-0361)", (_name, count, chars) => {
-    const args = Object.fromEntries(Array.from({ length: count }, (_, i) => [`f${i}`, "x".repeat(chars)]));
-    const start = performance.now();
-    const got = fitInspectBody({ tool: "message", args });
-    expect(performance.now() - start).toBeLessThan(3000);
-    expect(got.partial).toBe(true);
-    expect(got.payload.args_partial).toBe(true);
-    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
+    ["grid-body-mid-1100k", () => tune((n) => ({ action: "send", to: "+15551230000", body: `${prose(n)}key: ${KEY}${prose(n)}` }), 1_100_000)],
+    ["note-keymid-1400k", () => tune((n) => ({ action: "send", to: "+15551230000", body: `${prose(n)}key: ${KEY}${prose(n)}`, presentation: { blocks: [{ type: "table", rows: rows(12500) }] } }), 1_400_000)],
+    ["grid-message-mid-1100k", () => tune((n) => ({ action: "send", to: "+15551230000", message: `${prose(n)}key: ${KEY}${prose(n)}` }), 1_100_000)],
+  ])("refuses %s: the text is never cut", (_name, mk) => {
+    const payload = wrap(mk());
+    expect(bodyBytes(payload)).toBeGreaterThan(LIMIT);
+    const got = fitInspectBody(payload);
+    expect(got.refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+    expect(got.payload).toBe(payload);
+    expect(got.partial).toBe(false);
   });
 
-  it("fits a 16 MB attachment next to many long strings in bounded time", () => {
+  it.each(["content", "body", "message", "caption", "subject", "text", "html", "notes"])(
+    "refuses a call whose %s alone is over the limit, next to a photo",
+    (field) => {
+      const got = fitInspectBody(wrap({ to: "+1", [field]: `${prose(600_000)} ${KEY} ${prose(600_000)}`, buffer: b64(noise(1 << 20)) }));
+      expect(got.refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+    },
+  );
+
+  it("sends text just under the limit whole next to a large attachment", () => {
+    const photo = `data:image/png;base64,${b64(noise(2 << 20))}`;
+    const room = LIMIT - bodyBytes(wrap({ message: "", buffer: "" })) - 400;
+    const text = `${prose((room >> 1) - 40)} key: ${KEY} ${prose((room >> 1) - 40)}`;
+    const payload = wrap({ message: text, buffer: photo });
+    expect(bodyBytes(payload)).toBeGreaterThan(LIMIT);
+    const got = fitInspectBody(payload);
+    expect(got.refused).toBeUndefined();
+    expect(got.partial).toBe(true);
+    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(LIMIT);
+    const args = got.payload.args as Record<string, string>;
+    expect(args.message).toBe(text);
+    expect(args.message).toContain(KEY);
+    expect(args.buffer).toMatch(/^\[attachment bytes not sent: /);
+  });
+
+  it("refuses text under the limit next to an attachment when the descriptor does not fit with it", () => {
+    const text = "x".repeat(LIMIT - bodyBytes(wrap({ message: "", buffer: "" })) - 10);
+    const got = fitInspectBody(wrap({ message: text, buffer: b64(noise(1 << 20)) }));
+    expect(got.refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+  });
+
+  // A key inside an attachment: at the limit the call is sent whole and the
+  // gateway decodes the attachment; just over it the descriptor carries the
+  // text of the file, so the key still reaches the rules; when that text is
+  // itself over the limit the call is refused (rel refused the call, 400).
+  it("keeps the key of a text file sent as an attachment, at and over the limit", () => {
+    const file = (n: number) => `${prose(n)}\nkey: ${KEY}\n${prose(n)}`;
+    const mk = (n: number) => ({ action: "sendAttachment", to: "+1", caption: "see file", buffer: b64(file(n)) });
+    // The largest n whose call fits the limit: one more is over it.
+    let at = 0;
+    for (let hi = 600_000; at < hi;) {
+      const mid = (at + hi + 1) >> 1;
+      if (bodyBytes(wrap(mk(mid))) <= LIMIT) at = mid;
+      else hi = mid - 1;
+    }
+    const whole = wrap(mk(at));
+    expect(fitInspectBody(whole).payload).toBe(whole);
+    const over = fitInspectBody(wrap(mk(at + 1)));
+    expect(over.refused).toBeUndefined();
+    expect(over.partial).toBe(true);
+    expect((over.payload.args as Record<string, string>).buffer).toContain(`key: ${KEY}`);
+    expect(bodyBytes(over.payload)).toBeLessThanOrEqual(LIMIT);
+    // A text file whose text is over the limit: nothing can be sent whole.
+    expect(fitInspectBody(wrap(mk(800_000))).refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+  });
+
+  it("reads an attachment as the gateway does: UTF-16, a binary header, padding inside", () => {
+    const u16text = `key: ${KEY} in a UTF-16 file. `.repeat(60);
+    const u16le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(u16text, "utf16le")]);
+    // No byte order mark: told by the NUL beside every other byte.
+    const u16be = Buffer.from(u16text, "utf16le").swap16();
+    const binaryHead = Buffer.concat([noise(8192), Buffer.from(`\nkey: ${KEY}\n`), noise(8192)]);
+    // Two base64 values one after the other: the "=" of the first ends a group.
+    const joined = b64(`${prose(5001)}k`) + b64(`ey: ${KEY}`);
+    expect(b64(`${prose(5001)}k`)).toMatch(/=$/);
+    for (const [name, buffer] of [
+      ["utf16le", b64(u16le)],
+      ["utf16be", b64(u16be)],
+      ["binary head", b64(binaryHead)],
+      ["data url", `data:application/octet-stream;base64,${b64(binaryHead)}`],
+      ["wrapped", b64(binaryHead).replace(/.{76}/g, "$&\r\n")],
+    ] as const) {
+      const got = fitInspectBody(wrap({ message: "file", buffer, filler: "y".repeat(LIMIT) }));
+      expect(got.refused, name).toBe(MESSAGE_TEXT_OVER_LIMIT);
+      const fitted = fitInspectBody(wrap({ message: "file", media: buffer, other: { buffer: b64(noise(1 << 20)) } }));
+      expect(fitted.partial, name).toBe(true);
+      expect((fitted.payload.args as Record<string, string>).media, name).toContain(`key: ${KEY}`);
+    }
+    const pad = fitInspectBody(wrap({ message: "file", buffer: joined, photo: { media: b64(noise(1 << 20)) } }));
+    expect(pad.partial).toBe(true);
+    expect((pad.payload.args as Record<string, string>).buffer).toContain(`key: ${KEY}`);
+  });
+
+  it("keeps an attachment field that is not base64 as text: it is never described", () => {
+    // Plain words, base64 with spaces in it (the gateway reads both readings), a data URL that is not base64.
+    for (const buffer of ["word ".repeat(300_000), `${b64(noise(6000))} ${"x".repeat(1_200_000)}`, `data:text/plain,${"x".repeat(1_200_000)}`]) {
+      const got = fitInspectBody(wrap({ message: "hi", buffer }));
+      expect(got.refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+      expect(got.payload.args).toEqual({ message: "hi", buffer });
+    }
+    // Under 4,096 characters an attachment is left as it is.
+    const small = b64(noise(3000));
+    const got = fitInspectBody(wrap({ message: "hi", buffer: small, media: b64(noise(1 << 20)) }));
+    expect(got.partial).toBe(true);
+    expect((got.payload.args as Record<string, string>).buffer).toBe(small);
+  });
+
+  it("describes an attachment at any depth and in any case of its field name", () => {
+    const photo = b64(noise(1 << 20));
+    const got = fitInspectBody(wrap({ message: "two photos", attachments: [{ Buffer: photo, name: "a.png" }, { MEDIA: photo }] }));
+    expect(got.partial).toBe(true);
+    const list = (got.payload.args as { attachments: Array<Record<string, string>> }).attachments;
+    expect(list[0].Buffer).toMatch(/^\[attachment bytes not sent/);
+    expect(list[0].name).toBe("a.png");
+    expect(list[1].MEDIA).toMatch(/^\[attachment bytes not sent/);
+  });
+
+  it("refuses attachments past what one call reads", () => {
+    const got = fitInspectBody(wrap({ message: "a video", buffer: "AAEC".repeat((33 << 20) / 4) }));
+    expect(got.refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+  });
+
+  it("changes only a message, whatever the case of its name: any other tool is sent whole", () => {
+    const args = { command: "x".repeat(2 << 20) };
+    for (const tool of ["exec", "write", "bash", "messages"]) {
+      const payload = { tool, args };
+      const got = fitInspectBody(payload);
+      expect(got.partial).toBe(false);
+      expect(got.refused).toBeUndefined();
+      expect(got.payload).toBe(payload);
+    }
+    for (const tool of ["message", "Message", "MESSAGE"]) {
+      expect(fitInspectBody({ tool, args: { message: "x".repeat(2 << 20) } }).refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+      expect(fitInspectBody({ tool, args: { buffer: "AAEC".repeat(1 << 19) } }).partial).toBe(true);
+    }
+    expect(fitInspectBody({ tool: "message", content: "x".repeat(2 << 20) }).refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+  });
+
+  it("decides a 16 MB attachment next to 32 MB of text in bounded time", () => {
     const args: Record<string, unknown> = { buffer: `data:image/png;base64,${"AAEC".repeat((16 << 20) / 4)}` };
     for (let i = 0; i < 1000; i++) args[`field${i}`] = `${i}:${"z".repeat(32 * 1024)}`;
     const start = performance.now();
-    const got = fitInspectBody({ tool: "message", args });
-    expect(performance.now() - start).toBeLessThan(5000);
-    expect(got.partial).toBe(true);
-    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
+    expect(fitInspectBody({ tool: "message", args }).refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+    const photo = performance.now();
+    expect(fitInspectBody({ tool: "message", args: { message: "hi", buffer: b64(noise(12 << 20)) } }).partial).toBe(true);
+    expect(photo - start).toBeLessThan(5000);
+    expect(performance.now() - photo).toBeLessThan(5000);
   });
 
-  // A fixed-seed fuzz: random shapes of long and short strings, nested, never
-  // loop and always end under the budget.
-  it.each([1, 2, 3, 5, 8, 13, 21, 34, 55, 89])("terminates and fits for fuzz seed %i", (seed) => {
-    let state = seed * 2654435761 >>> 0;
+  // A fixed-seed fuzz: random shapes of text, numbers and attachments, nested.
+  // Every result is whole, refused, or partial within the limit with every
+  // string but an attachment exactly as it was.
+  const FUZZ_ATTACHMENTS = [4000, 60_000, 400_000, 900_000].map((n) => b64(noise(n)));
+  it.each([1, 2, 3, 5, 8, 13, 21, 34, 55, 89])("never cuts text, fuzz seed %i", (seed) => {
+    let state = (seed * 2654435761) >>> 0;
     const next = (n: number) => {
       state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
       return state % n;
@@ -131,85 +277,41 @@ describe("fitInspectBody", () => {
       if (kind === 2) return Array.from({ length: next(40) }, () => value(depth + 1));
       return Object.fromEntries(Array.from({ length: next(40) }, (_, i) => [`k${i}`, value(depth + 1)]));
     };
-    const payload = { tool: "message", args: { items: Array.from({ length: 30 + next(120) }, () => value(0)) } };
-    const start = performance.now();
+    // Attachments (a few, shared, so the fuzz stays small in memory) sit beside the items, nested or not.
+    const attachment = () => (next(3) === 0 ? { buffer: FUZZ_ATTACHMENTS[next(FUZZ_ATTACHMENTS.length)] } : { media: "short" });
+    const payload = { tool: "message", args: {
+      items: Array.from({ length: 30 + next(120) }, () => value(0)),
+      attachments: Array.from({ length: next(8) }, attachment),
+      buffer: next(2) === 0 ? FUZZ_ATTACHMENTS[next(FUZZ_ATTACHMENTS.length)] : "short",
+    } };
+    const before = JSON.stringify(payload);
     const got = fitInspectBody(payload);
-    expect(performance.now() - start).toBeLessThan(8000);
-    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
-    expect(got.partial).toBe(bodyBytes(payload) > INSPECT_BODY_BUDGET_BYTES);
-  });
-
-  it("sends a note with the text and the recipients for a call too large to cut", () => {
-    const params = {
-      to: "+15550001111",
-      target: { id: "u-7" },
-      message: `status ${KEY}`,
-      presentation: { blocks: [{ type: "table", rows: Array.from({ length: 200_000 }, (_, i) => [i, i * 7]) }] },
-    };
-    const payload = { tool: "message", args: params, direction: "outbound" };
-    expect(bodyBytes(payload)).toBeGreaterThan(GATEWAY_BODY_LIMIT);
-    const got = fitInspectBody(payload);
-    expect(got.partial).toBe(true);
-    expect(got.payload.args_partial).toBe(true);
-    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
-    const args = got.payload.args as Record<string, unknown>;
-    expect(args.to).toBe("+15550001111");
-    expect(args.id).toBe("u-7");
-    expect(typeof args.note).toBe("string");
-    expect(args.text).toContain(KEY);
-  });
-
-  it("sends the shape of 790 KB of numbers around a key whole (rel read it whole)", () => {
-    const params = {
-      to: "+15550001111",
-      message: `status ${KEY}`,
-      presentation: { blocks: [{ type: "table", rows: Array.from({ length: 56_000 }, (_, i) => [i, i * 7]) }] },
-    };
-    const payload = { tool: "message", args: params, direction: "outbound" };
-    expect(bodyBytes(payload)).toBeGreaterThan(700 * 1024);
-    expect(bodyBytes(payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
-    expect(fitInspectBody(payload).payload).toBe(payload);
-  });
-
-  it("cuts only a message, whatever the case of its name: any other tool is sent whole", () => {
-    const args = { command: "x".repeat(2 << 20) };
-    for (const tool of ["exec", "write", "bash"]) {
-      const payload = { tool, args };
-      const got = fitInspectBody(payload);
-      expect(got.partial).toBe(false);
+    expect(JSON.stringify(payload)).toBe(before);
+    if (bodyBytes(payload) <= LIMIT) {
       expect(got.payload).toBe(payload);
+      return;
     }
-    const message = { message: "x".repeat(2 << 20) };
-    expect(fitInspectBody({ tool: "Message", args: message }).partial).toBe(true);
-    expect(fitInspectBody({ tool: "MESSAGE", args: message }).partial).toBe(true);
-    expect(fitInspectBody({ tool: "messages", args: message }).partial).toBe(false);
-  });
-
-  it("describes only a line-wrapped base64 attachment: a value with spaces or other text is cut as text", () => {
-    const wrapped = `${"QUJD".repeat(2000)}=\n${"QUJD".repeat(2000)}-_\r\n${"QUJD".repeat(2000)}`;
-    const described = fitInspectBody({ tool: "message", args: { buffer: wrapped + "x".repeat(1_200_000) } });
-    expect((described.payload.args as Record<string, string>).buffer).toMatch(/^\[attachment bytes not sent/);
-    const spaced = fitInspectBody({ tool: "message", args: { buffer: `${wrapped} ${"x".repeat(1_200_000)}` } });
-    expect((spaced.payload.args as Record<string, string>).buffer).not.toMatch(/^\[attachment bytes not sent/);
-    expect(spaced.partial).toBe(true);
-    const words = fitInspectBody({ tool: "message", args: { buffer: "word ".repeat(300_000), message: "hi" } });
-    const buffer = (words.payload.args as Record<string, string>).buffer;
-    expect(buffer.startsWith("word word")).toBe(true);
-    expect(buffer).toContain("not sent");
-    expect(buffer).not.toContain("attachment bytes not sent");
+    if (got.refused) return;
+    expect(got.partial).toBe(true);
+    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(LIMIT);
+    const strip = (v: unknown, key = ""): unknown =>
+      typeof v === "string" ? ((key === "buffer" || key === "media") && v.length >= 4096 ? "ATTACHMENT" : v.startsWith("[attachment bytes not sent") ? "ATTACHMENT" : v)
+        : Array.isArray(v) ? v.map((x) => strip(x))
+          : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, strip(x, k)]))
+            : v;
+    expect(strip(got.payload.args)).toEqual(strip(payload.args));
   });
 });
 
-// GAP-0436, round 5: a call whose body is over the cut target by a few bytes but
-// under the gateway's limit is sent whole: rel read these calls whole (its body
-// is the params plus a copy of the text) and blocked the key in them. The shapes
-// are the review's band shapes; the Go side (TestInspectToolMessageMarginBandStillBlocksTheKey)
-// builds the same bytes and reads them through the gateway.
+// GAP-0436, round 5: a call whose body is over the old cut target (the limit
+// less 1 KiB) by a few bytes and under the gateway's limit is sent whole: rel
+// read these calls whole (its body is the params plus a copy of the text) and
+// blocked the key in them. The shapes are the review's band shapes; the Go side
+// (TestInspectToolMessageMarginBandStillBlocksTheKey) builds the same bytes and
+// reads them through the gateway.
 describe("fitInspectBody margin band (GAP-0436)", () => {
-  const prose = (n: number) => "the quarterly plan is attached for review. ".repeat(Math.ceil(n / 43) + 1).slice(0, n);
+  const BAND = LIMIT - 1024;
   const keyText = `${prose(7000)} key: ${KEY} ${prose(7000)}`;
-  const wrap = (params: Record<string, unknown>) => ({ tool: "message", args: params, direction: "outbound", approval_surface: "native" });
-  const rows = (n: number) => Array.from({ length: n }, (_, r) => Array.from({ length: 10 }, (_, c) => r * 10 + c));
 
   // The call whose JSON is exactly `target` bytes: `coarse(n)` grows with n; a list of small numbers fills the rest.
   const exact = (target: number, coarse: (n: number) => Record<string, unknown>, most: number): Record<string, unknown> => {
@@ -243,25 +345,12 @@ describe("fitInspectBody margin band (GAP-0436)", () => {
   ];
 
   it.each(shapes)("%s is sent whole", (_name, over, most, coarse) => {
-    const params = exact(INSPECT_BODY_BUDGET_BYTES + over, coarse, most);
-    const payload = wrap(params);
-    expect(bodyBytes(payload)).toBe(INSPECT_BODY_BUDGET_BYTES + over);
+    const payload = wrap(exact(BAND + over, coarse, most));
+    expect(bodyBytes(payload)).toBe(BAND + over);
     expect(bodyBytes(payload)).toBeLessThanOrEqual(GATEWAY_BODY_LIMIT_BYTES);
     const got = fitInspectBody(payload);
     expect(got.partial).toBe(false);
     expect(got.payload).toBe(payload);
     expect(got.payload).not.toHaveProperty("args_partial");
   });
-
-  it("sends a call of exactly the limit whole and cuts one byte more", () => {
-    const text = "x".repeat(GATEWAY_BODY_LIMIT_BYTES - bodyBytes(wrap({ message: "" })));
-    const atLimit = wrap({ message: text });
-    expect(bodyBytes(atLimit)).toBe(GATEWAY_BODY_LIMIT_BYTES);
-    expect(fitInspectBody(atLimit).partial).toBe(false);
-    const over = wrap({ message: `${text}x` });
-    const got = fitInspectBody(over);
-    expect(got.partial).toBe(true);
-    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
-  });
 });
-

@@ -712,50 +712,65 @@ func TestExtractMessageArgsAttachmentTailIsChecked(t *testing.T) {
 	}
 }
 
-// The request body limit has one source, the embedded limits file the plugin
-// build copies too (GAP-0402): the gateway reads it from there.
+// The request body limit and the attachment fields have one source, the
+// embedded limits file the plugin build copies too (GAP-0402): the gateway
+// reads them from there.
 func TestInspectToolRequestLimitsFile(t *testing.T) {
 	raw, err := os.ReadFile("../../schemas/inspect-tool-request-limits.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var limits struct {
-		BodyMax int64 `json:"body_max_bytes"`
-		Margin  int64 `json:"plugin_envelope_margin_bytes"`
+		BodyMax int64    `json:"body_max_bytes"`
+		Keys    []string `json:"message_attachment_keys"`
 	}
 	if err := json.Unmarshal(raw, &limits); err != nil {
 		t.Fatal(err)
 	}
-	if limits.BodyMax != apiRequestBodyMaxBytes || limits.Margin <= 0 || limits.Margin >= limits.BodyMax/100 {
-		t.Errorf("limits file %+v, gateway limit %d: want the same body limit and a small positive margin", limits, apiRequestBodyMaxBytes)
+	if limits.BodyMax != apiRequestBodyMaxBytes {
+		t.Errorf("limits file %+v, gateway limit %d: want the same body limit", limits, apiRequestBodyMaxBytes)
+	}
+	if len(limits.Keys) != len(messageAttachmentKeys) {
+		t.Errorf("attachment fields %v, gateway %v", limits.Keys, messageAttachmentKeys)
+	}
+	for _, k := range limits.Keys {
+		if !messageAttachmentField(k) || !messageAttachmentField(strings.ToUpper(k)) {
+			t.Errorf("%q is not an attachment field of the gateway", k)
+		}
+	}
+	for _, k := range []string{"message", "text", "caption", "content", "body", "subject", "files", "attachments"} {
+		if messageAttachmentField(k) {
+			t.Errorf("%q is a text field, not an attachment field", k)
+		}
 	}
 }
 
-// The note the plugin sends when a call is too large to cut (the text it holds,
-// its recipients and a note, flagged partial) blocks a key in the text in every
-// pack, as rel does for the whole call (GAP-0402); a message over the limit is
-// not blocked for its size alone.
-func TestInspectToolArgsPartialNoteKeepsTheText(t *testing.T) {
+// The descriptor the plugin sends for an attachment over the body limit (its
+// size, type and hash, then the text the gateway would have read in it, flagged
+// partial) blocks a key in that text in every pack; a photo's descriptor (its
+// camera metadata) is at the unknown tier, not blocked for its size (GAP-0356).
+func TestInspectToolArgsPartialDescriptorKeepsTheAttachmentText(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("POSIX home fixture requires an unprivileged Unix user")
 	}
 	env := boundedLaneEnv(t)
 	t.Setenv("HOME", env.home)
+	body := func(text string) string {
+		b, _ := json.Marshal(map[string]any{"tool": "message", "direction": "outbound", "args_partial": true,
+			"args": map[string]any{"to": "+15550001111", "caption": "see the file",
+				"buffer": "[attachment bytes not sent: 1398104 characters, image/jpeg, sha256 " + strings.Repeat("ab", 32) + "]\n" + text}})
+		return string(b)
+	}
 	for _, tier := range boundedTestTiers {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		api.inspectToolScanTimeout = 5 * time.Second
-		body := func(text string) string {
-			b, _ := json.Marshal(map[string]any{"tool": "message", "direction": "outbound", "args_partial": true,
-				"args": map[string]any{"to": "+15550001111", "text": text, "note": "call too large to send"}})
-			return string(b)
+		_, withKey := postInspectForConnector(t, api, "openclaw", body("notes for the demo\nkey: "+messageTestSecret+"\n"))
+		if withKey.Action != "block" || withKey.Severity != "CRITICAL" {
+			t.Errorf("%s: a key in an attachment's text: action = %q severity = %q, want block CRITICAL", tier.name, withKey.Action, withKey.Severity)
 		}
-		_, withKey := postInspectForConnector(t, api, "openclaw", body("status "+messageTestSecret))
-		if withKey.Action != "block" {
-			t.Errorf("%s: a key in the text of a too-large call: action = %q, want block", tier.name, withKey.Action)
-		}
-		_, clean := postInspectForConnector(t, api, "openclaw", body("status report"))
-		if want := bounded.Unknown(tier.tier).String(); clean.Action != want {
-			t.Errorf("%s: a clean too-large call: action = %q, want %s (the unknown tier), not a block for its size", tier.name, clean.Action, want)
+		_, photo := postInspectForConnector(t, api, "openclaw", body("Apple\niPhone 15 Pro Max\n<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"></x:xmpmeta>"))
+		if want := bounded.Unknown(tier.tier).String(); photo.Action != want {
+			t.Errorf("%s: a photo's descriptor: action = %q findings = %v, want %s (the unknown tier), not a block for its size", tier.name, photo.Action, photo.Findings, want)
 		}
 	}
 }

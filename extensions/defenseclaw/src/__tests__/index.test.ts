@@ -247,6 +247,20 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       expect((body.args as Record<string, string>).buffer).toMatch(/^\[attachment bytes not sent: 4194304 characters/);
     });
 
+    it.each([
+      ["body", { to: "+1", body: "status ".repeat(200_000) }],
+      ["message next to a photo", { to: "+1", message: "status ".repeat(200_000), buffer: "AAEC".repeat(1 << 18) }],
+    ])("blocks a message whose text (%s) is over the body limit without sending it, its text never cut", async (_name, params) => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const result = await listeners.before_tool_call({ toolName: "message", params }, ctx);
+        expect(mockDaemonClient.postRaw).not.toHaveBeenCalled();
+        expect(result).toMatchObject({ block: true, blockReason: expect.stringContaining("message text exceeds the inspection limit") });
+      } finally {
+        log.mockRestore();
+      }
+    });
+
     it("sends a message call with no params at all", async () => {
       mockDaemonClient.postRaw.mockResolvedValue(allow());
       await listeners.before_tool_call({ toolName: "message" }, ctx);

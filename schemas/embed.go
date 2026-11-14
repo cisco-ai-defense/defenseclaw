@@ -28,9 +28,10 @@ import (
 )
 
 // InspectToolRequestLimits is the request body limit of the local API and the
-// room the OpenClaw plugin leaves in it (inspect-tool-request-limits.json).
-// The gateway reads the limit from here and the plugin build copies the same
-// file, so the two sides cannot disagree (rel-1-0-10:GAP-0402, GAP-0436).
+// fields of a message call that carry an attachment
+// (inspect-tool-request-limits.json). The gateway reads both from here and the
+// plugin build copies the same file, so the two sides cannot disagree
+// (rel-1-0-10:GAP-0356, GAP-0402, GAP-0436).
 //
 //go:embed inspect-tool-request-limits.json
 var InspectToolRequestLimits []byte

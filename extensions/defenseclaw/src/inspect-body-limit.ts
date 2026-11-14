@@ -18,7 +18,8 @@
 
 import { createHash } from "node:crypto";
 // Copied from schemas/inspect-tool-request-limits.json by `make plugin`: the
-// gateway reads its request body limit from the same file.
+// gateway reads its request body limit and its attachment fields from the same
+// file.
 import limits from "./inspect-tool-request-limits.json" with { type: "json" };
 
 /**
@@ -27,22 +28,21 @@ import limits from "./inspect-tool-request-limits.json" with { type: "json" };
  *
  * The plugin sends a message call as it is, the params and nothing else: the
  * gateway reads the text, the recipients and the attachments out of them, and
- * judges them as the rules of its pack say. It cuts a call only when it does
- * not fit the gateway's request body limit (a call that fits is sent whole,
- * up to the byte), and then aims a small margin under the limit and cuts as
- * little as it must:
+ * judges them as the rules of its pack say. A call that fits the limit is sent
+ * whole, up to the byte.
  *
- *  1. an attachment's bytes become its size, media type and SHA-256;
- *  2. the longest strings are cut to one common length (head and tail around a
- *     marker), the shorter ones are left alone, each cut at most once;
- *  3. a call that still does not fit is sent as a note: its routing values
- *     (the recipient, target, channel ...) and its strings, cut to the room.
- *
- * A cut call carries `args_partial: true`: the part that was not sent is
- * unread, and the gateway judges the call at least at the unknown tier of its
- * policy (alert in the default and permissive packs, block in strict), not a
- * block for its size. Any other tool is never cut here: the gateway refuses it
- * as it always has and the check fails closed, as the shell hooks do.
+ * A call over the limit never has its text cut. Only an attachment (a long
+ * base64 value of an attachment field, at any depth) is replaced, by its size,
+ * media type and SHA-256 and the text the gateway would have read in it (the
+ * runs of text of its bytes, as messageAttachmentText reads them): a photo
+ * becomes a few bytes, and a key in a file sent as an attachment still reaches
+ * the rules. A call that then fits is sent with `args_partial: true` (the bytes
+ * were not sent, so the gateway judges it at least at the unknown tier of its
+ * pack). A call that still does not fit, because its text alone (or the text
+ * in its attachments) is over the limit, is refused here and blocked in every
+ * pack, as rel's gateway refused it (400, a failed check). Any other tool is
+ * never changed here: the gateway refuses it as it always has and the check
+ * fails closed.
  */
 
 /**
@@ -50,253 +50,247 @@ import limits from "./inspect-tool-request-limits.json" with { type: "json" };
  * is, up to exactly this (the client sends JSON.stringify of the payload).
  */
 export const GATEWAY_BODY_LIMIT_BYTES = limits.body_max_bytes;
-/**
- * The size a cut aims at: under the limit by a margin, so the cut call and the
- * flag it carries (args_partial) surely fit. A call that fits the limit is
- * never cut, so the margin costs nothing a call could use.
- */
-export const INSPECT_BODY_BUDGET_BYTES = GATEWAY_BODY_LIMIT_BYTES - limits.plugin_envelope_margin_bytes;
 
-/** Cut strings never go below this (characters). */
-const MIN_CUT_CHARS = 128;
-/** Room for the "not sent" marker inside a cut string (characters). */
-const MARKER_CHARS = 64;
-/**
- * Shares of the room the cut aims at, tried in turn on a fresh copy of the
- * call: the first leaves only the rounding of the JSON escapes, the others
- * allow for a call whose escapes cost more than the length suggests.
- */
-const CUT_SAFETIES = [0.9995, 0.99, 0.9];
+/** The reason a message call over the limit is blocked. */
+export const MESSAGE_TEXT_OVER_LIMIT = "message text exceeds the inspection limit";
+
+/** The fields that carry an attachment, at any depth (the gateway's messageAttachmentField). */
+const ATTACHMENT_KEYS = new Set(limits.message_attachment_keys.map((k) => k.toLowerCase()));
 /** An attachment field's value this long is replaced by its descriptor. */
 const ATTACHMENT_MIN_CHARS = 4096;
-
-/** The fields that carry an attachment, at any depth. */
-export const ATTACHMENT_KEYS = new Set(["buffer", "media"]);
-
 /**
- * Routing and control fields: where a message goes, not what it says. The
- * gateway reads them as routing values (messageRoutingKeys).
+ * The base64 characters of attachments one call decodes for their text (24 MiB
+ * of bytes, a few phone photos, well under a second). An attachment past it is
+ * not read, so the call is refused rather than sent without what it might hold.
  */
-export const ROUTING_KEYS = new Set([
-  "action", "channel", "provider", "accountid", "account", "to", "target",
-  "targets", "from", "recipient", "recipients", "replyto", "threadid",
-  "messageid", "chatid", "id", "type", "kind", "mode", "format", "parsemode",
-  "silent", "dryrun", "timeoutms", "besteffort", "gatewayurl",
-  "gatewaytoken",
-]);
+const ATTACHMENT_READ_MAX_CHARS = 32 << 20;
+/** The shortest run of text bytes read out of an attachment (messageRunMinBytes). */
+const RUN_MIN_BYTES = 16;
+/** How much of a decoded attachment is looked at to tell UTF-16 text (messageUTF16ProbeBytes). */
+const UTF16_PROBE_BYTES = 4096;
 
 /**
  * A value of base64 characters (either alphabet) and padding, wrapped at line
  * breaks, all through. A value with a space or a tab in it is not one here: the
  * gateway reads it as text as well as decoding it (messageLenientBase64), so
- * the plugin cuts it as text.
+ * the plugin keeps it as text.
  */
-export const BASE64_ALL = /^[A-Za-z0-9+/_=\n\r\f\v-]*$/;
+const BASE64_ALL = /^[A-Za-z0-9+/_=\n\r\f\v-]*$/;
 
 export interface FittedPayload {
   payload: Record<string, unknown>;
-  /** True when part of the call was not sent. */
+  /** True when the bytes of an attachment were not sent. */
   partial: boolean;
+  /** Set when the call cannot be sent without cutting its text: block it with this reason. */
+  refused?: string;
 }
 
 function size(payload: unknown): number {
   return Buffer.byteLength(JSON.stringify(payload) ?? "");
 }
 
-/** The descriptor of an attachment value: what the gateway can judge without its bytes. */
-function describeAttachment(value: string): string {
-  const mime = /^data:([^;,]*)[;,]/.exec(value.slice(0, 256))?.[1] || "unknown type";
-  const hash = createHash("sha256").update(value).digest("hex");
-  return `[attachment bytes not sent: ${value.length} characters, ${mime}, sha256 ${hash}]`;
-}
+/** The six bits of each base64 character (either alphabet); 64 white space, 65 "=", 255 anything else. */
+const B64 = (() => {
+  const t = new Uint8Array(256).fill(255);
+  const std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (let i = 0; i < std.length; i++) t[std.charCodeAt(i)] = i;
+  t[45] = 62; // -
+  t[95] = 63; // _
+  for (const c of " \t\n\r\f\v") t[c.charCodeAt(0)] = 64;
+  t[61] = 65; // =
+  return t;
+})();
 
-interface Slot {
-  container: Record<string, unknown> | unknown[];
-  key: string | number;
-  length: number;
-}
-
-/** Collects the strings of a value, with where each sits. */
-function collect(value: unknown, out: Slot[], seen: Set<unknown>, depth: number): void {
-  if (value === null || typeof value !== "object" || seen.has(value) || depth > 64) return;
-  seen.add(value);
-  const container = value as Record<string, unknown> | unknown[];
-  for (const key of Object.keys(container)) {
-    const item = (container as Record<string, unknown>)[key];
-    if (typeof item === "string") {
-      out.push({ container, key: Array.isArray(container) ? Number(key) : key, length: item.length });
-    } else {
-      collect(item, out, seen, depth + 1);
+/**
+ * Decodes base64 as the gateway's messageBase64Reader does: white space is
+ * skipped, either alphabet is read, and "=" drops the bits of the group it
+ * ends and starts the next group fresh.
+ */
+function decodeLenient(s: string): Buffer {
+  const out = Buffer.allocUnsafe(Math.ceil((s.length * 3) / 4));
+  let n = 0;
+  let acc = 0;
+  let bits = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    const v = c < 256 ? B64[c] : 255;
+    if (v < 64) {
+      acc = ((acc << 6) | v) & 0xffffff;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        out[n++] = (acc >> bits) & 0xff;
+        acc &= (1 << bits) - 1;
+      }
+    } else if (v === 65) {
+      acc = 0;
+      bits = 0;
     }
   }
+  return out.subarray(0, n);
 }
 
-/** A string of at most `limit` characters: its head and its tail around a marker. */
-function cutString(value: string, limit: number): string {
-  const keep = Math.max(16, (limit - MARKER_CHARS) >> 1);
-  return `${value.slice(0, keep)}\n[... ${value.length - 2 * keep} not sent ...]\n${value.slice(-keep)}`;
-}
+/** Go's unicode.IsPrint for a code point above ASCII: letters, marks, numbers, punctuation and symbols. */
+const PRINTABLE = /^[\p{L}\p{M}\p{N}\p{P}\p{S}]$/u;
 
-/** True for a long base64 value, bare or behind a base64 data URL header. */
-function isBase64Payload(value: string): boolean {
-  let payload = value;
-  if (value.startsWith("data:")) {
-    const i = value.slice(0, 256).indexOf(";base64,");
-    if (i < 0) return false;
-    payload = value.slice(i + ";base64,".length);
+/**
+ * The length of the valid UTF-8 character at buf[i] (Go's utf8.DecodeRune
+ * rules: no overlong forms, no surrogates, nothing past U+10FFFF) and its code
+ * point, or 0 for an invalid byte.
+ */
+function utf8At(buf: Buffer, i: number): [number, number] {
+  const b0 = buf[i];
+  const cont = (k: number) => i + k < buf.length && (buf[i + k] & 0xc0) === 0x80;
+  if (b0 >= 0xc2 && b0 <= 0xdf && cont(1)) return [2, ((b0 & 0x1f) << 6) | (buf[i + 1] & 0x3f)];
+  if (b0 >= 0xe0 && b0 <= 0xef && cont(1) && cont(2)) {
+    const cp = ((b0 & 0x0f) << 12) | ((buf[i + 1] & 0x3f) << 6) | (buf[i + 2] & 0x3f);
+    return cp < 0x800 || (cp >= 0xd800 && cp <= 0xdfff) ? [0, 0] : [3, cp];
   }
-  return BASE64_ALL.test(payload);
-}
-
-/** The routing values of a call (the recipient, target, channel ...): strings and lists of strings. */
-function collectRouting(args: unknown): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  let nodes = 0;
-  let bytes = 0;
-  const visit = (value: unknown, depth: number): void => {
-    if (value === null || typeof value !== "object" || depth > 8 || nodes++ > 4096) return;
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item, depth + 1);
-      return;
-    }
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      if (ROUTING_KEYS.has(key.toLowerCase())) {
-        const keep =
-          typeof item === "string" ? item.slice(0, 4096)
-            : Array.isArray(item) && item.every((i) => typeof i === "string") ? (item as string[]).slice(0, 64).map((i) => i.slice(0, 4096))
-              : undefined;
-        if (keep !== undefined && bytes < 64 * 1024) {
-          bytes += JSON.stringify(keep).length;
-          let name = key;
-          for (let n = 2; name in out; n++) name = `${key}#${n}`;
-          out[name] = keep;
-        } else if (keep === undefined) {
-          // A routing key that holds an object (a target with its own fields).
-          visit(item, depth + 1);
-        }
-      } else {
-        visit(item, depth + 1);
-      }
-    }
-  };
-  visit(args, 0);
-  return out;
-}
-
-/** The strings of a call outside its routing values, in order, joined by newlines. */
-function collectText(args: unknown): string {
-  const parts: string[] = [];
-  let nodes = 0;
-  const visit = (value: unknown, depth: number): void => {
-    if (nodes++ > 100_000 || depth > 64) return;
-    if (typeof value === "string") {
-      if (value.trim() !== "") parts.push(value);
-    } else if (Array.isArray(value)) {
-      for (const item of value) visit(item, depth + 1);
-    } else if (value !== null && typeof value === "object") {
-      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-        if (!ROUTING_KEYS.has(key.toLowerCase())) visit(item, depth + 1);
-      }
-    }
-  };
-  visit(args, 0);
-  return parts.join("\n");
+  if (b0 >= 0xf0 && b0 <= 0xf4 && cont(1) && cont(2) && cont(3)) {
+    const cp = ((b0 & 0x07) << 18) | ((buf[i + 1] & 0x3f) << 12) | ((buf[i + 2] & 0x3f) << 6) | (buf[i + 3] & 0x3f);
+    return cp < 0x10000 || cp > 0x10ffff ? [0, 0] : [4, cp];
+  }
+  return [0, 0];
 }
 
 /**
- * Cuts the longest strings to one common length so that the call fits, the
- * shorter ones untouched: the length is the largest the room allows. Returns
- * false when nothing can be cut to fit.
+ * The runs of at least RUN_MIN_BYTES text bytes (printable characters and
+ * white space of valid UTF-8) joined by newlines, as the gateway's
+ * messageStreamTextRuns reads them.
  */
-function cutLongest(out: Record<string, unknown>, slots: Slot[], budget: number, safety: number): boolean {
-  const read = (s: Slot) => (s.container as Record<string, unknown>)[s.key as string] as string;
-  const cuttable = slots.filter((s) => s.length > MIN_CUT_CHARS);
-  if (cuttable.length === 0) return false;
-  const bytes = cuttable.map((s) => Buffer.byteLength(JSON.stringify(read(s))));
-  const total = bytes.reduce((a, b) => a + b, 0);
-  const room = (budget - (size(out) - total)) * safety;
-  const floor = cuttable.length * (MIN_CUT_CHARS + MARKER_CHARS);
-  if (room < floor) return false;
-  // The largest byte length C such that every string over C is cut to C fits.
-  let lo = MIN_CUT_CHARS;
-  let hi = Math.max(...bytes);
-  const fits = (c: number) => bytes.reduce((a, b) => a + Math.min(b, c), 0) <= room;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (fits(mid)) lo = mid;
-    else hi = mid - 1;
-  }
-  cuttable.forEach((slot, i) => {
-    if (bytes[i] > lo) {
-      const limit = Math.max(MIN_CUT_CHARS, Math.floor((slot.length * lo) / bytes[i]));
-      (slot.container as Record<string, unknown>)[slot.key as string] = cutString(read(slot), limit);
+function textRuns(buf: Buffer): string {
+  const out: string[] = [];
+  let start = 0;
+  const flush = (end: number) => {
+    if (end - start >= RUN_MIN_BYTES) out.push(buf.toString("utf8", start, end));
+  };
+  let i = 0;
+  while (i < buf.length) {
+    const c = buf[i];
+    if (c < 0x80) {
+      if ((c >= 0x20 && c < 0x7f) || c === 0x0a || c === 0x0d || c === 0x09) {
+        i++;
+      } else {
+        flush(i);
+        i++;
+        start = i;
+      }
+      continue;
     }
-  });
+    const [len, cp] = utf8At(buf, i);
+    if (len === 0 || !PRINTABLE.test(String.fromCodePoint(cp))) {
+      flush(i);
+      i++;
+      start = i;
+    } else {
+      i += len;
+    }
+  }
+  flush(i);
+  return out.join("\n");
+}
+
+/** UTF-16 text and its byte order, as the gateway's messageUTF16 tells it. */
+function utf16Of(head: Buffer): { be: boolean; bom: boolean } | undefined {
+  if (head.length >= 2) {
+    if (head[0] === 0xff && head[1] === 0xfe) return { be: false, bom: true };
+    if (head[0] === 0xfe && head[1] === 0xff) return { be: true, bom: true };
+  }
+  const pairs = head.length >> 1;
+  if (pairs < 16) return undefined;
+  let even = 0;
+  let odd = 0;
+  for (let i = 0; i + 1 < head.length; i += 2) {
+    if (head[i] === 0) even++;
+    if (head[i + 1] === 0) odd++;
+  }
+  if (odd * 10 >= pairs * 3 && even * 50 <= pairs) return { be: false, bom: false };
+  if (even * 10 >= pairs * 3 && odd * 50 <= pairs) return { be: true, bom: false };
+  return undefined;
+}
+
+/**
+ * The text of a base64 payload, as the gateway's messageAttachmentText reads
+ * it: the runs of its 8-bit reading and, when it looks like UTF-16, the runs of
+ * that reading too.
+ */
+function attachmentText(payload: string): string {
+  const bytes = decodeLenient(payload);
+  let text = textRuns(bytes);
+  const u16 = utf16Of(bytes.subarray(0, UTF16_PROBE_BYTES));
+  if (u16) {
+    const words = Buffer.from(bytes.subarray(0, bytes.length & ~1));
+    if (u16.be) words.swap16();
+    let s = words.toString("utf16le");
+    if (u16.bom && s.charCodeAt(0) === 0xfeff) s = s.slice(1);
+    // Lone surrogates become U+FFFD, as Go's utf16.Decode makes them.
+    const runs = textRuns(Buffer.from(s, "utf8"));
+    if (text === "") text = runs;
+    else if (runs !== "" && runs !== text) text += `\n${runs}`;
+  }
+  return text;
+}
+
+/** The base64 part of a long attachment value (bare, or behind a base64 data URL header), or undefined. */
+function base64Payload(value: string): string | undefined {
+  let payload = value;
+  if (value.startsWith("data:")) {
+    const i = value.slice(0, 256).indexOf(";base64,");
+    if (i < 0) return undefined;
+    payload = value.slice(i + ";base64,".length);
+  }
+  return BASE64_ALL.test(payload) ? payload : undefined;
+}
+
+/**
+ * The descriptor of an attachment value: what the gateway can judge without
+ * its bytes, and the text it would have read in them.
+ */
+function describeAttachment(value: string, payload: string): string {
+  const mime = /^data:([^;,]*)[;,]/.exec(value.slice(0, 256))?.[1] || "unknown type";
+  const hash = createHash("sha256").update(value).digest("hex");
+  const text = attachmentText(payload);
+  const head = `[attachment bytes not sent: ${value.length} characters, ${mime}, sha256 ${hash}]`;
+  return text === "" ? head : `${head}\n${text}`;
+}
+
+/**
+ * Replaces each long base64 attachment value under value (in place) by its
+ * descriptor. Returns false when the attachments are past what one call reads.
+ */
+function describeAttachments(value: unknown, budget: { chars: number; described: number }, depth: number): boolean {
+  if (value === null || typeof value !== "object" || depth > 64) return true;
+  const container = value as Record<string, unknown>;
+  for (const key of Object.keys(container)) {
+    const item = container[key];
+    if (typeof item === "string") {
+      if (!Array.isArray(container) && ATTACHMENT_KEYS.has(key.toLowerCase()) && item.length >= ATTACHMENT_MIN_CHARS) {
+        const payload = base64Payload(item);
+        if (payload === undefined) continue;
+        budget.chars -= payload.length;
+        if (budget.chars < 0) return false;
+        container[key] = describeAttachment(item, payload);
+        budget.described++;
+      }
+    } else if (!describeAttachments(item, budget, depth + 1)) {
+      return false;
+    }
+  }
   return true;
 }
 
 /**
- * Returns the payload to send. The payload is copied before it is cut. The work
- * is bounded: one pass for the attachments, one cut, one note.
+ * Returns the payload to send, or the reason to block the call. The payload is
+ * copied before an attachment is replaced; the caller's call is not changed.
  */
-export function fitInspectBody(
-  payload: Record<string, unknown>,
-  budget = INSPECT_BODY_BUDGET_BYTES,
-  limit = GATEWAY_BODY_LIMIT_BYTES,
-): FittedPayload {
-  // Whole while the body fits the gateway's limit, margin or not (GAP-0436).
+export function fitInspectBody(payload: Record<string, unknown>, limit = GATEWAY_BODY_LIMIT_BYTES): FittedPayload {
+  // Whole while the body fits the gateway's limit (GAP-0436).
   if (String(payload.tool).toLowerCase() !== "message" || size(payload) <= limit) return { payload, partial: false };
-  const out: Record<string, unknown> = { ...payload };
-  const hasArgs = out.args !== null && typeof out.args === "object";
-  const slots: Slot[] = [];
-  if (hasArgs) {
-    // The gateway reads the text from the params, so a copy of it in content is not needed.
-    delete out.content;
-    out.args = structuredClone(out.args);
-    collect(out.args, slots, new Set(), 0);
-  } else if (typeof out.content === "string") {
-    slots.push({ container: out, key: "content", length: out.content.length });
-  }
-  const read = (s: Slot) => (s.container as Record<string, unknown>)[s.key as string] as string;
-  // First the attachments: their bytes are no text anyone reads. A value in an
-  // attachment field that is not base64 is text and is cut like any other.
-  for (const slot of slots) {
-    const value = read(slot);
-    if (
-      typeof slot.key === "string" && ATTACHMENT_KEYS.has(slot.key.toLowerCase()) &&
-      value.length >= ATTACHMENT_MIN_CHARS && isBase64Payload(value)
-    ) {
-      (slot.container as Record<string, unknown>)[slot.key as string] = describeAttachment(value);
-      slot.length = read(slot).length;
-    }
-  }
-  // Then the longest strings, once, as little as the call needs. Each attempt
-  // cuts a fresh copy of the call, so no string is cut twice.
-  if (size(out) > budget && hasArgs) {
-    for (const safety of CUT_SAFETIES) {
-      const trial: Record<string, unknown> = { ...out, args: structuredClone(out.args) };
-      const trialSlots: Slot[] = [];
-      collect(trial.args, trialSlots, new Set(), 0);
-      if (cutLongest(trial, trialSlots, budget, safety) && size(trial) <= budget) {
-        return { payload: { ...trial, args_partial: true }, partial: true };
-      }
-    }
-  } else if (size(out) > budget) {
-    cutLongest(out, slots, budget, CUT_SAFETIES[1]);
-  }
-  // A call that still does not fit (numbers and short values past the cut) is
-  // sent as a note: its routing values and its text, cut to the room left.
-  if (size(out) > budget) {
-    const note = "call too large to send: attachments and the rest of the structure are not sent";
-    const rest = { ...out, args: { ...collectRouting(payload.args), note } };
-    const room = budget - size(rest) - 1024;
-    const text = collectText(payload.args);
-    const bytesPerChar = text === "" ? 1 : Math.max(1, Buffer.byteLength(JSON.stringify(text)) / text.length);
-    const limit = Math.floor((room / bytesPerChar) * CUT_SAFETIES[1]);
-    const kept = text === "" || room <= MIN_CUT_CHARS ? "" : limit >= text.length ? text : cutString(text, Math.max(limit, MIN_CUT_CHARS));
-    out.args = { ...collectRouting(payload.args), ...(kept === "" ? {} : { text: kept }), note };
-    if (size(out) > budget && kept !== "") out.args = { ...collectRouting(payload.args), note };
-  }
-  out.args_partial = true;
-  return { payload: out, partial: true };
+  const refused = { payload, partial: false, refused: MESSAGE_TEXT_OVER_LIMIT };
+  if (payload.args === null || typeof payload.args !== "object") return refused;
+  const args = structuredClone(payload.args);
+  const budget = { chars: ATTACHMENT_READ_MAX_CHARS, described: 0 };
+  if (!describeAttachments(args, budget, 0) || budget.described === 0) return refused;
+  const out = { ...payload, args, args_partial: true };
+  return size(out) <= limit ? { payload: out, partial: true } : refused;
 }
