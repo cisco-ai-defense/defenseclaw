@@ -2259,12 +2259,16 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 // ResetToolJudgeSession drops the session's bounded context when a connector
 // announces a new or ended session. The process-local store persists no tool
 // arguments.
-// sessionID is the state key (sandboxSessionStateKey), not the raw ID.
-func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
+// sessionID is the state key (sandboxSessionStateKey), not the raw ID; ctx
+// is the hook call's (a shared store finds the caller in it).
+func (j *LLMJudge) ResetToolJudgeSession(ctx context.Context, sessionID string) {
 	if j == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	if err := j.intentStore().Reset(context.Background(), sessionID); err != nil {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := j.intentStore().Reset(ctx, sessionID); err != nil {
 		j.warnIntentStore("Reset", "the session's earlier intent and calls may still be shown to the judge", err)
 	}
 }
