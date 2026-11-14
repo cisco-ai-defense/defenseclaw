@@ -368,7 +368,8 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	loneHookBodyCol := "NULL"
 	if hasProjected, _ := columnExists(db, "audit_events", "projected_record_json"); hasProjected && hasPayloadJSON &&
 		eventNameCol != "NULL" {
-		loneHookBodyCol = loneHookDecisionBodySQL()
+		tracked, _ := audit.HookRowsTracked(db)
+		loneHookBodyCol = loneHookDecisionBodySQL(tracked)
 	}
 	q := `SELECT id, timestamp, action, target, actor, details, ` + structuredCol + `, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
