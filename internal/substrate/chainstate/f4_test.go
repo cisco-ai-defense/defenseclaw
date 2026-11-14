@@ -115,16 +115,17 @@ func TestForkEventNeverResetsTheChildClock(t *testing.T) {
 	// the clock rule keeps a repeated event from resetting the child.
 	h := newHarness(t, t.TempDir(), Options{})
 	h.life(LifecycleEvent{Actor: actorB, Event: LifecycleForked, Parent: &actorA})
-	h.life(LifecycleEvent{Actor: actorB, Event: LifecycleSuspended, AtUnixNano: h.clock().UnixNano()})
+	h.hook(actorB, "s1", benign)
 	h.advance(time.Hour)
-	h.life(LifecycleEvent{Actor: actorB, Event: LifecycleResumed, AtUnixNano: h.clock().UnixNano()})
+	h.hook(actorB, "s1", benign)
 	before := h.svc.stateOf(h.svc.actors[actorB.key()])
-	if before.SuspendedNanos < int64(time.Hour) || !before.Forked {
+	if before.UncountedNanos < int64(time.Hour-ActiveGap) || !before.Forked {
 		t.Fatalf("child clock %+v", before)
 	}
 	h.life(LifecycleEvent{Actor: actorB, Event: LifecycleForked, Parent: &actorA})
-	if after := h.svc.stateOf(h.svc.actors[actorB.key()]); after.SuspendedNanos != before.SuspendedNanos {
-		t.Fatalf("a repeated fork event reset the child's clock: %d -> %d", before.SuspendedNanos, after.SuspendedNanos)
+	if after := h.svc.stateOf(h.svc.actors[actorB.key()]); after.UncountedNanos != before.UncountedNanos ||
+		after.ActiveUnixNano != before.ActiveUnixNano {
+		t.Fatalf("a repeated fork event reset the child's clock: %+v -> %+v", before, after)
 	}
 }
 

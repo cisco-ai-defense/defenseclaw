@@ -16,14 +16,20 @@
 //     expiry, prune and LRU in it runs on that actor's own running-time
 //     clock; at most MaxActors actors per atespace (a retired actor, then
 //     the least recently used, is evicted); a deleted actor is purged, and
-//     an actor suspended or silent past PurgeAfter too;
+//     an actor suspended or silent past PurgeAfter too, unless its window
+//     still holds a secret read;
 //   - every actor is one connector instance (audit.ToolChainSubstrateInstanceID)
 //     with a window per session and one actor window (the #1391 root tables
 //     keyed on the verified actor UID), so rotating session ids cannot empty it;
 //   - a per-actor lock orders the actor's parallel calls;
-//   - time is the actor's running time at the leader's receive time (never a
-//     guest timestamp, E15): a suspend stops the actor's clock, and a late
-//     suspend or resume older than the last one applied is ignored;
+//   - time is the actor's running time, counted from its own requests at
+//     the leader's receive time (never a guest timestamp, E15), a gap
+//     between two counting at most ActiveGap: whatever stops the actor
+//     stops its clock, with no event needed (GAP-0292); a suspend or resume
+//     only decides retention, and one older than the last applied is
+//     ignored;
+//   - a revert puts a mutation barrier into the actor's windows, but not
+//     into an actor window that holds a secret read (GAP-0292);
 //   - a forked actor starts from its parent's windows the first time the
 //     leader sees it (parent from the verified registration), whatever
 //     arrives first;

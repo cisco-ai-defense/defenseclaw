@@ -1329,8 +1329,9 @@ func (c *Controller) SetLifecycle(l LifecycleSink) { c.o.Lifecycle = l }
 const maxPendingLifecycle = 64
 
 // lifecycleOf is the lifecycle event of a state change, "" for none. Every
-// way into SUSPENDED is suspended: the leader pauses the actor's running
-// time only on that event (a revert or a crash ends SUSPENDED too).
+// way into SUSPENDED is suspended (a revert or a crash ends SUSPENDED too):
+// the leader's retention of suspended actors. The leader's running-time
+// clock needs no event (GAP-0292).
 func lifecycleOf(prev, cur ateapi.ActorState) string {
 	if prev == cur {
 		return ""
@@ -1365,6 +1366,7 @@ type restoreID struct {
 	headGen  int32 // newest snapshot generation, 0 for none
 	headUUID string
 	local    bool   // the newest snapshot's files are on a node
+	durable  bool   // the newest snapshot is uploaded
 	worker   string // worker pod UID and epoch while placed
 }
 
@@ -1373,6 +1375,7 @@ func restoreIDOf(s *ateapi.ActorStatus) restoreID {
 	for _, sn := range s.GetSnapshots() {
 		if sn.GetGeneration() > id.headGen {
 			id.headGen, id.headUUID, id.local = sn.GetGeneration(), sn.GetUuid(), sn.GetLocality() != ""
+			id.durable = sn.GetDurableSnapshot().GetState() == ateapi.SnapshotStorageCompleted
 		}
 	}
 	if w := s.GetWorkerAssignment(); w.GetWorkerEpoch() != 0 {
@@ -1382,14 +1385,17 @@ func restoreIDOf(s *ateapi.ActorStatus) restoreID {
 }
 
 // freshSuspend reports the state a suspend leaves: the newest snapshot is
-// the last assigned generation and its files are still on the node.
-func (id restoreID) freshSuspend() bool { return id.headGen == id.lastGen && id.local }
+// the last assigned generation, its files still on the node or uploaded.
+// atelet drops the node copy of an uploaded snapshot after
+// --snapshot-detach-delay (30 minutes by default): the actor resumes from
+// the same snapshot, so a detach is no revert (GAP-0292).
+func (id restoreID) freshSuspend() bool { return id.headGen == id.lastGen && (id.local || id.durable) }
 
 // revertSeen reports a revert between the last pass (prev, was) and this
 // one (cur, now) that the state change alone does not show (a REVERTING
-// state seen in a pass is sent by lifecycleOf). A detach (no public call;
-// it also clears locality) reads as a revert: an extra mutation barrier is
-// the safe side.
+// state seen in a pass is sent by lifecycleOf). A detach is not one: the
+// restore point is the same snapshot, and a barrier would end the actor's
+// egress chains (GAP-0292).
 func revertSeen(prev, cur ateapi.ActorState, was, now restoreID) bool {
 	suspendedSince := now.lastGen > was.lastGen // a suspend ran since the last pass
 	switch {
@@ -1397,8 +1403,12 @@ func revertSeen(prev, cur ateapi.ActorState, was, now restoreID) bool {
 		if suspendedSince { // resumed and suspended again inside one poll
 			return !now.freshSuspend()
 		}
-		// The node-local snapshot a SUSPENDED actor holds is gone.
-		return was.local && (!now.local || now.headUUID != was.headUUID)
+		// A revert of a SUSPENDED actor needs its node-local snapshot. It
+		// drops a newest snapshot not uploaded (the newest changes); of an
+		// uploaded one it drops only the node copy, as a detach does, and
+		// the actor resumes from that same snapshot: no revert of what the
+		// windows saw (GAP-0292).
+		return was.local && (now.headUUID != was.headUUID || !now.local && !now.durable)
 	case prev == ateapi.ActorStateRunning && cur == ateapi.ActorStateRunning:
 		if suspendedSince { // suspended and resumed inside one poll
 			return now.headGen < now.lastGen

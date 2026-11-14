@@ -62,7 +62,7 @@ func TestEgressCheckNeedsNoStoreGAP0179(t *testing.T) {
 		t.Fatalf("after a secret read: %+v %v", v, err)
 	}
 	// Past the chain's time window, clear again.
-	h.advance(31 * time.Minute)
+	h.work(actorA, 31*time.Minute)
 	if v, _ := h.svc.Egress(ctx, EgressRequest{Actor: actorA, Host: "example.com", Method: "POST"}); v.Deny {
 		t.Fatalf("past the window: %+v", v)
 	}
@@ -70,7 +70,8 @@ func TestEgressCheckNeedsNoStoreGAP0179(t *testing.T) {
 
 // TestEgressMemoFollowsTheStore: the memo is saved with the actor's state,
 // so a new leader on the same volume (a failover) answers the first check
-// from it, and a revert barrier, which clears the memo, is saved too.
+// from it. A revert keeps the actor window's secret read (GAP-0292), on
+// this leader and the next.
 func TestEgressMemoFollowsTheStore(t *testing.T) {
 	dir := t.TempDir()
 	req := EgressRequest{Actor: actorA, Host: "example.com", Method: "POST"}
@@ -88,11 +89,11 @@ func TestEgressMemoFollowsTheStore(t *testing.T) {
 		t.Fatalf("new leader, first check: %+v %v", v, err)
 	}
 	h2.life(LifecycleEvent{Actor: actorA, Event: LifecycleReverted})
-	if v, err := h2.svc.Egress(context.Background(), req); err != nil || v.Deny {
+	if v, err := h2.svc.Egress(context.Background(), req); err != nil || !v.Deny {
 		t.Fatalf("after a revert: %+v %v", v, err)
 	}
 	h3 := newHarness(t, dir, Options{})
-	if v, err := h3.svc.Egress(context.Background(), req); err != nil || v.Deny {
+	if v, err := h3.svc.Egress(context.Background(), req); err != nil || !v.Deny {
 		t.Fatalf("leader 3 after the revert: %+v %v", v, err)
 	}
 }

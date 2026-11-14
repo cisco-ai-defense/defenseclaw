@@ -47,7 +47,8 @@ const (
 	// finished actors' when the atespace cap evicts.
 	DefaultRetention = 24 * time.Hour
 	// DefaultPurgeAfter is how long the state of an actor suspended (or
-	// silent) that long is kept before it is purged.
+	// silent) is kept before it is purged, unless its window still holds a
+	// secret read (GAP-0292).
 	DefaultPurgeAfter = 7 * 24 * time.Hour
 	// DefaultMaxActors bounds the actors with chain state per atespace
 	// (the 4,096-partition cap of a host store, per atespace).
@@ -89,7 +90,8 @@ type Options struct {
 	// atespace cap (default 24 h).
 	Retention time.Duration
 	// PurgeAfter purges the state of an actor suspended, or silent, that
-	// long (default 7 days). A deleted actor is purged at once.
+	// long (default 7 days), unless its window still holds a secret read
+	// (GAP-0292). A deleted actor is purged at once.
 	PurgeAfter time.Duration
 	// MaxActors bounds the actors with state per atespace (default 4,096):
 	// a new actor past it evicts a retired actor first, else the one used
@@ -198,13 +200,31 @@ type actorEntry struct {
 	memoLinked  bool
 }
 
+// ActiveGap is the most a gap between two of an actor's own requests counts
+// toward its running time (GAP-0292).
+const ActiveGap = 5 * time.Minute
+
 // actorState is what the leader keeps of an actor on the volume: its
 // running-time clock, the order of its lifecycle events, and its task.
+//
+// The clock is the actor's own requests through DefenseClaw, at the
+// leader's receive time (never a guest timestamp, E15): hook chain calls,
+// intent calls and egress checks. A gap between two counts at most
+// ActiveGap. An actor that is not running makes no requests, so whatever
+// stopped it (a suspend of any kind, a detach, a drain, an eviction, an
+// outage of the controller or of the leader) stops its clock, and nothing
+// has to report it (GAP-0292). What the leader does not see counts as not
+// running: a chain window lasts longer, never shorter.
 type actorState struct {
-	// SuspendedNanos is the time suspended before the current run;
-	// SinceUnixNano the start of the current suspension (0 while running).
-	SuspendedNanos int64 `json:"suspended_nanos"`
-	SinceUnixNano  int64 `json:"since_unix_nano,omitempty"`
+	// UncountedNanos is the wall time that is not running time: the part of
+	// each gap between two requests past ActiveGap.
+	UncountedNanos int64 `json:"uncounted_nanos,omitempty"`
+	// ActiveUnixNano is the receive time of the actor's last request (0
+	// before the first).
+	ActiveUnixNano int64 `json:"active_unix_nano,omitempty"`
+	// SinceUnixNano is the start of the suspension the controller reported
+	// last (0 while running); it only decides retention (Sweep).
+	SinceUnixNano int64 `json:"since_unix_nano,omitempty"`
 	// LastEventUnixNano is the time of the last suspend or resume applied;
 	// an older one arriving late is ignored (GAP-0092).
 	LastEventUnixNano int64 `json:"last_event_unix_nano,omitempty"`
@@ -221,11 +241,29 @@ type actorState struct {
 
 // running is wall in the actor's running time.
 func (c actorState) running(wall time.Time) time.Time {
-	off := c.SuspendedNanos
-	if c.SinceUnixNano != 0 && wall.UnixNano() > c.SinceUnixNano {
-		off += wall.UnixNano() - c.SinceUnixNano
+	off := c.UncountedNanos
+	if c.ActiveUnixNano != 0 {
+		if idle := wall.UnixNano() - c.ActiveUnixNano - int64(ActiveGap); idle > 0 {
+			off += idle
+		}
 	}
 	return wall.Add(-time.Duration(off))
+}
+
+// active is c after a request of the actor at wall. The running time at
+// wall does not change; from wall on it runs again.
+func (c actorState) active(wall time.Time) actorState {
+	w := wall.UnixNano()
+	if w <= c.ActiveUnixNano {
+		return c
+	}
+	if c.ActiveUnixNano != 0 {
+		if idle := w - c.ActiveUnixNano - int64(ActiveGap); idle > 0 {
+			c.UncountedNanos += idle
+		}
+	}
+	c.ActiveUnixNano = w
+	return c
 }
 
 // New opens a Service on opts.Dir and loads the actors it knows.
@@ -487,8 +525,9 @@ func (s *Service) after(quick bool, f func()) {
 	f()
 }
 
-// makeRoomLocked evicts one actor of atespace when it is full: a retired
-// actor first, else the least recently used; never one in use.
+// makeRoomLocked evicts one actor of atespace when it is full: one whose
+// window holds no secret read first (GAP-0292), then a retired actor, else
+// the least recently used; never one in use.
 func (s *Service) makeRoomLocked(atespace string) {
 	var in []*actorEntry
 	for _, e := range s.actors {
@@ -499,7 +538,14 @@ func (s *Service) makeRoomLocked(atespace string) {
 	if len(in) < s.opts.MaxActors {
 		return
 	}
+	holds := make(map[*actorEntry]bool, len(in))
+	for _, e := range in {
+		holds[e] = s.holdsEgressLocked(e)
+	}
 	sort.Slice(in, func(i, j int) bool {
+		if holds[in[i]] != holds[in[j]] {
+			return holds[in[j]]
+		}
 		if in[i].state.Retired != in[j].state.Retired {
 			return in[i].state.Retired
 		}
@@ -716,7 +762,7 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 	}
 	cst := child.state
 	s.mu.Unlock()
-	cst = forkClock(cst, pst, at)
+	cst = forkClock(cst, pst)
 	result := LifecycleResult{}
 	if _, err := os.Stat(s.dbPath(parent)); err == nil {
 		r, err := st.CopyToolChainFork(ctx, s.dbPath(parent), audit.ToolChainForkCopy{
@@ -743,15 +789,12 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 	return result, nil
 }
 
-// forkClock starts a child's clock from its parent's running time, once:
-// a late or repeated fork event never resets the child's own time. The
-// child takes the parent's task if it has none.
-func forkClock(cst, pst actorState, at time.Time) actorState {
+// forkClock starts a child's clock from its parent's, once: a late or
+// repeated fork event never resets the child's own time. The child takes
+// the parent's task if it has none.
+func forkClock(cst, pst actorState) actorState {
 	if !cst.Forked {
-		cst.SuspendedNanos = pst.SuspendedNanos
-		if pst.SinceUnixNano != 0 && at.UnixNano() > pst.SinceUnixNano {
-			cst.SuspendedNanos += at.UnixNano() - pst.SinceUnixNano
-		}
+		cst.UncountedNanos, cst.ActiveUnixNano = pst.UncountedNanos, pst.ActiveUnixNano
 		cst.SinceUnixNano, cst.Forked = 0, true
 	}
 	if cst.Task == "" {
@@ -811,7 +854,7 @@ func (s *Service) linkMemo(ctx context.Context, e *actorEntry) error {
 			pst = pe.state
 		}
 		// In memory only: copyFork saves it with the store.
-		e.state = forkClock(e.state, pst, s.opts.Now())
+		e.state = forkClock(e.state, pst)
 		s.mu.Unlock()
 		if pe != nil {
 			e.memo.linkFrom(&pe.memo)
@@ -863,6 +906,31 @@ func (s *Service) repo(ctx context.Context, st *audit.Store, e *actorEntry, scop
 	return st.ToolChainRepositoryWith(ctx, opts...)
 }
 
+// touch records a request of the actor itself: a hook chain call, an
+// intent call or an egress check (actorState.active, GAP-0292). It is
+// saved with the next state write; a leader that stops before loses only
+// running time, so the windows last longer, never shorter.
+func (s *Service) touch(e *actorEntry) {
+	s.mu.Lock()
+	e.state = e.state.active(s.opts.Now())
+	s.mu.Unlock()
+}
+
+// holdsEgressLocked reports whether the actor window still holds the first
+// step of an egress chain at the actor's running time now, or may (a cold
+// memo). Such a window is never purged for a long suspend or silence, and
+// a revert does not end it (GAP-0292). s.mu is held.
+func (s *Service) holdsEgressLocked(e *actorEntry) bool {
+	v, ok := e.memo.verdict(e.state.running(s.opts.Now()), EgressAlert)
+	return !ok || len(v.Detected) > 0
+}
+
+func (s *Service) holdsEgress(e *actorEntry) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.holdsEgressLocked(e)
+}
+
 // Observe serves ChainObserve: one hook chain operation. The leader stamps
 // the event with its own receive time in the actor's running time.
 func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveResponse, error) {
@@ -876,6 +944,7 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 		return ObserveResponse{}, err
 	}
 	defer s.lock(in.Actor)()
+	s.touch(e)
 	repo, err := s.repo(ctx, st, e, in.Scope)
 	if err != nil {
 		return ObserveResponse{}, err
@@ -1076,6 +1145,7 @@ func (s *Service) IntentGet(_ context.Context, in IntentRequest) (IntentResponse
 		return IntentResponse{}, err
 	}
 	defer release()
+	s.touch(e)
 	snap, _ := s.intents(e).Peek(in.Key)
 	return toResponse(snap, s.stateOf(e).Task), nil
 }
@@ -1089,6 +1159,10 @@ func (s *Service) IntentPut(ctx context.Context, in IntentRequest) (IntentRespon
 	defer release()
 	if in.Op != IntentTask && in.Key == "" {
 		return IntentResponse{}, bad(errors.New("chainstate: an intent needs its session key"))
+	}
+	if in.Op != IntentTask {
+		// The launcher registers the task; every other operation is the actor's.
+		s.touch(e)
 	}
 	p := s.intents(e)
 	switch in.Op {
@@ -1175,9 +1249,6 @@ func (s *Service) Lifecycle(ctx context.Context, in LifecycleEvent) (LifecycleRe
 				st.SinceUnixNano = at.UnixNano()
 			}
 		} else {
-			if st.SinceUnixNano != 0 && at.UnixNano() > st.SinceUnixNano {
-				st.SuspendedNanos += at.UnixNano() - st.SinceUnixNano
-			}
 			st.SinceUnixNano, st.Retired = 0, false
 		}
 		return LifecycleResult{}, s.setState(e, st)
@@ -1242,6 +1313,12 @@ func (s *Service) revert(ctx context.Context, e *actorEntry, at time.Time) (Life
 	if err != nil {
 		return LifecycleResult{}, err
 	}
+	// A revert never ends an egress chain: the snapshot the actor returns
+	// to may hold what it read (a revert of a suspended actor whose
+	// snapshot is uploaded returns to that very snapshot), so the actor
+	// window takes no barrier while it holds a secret read; the session
+	// windows still do (GAP-0292).
+	keepEgress := s.holdsEgress(e)
 	barrier := guardrail.ToolChainProjection{ParseStatus: actionfacts.StatusNotApplicable,
 		DetectionStepMask: guardrail.ToolChainArtifactMutationBarrier}
 	n := 0
@@ -1249,6 +1326,9 @@ func (s *Service) revert(ctx context.Context, e *actorEntry, at time.Time) (Life
 		scope, session := ScopeSession, w.ScopeDigest
 		if w.Scope == audit.ToolChainScopeRoot {
 			scope, session = ScopeActor, lifecycleSession("revert")
+			if keepEgress {
+				continue
+			}
 		}
 		repo, err := s.repo(ctx, st, e, scope)
 		if err != nil {
@@ -1336,6 +1416,7 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 	if err := s.linkMemo(ctx, e); err != nil {
 		return EgressVerdict{}, err
 	}
+	s.touch(e)
 	v, ok := e.memo.verdict(s.stateOf(e).running(s.opts.Now()), s.opts.EgressAction)
 	switch {
 	case !ok:
@@ -1406,7 +1487,7 @@ type SweepResult struct {
 
 // Sweep retires actors suspended past the retention (the atespace cap
 // evicts them first) and purges actors suspended, or silent, past
-// PurgeAfter.
+// PurgeAfter whose window holds no secret read (GAP-0292).
 func (s *Service) Sweep(_ context.Context) (SweepResult, error) {
 	now := s.opts.Now()
 	var res SweepResult
@@ -1421,7 +1502,7 @@ func (s *Service) Sweep(_ context.Context) (SweepResult, error) {
 			since = time.Unix(0, e.state.SinceUnixNano)
 		}
 		switch {
-		case now.Sub(since) > s.opts.PurgeAfter:
+		case now.Sub(since) > s.opts.PurgeAfter && !s.holdsEgressLocked(e):
 			s.purgeLocked(e)
 			res.Purged++
 		case e.state.SinceUnixNano != 0 && !e.state.Retired && now.Sub(since) > s.opts.Retention:

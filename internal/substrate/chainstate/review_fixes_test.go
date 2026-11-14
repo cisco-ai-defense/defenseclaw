@@ -137,7 +137,7 @@ func TestLateSuspendIsIgnored(t *testing.T) {
 	if r := h.life(LifecycleEvent{Actor: actorA, Event: LifecycleSuspended, AtUnixNano: t1.UnixNano()}); !r.Ignored {
 		t.Fatalf("late suspend applied: %+v", r)
 	}
-	h.advance(2 * time.Hour)
+	h.work(actorA, 2*time.Hour)
 	if res, err := h.svc.Sweep(context.Background()); err != nil || res.Retired != 0 || res.Purged != 0 {
 		t.Fatalf("sweep %+v err=%v", res, err)
 	}

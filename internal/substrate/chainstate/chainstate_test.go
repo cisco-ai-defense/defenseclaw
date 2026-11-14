@@ -150,7 +150,7 @@ func TestSuspendPausesTheChainClock(t *testing.T) {
 		t.Fatalf("after a suspend: session %+v actor %+v", s, a)
 	}
 	h.hook(actorB, "s1", projection(t, reverseShell, 1))
-	h.advance(41 * time.Minute)
+	h.work(actorB, 41*time.Minute)
 	if _, a := h.hook(actorB, "s1", projection(t, reverseShell, 2)); a.DetectedMask != 0 {
 		t.Fatalf("41 running minutes still matched: %+v", a)
 	}
