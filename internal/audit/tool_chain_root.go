@@ -202,7 +202,6 @@ var toolChainSessionMigrations = []func(dbExecer) error{
 	migrateToolChainPendingState,
 	migrateToolChainSQLValueSourceState,
 	migrateToolChainReturnedCredentialSourceState,
-	migrateToolChainFileUnknownState,
 }
 
 func createToolChainRootTables(ex dbExecer) error {

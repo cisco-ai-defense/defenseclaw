@@ -14,7 +14,7 @@ import (
 
 // The chain egress disposition of Agent Substrate actors (owner decision
 // 2026-11-13): actors are unattended, so a verified actor's hook call that
-// completes a chain the callout refuses (chainstate.RefusesEgressJoin: a secret
+// completes a chain the callout refuses (chainstate.RefusesEgress: a secret
 // read, or a secret-manager read, then external egress) is refused in every
 // tier, the open source default pack as well as strict and managed. The one
 // setting is the config key substrate.chain_egress_action: block (the
@@ -25,10 +25,9 @@ import (
 //
 // A chain that joined only through the file-unknown marker (a read of
 // several files, a read in a call that also writes, a relative path in a
-// call not proven to keep its directory) is refused the same way, on the
-// hook and at the callout (chainstate.RefusesEgressJoin, 1.0.10 lead ruling
-// 2026-11-14): the actor chooses the form of its read. Its
-// FileUnknownJoinMask bit is kept in the result and the audit record.
+// call not proven to keep its directory) is refused the same way: the actor
+// chooses the form of its read (1.0.10 lead ruling 2026-11-14,
+// substrate-1:GAP-0259).
 
 // substrateChainEgressAlert is true only after the gateway role read
 // substrate.chain_egress_action=alert. Unset is block.
@@ -64,7 +63,7 @@ func substrateChainEgressIntent(
 		return intent
 	}
 	for _, id := range result.DetectedChainIDs {
-		if chainstate.RefusesEgressJoin(id, result.FileUnknownJoinMask) {
+		if chainstate.RefusesEgress(id) {
 			return guardrailActionBlock
 		}
 	}

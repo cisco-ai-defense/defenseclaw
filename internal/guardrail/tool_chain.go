@@ -573,17 +573,7 @@ type ToolChainWindowEvent struct {
 // predecessor for each chain. Empty predecessor slots correspond to clear
 // result bits.
 type ToolChainMatches struct {
-	DetectedMask uint32
-	// FileUnknownJoinMask holds the detected two-step chains that joined only
-	// through ToolChainFileUnknownDigest: every first-step event that
-	// completes the chain with this final event carries the marker as its
-	// join identity (the read named no one file). A chain with at least one
-	// first step whose identity is an exact file, or no identity at all, is
-	// resolved and its bit is clear. The bit never changes DetectedMask; only
-	// the Agent Substrate egress disposition reads it (an unresolved chain
-	// alerts there instead of refusing). Clear is the fail-safe reading: a
-	// result or stored record without it is resolved.
-	FileUnknownJoinMask     uint32
+	DetectedMask            uint32
 	EnforcementSafeMask     uint32
 	DetectionPredecessors   [ToolChainCount]string
 	EnforcementPredecessors [ToolChainCount]string
@@ -794,9 +784,6 @@ func MatchToolChains(
 		}
 		return window[i].SemanticEventID < window[j].SemanticEventID
 	})
-	// resolvedJoins: two-step chains with a completing first step whose join
-	// identity is not the file-unknown marker.
-	var resolvedJoins uint32
 	for _, event := range window {
 		if event.SemanticEventID == "" || event.Sequence == 0 || event.ReceivedAt.IsZero() {
 			return ToolChainMatches{}, errors.New("guardrail: incomplete prior tool-chain event")
@@ -870,14 +857,10 @@ func MatchToolChains(
 				detectionJoinPossible = false
 			}
 			if detectionJoinPossible && final.Projection.DetectionStepMask&definition.Step2Bit != 0 &&
-				event.Projection.DetectionStepMask&definition.Step1Bit != 0 {
-				if matches.DetectionPredecessors[i] == "" {
-					matches.DetectedMask |= definition.ResultBit
-					matches.DetectionPredecessors[i] = event.SemanticEventID
-				}
-				if predecessorDigest != ToolChainFileUnknownDigest {
-					resolvedJoins |= definition.ResultBit
-				}
+				event.Projection.DetectionStepMask&definition.Step1Bit != 0 &&
+				matches.DetectionPredecessors[i] == "" {
+				matches.DetectedMask |= definition.ResultBit
+				matches.DetectionPredecessors[i] = event.SemanticEventID
 			}
 			joinSafe := !definition.DetectionOnly &&
 				(!definition.ArtifactMutationBarrier ||
@@ -910,7 +893,6 @@ func MatchToolChains(
 			}
 		}
 	}
-	matches.FileUnknownJoinMask = matches.DetectedMask &^ resolvedJoins
 	for i, definition := range toolChainDefinitions {
 		if definition.Step3Bit == 0 {
 			continue
