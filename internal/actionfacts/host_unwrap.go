@@ -727,12 +727,23 @@ func TruncatedHostCall(input Input) bool {
 		var args struct {
 			Command string `json:"command"`
 		}
-		if json.Unmarshal(input.Args, &args) == nil && args.Command != "" {
+		if json.Unmarshal(input.Args, &args) == nil {
 			text = args.Command
 		} else {
-			// A command that is not one string (an array of words): its
-			// words are screened as the arguments carry them.
-			text = string(input.Args)
+			// A command that is an array of words: its words are joined.
+			var words struct {
+				Command []any `json:"command"`
+			}
+			if json.Unmarshal(input.Args, &words) != nil {
+				return false
+			}
+			parts := make([]string, 0, len(words.Command))
+			for _, word := range words.Command {
+				if text, ok := word.(string); ok {
+					parts = append(parts, text)
+				}
+			}
+			text = strings.Join(parts, " ")
 		}
 	}
 	return hostLauncherMention(text) || windows && overSizeHostScriptMention(text)
@@ -749,17 +760,35 @@ func hostLauncherWord(word string) bool {
 	return false
 }
 
-// hostLauncherMention reports a text that names a powershell or pwsh launcher
-// (the word anywhere), or a cmd launcher with its /c, /r, /k, /s, /d or /q
-// switch. One pass over the text, no parse.
+// hostLauncherMention reports a text with a powershell, pwsh or cmd launcher
+// at a command position: at the start, after a statement separator (; & |
+// && || ( ) { } or a line break), behind sudo, env, exec, nohup, command,
+// time or start, by name or by a path, quoted or bare (which covers a launcher
+// behind cmd /c and Git Bash's cmd //c). A launcher word inside an open quoted
+// string is a word of another command (an ssh remote command, a script
+// argument, a message) and is not one. Past maxLauncherMentionMatches
+// candidates the text counts as naming one, so the screen is bounded. One
+// pass of a regular expression; no parse (rel-1-0-10:GAP-0608).
 func hostLauncherMention(text string) bool {
-	lower := strings.ToLower(text)
-	return strings.Contains(lower, "powershell") || strings.Contains(lower, "pwsh") || cmdLauncherMention.MatchString(lower)
+	matches := hostLauncherAtCommand.FindAllStringIndex(text, maxLauncherMentionMatches+1)
+	if len(matches) > maxLauncherMentionMatches {
+		return true
+	}
+	for _, match := range matches {
+		before := text[:match[0]]
+		if strings.Count(before, "'")%2 == 0 && strings.Count(before, `"`)%2 == 0 {
+			return true
+		}
+	}
+	return false
 }
 
-// cmdLauncherMention is a cmd or cmd.exe word, bare, quoted or at the end of
-// a path, followed by a cmd.exe switch (Git Bash spells it //c).
-var cmdLauncherMention = lazyMustCompile(`(?:^|[\s;&|(){}"'\x60/\\])cmd(?:\.exe)?["'\x60]?\s+//?[cdqskr]\b`)
+// maxLauncherMentionMatches bounds the candidates hostLauncherMention checks.
+const maxLauncherMentionMatches = 64
+
+// hostLauncherAtCommand is a launcher word at a command position
+// (hostLauncherMention).
+var hostLauncherAtCommand = lazyMustCompile(`(?i)(?:^|[;&|(){}\n]|&&|\|\|)[ \t]*(?:(?:sudo|env|exec|nohup|command|time|start)[ \t]+)*["'\x60]?(?:[a-z]:)?(?:[^\s;&|"'\x60()]*[/\\])?(?:powershell|pwsh|cmd)(?:\.exe)?["'\x60]?(?:[ \t]|$)`)
 
 // maxTruncatedHostCallArgsBytes bounds the arguments TruncatedHostCall
 // screens (four times the analysis bound, the hook body size).

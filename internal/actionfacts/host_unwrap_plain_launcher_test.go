@@ -58,6 +58,9 @@ func TestTruncatedHostCall(t *testing.T) {
 		{"Git Bash cmd //c wrapper", "Bash", "", "cmd //c echo " + strings.Repeat("QQBB", 20000), true},
 		{"quoted launcher path", "Bash", "", `"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -enc ` + strings.Repeat("QQBB", 20000), true},
 		{"cmdkey is not cmd", "Bash", "", "cmdkey /list " + strings.Repeat("a", 70000), false},
+		{"remote launcher inside an ssh argument", "Bash", "", "ssh host 'powershell -EncodedCommand " + strings.Repeat("QQBB", 20000) + "'", false},
+		{"launcher word in a quoted message", "Bash", "", `git commit -m "fix; pwsh tests ` + strings.Repeat("a", 70000) + `"`, false},
+		{"launcher behind sudo after a pipe", "Bash", "", "cat x | sudo pwsh -c " + strings.Repeat("a", 70000), true},
 	} {
 		args, err := json.Marshal(map[string]string{"command": test.command})
 		if err != nil {
