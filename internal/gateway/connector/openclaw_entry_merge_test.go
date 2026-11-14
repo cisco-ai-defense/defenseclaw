@@ -65,7 +65,7 @@ func TestGAP0596OpenClawSetupKeepsOperatorEntryKeys(t *testing.T) {
 
 	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
 	for i := 0; i < 2; i++ { // the gateway runs setup on every start
-		if err := patchOpenClawConfig(configPath, extDir, false, false, false); err != nil {
+		if err := patchOpenClawConfig(configPath, extDir, false, false, false, openClawPluginKeys{}); err != nil {
 			t.Fatalf("patchOpenClawConfig run %d: %v", i+1, err)
 		}
 	}
@@ -87,7 +87,7 @@ func TestGAP0596OpenClawSetupWritesOnlyEnabledForANewEntry(t *testing.T) {
 	configPath := filepath.Join(ocHome, "openclaw.json")
 	writeOpenClawJSON(t, configPath, map[string]interface{}{})
 
-	if err := patchOpenClawConfig(configPath, filepath.Join(ocHome, "extensions", "defenseclaw"), false, false, false); err != nil {
+	if err := patchOpenClawConfig(configPath, filepath.Join(ocHome, "extensions", "defenseclaw"), false, false, false, openClawPluginKeys{}); err != nil {
 		t.Fatal(err)
 	}
 	entries := readOpenClawEntries(t, configPath)
@@ -118,7 +118,7 @@ func TestGAP0596OpenClawTeardownKeepsOperatorEntryKeys(t *testing.T) {
 		},
 	})
 
-	if err := uninstallOpenClawExtension(ocHome, false, openClawSetupGrant{}); err != nil {
+	if err := uninstallOpenClawExtension(openClawPathsIn(ocHome), false, openClawSetupGrant{}); err != nil {
 		t.Fatalf("uninstallOpenClawExtension: %v", err)
 	}
 	entries := readOpenClawEntries(t, configPath)

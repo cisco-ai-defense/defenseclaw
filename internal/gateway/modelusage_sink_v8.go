@@ -111,7 +111,7 @@ func emitModelUsageLogV8(ctx context.Context, emitter sidecarRuntimeEmitter, rec
 	if emitter == nil {
 		return nil
 	}
-	producerKey := observability.ProducerKey(gatewaylog.EventLLMResponse)
+	producerKey := observability.ProducerKey(gatewaylog.EventModelUsage)
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
 		producerKey,
@@ -145,6 +145,10 @@ func emitModelUsageLogV8(ctx context.Context, emitter sidecarRuntimeEmitter, rec
 			PromptID: f.ModelRequestID, ResponseID: f.ModelResponseID,
 		}
 		envelope := hookModelLogEnvelope(ctx, snapshot, meta, connector, observability.TelemetryEventModelUsage)
+		// The admitted metadata carries the model_usage action; the record must
+		// carry the same one or verifyBuiltRecord refuses it. hookModelLogEnvelope
+		// names every non-request model log llm_response.
+		envelope.Action = string(producerKey)
 		envelope.Provenance.Producer = modelUsageV8Producer
 		record, buildErr := builder.BuildLogModelUsage(buildModelUsageLogInput(envelope, rec))
 		if buildErr != nil {

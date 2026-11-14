@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -85,7 +86,7 @@ func xargsStaticInputTwin(command, home string, split bool) (string, bool) {
 const maxXargsTwinScriptDepth = 2
 
 func xargsStaticInputTwinAt(command, home string, split bool, depth int) (string, bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(command), "")
 	if err != nil {
 		return "", false
 	}
