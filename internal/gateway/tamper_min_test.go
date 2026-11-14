@@ -345,3 +345,152 @@ func TestTMinSpellingsOfTheHandedPath(t *testing.T) {
 	})
 	tminRun(t, h, rows)
 }
+
+// rel-1-0-10:GAP-0501 (on rel since 1.0.5): a find -exec child or an xargs
+// child in findEmbeddedReaders (rg, file, less, chmod, chown, chgrp, touch)
+// returned "no change" before any option was read, and sort matched its
+// output option by exact name only. Each row hands the state file to a
+// program through one option that writes a file or runs a program.
+func TestTMinFindChildOptionsThatWrite(t *testing.T) {
+	h := tminHome(t)
+	const state, dir = "~/.defenseclaw/config.yaml", "~/.defenseclaw"
+	find := func(child string) string { return "find " + dir + " -name config.yaml -exec " + child + ` \;` }
+	xargs := func(child string) string { return "find " + dir + " -name config.yaml | xargs " + child }
+	var rows []tminRow
+	for name, child := range map[string]string{
+		"rg --pre":             "rg --pre ./hook.sh token {}",
+		"rg --pre=":            "rg --pre=./hook.sh token {}",
+		"rg cluster -z":        "rg -iz token {}",
+		"rg --search-zip":      "rg --search-zip token {}",
+		"rg --hostname-bin":    "rg --hostname-bin ./hook.sh --hyperlink-format default token {}",
+		"file -C":              "file -C -m {}",
+		"file cluster -Cm":     "file -Cm {}",
+		"file --compile":       "file --compile -m {}",
+		"file --comp":          "file --comp -m {}",
+		"less -o":              "less -o /var/tmp/tmin-out {}",
+		"less --log-file":      "less --log-file=/var/tmp/tmin-out {}",
+		"less abbreviated":     "less --log=/var/tmp/tmin-out {}",
+		"less +command":        "less '+!touch /var/tmp/tmin-x' {}",
+		"sort --output":        "sort --output {} {}",
+		"sort --output=":       "sort --output={} {}",
+		"sort --out":           "sort --out {} {}",
+		"sort --outp=":         "sort --outp={} {}",
+		"sort -o":              "sort -o {} {}",
+		"sort --compress-prog": "sort --compress-prog=./hook.sh {}",
+		"chmod":                "chmod 666 {}",
+		"chown":                "chown nobody {}",
+		"chgrp":                "chgrp nogroup {}",
+		"touch":                "touch {}",
+		"touch -d":             "touch -d 2001-01-01 {}",
+		"chmod absolute":       "/bin/chmod 666 {}",
+		"chmod under env":      "env chmod 666 {}",
+	} {
+		rows = append(rows,
+			tminRow{"gap0501", "find " + name, find(child), true},
+			tminRow{"gap0501", "xargs " + name, xargs(strings.ReplaceAll(strings.ReplaceAll(child, " {}", ""), "{}", state)), true})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+	tminRun(t, h, rows)
+}
+
+// The same programs used as readers stay as they were: a find -exec child or
+// an xargs child that only reads the state file names no tamper rule.
+func TestTMinFindChildReadersStayAllowed(t *testing.T) {
+	h := tminHome(t)
+	const state, dir = "~/.defenseclaw/config.yaml", "~/.defenseclaw"
+	find := func(child string) string { return "find " + dir + " -name config.yaml -exec " + child + ` \;` }
+	xargs := func(child string) string { return "find " + dir + " -name config.yaml | xargs " + child }
+	var rows []tminRow
+	for name, child := range map[string]string{
+		"rg":             "rg token {}",
+		"rg -n -i":       "rg -n -i token {}",
+		"rg -l -e":       "rg -l -e token {}",
+		"rg --json":      "rg --json token {}",
+		"file":           "file {}",
+		"file -b -i":     "file -b -i {}",
+		"file --mime":    "file --mime-type {}",
+		"less":           "less {}",
+		"less -N -S":     "less -N -S {}",
+		"sort":           "sort {}",
+		"sort -u -k 1":   "sort -u -k 1 {}",
+		"sort -r -n":     "sort -rn {}",
+		"sort --reverse": "sort --reverse {}",
+		"sort --key":     "sort --key=1 {}",
+		"sort --unique":  "sort --unique {}",
+		"grep":           "grep token {}",
+		"cat":            "cat {}",
+		"head":           "head -n 3 {}",
+		"sha256sum":      "sha256sum {}",
+		"stat":           "stat {}",
+	} {
+		rows = append(rows,
+			tminRow{"keep0501", "find " + name, find(child), false},
+			tminRow{"keep0501", "xargs " + name, xargs(strings.ReplaceAll(child, " {}", "")), false})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+	logOnly := os.Getenv("TMIN_LOG") != ""
+	for _, tier := range boundedTestTiers {
+		t.Run(tier.name, func(t *testing.T) {
+			api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+			for _, row := range rows {
+				action, findings := tminDecide(t, api, h, row.command)
+				rules := tminRules(findings)
+				if logOnly {
+					t.Logf("TMIN\t%s\t%s\t%s\taction=%s\trules=%s", tier.name, row.group, row.name, action, rules)
+				} else if rules != "" {
+					t.Errorf("%s %s: a reader names %s (action %s): %v", tier.name, row.name, rules, action, findings)
+				}
+			}
+		})
+	}
+}
+
+// Normal work that hands paths to inline code or extracts archives in the
+// project folder stays what it was.
+func TestTMinBenignInlineCodeAndArchivesStayAllowed(t *testing.T) {
+	h := tminHome(t)
+	const code = `'import sys; print(open(sys.argv[1]).read())'`
+	var rows []tminRow
+	for name, command := range map[string]string{
+		"python -c plain":          `python3 -c 'print(1)'`,
+		"python -c project path":   `python3 -c ` + code + ` notes.txt`,
+		"python -c project abs":    `python3 -c ` + code + ` ~/proj/notes.txt`,
+		"python -c xargs":          `echo notes.txt | xargs python3 -c ` + code,
+		"python -c xargs -I":       `echo notes.txt | xargs -I{} python3 -c ` + code + ` {}`,
+		"python -c for loop":       `for f in notes.txt other.txt; do python3 -c ` + code + ` "$f"; done`,
+		"python -c while read":     `ls | while read f; do python3 -c ` + code + ` "$f"; done`,
+		"python -c find exec":      `find . -name '*.txt' -exec python3 -c ` + code + ` {} \;`,
+		"python -c sh -c":          `sh -c "python3 -c 'print(1)' notes.txt"`,
+		"python -c variable":       `p=notes.txt; python3 -c ` + code + ` "$p"`,
+		"python -c parallel":       `parallel python3 -c ` + code + ` ::: notes.txt`,
+		"node -e project path":     `node -e 'console.log(process.argv[1])' notes.txt`,
+		"python -c text arguments": `python3 -c 'import sys; print(sys.argv[1:])' "two words" 'a;b' -v`,
+		"python script":            `python3 tool.py notes.txt`,
+		"tar project":              `tar -xf /tmp/tmin.tar -C ~/proj`,
+		"tar project member":       `tar -xf /tmp/tmin.tar -C ~/proj .defenseclaw-notes.txt`,
+		"tar cwd member":           `tar -xf /tmp/tmin.tar notes/a.txt`,
+		"tar member in home":       `tar -xf /tmp/tmin.tar -C ~ proj/notes.txt`,
+		"tar create":               `tar -czf /tmp/tmin.tgz -C ~ .defenseclaw/config.yaml .claude/settings.json`,
+		"unzip project":            `unzip -o /tmp/tmin.zip -d ~/proj`,
+		"unzip member in cwd":      `unzip -o /tmp/tmin.zip notes/a.txt`,
+		"unzip list":               `unzip -l /tmp/tmin.zip`,
+	} {
+		rows = append(rows, tminRow{"keepbenign", name, command, false})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+	logOnly := os.Getenv("TMIN_LOG") != ""
+	for _, tier := range boundedTestTiers {
+		t.Run(tier.name, func(t *testing.T) {
+			api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+			for _, row := range rows {
+				action, findings := tminDecide(t, api, h, row.command)
+				rules := tminRules(findings)
+				if logOnly {
+					t.Logf("TMIN\t%s\t%s\t%s\taction=%s\trules=%s", tier.name, row.group, row.name, action, rules)
+				} else if rules != "" {
+					t.Errorf("%s %s: names %s (action %s): %v", tier.name, row.name, rules, action, findings)
+				}
+			}
+		})
+	}
+}

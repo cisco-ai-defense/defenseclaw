@@ -32,18 +32,20 @@ func (h *HandedEntries) add(other HandedEntries) {
 }
 
 // findEmbeddedReaders are programs that, handed file names, only read
-// them (or change only modes, owners or times: chmod, chown, chgrp,
-// touch, judged on their own), whatever their arguments.
+// them whatever their arguments. A program with an option that writes a file
+// or runs a program (rg --pre, file -C, less -o, sort -o) is not here: it is
+// read option by option below. chmod, chown, chgrp and touch are not here
+// either: a find child changes the mode, owner or times of the entry it is
+// handed, which is a change of it (rel-1-0-10:GAP-0501).
 var findEmbeddedReaders = map[string]struct{}{
 	"basename": {}, "b2sum": {}, "cat": {}, "cksum": {}, "cmp": {}, "diff": {},
-	"dirname": {}, "du": {}, "echo": {}, "egrep": {}, "fgrep": {}, "file": {},
-	"grep": {}, "head": {}, "less": {}, "ls": {}, "md5": {}, "md5sum": {},
+	"dirname": {}, "du": {}, "echo": {}, "egrep": {}, "fgrep": {},
+	"grep": {}, "head": {}, "ls": {}, "md5": {}, "md5sum": {},
 	"more": {}, "od": {}, "printf": {}, "readlink": {}, "realpath": {},
-	"rg": {}, "sha1sum": {}, "sha224sum": {}, "sha256sum": {}, "sha384sum": {},
+	"sha1sum": {}, "sha224sum": {}, "sha256sum": {}, "sha384sum": {},
 	"sha512sum": {}, "shasum": {}, "stat": {}, "strings": {}, "tail": {},
 	"test": {}, "[": {}, "true": {}, "false": {}, "wc": {},
 	"jq": {}, "cut": {}, "column": {}, "nl": {}, "tac": {}, "rev": {},
-	"chmod": {}, "chown": {}, "chgrp": {}, "touch": {},
 }
 
 // FindEmbeddedCommandMayChange reports a find argv with an -exec, -execdir,
@@ -126,6 +128,12 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 		only = !xxdWritesOutput(args)
 	case "sort":
 		only = sortOnlyPrints(args)
+	case "rg":
+		only = rgOnlyReads(args)
+	case "file":
+		only = fileOnlyReads(args)
+	case "less":
+		only = lessOnlyReads(args)
 	case "sed":
 		only = sedOnlyPrints(args)
 	case "awk", "gawk", "mawk", "nawk":
@@ -242,15 +250,21 @@ func sortOnlyPrints(args []string) bool {
 		case arg == "--":
 			return true
 		case strings.HasPrefix(arg, "--"):
+			// getopt_long takes any unambiguous prefix of a long option
+			// (--out is --output, --compress-prog is --compress-program).
 			name, _, attached := strings.Cut(arg, "=")
-			switch name {
-			case "--output", "--compress-program", "--files0-from":
-				return false
-			case "--key", "--field-separator", "--buffer-size", "--temporary-directory",
-				"--parallel", "--batch-size", "--sort", "--random-source":
-				if !attached {
-					i++
+			if long := sortLongOption(name); long != "" {
+				switch long {
+				case "--output", "--compress-program", "--files0-from":
+					return false
+				case "--key", "--field-separator", "--buffer-size", "--temporary-directory",
+					"--parallel", "--batch-size", "--sort", "--random-source":
+					if !attached {
+						i++
+					}
 				}
+			} else {
+				return false // ambiguous or unknown: it may be one that writes
 			}
 		case strings.HasPrefix(arg, "-") && arg != "-":
 			for at, letter := range arg[1:] {
@@ -263,6 +277,96 @@ func sortOnlyPrints(args []string) bool {
 					}
 					break
 				}
+			}
+		}
+	}
+	return true
+}
+
+// sortLongOptions are the GNU sort long options.
+var sortLongOptions = []string{
+	"--batch-size", "--buffer-size", "--check", "--compress-program", "--debug", "--dictionary-order",
+	"--field-separator", "--files0-from", "--help", "--ignore-case", "--ignore-leading-blanks",
+	"--ignore-nonprinting", "--key", "--merge", "--month-sort", "--numeric-sort", "--output",
+	"--parallel", "--random-sort", "--random-source", "--reverse", "--sort", "--stable", "--temporary-directory",
+	"--unique", "--version", "--version-sort", "--zero-terminated", "--general-numeric-sort",
+	"--human-numeric-sort",
+}
+
+// sortLongOption names the long option a --word spells, exactly or as an
+// unambiguous prefix, and "" for anything else.
+func sortLongOption(word string) string {
+	match := ""
+	for _, option := range sortLongOptions {
+		if option == word {
+			return option
+		}
+		if strings.HasPrefix(option, word) {
+			if match != "" {
+				return ""
+			}
+			match = option
+		}
+	}
+	return match
+}
+
+// rgOnlyReads reports an rg whose options neither run a program (--pre, the
+// -z/--search-zip decompressors, --hostname-bin) nor name a file to write.
+func rgOnlyReads(args []string) bool {
+	for _, arg := range args {
+		name, _, _ := strings.Cut(arg, "=")
+		switch {
+		case arg == "--":
+			return true
+		case strings.HasPrefix(arg, "--"):
+			switch name {
+			case "--pre", "--search-zip", "--hostname-bin", "--generate":
+				return false
+			}
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			if strings.ContainsRune(arg[1:], 'z') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// fileOnlyReads reports a file whose options do not compile a magic file
+// (-C writes MAGIC.mgc next to it); a long option may be abbreviated.
+func fileOnlyReads(args []string) bool {
+	for _, arg := range args {
+		switch {
+		case arg == "--":
+			return true
+		case strings.HasPrefix(arg, "--"):
+			name, _, _ := strings.Cut(arg, "=")
+			if strings.HasPrefix("--compile", name) {
+				return false
+			}
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			if strings.ContainsRune(arg[1:], 'C') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// lessOnlyReads reports a less whose options are plain display flags: the
+// options that log the input to a file (-o, -O, --log-file), read a key file
+// or take a command (+cmd, -p, -P, -k, -t, -T and the like) are not.
+func lessOnlyReads(args []string) bool {
+	for _, arg := range args {
+		switch {
+		case arg == "--":
+			return true
+		case strings.HasPrefix(arg, "+") || strings.HasPrefix(arg, "--"):
+			return false
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			if strings.Trim(arg[1:], "EFgGiIJmMnNqQrRsSuUVwWX") != "" {
+				return false
 			}
 		}
 	}
