@@ -1697,12 +1697,14 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 		return nil, false, false
 
 	case "nohup":
-		for i := 1; i < len(argv); i++ {
-			arg := argv[i]
-			switch {
+		// nohup takes no options but --help, --version and the -- end
+		// marker: its first word decides (staticcheck SA4008, the loop
+		// this replaces never passed its first word).
+		if len(argv) > 1 {
+			switch arg := argv[1]; {
 			case arg == "--":
-				if i+1 < len(argv) {
-					return cloneSlice(argv[i+1:]), true, false
+				if len(argv) > 2 {
+					return cloneSlice(argv[2:]), true, false
 				}
 				return nil, false, false
 			case arg == "--help" || arg == "--version":
@@ -1710,7 +1712,7 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 			case strings.HasPrefix(arg, "-"):
 				return nil, false, true
 			default:
-				return cloneSlice(argv[i:]), true, false
+				return cloneSlice(argv[1:]), true, false
 			}
 		}
 
