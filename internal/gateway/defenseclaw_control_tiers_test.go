@@ -7,11 +7,34 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
+
+// warmDefenseClawControl sends one harmless call until the route answers 200:
+// the first call of a pack builds the rule generation, which under -race on a
+// busy machine can take longer than the scan deadline.
+func warmDefenseClawControl(t *testing.T, handler http.HandlerFunc, path string, body any) {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	for attempt := 0; attempt < 60; attempt++ {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		if recorder.Code == http.StatusOK {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("%s: the route never answered the warm-up call", path)
+}
 
 // TestDefenseClawControlFiveTiers is GAP-0596: every row of the actionfacts
 // corpus (loaded by id, not retyped) through the tool-inspect route in the five
@@ -46,8 +69,11 @@ func TestDefenseClawControlFiveTiers(t *testing.T) {
 	for _, p := range gap0437Packs {
 		a := gap0437Server(t, p, "openclaw", "action")
 		// The first call of a pack builds its rule generation; under -race on
-		// a loaded box that can outlast the scan deadline.
-		gap0437Inspect(t, a, t.TempDir(), "ls")
+		// a loaded box that can outlast the scan deadline, so it is repeated
+		// until the generation is built.
+		warmDefenseClawControl(t, a.handleInspectTool, "/api/v1/inspect/tool", map[string]any{
+			"tool": "exec", "connector": "openclaw", "args": map[string]any{"command": "ls", "workdir": t.TempDir()},
+		})
 		for _, r := range rows {
 			out := gap0437Inspect(t, a, t.TempDir(), r.Command)
 			raw, _ := json.Marshal(out)
@@ -107,7 +133,10 @@ func TestDefenseClawControlOnTheClaudeHookPath(t *testing.T) {
 	}
 	for _, p := range gap0437Packs {
 		a := gap0437Server(t, p, "claudecode", "action")
-		gap0437Hook(t, a, t.TempDir(), p.name+"warm", "ls")
+		warmDefenseClawControl(t, a.handleAgentHook("claudecode"), "/api/v1/claude-code/hook", map[string]any{
+			"hook_event_name": "PreToolUse", "session_id": "gap0596-warm-" + p.name, "cwd": t.TempDir(),
+			"tool_name": "Bash", "tool_use_id": "tu-gap0596-warm-" + p.name, "tool_input": map[string]any{"command": "ls"},
+		})
 		for id, action := range want {
 			if action == "block" && p.pack != "strict" && !p.managed {
 				action = "alert"
