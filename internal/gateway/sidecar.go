@@ -7750,6 +7750,12 @@ func managedEnterpriseGuardianOwnsConnectorLifecycle(cfg *config.Config, conn co
 	if cfg == nil || conn == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return false
 	}
+	// The proxy family (OpenClaw, ZeptoClaw) stays with the gateway on every
+	// OS. Native OpenClaw on Windows binds no proxy, and the bind test alone
+	// handed it to the hook guardian, which has no installer for it.
+	if connector.IsProxyConnector(conn.Name()) {
+		return false
+	}
 	return !proxyShouldBindForConnector(conn, &cfg.Guardrail)
 }
 

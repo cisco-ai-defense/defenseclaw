@@ -2375,6 +2375,11 @@ func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
 // Returns an allow verdict if the judge is disabled, not configured, or
 // tool_injection is false.
 func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *ScanVerdict {
+	if p := decisionPrepassFrom(ctx, j); p != nil {
+		// The hook lane already prepared the sample and asked the decision
+		// model (decisionPrepass): do not record the call twice.
+		return j.runToolJudgeSample(ctx, toolName, args, p.sample)
+	}
 	sample, eligible := j.prepareToolJudgeSample(ctx, toolName, args)
 	if !eligible {
 		return allowVerdict("llm-judge-tool")
@@ -2406,6 +2411,11 @@ func (j *LLMJudge) runToolJudgeSample(ctx context.Context, toolName, args, sampl
 
 // runToolJudgeLLM is the LLM tool-call judge.
 func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample string) *ScanVerdict {
+	if judgeUnavailableFrom(ctx) {
+		// The hook lane could not run the judge (no slot, no budget, no
+		// time): only the decision model answered.
+		return errorVerdict("llm-judge-tool")
+	}
 
 	timeout := time.Duration(j.cfg.Timeout) * time.Second
 	if timeout <= 0 {
