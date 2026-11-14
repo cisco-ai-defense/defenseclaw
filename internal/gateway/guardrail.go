@@ -1876,8 +1876,9 @@ func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 
 // scanUntrustedContentRules is the content rule scan of untrusted text with
 // generation: every content rule on the text as written, then the trust rules
-// on the same text with invisible separators and look-alike letters folded, for
-// a rule the first pass did not find. A directive with a zero-width character
+// on the same text with invisible separators and look-alike letters folded,
+// merged per rule ID keeping the stronger finding (unionRuleFindings,
+// rel-1-0-10:GAP-0527). A directive with a zero-width character
 // spliced into a word, or a Latin letter swapped for a Cyrillic one, reads the
 // same to a model and must not read differently to the rules. The hook path
 // does the same (messageRuleFindings); the Secure Client generation keeps its
@@ -1891,19 +1892,9 @@ func scanUntrustedContentRules(generation *compiledRulePackCategories, content s
 	if folded == content {
 		return findings
 	}
-	seen := make(map[string]bool, len(findings))
-	for _, finding := range findings {
-		seen[finding.RuleID] = true
-	}
-	for _, finding := range scanRuleGeneration(generation, folded, "", ruleScanOptions{
+	return unionRuleFindings(findings, scanRuleGeneration(generation, folded, "", ruleScanOptions{
 		contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit",
-	}) {
-		if !seen[finding.RuleID] {
-			findings = append(findings, finding)
-			seen[finding.RuleID] = true
-		}
-	}
-	return findings
+	}))
 }
 
 func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {
