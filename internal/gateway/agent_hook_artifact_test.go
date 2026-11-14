@@ -205,9 +205,12 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 		{"#!/bin/sh\ngrep -n -e acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
 		{"#!/bin/sh\nhead -n 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
 		{"#!/bin/sh\ngrep -e - /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
-		// A program the parse does not model (cut) leaves the script
+		// cut is a modelled file reader since fe9cd739ec (more file readers):
+		// the heredoc beside it counts, as beside cat, grep or head.
+		{"#!/bin/sh\ncut -d - -f 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		// A program the parse does not model (tr) leaves the script
 		// detection-only, heredoc or not.
-		{"#!/bin/sh\ncut -d - -f 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		{"#!/bin/sh\ntr a-z A-Z <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
 		{"#!/bin/sh\ngrep -f - /dev/null > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ngrep -e - /dev/null - > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ngrep acme > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
