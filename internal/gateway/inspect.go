@@ -1658,15 +1658,31 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		ruleFindings = messageRuleFindings(generation, content, folded, req.contentScope, !ManagedEnterpriseActive())
 	}
 	// A prompt whose content is a JSON block array is also read as the model
-	// reads its text parts, with no separator (GAP-0465).
-	if isPromptDirection(req.Direction) {
-		if joined := jsonContentPartsJoinedText(content); joined != "" {
-			joinedFolded := ""
-			if !secureClient {
-				if view := trustPatternText(joined); view != joined {
-					joinedFolded = view
-				}
+	// reads its text parts, with no separator (GAP-0465). So are the text
+	// blocks of a tool result, for the trust rules only (GAP-0528): the joined
+	// text exists to find an instruction split across blocks, and a secret or
+	// PII rule on it would read the digits and keys the blocks end and begin
+	// with as one token, and the unescaped text of a JSON item as a new
+	// plain-text string, which is not what the tool returned.
+	if joined := messagePartsJoinedText(req.Direction, content); joined != "" {
+		joinedFolded := ""
+		if !secureClient {
+			if view := trustPatternText(joined); view != joined {
+				joinedFolded = view
 			}
+		}
+		if isToolResultDirection(req.Direction) {
+			joinedFindings := messageRuleFindings(generation, "", joined, req.contentScope, false)
+			if joinedFolded != "" {
+				joinedFindings = unionRuleFindings(joinedFindings,
+					messageRuleFindings(generation, "", joinedFolded, req.contentScope, false))
+			}
+			if !secureClient {
+				// The tool-result disposition: HIGH at most (tool_result_inspect.go).
+				capToolResultSeverity(joinedFindings)
+			}
+			ruleFindings = unionRuleFindings(ruleFindings, joinedFindings)
+		} else {
 			ruleFindings = unionRuleFindings(ruleFindings,
 				messageRuleFindings(generation, joined, joinedFolded, req.contentScope, !ManagedEnterpriseActive()))
 		}

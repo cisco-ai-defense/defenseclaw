@@ -36,6 +36,17 @@ import (
 // is by rule and profile member). The view is never longer than the text it
 // is derived from, so it adds no input that a bound could cap: the existing
 // bounds (internal/guardrail/bounded) see the same sizes as before.
+//
+// Two more places hand the model adjacent text with a line feed in the
+// inspected form. The user messages of one turn are combined into one turn by
+// the provider (Anthropic Messages), and the text blocks of a tool result (an
+// MCP content array, Anthropic tool_result content) are read as one text; the
+// hook scans the leaves of a structured result one per line
+// (rel-1-0-10:GAP-0529, GAP-0528). Both get the same no-separator view and the
+// same stronger-finding merge. The tool-result view is read by the trust rules
+// only (inspectMessageContent): it exists to find an instruction split across
+// blocks, and a PII or secret rule would read the digits and keys two blocks
+// end and begin with as one token.
 
 // isContentTextBlockType reports whether a content block of type blockType is
 // text the model reads: "text" (Chat Completions, Anthropic), "input_text" and
@@ -95,6 +106,20 @@ func promptPartsJoinedText(content string, messages []ChatMessage, extra [][]str
 	for _, msg := range messages {
 		add(msg.Content, msg.textParts)
 	}
+	// The user messages of the current turn, as the model reads them: the
+	// provider combines consecutive user messages into one turn, so the
+	// message texts follow each other with nothing between them
+	// (currentTurnUserText inspects them with a line feed).
+	if turn := currentTurnUserMessages(messages); len(turn) > 1 {
+		reads := make([]string, len(turn))
+		for i, msg := range turn {
+			reads[i] = modelReadMessageText(msg)
+		}
+		inspected, joined := currentTurnUserText(messages), strings.Join(reads, "")
+		if joined != inspected && len(inspected) <= len(content) {
+			seams = append(seams, seam{inspected, joined})
+		}
+	}
 	for _, parts := range extra {
 		add(lineFeedJoinedParts(parts), parts)
 	}
@@ -114,6 +139,16 @@ func promptPartsJoinedText(content string, messages []ChatMessage, extra [][]str
 		return ""
 	}
 	return view
+}
+
+// modelReadMessageText is the text of msg as the model reads it: its text
+// parts with no separator, or Content for a message with no seam or whose
+// Content no longer is its parts (rewritten after parsing).
+func modelReadMessageText(msg ChatMessage) string {
+	if joined := partsJoinedText(msg.textParts); joined != "" && lineFeedJoinedParts(msg.textParts) == msg.Content {
+		return joined
+	}
+	return msg.Content
 }
 
 type promptPartsViewKey struct{}
@@ -214,6 +249,111 @@ func jsonContentTextParts(content string) []string {
 // with fewer than two.
 func jsonContentPartsJoinedText(content string) string {
 	return partsJoinedText(jsonContentTextParts(content))
+}
+
+// toolResultPartsJoinedText is the parts view of a tool result as a hook
+// carries it: the text blocks of every content block array in it, each array's
+// text parts with no separator (arrays joined by a line feed), "" when no array
+// has two or more. A structured result reaches the rules as its string leaves,
+// one per line, followed by its JSON (structuredHookContentString), so a
+// literal split across the text blocks of an MCP content array or of an
+// Anthropic tool_result is two leaves with a line feed between; the model reads
+// the blocks one after the other. The JSON is read from the whole content or,
+// for a leaves-then-JSON result, from each line that holds one. The view is
+// never longer than content: a text part is no longer than its JSON encoding.
+func toolResultPartsJoinedText(content string) string {
+	var groups []string
+	if trimmed := strings.TrimSpace(content); looksLikeJSONContainer(trimmed) {
+		var decoded any
+		if json.Unmarshal([]byte(trimmed), &decoded) == nil {
+			collectTextBlockGroups(decoded, &groups)
+			return strings.Join(groups, "\n")
+		}
+	}
+	for rest := content; rest != ""; {
+		line := rest
+		if i := strings.IndexByte(rest, '\n'); i >= 0 {
+			line, rest = rest[:i], rest[i+1:]
+		} else {
+			rest = ""
+		}
+		line = strings.TrimSpace(line)
+		// A content block array holds a "text" key; skipping the lines
+		// without one keeps the scan of a large plain-text result to one pass.
+		if !looksLikeJSONContainer(line) || !strings.Contains(line, `"text"`) {
+			continue
+		}
+		var decoded any
+		if json.Unmarshal([]byte(line), &decoded) == nil {
+			collectTextBlockGroups(decoded, &groups)
+		}
+	}
+	return strings.Join(groups, "\n")
+}
+
+func looksLikeJSONContainer(s string) bool {
+	return len(s) >= 2 && (s[0] == '[' || s[0] == '{')
+}
+
+// collectTextBlockGroups appends, for every array nested anywhere in v with
+// two or more text blocks, those blocks' texts joined with no separator. A
+// text block is an object with a string "text" and a text block type
+// (isContentTextBlockType); an object with no type counts only when "text" is
+// its one key (Bedrock {"text": ...}), so a list of records that happen to
+// carry a text field is not read as one text.
+func collectTextBlockGroups(v any, groups *[]string) {
+	switch value := v.(type) {
+	case []any:
+		var parts []string
+		for _, item := range value {
+			if text, ok := contentTextBlock(item); ok {
+				parts = append(parts, text)
+			}
+			collectTextBlockGroups(item, groups)
+		}
+		if joined := partsJoinedText(parts); joined != "" {
+			*groups = append(*groups, joined)
+		}
+	case map[string]any:
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			collectTextBlockGroups(value[key], groups)
+		}
+	}
+}
+
+func contentTextBlock(item any) (string, bool) {
+	block, ok := item.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	text, ok := block["text"].(string)
+	if !ok {
+		return "", false
+	}
+	blockType, hasType := block["type"]
+	if !hasType {
+		return text, len(block) == 1
+	}
+	typeName, ok := blockType.(string)
+	return text, ok && typeName != "" && isContentTextBlockType(typeName)
+}
+
+// messagePartsJoinedText is the parts view of content a hook inspects as
+// direction: a prompt that is a JSON block array, or a tool result with block
+// arrays in it. "" for any other direction or content.
+func messagePartsJoinedText(direction, content string) string {
+	switch {
+	case isPromptDirection(direction):
+		return jsonContentPartsJoinedText(content)
+	case isToolResultDirection(direction):
+		return toolResultPartsJoinedText(content)
+	}
+	return ""
 }
 
 // unionRuleFindings merges two rule scans of one message (its text and its
