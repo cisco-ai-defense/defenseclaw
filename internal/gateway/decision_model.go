@@ -794,6 +794,11 @@ func strongerDecisionVerdict(judged, floor *ScanVerdict) *ScanVerdict {
 		return floor
 	}
 	if guardrailSeverityRank(judged.Severity) >= guardrailSeverityRank(floor.Severity) {
+		if judged.systemOneBlocked == floor.systemOneBlocked {
+			return judged
+		}
+		// The judge's verdict stands, marked as a call System One
+		// confidently blocked (guardrail.cascade.judge.block_needs_system_one).
 		out := *judged
 		out.systemOneBlocked = floor.systemOneBlocked
 		return &out
