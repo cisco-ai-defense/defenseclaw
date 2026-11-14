@@ -1,7 +1,7 @@
 # Windows shell corpus (windows-shell)
 
 Builder for the S7 Windows shell corpus (rel-1-0-10:GAP-0019). It produces `windows-shell.cases.jsonl` (case-v1), kept separate from every other corpus.
-The corpus data is not in git: it lives on dev at `~/dc-eh/evidence/rel-1-0-10/s7/corpus/windows-shell.cases.jsonl` and on dc-build-1 at
+The corpus data is not in git: it lives on dev at `~/dc-eh/evidence/rel-1-0-10/s7/corpus/windows-shell.cases.jsonl` and on `$BENCH_HOST` at
 `~/s7c/corpora/windows-shell.cases.jsonl`, and is registered in s7-gate's `corpora_all.json` / `corpora_full.json` as `windows-shell`.
 
 ```

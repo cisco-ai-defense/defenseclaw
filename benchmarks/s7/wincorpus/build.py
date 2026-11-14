@@ -9,7 +9,7 @@ Sources (see README.md):
                   corpus lane); deduplicated by command shape, stratified by command family, re-redacted for lab identities
   real-traces     real third-party Claude Code PowerShell / Git Bash calls on Windows (trace-commons/agent-traces rows of the shell corpus)
   real-stateful   Windows sequence windows from the owner's sessions
-  capture         replayable Windows tool calls found in round audit logs (rel-1-0-6 r109 dc-ent-win)
+  capture         replayable Windows tool calls found in round audit logs (rel-1-0-6 r109 lab-host)
   fixture/variant the product's own tool-call TP/FP suite (internal/gateway/testdata/security_suite/toolcall/corpus.jsonl), Windows rows, plus
                   equivalence-preserving wrappers of each row (same action, other spelling; the label carries over)
   atomic          Atomic Red Team Windows tests of attack techniques (public, MITRE ATT&CK ids), a curated allowlist
@@ -175,7 +175,7 @@ def src_captures(path: str) -> list[dict]:
         cmd = L.redact(cmd) if cmd else None
         dialect = "powershell" if tool in ("Bash",) and cmd and re.search(r"(?i)powershell|Get-|Set-|Add-Content", cmd) else ("none" if tool != "Bash" else "powershell")
         cats = ["src:capture", "tool:" + tool, "protected-target-write" if attack else "control"]
-        out.append(L.mkcase("wsh/capture/" + L.sha(json.dumps(a, sort_keys=True) + conn)[:16], "capture", f"rel-1-0-6:r109:fcd7:dc-ent-win:MS:{conn}", tool, args, cmd, dialect, conn,
+        out.append(L.mkcase("wsh/capture/" + L.sha(json.dumps(a, sort_keys=True) + conn)[:16], "capture", f"rel-1-0-6:r109:fcd7:lab-host:MS:{conn}", tool, args, cmd, dialect, conn,
                             truth="malicious" if attack else "benign", cats=cats, label_source="ledger:rel-1-0-6:r109:fcd7:protected-target" if attack else "capture:control", conf="high" if attack else "medium",
                             actions=L.profile_actions("CRITICAL") if attack else None, hard_neg=not attack, cwd="C:\\Users\\alice"))
     return out

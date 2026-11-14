@@ -9,6 +9,6 @@ if ! git diff --cached --quiet; then
 fi
 git log -1 --format=%h
 cd ~/dc-eh
-DC_BUILD_HOLDER=h-f33664dc DCB_BOX=dc-build-1 timeout 900 ~/dc-eh/bin/dcb s7-bench "export GOTOOLCHAIN=go1.26.4; mkdir -p .s7out; go build -tags s7bench -o .s7out/s7bench ./benchmarks/cmd/s7bench" 2>&1 | tail -20
-DCB_BOX=dc-build-1 ~/dc-eh/bin/dcb get s7-bench .s7out 2>&1 | tail -2
+DC_BUILD_HOLDER=h-f33664dc DCB_BOX="${BENCH_HOST:?set BENCH_HOST to the bench box alias}" timeout 900 ~/dc-eh/bin/dcb s7-bench "export GOTOOLCHAIN=go1.26.4; mkdir -p .s7out; go build -tags s7bench -o .s7out/s7bench ./benchmarks/cmd/s7bench" 2>&1 | tail -20
+DCB_BOX="${BENCH_HOST:?set BENCH_HOST to the bench box alias}" ~/dc-eh/bin/dcb get s7-bench .s7out 2>&1 | tail -2
 ls -la ~/dc-eh/wt/s7-bench/.s7out/s7bench
