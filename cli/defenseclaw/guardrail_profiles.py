@@ -83,6 +83,10 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
             # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
             "bada955b0ca029db29465c2ab0d5b4ffde02406eed0e16c36e70c7bc1de27ec6",
+            # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
+            "0dcc0d9a1cd54d73c8267c8950bb759806cd8e5a36b50b90d979ac39cc9eae18",
+            # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
+            "b82abc998f4b917dbbc856bda3bb4f9211ce829b3ab86a6464a031b6953b680a",
         }
     ),
     "permissive": frozenset(
@@ -122,6 +126,10 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
             # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
             "a35b1f3babbf06082de85953c1b6f7743233cff459a7ec19dbbf6c64181c5177",
+            # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
+            "976c0343636d8163f496e37746aa26c57f5495c906a5cd7142fda001d78bdeb0",
+            # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
+            "969de899d5a8544152cd09ad05b1e67ac841a4da53c4bb1e992a3b55c796f7a1",
         }
     ),
     "strict": frozenset(
@@ -160,6 +168,10 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
             # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
             "18bef68d5e6cf60390d9f3925667fa2afa39d9d74b70ee5114c02de8b714c3ec",
+            # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
+            "437f688e218aef5d3c5b47eb1591330401fecc157964c742f7570781f885a9b3",
+            # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
+            "f6ba060634b55b87887932700fbd73cd7d658f175f2bc83a75b057e45e8355aa",
         }
     ),
 }

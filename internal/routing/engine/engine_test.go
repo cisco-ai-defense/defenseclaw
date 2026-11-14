@@ -332,3 +332,13 @@ func TestDecideNoStickyForRules(t *testing.T) {
 		t.Fatalf("rules decide per request: %+v", d)
 	}
 }
+
+// S11 REVIEW-slice3 S1-3: a binding admin rule with no allowed survivor
+// falls back; the Gate judges the original at the exit.
+func TestDecideBindFallsBackForTheGate(t *testing.T) {
+	cfg := testConfig()
+	e := mustEngine(t, cfg, Options{Managed: true, Admin: fakeAdmin{verdict: AdminVerdict{Bind: true, Policy: Policy{AllowedAliases: []string{"missing"}}}}})
+	if d := e.Decide(context.Background(), chat("refactor")); d.Outcome != OutcomeFallback || d.Deny != nil {
+		t.Fatalf("bind without survivor = %+v, want fallback for the gate", d)
+	}
+}

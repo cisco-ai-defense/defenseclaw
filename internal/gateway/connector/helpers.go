@@ -1633,13 +1633,16 @@ func nativeHookBinaryOwnershipCandidates() []string {
 	// and the installed payload may itself have been quarantined. Known
 	// installer locations plus the pre-installer ~/.local launcher remain
 	// teardown authority. All comparisons still require one exact command.
-	return uniqueNonEmptyStrings(append(
+	// The standalone launch images under bin\hooks\<16 hex> are this
+	// install's too (GAP-0751): a registration an earlier release wrote
+	// names the transition image or an earlier launch folder.
+	return uniqueNonEmptyStrings(append(append(
 		hookBinaries,
 		canonicalNativeWindowsHookBinary(),
 		canonicalNativeWindowsInstalledHookBinary(),
 		canonicalStandaloneWindowsHookBinary(),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
-	))
+	), standaloneWindowsHookLaunchImages()...))
 }
 
 func isDefenseClawHookExecutable(exe string) bool {
@@ -1672,13 +1675,19 @@ func isDefenseClawHookExecutable(exe string) bool {
 }
 
 // isDefenseClawManagedHookExecutable recognizes only the exact current
-// launcher or native Setup's canonical installed launcher. Structured exec
-// hooks use this narrower predicate so a foreign absolute or PATH-resolved
-// command is never claimed merely because its basename resembles ours.
+// launcher, native Setup's canonical installed launcher, or a hook image of
+// the standalone install bin (the transition image or a launch image under
+// bin\hooks\<16 hex>, GAP-0751). Structured exec hooks use this narrower
+// predicate so a foreign absolute or PATH-resolved command is never claimed
+// merely because its basename resembles ours.
 func isDefenseClawManagedHookExecutable(exe string) bool {
 	exe = strings.TrimSpace(exe)
 	if exe == "" || (!filepath.IsAbs(exe) && !isWindowsDriveAbsolutePath(exe)) {
 		return false
+	}
+	if standalone := canonicalStandaloneWindowsHookBinary(); standalone != "" &&
+		winpath.SameEnterpriseHookImageFamily(exe, standalone) {
+		return true
 	}
 	for _, owned := range uniqueNonEmptyStrings([]string{
 		defenseclawHookBinary(),
@@ -1800,8 +1809,9 @@ func ExtractBearerKey(value string) string {
 //  3. x-api-key header (Anthropic)
 //  4. Authorization header
 //
-// Keys prefixed with "sk-dc-" (DefenseClaw master keys) are skipped so they
-// don't leak upstream.
+// Keys prefixed with "sk-dc-" are skipped. DefenseClaw no longer issues them,
+// but a stale value left in a pre-1.0.10 agent config must not be forwarded
+// upstream as a provider key. Remove in 1.1.
 func ExtractAPIKey(r *http.Request) string {
 	if aiAuth := r.Header.Get("X-AI-Auth"); aiAuth != "" {
 		key := ExtractBearerKey(aiAuth)
@@ -1977,17 +1987,10 @@ func AcceptLoopbackWithWarning(r *http.Request, configuredCredential, connectorN
 	return true
 }
 
-func authenticateHookBridgeRequest(r *http.Request, gatewayToken, masterKey, connectorName, loopbackReason string, warned *sync.Once) bool {
+func authenticateHookBridgeRequest(r *http.Request, gatewayToken, connectorName, loopbackReason string, warned *sync.Once) bool {
 	provided := ExtractBearerKey(r.Header.Get("Authorization"))
 	if gatewayToken != "" && SecureTokenMatch(provided, gatewayToken) {
 		return true
 	}
-	if masterKey != "" && SecureTokenMatch(provided, masterKey) {
-		return true
-	}
-	configuredCredential := gatewayToken
-	if configuredCredential == "" {
-		configuredCredential = masterKey
-	}
-	return AcceptLoopbackWithWarning(r, configuredCredential, connectorName, loopbackReason, warned)
+	return AcceptLoopbackWithWarning(r, gatewayToken, connectorName, loopbackReason, warned)
 }

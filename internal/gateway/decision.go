@@ -262,6 +262,10 @@ func guardrailActionForGuardrailFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
+	// ManagedEnterpriseActive is the Secure Client posture: the sidecar sets
+	// it from cfg.ManagedAIDOnly() (sidecar.go). A managed standalone install
+	// leaves it false, so its proxy limit findings map by the pack like the
+	// hook routes (TestBoundedProxyPathMapsByThePack).
 	return guardrailActionForProfile(findings, ManagedEnterpriseActive(),
 		func() bool {
 			ref := gc.EffectiveRulePackRef(connector)

@@ -325,3 +325,32 @@ func TestEnsureAppliesANewlyCreatedImplicitRulePack(t *testing.T) {
 		})
 	}
 }
+
+// The managed samples 1.0.9 and 1.0.8 published, with a routing block those
+// releases accepted (routing on, keys by api_key_env), install and ensure on
+// this release unchanged: an upgrade must not refuse them (owner rule; S1
+// lead item 1). The api_key_env names keep working with a doctor warning.
+func TestPreviousReleaseManagedRoutingConfigsUpgrade(t *testing.T) {
+	for _, v := range []string{"1.0.9", "1.0.8"} {
+		for _, sample := range []struct{ goos, file string }{{"linux", "linux"}, {"darwin", "macos"}} {
+			t.Run(v+"/"+sample.goos, func(t *testing.T) {
+				raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "enterprise-configs", "upgrade", sample.file+"-standalone-"+v+"-routing.yaml"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				h := newTestHost(t, sample.goos)
+				requireNoHostInstall(t, h.env.Layout)
+				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, raw)}))
+				requireOK(t, h.run(Options{Action: ActionEnsure}))
+				validated, err := h.env.validateConfig(raw)
+				if err != nil {
+					t.Fatalf("this release refuses the %s managed routing config: %v", v, err)
+				}
+				r := validated.Loaded.Routing
+				if !r.Enabled || r.EffectiveClassifier() != config.RoutingClassifierVLLMSR || r.Models[0].APIKeyEnv != "OPENAI_API_KEY" {
+					t.Fatalf("routing changed meaning: %+v", r)
+				}
+			})
+		}
+	}
+}

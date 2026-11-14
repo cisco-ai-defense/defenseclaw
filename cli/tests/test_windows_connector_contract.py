@@ -35,7 +35,9 @@ PLUGIN_CONNECTORS = {"opencode"}  # a plugin: its golden commands go through the
 # GAP-0676 changes its per-user Windows command (a cmd.exe-wrapped bridge that answers a launcher
 # that cannot start); the Go Windows shard exercises that. A registration-only cell or a golden
 # is a 1.0.10 item.
-NO_CONTRACT = {"kiro"}
+# OpenClaw (native hook mode since 1.0.10) is a plugin of its own gateway, not a
+# shell-hook golden; the live OC-W lanes and the Go Windows shard cover it.
+NO_CONTRACT = {"kiro", "openclaw"}
 
 
 def _jobs() -> dict:
