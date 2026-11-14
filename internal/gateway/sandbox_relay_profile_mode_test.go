@@ -69,7 +69,7 @@ func TestSandboxRelayObserveProfileAlertsLikeTheHost(t *testing.T) {
 		r.Profile, r.ProfileMatch = "sandbox-admins", "group"
 	})
 	resp, body := f.post(t, sandboxrelay.PathHookPrefix+"claudecode", reg.ID,
-		`{"hook_event_name":"UserPromptSubmit","session_id":"o1","prompt":"AWS_ACCESS_KEY_ID=AKIA7Q9W2E4R6T8Y1U3I"}`)
+		userTypedBlockingPromptHook("UserPromptSubmit", "o1"))
 	d, ok := relayTrailer(t, resp)
 	if resp.StatusCode != http.StatusOK || !ok || d.Action == "block" || !d.WouldBlock {
 		t.Fatalf("observe profile in a sandbox: %d %s trailer %+v, want an alert with would_block", resp.StatusCode, body, d)
