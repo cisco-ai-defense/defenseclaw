@@ -113,7 +113,7 @@ func TestReviewProbes3(t *testing.T) {
 	N := func(n, conn, tool, args string) {
 		cs = append(cs, pc{n, envOpts, Normalize(conn, tool, json.RawMessage(args))})
 	}
-	N("F1 CommandLine cap", "windsurf", "run_command", `{"CommandLine":"rm -rf /etc/x"}`)
+	N("F1 CommandLine cap", "x", "run_command", `{"CommandLine":"rm -rf /etc/x"}`)
 	N("F2 local_shell action", "codex", "local_shell", `{"action":{"type":"exec","command":["rm","-rf","/etc/x"]}}`)
 	N("F3 json string args", "x", "bash", `"rm -rf /etc/x"`)
 	N("F4 numeric command", "x", "bash", `{"command":5}`)

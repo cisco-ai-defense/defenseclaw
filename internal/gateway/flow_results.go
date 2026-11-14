@@ -56,7 +56,7 @@ var secretFlowResultKeys = []string{
 }
 
 // secretFlowResultNestedKeys are result fields one object down (Hermes puts
-// them in extra, Windsurf-style payloads in tool_info).
+// them in extra, other payloads in tool_info).
 var secretFlowResultNestedKeys = map[string][]string{
 	"extra":     {"result", "output"},
 	"tool_info": {"mcp_result", "response", "output"},
