@@ -91,7 +91,7 @@ Each routed request also records one `defenseclaw.semantic_routing.decision` cou
 
 ## Going back to a release before 1.0.10
 
-`defenseclaw rollback` and `defenseclaw upgrade --version 1.0.9` (or any release before 1.0.10, which has no route-only listener) stop the gateway and put the Claude Code and Codex model settings that route-only changed back before the older release is installed; restart the agent afterwards. If they cannot be put back, nothing is changed and the command names `defenseclaw routing disable --connector <name>`. When you run an older release's installer yourself (`install.sh --version 1.0.9`), run `defenseclaw routing disable --connector <name>` for each route-only connector first.
+A release before 1.0.10 has no route-only listener, so the Claude Code and Codex model settings route-only changed go back first. `defenseclaw rollback` (and `defenseclaw upgrade --version` on Windows) does it in the installer, after its prompt, with the gateway stopped. On Linux and macOS, `defenseclaw upgrade --version 1.0.9` asks first (or takes `--yes`), stops the gateway and puts them back; if they cannot be put back, or the older installer fails, the gateway of this release starts again and writes them again. Restart the agent afterwards. When you run an older release's installer yourself (`install.sh --version 1.0.9`), run `defenseclaw routing disable --connector <name>` for each route-only connector first.
 
 ## Disable routing
 

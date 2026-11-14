@@ -16,12 +16,12 @@ func TestRouteOnlyReadinessReportsNoEnrolledRender(t *testing.T) {
 	cfg := readinessConfig(config.RoutingUpstreamConfig{BaseURL: "https://api.anthropic.com", API: config.RoutingAPIMessages})
 	cfg.DeploymentMode, cfg.Enterprise.Profile = "managed_enterprise", "standalone"
 	var signers bedrockSigners
-	count := 0
-	enrolled := func(string) (int, bool) { return count, true }
-	r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, enrolled))
 	if !cfg.StandaloneEnterprise() {
 		t.Skip("fixture is not a standalone managed config on this platform")
 	}
+	count := 0
+	enrolled := func(string) (int, bool) { return count, true }
+	r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, enrolled))
 	if r.Ready || r.EnrolledUsers == nil || *r.EnrolledUsers != 0 || !strings.Contains(r.Problem, "no enrolled account") {
 		t.Fatalf("zero renders: %+v", r)
 	}

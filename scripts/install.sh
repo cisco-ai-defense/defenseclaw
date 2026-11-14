@@ -3341,7 +3341,7 @@ convert_hooks_for_rollback() {
     help="$("${gateway}" connector prepare-rollback --help 2>/dev/null || true)"
     [[ "${help}" != *--to-version* || -z "${back_to:-}" ]] || to=(--to-version "${back_to}")
     "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" ${to[@]+"${to[@]}"} 2>>"${LOG}" \
-        || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
+        || warn "Could not rewrite the agent hook entries, or put back the route-only model settings, of DefenseClaw ${current:-?} for ${back_to} (see ${LOG}); a route-only agent then gets 401 until you remove the DefenseClaw base URL and route header from its settings by hand; after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
 }
 
 # drop_newer_hook_helper LEFT_DATA: remove the live hooks/_hardening.sh when

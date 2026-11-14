@@ -903,7 +903,7 @@ func ManagedRouteOnlySetup(cfg *config.Config, connectorName, apiAddr, token str
 
 // RouteOnlyRouted reports whether config.yaml routes connector route-only.
 func RouteOnlyRouted(cfg *config.Config, connectorName string) bool {
-	return cfg != nil && cfg.Routing.Enabled && slices.Contains(cfg.Routing.RouteOnly.Connectors, connectorName)
+	return cfg.RouteOnlyRouted(connectorName)
 }
 
 // routeOnlySetupBase is the rendering without its credential, or nil.

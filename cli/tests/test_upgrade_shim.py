@@ -1916,20 +1916,15 @@ def test_a_good_defenseclaw_repo_is_still_accepted(
     assert upgrade_shim.release_source() == base
 
 
-# rel-1-0-10 GAP-0602: a rollback or downgrade to a release without route-only
-# puts the agent model settings back first, with the gateway stopped, or
-# refuses with the command that does it.
+# rel-1-0-10 GAP-0602: a downgrade to a release without route-only puts the
+# agent model settings back first (asked, gateway stopped), or refuses with
+# the command that does it; a rollback leaves it to the saved installer's
+# prepare-rollback step, which runs after its prompt with the gateway stopped.
 _CLAUDE_ROUTED = '{"env": {"ANTHROPIC_BEDROCK_BASE_URL": "http://127.0.0.1:18970/r/claudecode", "ANTHROPIC_CUSTOM_HEADERS": "X-DC-Route-Auth: dcr1-x", "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1"}}'
 _CLAUDE_DIRECT = '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}'
 
 
-def _route_only_install(home: Path, previous: str) -> Path:
-    saved = home / "installer" / "install.sh"
-    saved.parent.mkdir()
-    saved.write_text("#!/bin/bash\n", encoding="utf-8")
-    _record(home, saved)
-    (home / "previous").mkdir()
-    (home / "previous" / "VERSION").write_text(previous + "\n", encoding="utf-8")
+def _routed_claude() -> Path:
     settings = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"
     settings.parent.mkdir(parents=True)
     settings.write_text(_CLAUDE_ROUTED, encoding="utf-8")
@@ -1950,48 +1945,88 @@ def _fake_gateway(monkeypatch: pytest.MonkeyPatch, settings: Path, *, restores: 
     return calls
 
 
-def test_rollback_to_a_release_without_route_only_restores_the_agent_settings_first(
-    home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def _downgrade_to_1_0_9(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rc: int = 0) -> list[list[str]]:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+    waited: list[list[str]] = []
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", lambda argv: waited.append(list(argv)) or rc)
+    return waited
+
+
+def test_downgrade_puts_the_route_only_settings_back_with_the_gateway_stopped(
+    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    settings = _route_only_install(home, "1.0.9")
+    settings = _routed_claude()
     calls = _fake_gateway(monkeypatch, settings, restores=True)
+    waited = _downgrade_to_1_0_9(tmp_path, monkeypatch)
 
-    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
 
-    # The gateway is stopped before the restore, so it cannot render again.
     assert calls == [["stop"], ["connector", "route-restore", "--all"]]
     assert "/r/claudecode" not in settings.read_text(encoding="utf-8")
-    assert execs[0][2:] == ["--rollback", "--yes"]
+    assert len(waited) == 1 and "--yes" in waited[0] and execs == []
     assert "Put back the claudecode model settings" in capsys.readouterr().out
 
 
-def test_rollback_refuses_when_the_route_only_settings_stay(
-    home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_a_failed_downgrade_starts_the_gateway_again(
+    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    settings = _route_only_install(home, "1.0.9")
+    settings = _routed_claude()
+    calls = _fake_gateway(monkeypatch, settings, restores=True)
+    _downgrade_to_1_0_9(tmp_path, monkeypatch, rc=3)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 3
+
+    assert calls[-1] == ["start"]
+
+
+def test_downgrade_refuses_when_the_route_only_settings_stay(
+    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = _routed_claude()
     calls = _fake_gateway(monkeypatch, settings, restores=False)
+    waited = _downgrade_to_1_0_9(tmp_path, monkeypatch)
 
-    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 1
 
-    assert execs == []
-    assert calls[-1] == ["start"]  # the gateway it stopped runs again
+    assert waited == [] and execs == []
+    assert calls[-1] == ["start"]
     err = capsys.readouterr().err
-    assert "defenseclaw routing disable --connector claudecode" in err and "401" in err
+    assert "defenseclaw routing disable --connector claudecode" in err and "401" in err and "Nothing was changed" in err
 
 
-def test_rollback_to_a_route_only_release_leaves_the_settings(
+def test_downgrade_without_yes_and_no_terminal_changes_nothing(
+    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = _routed_claude()
+    calls = _fake_gateway(monkeypatch, settings, restores=True)
+    _downgrade_to_1_0_9(tmp_path, monkeypatch)
+    monkeypatch.setattr(upgrade_shim.sys.stdin, "isatty", lambda: False, raising=False)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9"]) == 1
+
+    assert calls == [] and execs == []
+    assert "/r/claudecode" in settings.read_text(encoding="utf-8")
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_rollback_leaves_the_route_only_settings_to_the_installer(
     home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    settings = _route_only_install(home, "1.0.10")
+    saved = home / "installer" / "install.sh"
+    saved.parent.mkdir()
+    saved.write_text("#!/bin/bash\n", encoding="utf-8")
+    _record(home, saved)
+    settings = _routed_claude()
     calls = _fake_gateway(monkeypatch, settings, restores=True)
 
     assert upgrade_shim.run(["rollback", "--yes"]) == 0
 
-    assert calls == []
-    assert "/r/claudecode" in settings.read_text(encoding="utf-8")
+    # Nothing changes before the installer's own prompt.
+    assert calls == [] and execs[0][2:] == ["--rollback", "--yes"]
 
 
-def test_codex_route_render_is_found() -> None:
+def test_codex_route_render_is_found(home: Path) -> None:
     codex = Path(os.environ["CODEX_HOME"])
     codex.mkdir(parents=True)
     assert upgrade_shim._route_only_rendered() == []

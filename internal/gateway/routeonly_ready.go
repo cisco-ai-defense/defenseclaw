@@ -35,8 +35,9 @@ type routeOnlyReadiness struct {
 	Credential string                     `json:"credential"`
 	Signing    *routeOnlySigningReadiness `json:"signing,omitempty"`
 	// EnrolledUsers counts the enrolled accounts of a managed host whose
-	// route credential the gateway accepts (one per protected ledger row);
-	// nil off managed hosts.
+	// route credential the gateway accepts (one per protected ledger row,
+	// whether or not that account's route settings were written; verify
+	// reports a missing render); nil off managed hosts.
 	EnrolledUsers *int   `json:"enrolled_users,omitempty"`
 	Ready         bool   `json:"ready"`
 	Problem       string `json:"problem,omitempty"`
@@ -121,8 +122,8 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 					// Nothing is routed until the guardian renders an
 					// enrolled account (rel-1-0-10 GAP-0568: this was silent).
 					r.Ready = false
-					r.Problem = "no enrolled account has a route-only render for " + name + " yet, so no call is routed"
-					r.Fix = "enroll users (enterprise.enrollment), wait for the hook guardian pass (about 2 minutes) and restart the agent; enterprise verify lists route_config_drift for an account whose render is missing"
+					r.Problem = "no enrolled account has " + name + " protected yet, so no " + name + " call is routed"
+					r.Fix = "enroll users with " + name + " installed (enterprise.enrollment), wait for the hook guardian pass (about 2 minutes) and restart the agent; enterprise verify lists route_config_drift for an account whose route settings are missing"
 				}
 			}
 		}

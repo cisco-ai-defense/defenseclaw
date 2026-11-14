@@ -528,7 +528,7 @@ def route_only_rows(
             provider = state.get("provider") or upstream_provider(str(up.get("api") or ""))
             where = state.get("upstream") or origin(up.get("base_url") or "")
             enrolled = state.get("enrolled_users")
-            routed = f"; {enrolled} enrolled account(s) routed" if isinstance(enrolled, int) else ""
+            routed = f"; {enrolled} enrolled account(s) with a route credential" if isinstance(enrolled, int) else ""
             rows.append(Row("pass", label, f"{provider} at {where}; {text}{routed}"))
         else:
             rows.append(

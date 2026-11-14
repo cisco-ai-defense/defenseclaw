@@ -262,13 +262,15 @@ func (b enterpriseHookUnixBindings) lookup(key string, uid int, home string, ino
 }
 
 // restoreDepartedEnterpriseHookMachineRoutes takes back, as each account,
-// the route-only render of a machine-policy connector whose row left this
-// pass (routing turned off, the connector left route_only.connectors, the
-// account left the enrollment), rel-1-0-10 GAP-0568. Without it the
+// the route-only render of a route-capable connector (Claude Code, Codex)
+// whose row left this pass (routing turned off, the connector left
+// route_only.connectors or the descriptor, the account left the
+// enrollment), rel-1-0-10 GAP-0568. It does not depend on the descriptor
+// (unreadable mid-upgrade) and is a no-op where nothing was rendered. Without it the
 // agent kept a base URL to a route the gateway no longer serves. The
 // restore touches no file when nothing was rendered; a failed one keeps
 // the binding, so the next pass tries again.
-func restoreDepartedEnterpriseHookMachineRoutes(ctx context.Context, previous, next enterpriseHookUnixBindings, machinePolicy map[string]struct{}, resolver unixidentity.Resolver) {
+func restoreDepartedEnterpriseHookMachineRoutes(ctx context.Context, previous, next enterpriseHookUnixBindings, resolver unixidentity.Resolver) {
 	keys := make([]string, 0, len(previous.Bindings))
 	for key := range previous.Bindings {
 		if _, kept := next.Bindings[key]; !kept {
@@ -283,7 +285,7 @@ func restoreDepartedEnterpriseHookMachineRoutes(ctx context.Context, previous, n
 		if len(parts) != 3 || (parts[1] != "user" && parts[1] != "home") {
 			continue
 		}
-		if _, machine := machinePolicy[parts[0]]; !machine || !slices.Contains(config.RouteOnlyCapableConnectors, parts[0]) {
+		if !slices.Contains(config.RouteOnlyCapableConnectors, parts[0]) {
 			continue
 		}
 		binding := previous.Bindings[key]
@@ -293,7 +295,15 @@ func restoreDepartedEnterpriseHookMachineRoutes(ctx context.Context, previous, n
 			target.User = parts[2]
 		}
 		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
-		if err != nil || pendingReason != "" || account.UID != binding.UID || account.UID <= 0 {
+		if errors.Is(err, errEnterpriseHookTargetNotFound) || (err == nil && pendingReason == "" && (account.UID != binding.UID || account.UID <= 0)) {
+			// The account is gone or the name is another account now:
+			// nothing of this binding's is left to take back.
+			continue
+		}
+		if err != nil || pendingReason != "" {
+			// Not resolvable now (directory down, home pending): keep the
+			// binding, so a later pass takes the render back.
+			next.Bindings[key] = binding
 			continue
 		}
 		index := len(byIndex)
@@ -942,7 +952,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 					// The account's own route render rides on the same job
 					// (nil takes an earlier render back), rel-1-0-10 GAP-0568.
 					job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: index,
-						Mode: mode,
+						Mode: mode, MachineRoute: slices.Contains(config.RouteOnlyCapableConnectors, strings.ToLower(row.Connector)),
 						Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
 							ConnectorName: row.Connector, UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
 							DataDir:   strings.TrimSpace(target.DataDir),
@@ -1256,7 +1266,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		}
 	}
 
-	restoreDepartedEnterpriseHookMachineRoutes(ctx, bindings, next, machinePolicy, resolver)
+	restoreDepartedEnterpriseHookMachineRoutes(ctx, bindings, next, resolver)
 	bindingsErr := saveEnterpriseHookUnixBindings(next)
 	writeEnterpriseHookGuardianRepairs(cfg.DataDir, repaired)
 	writeEnterpriseHookGuardianNotices(enterpriseHookWorkerLog, cfg.DataDir, notices)

@@ -246,6 +246,9 @@ type enterpriseHookWorkerTarget struct {
 	// (enterpriseHookPriorUserTokens). They only classify a reinstall as
 	// configuration; nothing is rendered from them.
 	PriorCredentials *enterprisehooks.HookCredentials `json:"prior_credentials,omitempty"`
+	// MachineRoute: this machine-policy target also applies the account's
+	// route-only render (Options.RouteOnly; nil takes it back), GAP-0568.
+	MachineRoute bool `json:"machine_route,omitempty"`
 }
 
 type enterpriseHookWorkerRequest struct {
@@ -880,7 +883,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		case enterpriseHookWorkerModeBlockPersonalClaude:
 			err = blockPersonalClaudeHook(opts)
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
-			if err == nil && request.Standalone {
+			if err == nil && request.Standalone && target.MachineRoute {
 				outcome.RouteDrift = applyMachinePolicyRouteOnly(registry, opts)
 			}
 		case enterpriseHookWorkerModeVerifyMachineRoute:
@@ -903,7 +906,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				err = errors.New("managed Codex feature repair requires the standalone guardian")
 			} else {
 				err = repairManagedCodexUserFeature(opts)
-				if err == nil {
+				if err == nil && target.MachineRoute {
 					outcome.RouteDrift = applyMachinePolicyRouteOnly(registry, opts)
 				}
 			}
@@ -1065,6 +1068,16 @@ func applyMachinePolicyRouteOnly(registry *connector.Registry, opts enterpriseho
 	dataDir := strings.TrimSpace(opts.DataDir)
 	if dataDir == "" {
 		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+	}
+	if opts.RouteOnly != nil {
+		// An agent installed but never run has no config folder yet; the
+		// render (and its lock file) needs it. The worker runs as the user.
+		folder := map[string]string{"claudecode": ".claude", "codex": ".codex"}[strings.ToLower(opts.ConnectorName)]
+		if folder != "" {
+			if err := os.MkdirAll(filepath.Join(opts.UserHome, folder), 0o700); err != nil {
+				return boundedEnterpriseHookRouteDrift(err.Error())
+			}
+		}
 	}
 	setup := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true, RouteOnly: opts.RouteOnly}
 	err := connector.WithUserHomeDir(opts.UserHome, func() error {
