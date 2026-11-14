@@ -54,7 +54,7 @@ func TestManagedGuardrailRefusesABuildWithNoCredentialProvider(t *testing.T) {
 	s := managedInspectionSidecar(t)
 
 	err := s.runManagedEnterpriseMultiHookGuardrail(
-		context.Background(), reg, []connector.Connector{conn}, "gateway-token", "a", "b", "master",
+		context.Background(), reg, []connector.Connector{conn}, "gateway-token", "a", "b",
 	)
 	if !errors.Is(err, cloudreg.ErrNoProviderRegistered) {
 		t.Fatalf("error = %v, want %v", err, cloudreg.ErrNoProviderRegistered)

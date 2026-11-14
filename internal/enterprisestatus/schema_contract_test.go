@@ -243,6 +243,9 @@ func TestLifecycleSchemaDescribesEveryField(t *testing.T) {
 		"readiness":     {reflect.TypeOf(Readiness{}), properties["readiness"].(map[string]any)},
 		"inspection":    {reflect.TypeOf(Inspection{}), properties["inspection"].(map[string]any)},
 		"enrollment":    {reflect.TypeOf(Enrollment{}), properties["enrollment"].(map[string]any)},
+		"healthReport":  {reflect.TypeOf(HealthReportState{}), defs["healthReport"].(map[string]any)},
+		"healthReportDelivery": {reflect.TypeOf(HealthReportDelivery{}),
+			defs["healthReport"].(map[string]any)["properties"].(map[string]any)["delivery"].(map[string]any)},
 	}
 	for name, object := range objects {
 		var fields, required []string

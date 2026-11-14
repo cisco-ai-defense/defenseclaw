@@ -196,6 +196,7 @@ func TestOptInPolicyPacksUseDistinctBalancedLanes(t *testing.T) {
 		{"database-destruction-protection", "database-destruction-conformance-v1.jsonl", "sql-v1/psql-delete", "impact.sql_unbounded_delete"},
 		{"infrastructure-destruction-protection", "infrastructure-destruction-conformance-v1.jsonl", "iac-v1/terraform-destroy", "impact.iac_full_destroy"},
 		{"kubernetes-production-protection", "kubernetes-production-conformance-v1.jsonl", "kube-v1/kubectl-namespace", "impact.kubernetes_namespace_delete"},
+		{"active-directory-protection", "active-directory-conformance-v1.jsonl", "ad-v1/netexec-credential-use", "credential.directory_service_credential_use"},
 	}
 	for _, test := range tests {
 		t.Run(test.pack, func(t *testing.T) {

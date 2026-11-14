@@ -115,6 +115,16 @@ type ToolChainDefinition struct {
 	// establish completeness for its own role even when the generic command
 	// classifier reports an otherwise harmless unknown-operand issue.
 	ValueJoinOwnsParseProof bool
+	// Step1IdentityOwnsParseProof lets the first role of a
+	// RequiresEnforcementJoin chain come from a call whose overall parse is
+	// partial when that call carries an identity for the role in
+	// EnforcementJoinDigests: the projector proved the commands that play the
+	// role complete, and an unknown operand grammar elsewhere in the call (a
+	// pipeline stage, a list member) says nothing about them. The identity is
+	// the exact resource, or a marker that equals no resource; exact unequal
+	// identities still disprove the chain. It never sets an enforcement step,
+	// and the terminal role still needs a complete parse.
+	Step1IdentityOwnsParseProof bool
 	// RequiresDistinctResourceJoin requires both roles to carry exact, non-empty
 	// trusted resource identities and rejects a same-resource pair. It is
 	// intentionally separate from value equality: the associated value HMACs
@@ -164,13 +174,16 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		// entry stays while the flow lane ships in shadow so turning the flow
 		// lane off keeps today's answer; it is removed when the flow lane
 		// becomes authoritative by default.
-		ID: ToolChainSecretReadThenEgress, Version: "1.7",
+				ID: ToolChainSecretReadThenEgress, Version: "1.8",
 		Title:       "Secret read followed by external egress",
 		Severity:    "CRITICAL",
-		EventWindow: 8, TimeWindow: 30 * time.Minute, Revision: "h01-h07-n01-n02-n04-to-data-external-egress-bounded8-v2",
+		EventWindow: 8, TimeWindow: 30 * time.Minute, Revision: "h01-h07-n01-n02-n04-to-data-external-egress-bounded8-v3-readproof",
 		RequiresEnforcementJoin: true,
-		ArtifactMutationBarrier: true,
-		DetectionOnly:           true,
+		// A credentials-file read inside a pipeline or a command list
+		// (cat .env | tr ... | grep) starts the chain (substrate-1:GAP-0226).
+		Step1IdentityOwnsParseProof: true,
+		ArtifactMutationBarrier:     true,
+		DetectionOnly:               true,
 	},
 	{
 		ID: ToolChainWorkloadIdentityThenLateralExec, Version: "1.7",
@@ -797,7 +810,11 @@ func MatchToolChains(
 				detectionJoinPossible = predecessorDigest != "" &&
 					predecessorDigest == finalDigest
 			} else if definition.RequiresEnforcementJoin {
-				if event.Projection.ParseStatus != actionfacts.StatusComplete ||
+				eventParseProven := event.Projection.ParseStatus == actionfacts.StatusComplete ||
+					definition.Step1IdentityOwnsParseProof &&
+						event.Projection.ParseStatus == actionfacts.StatusPartial &&
+						predecessorDigest != ""
+				if !eventParseProven ||
 					final.Projection.ParseStatus != actionfacts.StatusComplete {
 					// Conditional, dynamic, or unresolved parsing does not create a
 					// new chain alert. Atomic findings retain their own posture.

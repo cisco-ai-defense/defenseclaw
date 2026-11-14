@@ -1306,6 +1306,26 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_E2E_DATA_DIR",
+      "category": "test_fixture",
+      "purpose": "Opts into the live Claude Code run-config probe (Docker, no OpenShell gateway) and names the data directory whose sandboxes/images.json it writes; the test is skipped when it is unset.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/openshell/image/claudecode_runconfig_integration_test.go",
+          "description": "Live Claude Code run-config probe in the real overlay image (openshell_integration build tag)"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_E2E_HARNESS",
       "category": "test_fixture",
       "purpose": "Names the hook-only harness the live hook-only sandbox test drives (hermes or antigravity); the test is skipped when it is unset.",
@@ -8322,6 +8342,83 @@
         }
       ],
       "since": "1.0.7"
+    },
+    {
+      "name": "DEFENSECLAW_INSTALL_POLICY_API",
+      "category": "hook_internal",
+      "purpose": "Gateway API base URL the OpenClaw security.installPolicy exec command asks; setup writes it into exec.env.",
+      "default": "(set by setup in openclaw.json)",
+      "accepted_values": [
+        "http-url"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/openclaw_install_policy.go",
+          "description": "Go reader (install-policy command)"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_INSTALL_POLICY_OUTAGE",
+      "category": "hook_internal",
+      "purpose": "Install decision when the gateway does not answer (allow or block, from the outage tier); setup writes it into exec.env.",
+      "default": "(set by setup in openclaw.json)",
+      "accepted_values": [
+        "allow",
+        "block"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/openclaw_install_policy.go",
+          "description": "Go reader (install-policy command)"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_INSTALL_POLICY_TIMEOUT_MS",
+      "category": "hook_internal",
+      "purpose": "How long the OpenClaw install-policy command waits for the gateway verdict; setup writes it into exec.env.",
+      "default": "(set by setup in openclaw.json)",
+      "accepted_values": [
+        "positive-integer-ms"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/openclaw_install_policy.go",
+          "description": "Go reader (install-policy command)"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_INSTALL_POLICY_TOKEN_FILE",
+      "category": "hook_internal",
+      "purpose": "Connector-scoped OpenClaw plugin credential file the install-policy command reads; setup writes it into exec.env.",
+      "default": "(set by setup in openclaw.json)",
+      "accepted_values": [
+        "absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/openclaw_install_policy.go",
+          "description": "Go reader (install-policy command)"
+        }
+      ],
+      "since": "1.0.10"
     }
   ]
 }

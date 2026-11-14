@@ -144,6 +144,14 @@ type Event struct {
 	// rides in the structured envelope and the raw column as on main, not in
 	// a path-class record field (issue #1092).
 	RulePackDirInEnvelope bool `json:"-"`
+	// SemanticEventID, LogicalEventID and ConnectorInstanceID name the
+	// correlation event of a hook failure report row: the row of a call
+	// whose audit write failed pairs with the hook_decision record of that
+	// call, so readers count the call once (#1384). Empty on every other
+	// row, whose runtime takes them from the context envelope.
+	SemanticEventID     string `json:"-"`
+	LogicalEventID      string `json:"-"`
+	ConnectorInstanceID string `json:"-"`
 
 	// WorkspaceHostPaths are the folders connected to the Claude Cowork
 	// session of a claudecode hook row. There is no SQLite column: the
@@ -2088,6 +2096,10 @@ var migrations = []migration{
 		description: sparseKeyIndexesMigrationDescription,
 		apply:       migrateSparseKeyIndexes,
 	},
+	{
+		description: rejectedRecordsMigrationDescription,
+		apply:       migrateRejectedRecords,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2142,6 +2154,18 @@ var unreadAuditIndexes = []struct{ name, create string }{
 	// (rel-1-0-3 GAP-0320).
 	{"idx_correlation_identifiers_exact", `CREATE INDEX IF NOT EXISTS idx_correlation_identifiers_exact ON correlation_identifiers(connector_instance_id, namespace, identifier_kind, value_digest)`},
 	{"idx_correlation_receipts_source", `CREATE INDEX IF NOT EXISTS idx_correlation_receipts_source ON correlation_receipts(connector_instance_id, source_key_digest)`},
+	// Three more correlation indexes no query needs (S8 R5). The pending
+	// operation's exact key is its primary key; status, the index's last
+	// column, only filters the one row the key finds. The from index leads
+	// with the two columns that lead the unique key of the relationship
+	// (sqlite_autoindex_correlation_relationships_2), so the graph load and
+	// the retention keep tests seek that one instead. No query filters
+	// relationships by status, with or without the last-seen time: retention
+	// orders them by idx_correlation_relationships_seen. A benign hook call
+	// wrote about 300 bytes to these three (TestCorrelationLookupsUseUniqueIndexesAfterTheTrim).
+	{"idx_correlation_pending_exact", `CREATE INDEX IF NOT EXISTS idx_correlation_pending_exact ON correlation_pending_operations(connector_instance_id, operation_namespace, operation_kind, operation_id, operation_type, scope_kind, scope_id, status)`},
+	{"idx_correlation_relationships_from", `CREATE INDEX IF NOT EXISTS idx_correlation_relationships_from ON correlation_relationships(from_kind, from_id, status)`},
+	{"idx_correlation_relationships_status", `CREATE INDEX IF NOT EXISTS idx_correlation_relationships_status ON correlation_relationships(status, last_seen_time_unix_nano)`},
 }
 
 // trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client
@@ -2408,6 +2432,9 @@ func (s *Store) HasAuditEventID(ctx context.Context, id string) (bool, error) {
 // text (a redaction profile removed it), is empty.
 type StoredHookVerdict struct {
 	Action, Reason string
+	// ReasonRedacted: the row holds a reason that is not text (a redaction
+	// profile transformed it), so Reason is empty and proves nothing.
+	ReasonRedacted bool
 }
 
 // StoredHookVerdict returns the decision the stored hook record id holds.
@@ -2422,12 +2449,16 @@ func (s *Store) StoredHookVerdict(ctx context.Context, id string) (verdict Store
 			THEN COALESCE(json_extract(structured_json,'$.action'),'') ELSE '' END,
 		CASE WHEN json_valid(COALESCE(structured_json,'')) AND json_type(structured_json,'$.reason') = 'text'
 			THEN json_extract(structured_json,'$.reason') ELSE '' END,
+		json_valid(COALESCE(structured_json,'')) AND COALESCE(json_type(structured_json,'$.reason'),'null') NOT IN ('text','null'),
 		CASE WHEN json_valid(COALESCE(projected_record_json,''))
 			THEN COALESCE(json_extract(projected_record_json,'$.body."defenseclaw.guardrail.effective_action"'),'') ELSE '' END,
 		CASE WHEN json_valid(COALESCE(projected_record_json,''))
 				AND json_type(projected_record_json,'$.body."defenseclaw.guardrail.reason"') = 'text'
-			THEN json_extract(projected_record_json,'$.body."defenseclaw.guardrail.reason"') ELSE '' END
-		FROM audit_events WHERE id = ?`, id), &envelope.Action, &envelope.Reason, &decision.Action, &decision.Reason)
+			THEN json_extract(projected_record_json,'$.body."defenseclaw.guardrail.reason"') ELSE '' END,
+		json_valid(COALESCE(projected_record_json,'')) AND
+			COALESCE(json_type(projected_record_json,'$.body."defenseclaw.guardrail.reason"'),'null') NOT IN ('text','null')
+		FROM audit_events WHERE id = ?`, id), &envelope.Action, &envelope.Reason, &envelope.ReasonRedacted,
+		&decision.Action, &decision.Reason, &decision.ReasonRedacted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StoredHookVerdict{}, false, nil
 	}
@@ -2441,7 +2472,7 @@ func (s *Store) StoredHookVerdict(ctx context.Context, id string) (verdict Store
 }
 
 // LatestHookVerdictOfEvent returns the verdict of the newest hook record
-// (connector-hook or connector-hook-synthetic row, or its decision record)
+// (connector-hook or connector-hook-synthetic row, or a hook_decision record)
 // observed for the semantic event id, so a repeat of that delivery can tell
 // what the audit last recorded for it. found is false when no hook record is
 // linked to the event (GAP-1060).
@@ -2450,11 +2481,13 @@ func (s *Store) LatestHookVerdictOfEvent(ctx context.Context, semanticEventID st
 		return StoredHookVerdict{}, false, errors.New("audit: hook verdict lookup requires a ready store and a semantic event id")
 	}
 	var id string
+	// A benign per-user allow keeps only its hook_decision row (#1384), so
+	// that row kind is a hook record too; both kinds stay readable.
 	err = s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx, `SELECT event.id
 		FROM correlation_observations AS observation JOIN audit_events AS event ON event.id = observation.record_id
-		WHERE observation.semantic_event_id = ? AND event.action IN (?, ?)
+		WHERE observation.semantic_event_id = ? AND event.action IN (?, ?, ?)
 		ORDER BY observation.observed_time_unix_nano DESC, event.timestamp DESC, event.rowid DESC LIMIT 1`,
-		semanticEventID, string(ActionConnectorHook), string(ActionConnectorHookSynthetic)), &id)
+		semanticEventID, string(ActionConnectorHook), string(ActionConnectorHookSynthetic), hookDecisionEventName), &id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StoredHookVerdict{}, false, nil
 	}
@@ -2462,6 +2495,17 @@ func (s *Store) LatestHookVerdictOfEvent(ctx context.Context, semanticEventID st
 		return StoredHookVerdict{}, false, err
 	}
 	return s.StoredHookVerdict(ctx, id)
+}
+
+// correlationEventExists reports whether the correlation ledger still holds
+// the semantic event id.
+func (s *Store) correlationEventExists(ctx context.Context, id string) bool {
+	if s == nil || !s.Ready() || id == "" {
+		return false
+	}
+	var one int
+	return s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx,
+		`SELECT 1 FROM correlation_events WHERE semantic_event_id = ?`, id), &one) == nil
 }
 
 // DatabaseFileReplaced reports whether the database path no longer names

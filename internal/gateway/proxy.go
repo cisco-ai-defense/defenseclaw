@@ -20,7 +20,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -40,7 +39,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/crypto/pbkdf2"
+
 	"golang.org/x/time/rate"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -52,6 +51,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -92,6 +92,10 @@ type ContentInspector interface {
 // requests, runs guardrail inspection, and forwards to the upstream LLM
 // provider.
 type GuardrailProxy struct {
+	// kernelPeer names the verified caller of a request from the kernel
+	// (managed hosts with routing on, S1 DESIGN 15.2 Q3); nil or false
+	// leaves authentication as it was.
+	kernelPeer func(r *http.Request, connectorName string) (string, bool)
 	// generationSource is the gateway's published generation; each request
 	// pins it in withProxyAgent. nil outside a gateway.
 	generationSource func() *Generation
@@ -114,7 +118,6 @@ type GuardrailProxy struct {
 
 	inspector    ContentInspector
 	secureClient atomic.Bool
-	masterKey    string
 	gatewayToken string // gateway token, accepted in X-DC-Auth
 	notify       *NotificationQueue
 	webhooks     *WebhookDispatcher
@@ -173,12 +176,6 @@ type GuardrailProxy struct {
 	// X-DC-Auth header. Production callers MUST never set this —
 	// it bypasses the security floor entirely.
 	skipAuthForTest bool
-
-	// refreshedGatewayToken returns the gateway token the OpenClaw client
-	// adopted from openclaw.json after boot ("" when none). The proxy
-	// accepts it in X-DC-Auth next to the boot token until restart, so
-	// the OpenClaw plugin keeps working after a token rotation (GAP-2346).
-	refreshedGatewayToken func() string
 }
 
 // SetDefaultAgentName sets the agent name fallback for OTel spans when
@@ -211,40 +208,25 @@ func (p *GuardrailProxy) SetNotifier(n *notifier.Dispatcher) {
 // guardrail port (writeGatewayTokenListenerProof). Secure Client serves no
 // proof.
 func (p *GuardrailProxy) handleListenerProof(w http.ResponseWriter, r *http.Request) {
-	refreshed := ""
-	if p.refreshedGatewayToken != nil {
-		refreshed = p.refreshedGatewayToken()
-	}
 	secureClient := false
 	if cfg := proxyDecisionConfig(r.Context()); cfg != nil && cfg.SecureClientIntegration() {
 		secureClient = true
 	}
-	if secureClient || ManagedEnterpriseActive() || !writeGatewayTokenListenerProof(w, r, p.gatewayToken, refreshed) {
+	// The OpenClaw plugin proves this listener with its connector-scoped
+	// credential before it sends that credential and provider keys.
+	pluginToken := ""
+	if prover, ok := p.connector.(interface{ PluginProofToken() string }); ok {
+		pluginToken = prover.PluginProofToken()
+	}
+	pluginAccount := ""
+	if cfg := proxyDecisionConfig(r.Context()); cfg != nil {
+		pluginAccount = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)
+	}
+	if secureClient || ManagedEnterpriseActive() || (!writeGatewayTokenListenerProof(w, r, p.gatewayToken, pluginToken) &&
+		!writeOpenClawPluginAccountProof(w, r, pluginToken, pluginAccount)) {
 		p.emitProxyAuthFailure(r, "listener_proof_refused")
 		writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 	}
-}
-
-// SetRefreshedGatewayTokenSource wires the OpenClaw client's runtime-adopted
-// gateway token into proxy authentication (GAP-2346). Call it before the
-// proxy starts serving.
-func (p *GuardrailProxy) SetRefreshedGatewayTokenSource(fn func() string) {
-	p.refreshedGatewayToken = fn
-}
-
-// matchesRefreshedGatewayToken reports whether X-DC-Auth carries the gateway
-// token adopted by auth repair after boot. Like APIServer.tokenAuth since
-// GAP-2259, the boot token stays valid until the next restart.
-func (p *GuardrailProxy) matchesRefreshedGatewayToken(r *http.Request) bool {
-	if p.refreshedGatewayToken == nil {
-		return false
-	}
-	dcAuth := r.Header.Get("X-DC-Auth")
-	if dcAuth == "" {
-		return false
-	}
-	refreshed := p.refreshedGatewayToken()
-	return refreshed != "" && constantTimeStringMatch(strings.TrimPrefix(dcAuth, "Bearer "), refreshed)
 }
 
 // agentNameForRequest picks the most specific agent name available.
@@ -442,8 +424,6 @@ func NewGuardrailProxy(
 	// for non-gateway callers like direct `opa eval` runs).
 	inspector.SetHILTConfig(cfg.HILT.Enabled, cfg.HILT.MinSeverity)
 
-	masterKey := deriveMasterKey(dataDir)
-
 	// Sidecar resolves or synthesizes the gateway token synchronously before
 	// starting the API and guardrail runtimes. Reuse that exact credential
 	// here. Independently calling EnsureGatewayToken would generate a dotenv
@@ -456,7 +436,7 @@ func NewGuardrailProxy(
 	// Inject credentials into the connector so its Authenticate() method
 	// can validate tokens without the proxy duplicating the logic.
 	if conn != nil {
-		conn.SetCredentials(gatewayToken, masterKey)
+		conn.SetCredentials(gatewayToken)
 	}
 
 	p := &GuardrailProxy{
@@ -467,7 +447,6 @@ func NewGuardrailProxy(
 		dataDir:      dataDir,
 		connector:    conn,
 		inspector:    inspector,
-		masterKey:    masterKey,
 		gatewayToken: gatewayToken,
 		notify:       notify,
 		limiter:      rate.NewLimiter(rate.Limit(100), 200),
@@ -821,7 +800,9 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	withCorr := CorrelationMiddleware(SharedAgentRegistry())(logged)
 	withRequestID := p.requestIDMiddleware(dropProxyUserClaims(withCorr))
 	handler := inboundTraceContextMiddleware(withRequestID)
-	srv := &http.Server{Addr: addr, Handler: handler}
+	// The kernel peer of a loopback caller is read once per connection,
+	// and only when a managed routing request asks (proxyKernelPeer).
+	srv := &http.Server{Addr: addr, Handler: handler, ConnContext: acpPeerConnContext}
 
 	p.health.SetGuardrail(StateStarting, "", map[string]interface{}{
 		"port": p.cfg.Port,
@@ -998,7 +979,8 @@ func (p *GuardrailProxy) requestLogger(next http.Handler) http.Handler {
 // passthroughUpstreamAuth picks the upstream credential of a passthrough
 // request. Priority: (1) X-AI-Auth from the fetch interceptor (normalized to
 // "Bearer <key>" regardless of the original header), (2) api-key (Azure),
-// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
+// (3) x-api-key (Anthropic), (4) Authorization. A stale sk-dc- value left in a pre-1.0.10 agent config
+// is skipped so it is never forwarded as a provider key (remove in 1.1).
 func passthroughUpstreamAuth(h http.Header) string {
 	if aiAuth := h.Get("X-AI-Auth"); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
 		return aiAuth
@@ -1283,6 +1265,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		Stream            bool            `json:"stream,omitempty"`
 	}
 	_ = json.Unmarshal(body, &partial)
+	if bedrockStreamingPath(r.URL.Path) {
+		// Bedrock names a stream by its path, not a body field (GAP-0098).
+		partial.Stream = true
+	}
 
 	p.rtMu.RLock()
 	mode := p.mode
@@ -1578,7 +1564,8 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// Resolve the key to use for the upstream provider.
 	// Priority: (1) X-AI-Auth from the fetch interceptor (normalized to
 	// "Bearer <key>" regardless of the original header), (2) api-key (Azure),
-	// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
+	// (3) x-api-key (Anthropic), (4) Authorization. Stale sk-dc- values are
+	// skipped (see passthroughUpstreamAuth).
 	upstreamAuth := passthroughUpstreamAuth(r.Header)
 	if credentialBoundary {
 		// A routed backend is a new credential boundary: its gateway-held
@@ -1657,6 +1644,35 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	setPassthroughUpstreamAuth(upstreamReq.Header, provider, upstreamAuth)
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
+	{
+		requestedProvider, selectedProvider := provider, provider
+		requestedModel, selectedModel := partial.Model, partial.Model
+		if routed {
+			requestedProvider = routeRequestedProvider(r.Header.Get("X-DC-Target-URL"), r.URL.RequestURI(), requestProviderRegistry(r.Context()), provider)
+			if routeOutcome.Decision != nil {
+				selectedModel = routeOutcome.Decision.Model
+			}
+		}
+		if f := passthroughAPIFamily(r.URL.Path); f == config.RoutingAPIConverse || f == config.RoutingAPIInvoke {
+			requestedModel = bedrockModelFromPath(r.URL.Path)
+			if !routed {
+				selectedModel = requestedModel
+			}
+		}
+		var chargeKeys []string
+		if routeOutcome.Route != nil {
+			chargeKeys = routeOutcome.Route.ChargeKeys
+		}
+		var finishUsage func(error)
+		w, finishUsage = beginUsage(r.Context(), w, modelusage.CallFacts{
+			Listener: engine.ListenerGuardrail, Connector: p.connectorName(), APIFamily: usageAPIFamily(r.URL.Path),
+			CallRole: modelusage.RoleAgent, Streaming: usageStreaming(r.URL.Path, body, partial.Stream),
+			RequestedProvider: requestedProvider, RequestedModel: requestedModel,
+			SelectedProvider: selectedProvider, SelectedModel: selectedModel,
+			Route: usageDecision(usageRouteFacts(routeOutcome, p.routerActive(r.Context())), routed), ChargeKeys: chargeKeys,
+		})
+		defer finishUsage(nil)
+	}
 	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
 	if err != nil {
 		if msg, ok := privateUpstreamReply(err); ok {
@@ -1674,13 +1690,47 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 	// Determine whether the upstream response is streaming (SSE).
 	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+	// Bedrock InvokeModelWithResponseStream and ConverseStream answer in the
+	// binary AWS eventstream: streamed through like SSE, decoded frame by
+	// frame for inspection (GAP-0098).
+	var bedrockStream *bedrockEventStreamText
+	if strings.Contains(resp.Header.Get("Content-Type"), "application/vnd.amazon.eventstream") ||
+		(bedrockStreamingPath(r.URL.Path) && !isSSE && resp.StatusCode >= 200 && resp.StatusCode < 300) {
+		// A streaming Bedrock path is read as eventstream whatever its
+		// Content-Type says: the AWS SDK reads the frames regardless, so a
+		// mislabelled reply must not skip inspection (item 5 review P2-2).
+		// A body that does not frame takes the uninspectable path.
+		bedrockStream = newBedrockEventStreamText()
+	}
 
-	if !isSSE {
+	if !isSSE && bedrockStream == nil {
 		// --- Non-streaming: buffer response, inspect, then forward ---
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 		if readErr != nil {
 			writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
 			return
+		}
+		// An encoding the transport left (br, zstd, deflate, stacked) is
+		// decoded so inspection and the usage record read the reply; only
+		// one that cannot be decoded reaches the check below (GAP-0097).
+		if decoded, ok := decodeReplyBody(resp.Header, respBody); ok {
+			respBody = decoded
+		}
+		if enc := uninspectableEncoding(resp.Header); enc != "" {
+			if p.uninspectableReply(r.Context(), label, mode, "content-encoding "+enc) {
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
+					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
+				return
+			}
+		} else if resp.StatusCode >= 200 && resp.StatusCode < 300 && len(bytes.TrimSpace(respBody)) > 0 && !json.Valid(respBody) {
+			// A 2xx body that is not JSON (for example compressed bytes with
+			// no Content-Encoding) cannot be inspected either (item 5 review
+			// P2-2).
+			if p.uninspectableReply(r.Context(), label, mode, "the reply body is not JSON") {
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
+					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
+				return
+			}
 		}
 
 		// Extract assistant text from provider-native response format.
@@ -1743,6 +1793,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		_, _ = w.Write(respBody)
 	} else {
 		// --- Streaming: buffer initial bytes for pre-scan, then forward with periodic scans ---
+		if enc := uninspectableEncoding(resp.Header); enc != "" {
+			if p.uninspectableReply(r.Context(), label, mode, "content-encoding "+enc) {
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, true,
+					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
+				return
+			}
+		}
 		for k, vs := range resp.Header {
 			for _, v := range vs {
 				w.Header().Add(k, v)
@@ -1757,6 +1814,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		const scanInterval = 500
 		buf := make([]byte, 4096)
 		var lineBuf strings.Builder
+		bedrockStreamReported := false
 
 		streamBufferSize := 1024
 		if p.cfg != nil && p.cfg.StreamBufferBytes > 0 {
@@ -1776,7 +1834,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				p.resolveConfirm(r.Context(), r, initVerdict, "completion", label, mode)
 				if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 					fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
-						initVerdict.Severity, redaction.Reason(initVerdict.Reason))
+						initVerdict.Severity, logDisplayReason(initVerdict.Reason))
 					p.recordTelemetry(r.Context(), "completion", label, initVerdict, 0, mode, true)
 					preblocked = true
 					return false
@@ -1797,9 +1855,26 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			if n > 0 {
 				chunk := buf[:n]
 
-				// Parse SSE text for inspection regardless of buffer state.
-				lineBuf.Write(chunk)
-				for {
+				// Parse SSE text (or eventstream frames) for inspection
+				// regardless of buffer state.
+				if bedrockStream != nil {
+					accumulated.WriteString(bedrockStream.Feed(chunk))
+					if streamResponseModel == "" {
+						streamResponseModel = bedrockStream.Model()
+					}
+					if bedrockStream.Broken() && !bedrockStreamReported {
+						bedrockStreamReported = true
+						if p.uninspectableReply(r.Context(), label, mode, "the event stream could not be framed") {
+							// Nothing more reaches the caller; before the first
+							// flush, nothing at all.
+							preblocked = !initialFlushed
+							break
+						}
+					}
+				} else {
+					lineBuf.Write(chunk)
+				}
+				for bedrockStream == nil {
 					line, rest, found := strings.Cut(lineBuf.String(), "\n")
 					if !found {
 						break
@@ -1847,7 +1922,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 						p.resolveConfirm(r.Context(), r, midVerdict, "completion", label, mode)
 						if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 							fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client)\n",
-								midVerdict.Severity, redaction.Reason(midVerdict.Reason), lastScanLen+len(chunk))
+								midVerdict.Severity, logDisplayReason(midVerdict.Reason), lastScanLen+len(chunk))
 							p.recordTelemetry(r.Context(), "completion", label, midVerdict, 0, mode, true)
 							break
 						}
@@ -1969,9 +2044,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 
 	case "bedrock":
 		// F-1186: Bedrock Converse: {"output": {"message": {"content": [{"text": "..."}]}}}
-		// Bedrock InvokeModel responses are model-shaped and re-routed through
-		// the matching provider extractor (anthropic / cohere / etc.) by the
-		// caller, so this branch only handles the Converse envelope.
+		// InvokeModel answers in the model family's shape (bedrockInvokeText).
 		var bedrockResp struct {
 			Output struct {
 				Message struct {
@@ -1989,6 +2062,10 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 			if sb.Len() > 0 {
 				return sb.String()
 			}
+		}
+		// InvokeModel answers in the model family's own shape (GAP-0098).
+		if t := bedrockInvokeText(body); t != "" {
+			return t
 		}
 
 	default:
@@ -2133,6 +2210,13 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 		if json.Unmarshal(body, &resp) == nil {
 			for _, c := range resp.Output.Message.Content {
 				addCall(c.ToolUse.Name, c.ToolUse.Input)
+			}
+		}
+		if len(calls) == 0 {
+			// InvokeModel for Claude answers with Anthropic tool_use blocks
+			// (GAP-0098).
+			if raw := extractPassthroughToolCalls(body, "anthropic"); raw != nil {
+				return raw
 			}
 		}
 	default:
@@ -3163,7 +3247,10 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// This runs AFTER guardrails (reuses their signals) and BEFORE the
 	// upstream forward. A nil return gracefully falls through.
 	var routedDecision *ModelRouterDecision
-	if p.routerActive(r.Context()) {
+	usageRequestedModel := req.Model
+	usageRouterOn := p.routerActive(r.Context())
+	var usageRoute SemanticRouteOutcome
+	if usageRouterOn {
 		routerMeta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		var routerTools []interface{}
 		if len(req.Tools) > 0 {
@@ -3196,6 +3283,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			routeOutcome = outcomeFromDecision(routerInput, p.modelRouter.Route(r.Context(), routerInput), time.Since(startedRoute))
 		}
 		p.applyRouteGate(r.Context(), &routeOutcome, routerInput.RequestedProvider, req.Model)
+		usageRoute = routeOutcome
 		p.recordSemanticRoutingDecisionV8(r.Context(), routeOutcome)
 		if routeOutcome.Result == SemanticRouteDenied {
 			p.recordRouteDeny(r.Context(), r.URL.Path, routeOutcome.Deny)
@@ -3301,6 +3389,26 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	routedProvider := ""
 	if routedDecision != nil {
 		routedProvider = routedDecision.Provider
+	}
+	// S10 usage record of the forwarded call (all chat forwarding paths).
+	{
+		selectedProvider := routedProvider
+		if selectedProvider == "" {
+			selectedProvider = promptProviderName
+		}
+		var chargeKeys []string
+		if usageRoute.Route != nil {
+			chargeKeys = usageRoute.Route.ChargeKeys
+		}
+		var finishUsage func(error)
+		w, finishUsage = beginUsage(r.Context(), w, modelusage.CallFacts{
+			Listener: engine.ListenerGuardrail, Connector: p.connectorName(), APIFamily: modelusage.FamilyChat,
+			CallRole: modelusage.RoleAgent, Streaming: req.Stream,
+			RequestedProvider: promptProviderName, RequestedModel: usageRequestedModel,
+			SelectedProvider: selectedProvider, SelectedModel: req.Model,
+			Route: usageRouteFacts(usageRoute, usageRouterOn), ChargeKeys: chargeKeys,
+		})
+		defer finishUsage(nil)
 	}
 	if req.TargetURL != "" {
 		// Revalidate the router-selected URL before forwarding.
@@ -3677,7 +3785,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
 			if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s\n",
-					midVerdict.Severity, redaction.Reason(midVerdict.Reason))
+					midVerdict.Severity, logDisplayReason(midVerdict.Reason))
 				overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, midVerdict, 0, mode, true)
 				modelTrace.AddGuardrailOverlay(overlay)
 				p.enqueueBlockNotification(midVerdict, "completion", aliasModel)
@@ -3720,6 +3828,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	})
+	// Bifrost parsed the usage (it always asks for include_usage): hand it
+	// to the usage record of this call.
+	recordChatUsage(w, usage)
 	upstreamDuration := time.Since(llmStartTime)
 	// Flush any remaining initial buffer (short streams that completed
 	// before reaching the buffer threshold). Run a guardrail check first.
@@ -3730,7 +3841,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			p.resolveConfirm(r.Context(), r, initVerdict, "completion", aliasModel, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-PREBLOCK severity=%s %s\n",
-					initVerdict.Severity, redaction.Reason(initVerdict.Reason))
+					initVerdict.Severity, logDisplayReason(initVerdict.Reason))
 				overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, initVerdict, 0, mode, true)
 				modelTrace.AddGuardrailOverlay(overlay)
 				p.enqueueBlockNotification(initVerdict, "completion", aliasModel)
@@ -4471,13 +4582,23 @@ func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, mode
 //     trusted unconditionally to avoid breaking existing setups. A warning is
 //     logged at startup (see NewGuardrailProxy).
 //   - For non-loopback (sandbox / bridge deployments), authentication is always
-//     required via X-DC-Auth or the master key.
+//     required via X-DC-Auth.
 
 // authenticateRequest returns r with its verified subject bound when the
 // caller proved an owner credential (presentsOwnerCredential).
 func (p *GuardrailProxy) authenticateRequest(r *http.Request) (*http.Request, bool) {
 	if !p.credentialsAccepted(r) {
 		return r, false
+	}
+	if p.kernelPeer != nil {
+		// Managed with routing on: the account the kernel names for the
+		// loopback connection, when DefenseClaw protects it for this
+		// connector, is the subject (profile overlay, routing caller);
+		// anyone else keeps the base-only answer below.
+		if subject, ok := p.kernelPeer(r, p.connectorName()); ok {
+			return r.WithContext(attachVerifiedSubject(r.Context(), p.observabilityV8Emitter(), subject,
+				sanitizeLLMEventUser(userScopedIdentityName(subject)), subjectSourceKernelPeer)), true
+		}
 	}
 	if p.presentsOwnerCredential(r) {
 		// The correlation middleware took the user from the loopback
@@ -4505,20 +4626,23 @@ func dropProxyUserClaims(next http.Handler) http.Handler {
 }
 
 // presentsOwnerCredential reports whether r carries a credential only the
-// gateway's account can read: the gateway token or the master key derived
-// from its device key. Connectors also admit loopback callers without one
+// gateway's account can read: the gateway token. Connectors also admit
+// loopback callers without one
 // (legacy hook installs) or with a provider key, which prove nothing about
 // who sent the request.
 func (p *GuardrailProxy) presentsOwnerCredential(r *http.Request) bool {
-	if p.matchesRefreshedGatewayToken(r) {
+	// The OpenClaw plugin credential lives in the data folder of this
+	// account, so it proves the gateway account in the same-user layout. In
+	// the separate-user layout another account holds it and it proves
+	// nothing about who sent the request.
+	if p.openClawPluginCredentialIsOwner(r) {
 		return true
 	}
 	for _, presented := range []string{
 		strings.TrimPrefix(r.Header.Get("X-DC-Auth"), "Bearer "),
 		connector.ExtractBearerKey(r.Header.Get("Authorization")),
 	} {
-		if presented != "" && ((p.gatewayToken != "" && constantTimeStringMatch(presented, p.gatewayToken)) ||
-			(p.masterKey != "" && constantTimeStringMatch(presented, p.masterKey))) {
+		if presented != "" && p.gatewayToken != "" && constantTimeStringMatch(presented, p.gatewayToken) {
 			return true
 		}
 	}
@@ -4536,11 +4660,11 @@ func (p *GuardrailProxy) credentialsAccepted(r *http.Request) bool {
 	// Delegate to the connector when available — each connector knows its
 	// own auth scheme (tokens, loopback trust, etc.).
 	if p.connector != nil {
-		if p.connector.Authenticate(r) || p.matchesRefreshedGatewayToken(r) {
+		if p.connector.Authenticate(r) {
 			return true
 		}
 		reason := "invalid_token"
-		if strings.TrimSpace(r.Header.Get("X-DC-Auth")) == "" && (p.masterKey == "" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")) {
+		if strings.TrimSpace(r.Header.Get("X-DC-Auth")) == "" && !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 			reason = "missing_token"
 		}
 		p.emitProxyAuthFailure(r, reason)
@@ -4551,16 +4675,6 @@ func (p *GuardrailProxy) credentialsAccepted(r *http.Request) bool {
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
 		if p.gatewayToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(p.gatewayToken)) == 1 {
-			return true
-		}
-		if p.matchesRefreshedGatewayToken(r) {
-			return true
-		}
-	}
-
-	if p.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(p.masterKey)) == 1 {
 			return true
 		}
 	}
@@ -4577,7 +4691,7 @@ func (p *GuardrailProxy) credentialsAccepted(r *http.Request) bool {
 	}
 
 	reason := "invalid_token"
-	if strings.TrimSpace(r.Header.Get("X-DC-Auth")) == "" && (p.masterKey == "" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")) {
+	if strings.TrimSpace(r.Header.Get("X-DC-Auth")) == "" && !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 		reason = "missing_token"
 	}
 	p.emitProxyAuthFailure(r, reason)
@@ -4603,39 +4717,6 @@ func (p *GuardrailProxy) emitProxyAuthFailure(r *http.Request, metricReason stri
 		metricReason,
 		apiAuthenticationFailureFacts{},
 	)
-}
-
-// deriveMasterKey produces a deterministic master key from the device key
-// file using PBKDF2-SHA256 with 100k iterations.
-//
-// PR #141 audit H9: the previous implementation was a single HMAC-SHA256
-// round. With ~16 bytes of effective entropy in `device.key` and zero
-// stretching, a leak of `device.key` (a 0600 file in dataDir, but anyone
-// with that fd has full master-key control) was instantly equivalent to
-// a master-key compromise — and a leak of the master key gave the
-// attacker an `Authorization: Bearer sk-dc-…` that bypasses the entire
-// connector auth chain (see Codex/ZeptoClaw Authenticate). PBKDF2 with
-// 100k iterations puts a CPU cost on each crack attempt, so an attacker
-// needs the live file plus seconds-per-guess of compute even when both
-// the device.key contents and the salt are known.
-//
-// BREAKING for any persisted `sk-dc-…` value derived under the old
-// algorithm: those will no longer match the master key the proxy
-// recomputes at boot. The gateway never logs or prints the value. Callers
-// use the connector-issued bearer their tooling has: `sk-dc-` master keys
-// are an internal fallback, not a supported credential.
-func deriveMasterKey(dataDir string) string {
-	keyFile := filepath.Join(dataDir, "device.key")
-	data, err := os.ReadFile(keyFile)
-	if err != nil {
-		return ""
-	}
-	// 32-byte output (= 64 hex chars) — wider than the previous
-	// truncated-to-16-byte digest so a brute-force attacker now also
-	// needs to cover a meaningfully larger search space if they ever
-	// recover only the published `sk-dc-…` string.
-	dk := pbkdf2.Key(data, []byte("defenseclaw-proxy-master-key"), 100_000, 32, sha256.New)
-	return "sk-dc-" + fmt.Sprintf("%x", dk)
 }
 
 // switchConnectorLocked tears down the current connector and sets up the
@@ -4668,7 +4749,7 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	ctx := context.Background()
 	oldConn := p.connector
 
-	newConn.SetCredentials(p.gatewayToken, p.masterKey)
+	newConn.SetCredentials(p.gatewayToken)
 
 	// Pause self-heal across the swap. Teardown below strips the outgoing
 	// connector's hook entries, which must NOT be auto-restored; without
@@ -4795,11 +4876,11 @@ func logVerdict(severity, action string, verdict *ScanVerdict, elapsed time.Dura
 		// through redaction.Reason so rule-IDs pass verbatim
 		// but raw literals are masked unless Reveal is set.
 		fmt.Fprintf(os.Stderr, "  verdict: \033[91m%s\033[0m  action=%s%s  %s\n",
-			severity, action, scannerStr, redaction.Reason(verdict.Reason))
+			severity, action, scannerStr, logDisplayReason(verdict.Reason))
 		if len(verdict.Findings) > 0 {
 			scrubbed := make([]string, len(verdict.Findings))
 			for i, f := range verdict.Findings {
-				scrubbed[i] = redaction.Reason(f)
+				scrubbed[i] = logDisplayReason(f)
 			}
 			fmt.Fprintf(os.Stderr, "  findings: %s\n", strings.Join(scrubbed, ", "))
 		}
@@ -5845,6 +5926,12 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 		forwardBody = req.RawBody
 	}
 	forwardBody = applyProviderRequestOverrides(forwardBody, upstreamURL, req.providers)
+	if req.Stream {
+		var added bool
+		if forwardBody, added = withStreamIncludeUsage(forwardBody); added {
+			r = r.WithContext(context.WithValue(r.Context(), includeUsageKey{}, true))
+		}
+	}
 
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
 	if err != nil {
@@ -6085,6 +6172,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	streamResponseModel := ""
 	streamFinishReasons := []string{}
 	var streamUsage *ChatUsage
+	stripUsageChunk, _ := r.Context().Value(includeUsageKey{}).(bool)
 	// A well-formed stream reaches finalization at [DONE] and then EOF. Keep
 	// guardrail evaluation and its canonical telemetry exactly once.
 	finalTextInspected := false
@@ -6245,6 +6333,12 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			return true
 		}
 
+		if stripUsageChunk {
+			if payloads := rawForwardSSEDataPayloads(frame); len(payloads) == 1 && isUsageOnlyChunk(payloads[0]) {
+				// The gateway asked for this chunk; the client did not.
+				return true
+			}
+		}
 		_, _ = w.Write(frame)
 		flusher.Flush()
 		return true
@@ -6700,4 +6794,21 @@ func mergeRequestJSON(base, overlay map[string]interface{}) map[string]interface
 	}
 
 	return out
+}
+
+// openClawPluginCredentialIsOwner reports an X-DC-Auth that carries the
+// OpenClaw plugin credential while OpenClaw runs as this account.
+func (p *GuardrailProxy) openClawPluginCredentialIsOwner(r *http.Request) bool {
+	prover, ok := p.connector.(interface{ PluginProofToken() string })
+	if !ok {
+		return false
+	}
+	token := prover.PluginProofToken()
+	presented := strings.TrimPrefix(r.Header.Get("X-DC-Auth"), "Bearer ")
+	if token == "" || presented == "" || !constantTimeStringMatch(presented, token) {
+		return false
+	}
+	cfg := proxyDecisionConfig(r.Context())
+	// No config yet: the layout is unknown, so the credential proves nothing.
+	return cfg != nil && !cfg.OpenClawSeparateUser()
 }

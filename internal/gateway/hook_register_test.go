@@ -120,6 +120,6 @@ func (f *fakeHookEndpointConnector) Authenticate(*http.Request) bool            
 func (f *fakeHookEndpointConnector) Route(*http.Request, []byte) (*connector.ConnectorSignals, error) {
 	return &connector.ConnectorSignals{ConnectorName: f.name}, nil
 }
-func (f *fakeHookEndpointConnector) SetCredentials(string, string)         {}
+func (f *fakeHookEndpointConnector) SetCredentials(string)                 {}
 func (f *fakeHookEndpointConnector) VerifyClean(connector.SetupOpts) error { return nil }
 func (f *fakeHookEndpointConnector) HookAPIPath() string                   { return f.path }

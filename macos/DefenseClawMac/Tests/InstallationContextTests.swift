@@ -34,7 +34,9 @@ struct InstallationContextTests {
         nestedAuditPathIsReadCorrectly()
         protectedEnvironmentCannotBeOverridden()
         await redactionDefaultProfileMatchesRuntimeSchema()
+        await clawModeKeepsTheLoaderDefault()
         await configStoreRebindDropsThePreviousInstallation()
+        await openClawGatewayTokenIsNeverTheGatewayToken()
         await lowerLevelMutationGateSurvivesRebind()
         await gatewayPOSTGateFailsBeforeNetwork()
         print("InstallationContextTests passed")
@@ -527,6 +529,42 @@ struct InstallationContextTests {
         expect(environment["PATH"]?.hasPrefix("/custom/bin") == true, "normal PATH inheritance remains")
     }
 
+    /// config.load keeps claw.mode's "openclaw" default; the not-installed
+    /// marking is skipped for a managed enterprise profile, a fleet link, an
+    /// explicit connector or roster, and an empty mode (setup remove).
+    private static func clawModeKeepsTheLoaderDefault() async {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("defenseclaw-claw-mode-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let configURL = directory.appendingPathComponent("config.yaml", isDirectory: false)
+            let context = InstallationContext.resolve(
+                environment: ["DEFENSECLAW_CONFIG": configURL.path], appConfigOverride: nil, userHome: directory
+            )
+            let store = ConfigStore(context: context)
+            func load(_ yaml: String) async -> DefenseClawConfig {
+                try? yaml.write(to: configURL, atomically: true, encoding: .utf8)
+                return await store.reload()
+            }
+            var config = await load("config_version: 9\ndeployment_mode: unmanaged_byod\n")
+            expect(config.clawMode == "openclaw", "no claw block loads claw.mode as openclaw")
+            config = await load("config_version: 9\nclaw:\n  mode: ''\n")
+            expect(config.clawMode == "" && !config.openclawNotInstalled && config.activeConnector == "",
+                   "setup remove's empty claw.mode names no connector and is not marked")
+            config = await load("config_version: 9\nguardrail:\n  connector: codex\n")
+            expect(!config.openclawNotInstalled && config.activeConnector == "codex", "an explicit connector is never marked")
+            config = await load("config_version: 9\ngateway:\n  host: 10.0.0.5\n")
+            expect(!config.openclawNotInstalled && config.activeConnector == "openclaw", "a remote fleet host keeps OpenClaw")
+            config = await load("config_version: 9\ndeployment_mode: managed_enterprise\n")
+            expect(!config.openclawNotInstalled && config.activeConnector == "openclaw", "managed enterprise keeps OpenClaw")
+            config = await load("config_version: 9\ngateway:\n  host: 127.0.0.1\n  fleet_mode: enabled\n")
+            expect(!config.openclawNotInstalled && config.activeConnector == "openclaw", "an enabled fleet mode keeps OpenClaw")
+        } catch {
+            expect(false, "claw.mode fixture: \(error)")
+        }
+    }
+
     private static func redactionDefaultProfileMatchesRuntimeSchema() async {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("defenseclaw-redaction-profile-\(UUID().uuidString)", isDirectory: true)
@@ -641,6 +679,51 @@ struct InstallationContextTests {
             expect(second.gatewayPort == 19002, "ConfigStore reads only the rebound context")
         } catch {
             fail("ConfigStore rebind fixture failed: \(error)")
+        }
+    }
+
+    /// R-TOK: OPENCLAW_GATEWAY_TOKEN is the OpenClaw WebSocket credential. The
+    /// app never presents it to the DefenseClaw API, also not through a 1.0.9
+    /// gateway.token_env that names it or a DEFENSECLAW_GATEWAY_TOKEN copy of it.
+    private static func openClawGatewayTokenIsNeverTheGatewayToken() async {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("defenseclaw-rtok-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let data = directory.appendingPathComponent("data", isDirectory: true)
+            try FileManager.default.createDirectory(at: data, withIntermediateDirectories: false)
+            let configURL = directory.appendingPathComponent("config.yaml", isDirectory: false)
+            let envURL = data.appendingPathComponent(".env", isDirectory: false)
+            try """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            data_dir: \(data.path)
+            gateway:
+              token_env: OPENCLAW_GATEWAY_TOKEN
+            """.write(to: configURL, atomically: true, encoding: .utf8)
+            let context = InstallationContext.resolve(
+                environment: ["DEFENSECLAW_CONFIG": configURL.path],
+                appConfigOverride: nil,
+                userHome: directory
+            )
+            let store = ConfigStore(context: context)
+
+            try "OPENCLAW_GATEWAY_TOKEN=oc-credential\n".write(to: envURL, atomically: true, encoding: .utf8)
+            var config = await store.reload()
+            expect(config.gatewayToken == nil, "token_env OPENCLAW_GATEWAY_TOKEN is not the gateway token")
+
+            try "OPENCLAW_GATEWAY_TOKEN=oc-credential\nDEFENSECLAW_GATEWAY_TOKEN=oc-credential\n"
+                .write(to: envURL, atomically: true, encoding: .utf8)
+            config = await store.reload()
+            expect(config.gatewayToken == nil, "a DEFENSECLAW_GATEWAY_TOKEN equal to the OpenClaw token is skipped")
+
+            try "OPENCLAW_GATEWAY_TOKEN=oc-credential\nDEFENSECLAW_GATEWAY_TOKEN=dc-master\n"
+                .write(to: envURL, atomically: true, encoding: .utf8)
+            config = await store.reload()
+            expect(config.gatewayToken == "dc-master", "the minted DefenseClaw token is the gateway token")
+        } catch {
+            fail("R-TOK token fixture failed: \(error)")
         }
     }
 

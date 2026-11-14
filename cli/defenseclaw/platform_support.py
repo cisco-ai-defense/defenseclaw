@@ -18,9 +18,12 @@ both required. The resulting status is one of ``supported``, ``preview``,
 DefenseClaw runs hooks plus the ACP guard on Windows: most agents invoke the native Go hook
 entrypoint directly. Cursor invokes a native PowerShell adapter first because
 its Windows command-hook transport materializes stdin as PowerShell pipeline
-objects. There is no Windows guardrail-proxy lifecycle. The proxy/chat
-connectors (``openclaw`` and ``zeptoclaw``) therefore cannot run on Windows,
-so the TUI/CLI must not offer or accept them there.
+objects. There is no Windows guardrail-proxy lifecycle. OpenClaw runs there in
+native hook mode (its plugin hooks only, OpenClaw 2026.8.35 or later, per-user
+installs); ZeptoClaw needs the proxy, so the TUI/CLI must not offer or accept
+it there. ``is_proxy_connector`` names the proxy/plugin family on every OS;
+``uses_guardrail_proxy`` says whether model traffic goes through the proxy on
+the host (Go ``UsesGuardrailProxy``).
 
 This module mirrors ``internal/gateway/connector/platform_support.go``.  Tests
 pin the two taxonomies and all Python presentation lists together. Retired
@@ -120,8 +123,10 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
         "Windows x64; restart any open Hermes session after setup so it loads them.",
     ),
     "openclaw": ConnectorPlatformSupport(
-        UNSUPPORTED,
-        "DefenseClaw on Windows is hook-only; OpenClaw integration requires the guardrail proxy.",
+        SUPPORTED,
+        "OpenClaw 2026.8.35 or later is supported on native Windows x64 through its native "
+        "plugin hooks (no guardrail proxy, no model response scan); managed Windows is not "
+        "in this release.",
     ),
     "zeptoclaw": ConnectorPlatformSupport(
         UNSUPPORTED,
@@ -144,14 +149,6 @@ WINDOWS_UNSUPPORTED_CONNECTORS: frozenset[str] = frozenset(
 
 WINDOWS_CERTIFIED_ARCHITECTURES: frozenset[str] = frozenset({"amd64"})
 WINDOWS_NOT_CERTIFIED_ARCHITECTURES: frozenset[str] = frozenset({"arm64"})
-WINDOWS_UNSUPPORTED_FEATURES: frozenset[str] = frozenset(
-    {
-        "sandbox",
-        "enterprise-hooks",
-        "openclaw",
-        "zeptoclaw",
-    }
-)
 
 
 def host_os() -> str:
@@ -171,8 +168,21 @@ def _normalize_os_name(os_name: str) -> str:
 
 
 def is_proxy_connector(name: str) -> bool:
-    """Report whether *name* is a proxy/chat connector."""
+    """Report whether *name* is a proxy/chat connector (the family, on every OS)."""
     return name in PROXY_CONNECTORS
+
+
+def uses_guardrail_proxy(name: str, os_name: str | None = None) -> bool:
+    """Report whether *name* routes model traffic through the guardrail proxy.
+
+    Mirrors Go ``connector.UsesGuardrailProxy``: OpenClaw resolves to native
+    hook mode on Windows (no proxy there) and to proxy or hybrid on Linux and
+    macOS, which both use the proxy.
+    """
+    if name not in PROXY_CONNECTORS:
+        return False
+    resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
+    return not (name == "openclaw" and resolved_os == "windows")
 
 
 def connector_platform_support(

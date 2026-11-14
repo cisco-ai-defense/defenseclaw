@@ -23,6 +23,15 @@
       "note": "Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`; the reason says whether the machine policy still inspects its calls. An administrator's run shows the deployment."
     },
     {
+      "command": "defenseclaw routing status",
+      "managed_linux": "Offered",
+      "managed_macos": "Offered",
+      "managed_windows": "Offered",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "routing status",
+      "note": "`routing status`, `routing budgets list` and `routing explain <id>` show your own model routing decisions and budgets, read from the managed gateway; every other routing command is set in the administrator's config."
+    },
+    {
       "command": "defenseclaw sandbox ...",
       "managed_linux": "Offered",
       "managed_macos": "Offered",
@@ -192,6 +201,15 @@
       "per_user": "Linux, macOS, Windows",
       "per_user_path": "audit compact",
       "note": "Gives the disk space of deleted audit history back. An administrator runs it after stopping the gateway service."
+    },
+    {
+      "command": "defenseclaw audit rejected",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Administrators only",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "audit rejected",
+      "note": "The records the schema gate refused are part of the managed audit store, which is administrator-only."
     }
   ]
 }

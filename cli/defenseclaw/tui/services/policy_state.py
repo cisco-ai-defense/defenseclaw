@@ -757,6 +757,7 @@ PROTECTED_CONTEXT = {
     "cloud-production-protection": "protected production cloud accounts",
     "infrastructure-destruction-protection": "protected production hosts and infrastructure",
     "privacy-high-assurance": "high-assurance personal data",
+    "active-directory-protection": "a managed Active Directory domain",
 }
 
 

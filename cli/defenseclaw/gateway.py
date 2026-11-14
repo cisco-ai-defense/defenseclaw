@@ -938,6 +938,22 @@ class _GatewaySession(requests.Session):
         return super().send(request, **kwargs)
 
 
+class RoutingAPIError(Exception):
+    """A refusal or error answer from a /api/v1/routing or /api/v1/usage route."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+    def plain(self) -> str:
+        if self.status == 404 and not self.message:
+            return "the gateway does not know that (not in its recent decisions, or this build has no routing API)"
+        if self.status in (401, 403) and not self.message:
+            return "the gateway refused: only an administrator may ask that"
+        return self.message or f"the gateway answered HTTP {self.status}"
+
+
 class OrchestratorClient:
     def __init__(
         self,
@@ -1143,6 +1159,26 @@ class OrchestratorClient:
 
     def close(self) -> None:
         self._session.close()
+
+    def routing_request(
+        self, method: str, path: str, *, params: Mapping[str, Any] | None = None, json: Any = None
+    ) -> Any:
+        """One call to a routing or usage route; RoutingAPIError on a non-2xx answer."""
+        if not (path.startswith("/api/v1/routing/") or path == "/api/v1/usage"):
+            raise ValueError(f"not a routing route: {path}")
+        resp = self._session.request(
+            method, f"{self.base_url}{path}", params=params, json=json, timeout=self.timeout, allow_redirects=False
+        )
+        if resp.status_code >= 400:
+            message = ""
+            try:
+                body = resp.json()
+                if isinstance(body, dict):
+                    message = str(body.get("error") or body.get("message") or "")
+            except ValueError:
+                pass
+            raise RoutingAPIError(resp.status_code, message[:512])
+        return resp.json() if resp.content else {}
 
     def disable_skill(self, skill_key: str) -> dict[str, Any]:
         resp = self._session.post(

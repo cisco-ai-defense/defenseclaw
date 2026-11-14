@@ -103,8 +103,9 @@ The token is resolved from one of, in priority order:
 
 1. The env var named by `gateway.token_env` (custom name — operator intent wins)
 2. `DEFENSECLAW_GATEWAY_TOKEN` (canonical)
-3. `OPENCLAW_GATEWAY_TOKEN` (legacy fallback for existing installs)
-4. `gateway.token` directly in `~/.defenseclaw/config.yaml`
+3. `gateway.token` directly in `~/.defenseclaw/config.yaml`
+
+`OPENCLAW_GATEWAY_TOKEN` is never this token. It is the credential the gateway uses to connect to OpenClaw. A `gateway.token_env` that names it is skipped, and so is any value equal to it. A request that presents the OpenClaw gateway token gets 401. Since 1.0.10 the upgrade creates a separate `DEFENSECLAW_GATEWAY_TOKEN` for installs that used the OpenClaw token here ([OpenClaw gateway token](/docs/connectors/openclaw#openclaw-gateway-token)).
 
 There is no `~/.defenseclaw/gateway-token` file. On first boot the sidecar creates `DEFENSECLAW_GATEWAY_TOKEN` in `~/.defenseclaw/.env` when no environment or dotenv source supplies one. Rotate a local token with `defenseclaw setup rotate-token --yes`, which restarts the gateway and refreshes active connector credentials; an external `gateway.token_env` is rotated by its owner ([Keys](/docs/reference/keys)).
 

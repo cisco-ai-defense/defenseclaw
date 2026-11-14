@@ -13,41 +13,47 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+// windowsAtomicParityCase is one atomic Windows attack the parity tests judge,
+// by name; other tests build their inputs from these cases by name.
+type windowsAtomicParityCase struct {
+	name, ruleID, command, tool string
+	dialect                     actionfacts.Dialect
+}
+
+var windowsAtomicParityPositives = []windowsAtomicParityCase{
+	{
+		name:    "Defender scheduled task removal",
+		ruleID:  "tamper.windows_defender_component_disable",
+		command: "schtasks /delete /tn \"\\Microsoft\\Windows\\Windows Defender\\Windows Defender Scheduled Scan\" /f",
+		tool:    "cmd",
+		dialect: actionfacts.DialectCMD,
+	},
+	{
+		name:    "accessibility binary replacement",
+		ruleID:  "persistence.windows_accessibility_feature_hijack",
+		command: "copy /Y C:\\Windows\\System32\\cmd.exe C:\\Windows\\System32\\sethc.exe",
+		tool:    "cmd",
+		dialect: actionfacts.DialectCMD,
+	},
+	{
+		name:   "UAC event viewer handler chain",
+		ruleID: "privilege.windows_uac_autoelevation_hijack",
+		command: "reg.exe add hkcu\\software\\classes\\mscfile\\shell\\open\\command /ve /d \"C:\\Windows\\System32\\cmd.exe\" /f\n" +
+			"Start-Process -FilePath \"C:\\Windows\\System32\\eventvwr.msc\"",
+		tool:    "PowerShell",
+		dialect: actionfacts.DialectPowerShell,
+	},
+	{
+		name:    "PowerShell UAC policy suppression",
+		ruleID:  windowsRegistrySecurityControlRuleID,
+		command: "Set-ItemProperty HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System -Name PromptOnSecureDesktop -Value 0 -Type Dword -Force",
+		tool:    "PowerShell",
+		dialect: actionfacts.DialectPowerShell,
+	},
+}
+
 func TestWindowsAtomicPolicyParityProfilePosture(t *testing.T) {
-	positives := []struct {
-		name, ruleID, command, tool string
-		dialect                     actionfacts.Dialect
-	}{
-		{
-			name:    "Defender scheduled task removal",
-			ruleID:  "tamper.windows_defender_component_disable",
-			command: "schtasks /delete /tn \"\\Microsoft\\Windows\\Windows Defender\\Windows Defender Scheduled Scan\" /f",
-			tool:    "cmd",
-			dialect: actionfacts.DialectCMD,
-		},
-		{
-			name:    "accessibility binary replacement",
-			ruleID:  "persistence.windows_accessibility_feature_hijack",
-			command: "copy /Y C:\\Windows\\System32\\cmd.exe C:\\Windows\\System32\\sethc.exe",
-			tool:    "cmd",
-			dialect: actionfacts.DialectCMD,
-		},
-		{
-			name:   "UAC event viewer handler chain",
-			ruleID: "privilege.windows_uac_autoelevation_hijack",
-			command: "reg.exe add hkcu\\software\\classes\\mscfile\\shell\\open\\command /ve /d \"C:\\Windows\\System32\\cmd.exe\" /f\n" +
-				"Start-Process -FilePath \"C:\\Windows\\System32\\eventvwr.msc\"",
-			tool:    "PowerShell",
-			dialect: actionfacts.DialectPowerShell,
-		},
-		{
-			name:    "PowerShell UAC policy suppression",
-			ruleID:  windowsRegistrySecurityControlRuleID,
-			command: "Set-ItemProperty HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System -Name PromptOnSecureDesktop -Value 0 -Type Dword -Force",
-			tool:    "PowerShell",
-			dialect: actionfacts.DialectPowerShell,
-		},
-	}
+	positives := windowsAtomicParityPositives
 	profiles := []struct {
 		name, action, severity string
 	}{

@@ -831,16 +831,57 @@ def proxy_outage_source(cfg: Any, connector: str) -> str:
     return f"from the policy tier ({guardrail.hook_policy_tier(connector)} tier); no fail mode is saved."
 
 
-def proxy_outage_note(mode: str) -> str:
+def _native_openclaw(connector: str) -> bool:
+    # OpenClaw on Windows runs the native plugin hooks, with no guardrail proxy.
+    from defenseclaw.platform_support import uses_guardrail_proxy
+
+    return connector == "openclaw" and not uses_guardrail_proxy(connector)
+
+
+def _openclaw_provenance(connector: str) -> str:
+    # The fail-mode provenance label of a proxy connector.
+    if _native_openclaw(connector):
+        return "native-hooks"
+    return "proxy-and-hooks" if _hybrid_openclaw(connector) else "proxy-backed"
+
+
+def _hybrid_openclaw(connector: str) -> bool:
+    # OpenClaw on Linux and macOS with the native plugin hooks next to the
+    # guardrail proxy (hookMode hybrid in openclaw.json).
+    if connector != "openclaw" or _native_openclaw(connector):
+        return False
+    try:
+        from defenseclaw.config import load
+        from defenseclaw.openclaw_plugin_config import configured_openclaw_hook_mode
+
+        return configured_openclaw_hook_mode(load()) == "hybrid"
+    except Exception:  # noqa: BLE001 - a description only
+        return False
+
+
+def proxy_outage_note(mode: str, connector: str = "") -> str:
+    if _hybrid_openclaw(connector):
+        if mode == "open":
+            return (
+                "proxy and plugin hooks: tool calls, prompts and model requests continue with a warning "
+                "while the gateway is down"
+            )
+        return "proxy and plugin hooks: blocked while the gateway is down"
+    if _native_openclaw(connector):
+        if mode == "open":
+            return "native plugin hooks: tool calls and prompts continue with a warning while the gateway is down"
+        return "native plugin hooks: tool calls and prompts are blocked while the gateway is down"
     if mode == "open":
         return "no hooks: model requests continue with a warning while the gateway is down"
     return "no hooks: blocked while the gateway is down"
 
 
-def proxy_outage_summary(mode: str) -> str:
+def proxy_outage_summary(mode: str, connector: str = "") -> str:
     """The one-line outage behaviour of a proxy-backed connector, as every fail-mode view prints it."""
 
     shown = "open" if mode == "open" else "closed"
+    if _native_openclaw(connector) or _hybrid_openclaw(connector):
+        return shown + " (" + proxy_outage_note(mode, connector) + ")"
     return shown + " (proxy-backed, " + proxy_outage_note(mode) + ")"
 
 
@@ -1023,8 +1064,8 @@ def _connector_fail_mode_report(
         outage = proxy_model_outage_mode(cfg, name)
         return {
             "effective": outage,
-            "provenance": "proxy-backed",
-            "note": proxy_outage_note(outage),
+            "provenance": _openclaw_provenance(name),
+            "note": proxy_outage_note(outage, name),
             "configured": configured,
             "desired": outage,
             "runtime": None,

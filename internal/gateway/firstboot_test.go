@@ -129,15 +129,15 @@ func TestEnsureGatewayToken_PreservesOtherDotenvLines(t *testing.T) {
 // invariant: the active connector must receive SetCredentials() BEFORE
 // the HasUsableProviders() probe runs in runGuardrail. The earlier
 // wiring deferred SetCredentials to NewGuardrailProxy() — which runs
-// after the probe — and OpenClaw's probe (keyed off gatewayToken /
-// masterKey fields) returned a false-negative
-// "no gateway token or master key configured" error on every fresh
+// after the probe — and OpenClaw's probe (keyed off the gatewayToken
+// field) returned a false-negative
+// "no gateway token configured" error on every fresh
 // boot. The TUI symptom was "fetch failed" because the guardrail proxy
 // never came up.
 //
 // This test simulates the runGuardrail credential-injection sequence
 // against a freshly constructed OpenClaw connector: resolve the token
-// from a dotenv, derive the master key, call SetCredentials, then run
+// from a dotenv, call SetCredentials, then run
 // the probe. The probe MUST succeed here because that is the exact
 // order the production code now follows — any future regression that
 // moves SetCredentials back below the probe will fail this test.
@@ -157,8 +157,13 @@ func TestRunGuardrail_OpenClaw_CredentialsBeforeProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureGatewayToken: %v", err)
 	}
-	if tok != "test-token-from-dotenv" {
-		t.Fatalf("EnsureGatewayToken should return existing OPENCLAW_GATEWAY_TOKEN unchanged; got %q", tok)
+	// R-TOK: OPENCLAW_GATEWAY_TOKEN is the OpenClaw credential, never the
+	// gateway token; a separate one is minted next to it.
+	if tok == "test-token-from-dotenv" || len(tok) != 64 {
+		t.Fatalf("EnsureGatewayToken must mint a separate token, not return OPENCLAW_GATEWAY_TOKEN; got %q", tok)
+	}
+	if env, err := loadDotEnv(dotenv); err != nil || env["OPENCLAW_GATEWAY_TOKEN"] != "test-token-from-dotenv" || env["DEFENSECLAW_GATEWAY_TOKEN"] != tok {
+		t.Fatalf(".env after mint = %v, %v; want OPENCLAW_GATEWAY_TOKEN kept and the minted DEFENSECLAW_GATEWAY_TOKEN", env, err)
 	}
 
 	conn := connector.NewOpenClawConnector()
@@ -175,8 +180,7 @@ func TestRunGuardrail_OpenClaw_CredentialsBeforeProbe(t *testing.T) {
 	}
 
 	// Run the new wiring exactly as runGuardrail does.
-	masterKey := deriveMasterKey(tmp) // empty when no device.key — that's fine.
-	conn.SetCredentials(tok, masterKey)
+	conn.SetCredentials(tok)
 
 	count, err := probe.HasUsableProviders()
 	if err != nil {

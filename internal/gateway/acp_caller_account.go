@@ -48,6 +48,8 @@ type acpConnPeer struct {
 	local, remote *net.TCPAddr
 	uid           int
 	known         bool
+	// sid is the client SID (Windows), "" until read.
+	sid string
 }
 
 func (p *acpConnPeer) lookup() (int, error) {
