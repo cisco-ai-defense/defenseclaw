@@ -2318,13 +2318,13 @@ def refresh_cmd(app: AppContext, from_sha256: str, guard_path: str, agent: str |
 
     An upgrade replaces defenseclaw-acp, so each contract lock still names the
     old guard digest and the editor entry fails closed. This re-pins only
-    DefenseClaw's own guard and the protocol schema; a changed editor entry
-    still needs 'defenseclaw acp setup', and a changed agent --agent. The installers and
+    DefenseClaw's own guard and the protocol schema. The installers and
     'make all' run it, and 'defenseclaw doctor --fix' does too.
 
     With --agent it re-pins that agent instead, after you updated it: only
-    its digest at the path setup pinned, once only this account or an
-    administrator can change the file and its folder (rel-1-0-10:GAP-0250).
+    its digest at the path setup pinned, once only your account or an
+    administrator can change the file and its folders. A changed editor
+    entry still needs 'defenseclaw acp setup'.
     """
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
