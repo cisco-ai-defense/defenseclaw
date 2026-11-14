@@ -4385,9 +4385,11 @@ func planHermesAllowlistApprovals(path string, approvals []interface{}, command 
 		_, requiredEvent := events[event]
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, recognized := recognizedCommands[entryCommand]
-		if !recognized && hermesLaunchImageFamilyCommand(entryCommand) {
-			// DefenseClaw's approval for another hook image of this install,
-			// one an earlier release or a rolled-back upgrade wrote (GAP-0601).
+		if owned && !recognized && hermesLaunchImageFamilyCommand(entryCommand) {
+			// DefenseClaw's own approval for another hook image of this
+			// install, one an earlier release or a rolled-back upgrade wrote
+			// (GAP-0601). An entry without the ownership marker keeps the
+			// earlier handling.
 			recognized = true
 		}
 		if owned && !recognized && hermesRelocatedHookCommand(entryCommand, command) {
