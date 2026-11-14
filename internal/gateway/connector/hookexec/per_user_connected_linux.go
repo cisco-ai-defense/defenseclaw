@@ -382,9 +382,18 @@ func threadHasOwnIDs(threadDir string) bool {
 // the kernel may report UID 0 for it (sock_i_uid without a socket file), so
 // that row proves nothing, not even for a root caller. Only an accepted
 // row's real owner is proof; a foreign owner after accept is final.
+//
+// The kernel reads a row's owner and inode apart (sock_i_uid, then
+// sock_i_ino, each under its own lock), and on kernels whose sock_i_uid
+// gives the root UID to a socket without a file (RHEL 9) a row read while
+// accept() gives the socket its file can show root beside the real inode.
+// A root owner on an accepted row is therefore read again, up to
+// settledRootReads times, before it is final (rel-1-0-10 GAP-0395: a busy
+// gateway's benign calls were refused as another account's listener).
 func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int, error)) error {
 	lastErr := errConnectedSocketNotFound
 	attempt := 0
+	rootReads := 0
 	for {
 		if ctx.Err() != nil {
 			return lastErr
@@ -393,8 +402,11 @@ func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int,
 		switch {
 		case err == nil && uid == self:
 			return nil
+		case err == nil && uid == 0 && rootReads+1 < settledRootReads:
+			rootReads++
+			lastErr = errConnectedSocketForeign
 		case err == nil:
-			return errors.New("connected gateway socket belongs to another account")
+			return errConnectedSocketForeign
 		case errors.Is(err, errConnectedSocketNotFound), errors.Is(err, errConnectedSocketNotAccepted):
 			lastErr = err
 		default:
@@ -407,6 +419,13 @@ func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int,
 		}
 	}
 }
+
+// settledRootReads is how many reads of an accepted row owned by root it
+// takes before that owner is final for a caller that is not root.
+const settledRootReads = 3
+
+// errConnectedSocketForeign is an accepted server socket of another account.
+var errConnectedSocketForeign = errors.New("connected gateway socket belongs to another account")
 
 // errConnectedSocketNotAccepted is an exact accepted reverse tuple the
 // gateway has not accept()ed yet: its owner is provisional.
