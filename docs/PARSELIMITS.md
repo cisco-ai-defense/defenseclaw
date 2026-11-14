@@ -67,14 +67,34 @@ profile, a managed install with a pack that is not strict included (the owner
 ruling of rel-1-0-6:GAP-0675), and blocks in strict, managed strict included.
 It never reads as allowed.
 
-It keeps the check that works on the raw text. A call whose text may name the
-active DefenseClaw state (`hookpaths.MayNameState`: quotes, escapes, case and
-patterns do not hide it) is judged as a proven mutation of it, which blocks in
-every mode, including observe, as the readers' proof of a state write did
-before the budget refused to read the call (GAP-0281). That holds for a state
-write before the cap (GAP-0312: a write before 513 nested subshells) and after
-it. The hook client sends the incomplete-evidence header for such a call; the
-gateway does not depend on it.
+It keeps the check that works on the raw text. A call whose statements may
+write the active DefenseClaw state (`hookpaths.BudgetMayWriteState`: a
+statement that may name it, however quotes, escapes, case or patterns spell
+it, and is not proven read-only) is judged as a proven mutation of it, which
+blocks in every mode, including observe, as the readers' proof of a state write
+did before the budget refused to read the call (GAP-0281). That holds for a
+state write before the cap (GAP-0312: a write before 513 nested subshells) and
+after it. A call that only reads or prints what names the state (the owner
+traces name the tree in most scripts) is not blocked. The hook client sends the
+incomplete-evidence header for such a call, listing the state it may write
+(`hookpaths.BudgetStateReading`); the gateway does not depend on it.
+
+A brace expansion past its bound and nested shell bodies past
+`MaxNestedBodyBytes` keep the evaluation-limit-only verdict the owner ruled for
+them (rel-1-0-6:GAP-0675, GAP-0677).
+
+A shell call over the string limit of the analysis (64 KiB) leaves the
+analysers no command to judge. When its padding is white space or comments the
+bounded twin reads the whole call; otherwise (one word of that size) it is
+truncated like the rest, bytes cap (GAP-0382). A trailing comment never takes a
+block away (GAP-0381). Two of 3,134,337 real calls are over 64 KiB.
+
+## Every cap counts work, never time
+
+No bound of a shell reader counts wall-clock time: the walks of the active
+state, the linked-tree walks and the state-glob expansion end at an entry or
+work bound, so one call has one verdict whatever the load of the box
+(GAP-0339, tests under full CPU load, 50 runs per call and tier).
 
 ## Cost curve
 
