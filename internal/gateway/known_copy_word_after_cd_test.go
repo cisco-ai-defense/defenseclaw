@@ -18,7 +18,7 @@ import (
 // without it, in every cell (rel-1-0-6:GAP-0320). The cd twins of the
 // keys-bound forms, and a copy of the keys link after cd, still block.
 func TestR107KnownCopyWordAfterCdGetsTheVerdictWithoutTheCd(t *testing.T) {
-	checkDynamicWordParity(t,
+	checkDynamicWordParityWarned(t,
 		[]string{
 			`f=a.txt; cp $f out.txt && echo ok`,
 			`cd ~/proj && f=a.txt; cp "$f" out.txt && echo ok`,
@@ -29,16 +29,18 @@ func TestR107KnownCopyWordAfterCdGetsTheVerdictWithoutTheCd(t *testing.T) {
 			`cd ~/proj && cp a.txt out.txt; echo hi > report.txt`,
 		},
 		[]string{
-			`cd ~/proj && cp $f build/ && echo hi > report.txt`,
 			`cd ~/proj && f=a.txt; cp $f disklink`,
 			`cd ~/proj && for f in a.txt; do cp $f disklink; done`,
 			`cd ~/proj && f=a.txt; cp $f build/; echo hi > disklink`,
-			`cd ~/proj && f=a.txt; read f; cp $f build/ && echo hi > report.txt`,
 			`cd ~/proj && T=--target-directory=$HOME/.ssh; cp $T a.txt`,
 			`cd ~/proj && f=disklink; cp -a $f kbak && echo k >> kbak`,
 			`cd ~/proj && cp -a disklink kbak && echo k >> kbak`,
 			`cd ~/.ssh && f=a.txt; cp ~/proj/$f authorized_keys`,
 			`cd ~ && f=a.txt; cp proj/$f .ssh/authorized_keys`,
+		},
+		[]string{
+			`cd ~/proj && cp $f build/ && echo hi > report.txt`,
+			`cd ~/proj && f=a.txt; read f; cp $f build/ && echo hi > report.txt`,
 			`cd /nonexistent-r107 && f=a.txt; cp $f build/ && echo hi > report.txt`,
 			`cd ~/proj/../proj && f=a.txt; cp $f build/ && echo hi > report.txt`,
 			`echo x; cd ~/proj && f=a.txt; cp $f build/ && echo hi > report.txt`,
@@ -74,11 +76,15 @@ func TestR107Review5CdConditionsOfTheKnownCopyWord(t *testing.T) {
 		`f=a.txt; cd build; cp $f out.txt`,
 		`cd build && f=a.txt; cp $f build2/ && echo hi > report.txt`,
 	}
-	blocked := []string{
+	// A cd that may fail or stand elsewhere leaves the copied word UNCERTAIN: the
+	// per-user default pack alerts, a managed gateway keeps the block.
+	warned := []string{
 		`cd nosuch && f=a.txt; cp $f build/ && echo hi > report.txt`,
 		`cd locked && f=a.txt; cp $f build/ && echo hi > report.txt`,
 		`cd - && f=a.txt; cp $f build/ && echo hi > report.txt`,
 		`cd ~; cd build && f=a.txt; cp $f build/ && echo hi > report.txt`,
+	}
+	blocked := []string{
 		`f=; cd ${f:=disklink} 2>/dev/null; cp -a $f kbak && echo k >> kbak`,
 		`f=kl.txt; cd build; cp -a $f kbak && echo k >> kbak`,
 		`cd build; cp -a kl.txt kbak && echo k >> kbak`,
@@ -93,6 +99,15 @@ func TestR107Review5CdConditionsOfTheKnownCopyWord(t *testing.T) {
 			for _, command := range blocked {
 				if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, `{"action":"block"`) {
 					t.Errorf("%s managed=%v %s = %.200s, want block", connector, managed, command, got)
+				}
+			}
+			for _, command := range warned {
+				want := `{"action":"alert"`
+				if managed {
+					want = `{"action":"block"`
+				}
+				if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, want) {
+					t.Errorf("%s managed=%v %s = %.200s, want %s", connector, managed, command, got, want)
 				}
 			}
 		}

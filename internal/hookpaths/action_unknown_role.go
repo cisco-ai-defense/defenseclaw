@@ -27,11 +27,15 @@ var actionRoleKnownWriters = strings.Fields(`rm rmdir unlink shred mkdir mkfifo 
 	bash sh zsh dash ksh fish csh tcsh eval source exec env sudo doas su nohup timeout nice ionice setsid stdbuf command
 	xargs find gfind ssh scp sftp rsync git curl wget aria2c patch install chmod chown chgrp chattr setfacl
 	sort uniq tr gzip gunzip bzip2 xz zip unzip tar make cmake sqlite3 mysql psql openssl gpg ssh-keygen ssh-add
-	vi vim nano emacs ed ex code open xdg-open sendmail mail`)
+	vi vim nano emacs ed ex code open xdg-open sendmail mail
+	set-content sc add-content ac out-file new-item ni copy-item cpi move-item mi remove-item ri rename-item rni clear-content clc
+	set-itemproperty sp tee-object export-csv export-clixml set-acl invoke-expression iex invoke-command icm start-process saps
+	start-job invoke-webrequest iwr invoke-restmethod irm copy move del erase ren rename xcopy robocopy mklink icacls takeown attrib`)
 
 // actionRoleKnownProgram reports a program the scan models: one of its own
 // lists or one of actionRoleKnownWriters.
 func actionRoleKnownProgram(base string) bool {
+	base = strings.ToLower(base)
 	return slices.Contains(actionRoleKnownWriters, base) ||
 		slices.Contains(linkPrograms, base) || slices.Contains(copyPrograms, base) ||
 		slices.Contains(renamePrograms, base) || slices.Contains(cdPrograms, base) ||
@@ -104,4 +108,16 @@ func actionCallRoleUnknown(call *syntax.CallExpr, home string) bool {
 	// A program the scan does not list is unknown, bare name or path alike;
 	// the GNU g prefix of a listed coreutil (gtee, gtruncate) is that coreutil.
 	return !actionRoleKnownProgram(base) && !actionRoleKnownProgram(strings.TrimPrefix(base, "g"))
+}
+
+// actionOptionWithAttachedValue reports an option that carries its value in the
+// word (--output=FILE, -oFILE=...): the option names what the program is to
+// write or read, so the word is not data of unknown role and keeps its
+// reading as a target.
+func actionOptionWithAttachedValue(word *syntax.Word, home string) bool {
+	value, known := StaticWord(word, home)
+	if !known {
+		return strings.HasPrefix(word.Lit(), "-") && strings.Contains(word.Lit(), "=")
+	}
+	return strings.HasPrefix(value, "-") && strings.Contains(value, "=")
 }

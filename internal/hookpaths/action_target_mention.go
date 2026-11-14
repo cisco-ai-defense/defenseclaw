@@ -424,7 +424,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					if blankReads && len(removedEntries) == 0 && len(replacedEntries) == 0 {
 						judgedWords = append(judgedWords, word)
 					}
-					if roleUnknown {
+					if roleUnknown && !actionOptionWithAttachedValue(word, home) {
 						// A word handed to a program the scan has no model of is
 						// data of unknown role, not a write target: ActionMentionsNoWriteRole
 						// leaves it out of this walk and of the text scan.

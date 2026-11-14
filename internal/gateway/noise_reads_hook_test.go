@@ -31,6 +31,12 @@ func TestGAP0018KeyReadersAreNotKeyWrites(t *testing.T) {
 		{"listing printed by sed", `ls ~/.ssh | sed -n 1,5p`, false},
 		{"login shell body", `sudo -iu builder bash -lc "sha256sum ~/.ssh/authorized_keys"`, false},
 		{"state test or true", `test -e ~/.ssh/authorized_keys || true`, false},
+		// A list of prints of a source file whose NAME holds the key file name reads
+		// no key file; the list is held as unproven, and only reads are in it.
+		{"printed source files named for the keys", `sed -n '2090,2115p' internal/gateway/semantic_authorized_keys_proof.go && sed -n '1,230p' internal/hookpaths/applypatch.go`, false},
+		// A source file called applypatch.go is a file, not an apply_patch call.
+		{"printed source files, one named applypatch.go", `sed -n 1,5p internal/gateway/semantic_authorized_keys_proof.go && cat internal/hookpaths/applypatch.go`, false},
+		{"printed source file, then a key write", `sed -n '2090,2115p' internal/gateway/semantic_authorized_keys_proof.go && echo x >> ~/.ssh/authorized_keys`, true},
 		// A statement with an output redirect is no plain read (owner ruling, GAP-2590):
 		// the copy of the file's content into another file stays a block.
 		{"checksum to a report", `sha256sum ~/.ssh/authorized_keys > keys.sum`, true},

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -565,13 +566,42 @@ func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []b
 			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 && !strings.ContainsAny(line, ";|&") {
 			continue
 		}
-		count := len(patchProgramWord.FindAllString(line, -1))
+		count := patchProgramWordCount(line)
 		calls += count
 		if count > bound[i] {
 			return false, calls, nil
 		}
 	}
 	return true, calls, fedBody
+}
+
+// patchProgramWordCount counts the apply_patch program names in a shell line,
+// leaving out a name that is part of a file name or a word (applypatch.go,
+// apply_patch.md, my-apply-patch): such a word names a file the line reads,
+// not a call the patch walk must account for (rel-1-0-10:GAP-0018).
+var patchProgramSuffixes = strings.Fields("exe cmd bat ps1 com")
+
+func patchProgramWordCount(line string) int {
+	count := 0
+	for _, at := range patchProgramWord.FindAllStringIndex(line, -1) {
+		start, end := at[0], at[1]
+		if start > 0 && (line[start-1] == '-' || line[start-1] == '.') {
+			continue
+		}
+		if end+1 < len(line) && (line[end] == '.' || line[end] == '-') {
+			rest := line[end+1:]
+			length := 0
+			for length < len(rest) && (rest[length] >= 'a' && rest[length] <= 'z' || rest[length] >= 'A' && rest[length] <= 'Z' || rest[length] >= '0' && rest[length] <= '9') {
+				length++
+			}
+			// A Windows program suffix is still the program.
+			if length > 0 && !(line[end] == '.' && slices.Contains(patchProgramSuffixes, strings.ToLower(rest[:length]))) {
+				continue
+			}
+		}
+		count++
+	}
+	return count
 }
 
 // patchFedLines marks the lines inside every envelope in a shell text that

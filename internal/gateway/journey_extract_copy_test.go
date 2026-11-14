@@ -66,10 +66,10 @@ func TestR107JourneyCorpusExtractMoveAndCopyThenArchive(t *testing.T) {
 		{"cp -a then archive, no cd", "project", `cp -a journey1 journey1-bak5 && tar -czf journey1b.tgz journey1`, "allow"},
 		{"extract then rename onto the keys file", "project", `tar -C {P}/x -xzf {P}/journey1.tgz && mv {P}/x/journey1 ~/.ssh/authorized_keys`, "block"},
 		{"extract then rename to authorized_keys in a scoped folder", "project", `tar -C {P}/x -xzf keys.tar && mv a.txt {P}/x/d/authorized_keys`, "block"},
-		{"extract then rename into a folder under the scope root", "project", `tar -C {P}/x -xzf {P}/journey1.tgz && mv {P}/x/journey1 {P}/x/sub/journey1-x`, "block"},
+		{"extract then rename into a folder under the scope root", "project", `tar -C {P}/x -xzf {P}/journey1.tgz && mv {P}/x/journey1 {P}/x/sub/journey1-x`, "alert/block"},
 		{"extract then move into the scope root", "project", `tar -C {P}/x -xzf keys.tar && mv authorized_keys {P}/x`, "block"},
 		{"cd, cp -a of the keys link, write the copy", "home", `cd project && cp -a keylink kbak && echo k >> kbak`, "block"},
-		{"write into the extraction scope", "project", `tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "block"},
+		{"write into the extraction scope", "project", `tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`, "alert/block"},
 		{"cp -a of the keys link then write", "project", `cp -a keylink notes.txt && echo k >> notes.txt`, "block"},
 
 		// Review 3: one must-deny row per condition of the scoped-move
@@ -79,22 +79,22 @@ func TestR107JourneyCorpusExtractMoveAndCopyThenArchive(t *testing.T) {
 		{"r3 extract then move a trailing-dot keys name into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv authorized_keys. {P}/x/d`, "block"},
 		{"r3 extract then move the keys name into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv authorized_keys {P}/x/d`, "block"},
 		{"r3 extract then move authorized_keys2 into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv authorized_keys2 {P}/x/d`, "block"},
-		{"r3 extract then move an ssh rc file into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv rc {P}/x/d`, "block"},
+		{"r3 extract then move an ssh rc file into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv rc {P}/x/d`, "alert/block"},
 		{"r3 extract then move a case variant of the keys name into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv Authorized_Keys {P}/x/d`, "block"},
 		{"r3 extract then move two sources into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv notes authorized_keys {P}/x/d`, "block"},
 		{"r3 extract then move with -t into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv -t {P}/x/d authorized_keys`, "block"},
-		{"r3 extract then move with a backup suffix into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv --suffix=_keys authorized {P}/x/d`, "block"},
-		{"r3 extract then move with -b -S into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv -b -S _keys authorized {P}/x/d`, "block"},
-		{"r3 extract then move a file from below the scope root", "project", `tar -C {P}/x -xzf keys.tar && mv {P}/x/d/notes {P}/x/notes-x`, "block"},
-		{"r3 extract then move a plain file onto the scope root", "project", `tar -C {P}/x -xzf keys.tar && mv notes {P}/x`, "block"},
+		{"r3 extract then move with a backup suffix into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv --suffix=_keys authorized {P}/x/d`, "alert/block"},
+		{"r3 extract then move with -b -S into a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv -b -S _keys authorized {P}/x/d`, "alert/block"},
+		{"r3 extract then move a file from below the scope root", "project", `tar -C {P}/x -xzf keys.tar && mv {P}/x/d/notes {P}/x/notes-x`, "alert/block"},
+		{"r3 extract then move a plain file onto the scope root", "project", `tar -C {P}/x -xzf keys.tar && mv notes {P}/x`, "alert/block"},
 		{"r3 extract then move through a scope entry and dot-dot", "project", `tar -C {P}/x -xzf keys.tar && mv notes {P}/x/d/../authorized_keys`, "block"},
 
 		// Review 3: another write at a marked move destination.
 		{"r3 extract then rename a plain file onto a scope entry", "project", `tar -C {P}/x -xzf keys.tar && mv notes {P}/x/k`, "allow"},
-		{"r3 extract, failed move onto a scope entry, write it", "project", `tar -C {P}/x -xzf keys.tar; mv nosuch {P}/x/k; echo k >> {P}/x/k`, "block"},
-		{"r3 extract, no-clobber move onto a scope entry, write it", "project", `tar -C {P}/x -xzf keys.tar && mv -n notes {P}/x/k && echo k >> {P}/x/k`, "block"},
-		{"r3 extract, write a scope entry, then move onto it", "project", `tar -C {P}/x -xzf keys.tar; echo k >> {P}/x/k; mv notes {P}/x/k`, "block"},
-		{"r3 extract, copy onto a scope entry, then move onto it", "project", `tar -C {P}/x -xzf keys.tar; cp a.txt {P}/x/k; mv notes {P}/x/k`, "block"},
+		{"r3 extract, failed move onto a scope entry, write it", "project", `tar -C {P}/x -xzf keys.tar; mv nosuch {P}/x/k; echo k >> {P}/x/k`, "alert/block"},
+		{"r3 extract, no-clobber move onto a scope entry, write it", "project", `tar -C {P}/x -xzf keys.tar && mv -n notes {P}/x/k && echo k >> {P}/x/k`, "alert/block"},
+		{"r3 extract, write a scope entry, then move onto it", "project", `tar -C {P}/x -xzf keys.tar; echo k >> {P}/x/k; mv notes {P}/x/k`, "alert/block"},
+		{"r3 extract, copy onto a scope entry, then move onto it", "project", `tar -C {P}/x -xzf keys.tar; cp a.txt {P}/x/k; mv notes {P}/x/k`, "alert/block"},
 
 		// Review 3: an extraction folder that already holds d -> the .ssh
 		// decoy directory.

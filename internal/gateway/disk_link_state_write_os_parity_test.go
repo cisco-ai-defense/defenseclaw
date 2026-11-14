@@ -36,6 +36,10 @@ const (
 	// makes is also read by the keys reader, which cannot place the cd, so
 	// the call may name that rule (Linux and Windows alike).
 	diskLinkAnyRule = "any"
+	// diskLinkUncertain: a cd into a link the call makes inside a shell body, the
+	// target of which the walk cannot place: the default pack alerts on the keys
+	// rule (rel-1-0-10:GAP-0350).
+	diskLinkUncertain = "uncertain"
 )
 
 // judgeDiskLinkStateRows runs rows through the Claude Code hook as the
@@ -110,6 +114,12 @@ func judgeDiskLinkStateRows(t *testing.T, rows []diskLinkStateRow) {
 				api.handleAgentHook("claudecode").ServeHTTP(recorder, req)
 				got := recorder.Body.String()
 				blocked := strings.Contains(got, `"action":"block"`)
+				if row.rule == diskLinkUncertain {
+					if blocked || !strings.HasPrefix(got, `{"action":"alert"`) || !strings.Contains(got, diskLinkKeysRule) {
+						t.Fatalf("targets=%v %q: want an alert on the keys rule: %.400s", withTargets, command, got)
+					}
+					continue
+				}
 				if blocked != (row.rule != "") {
 					t.Fatalf("targets=%v %q: block=%v, want %v: %.400s", withTargets, command, blocked, row.rule != "", got)
 				}
@@ -152,7 +162,7 @@ func TestClaudeBashWriteThroughDiskLinkToStateMatchesAcrossOS(t *testing.T) {
 		{name: "command link in bash -c Git Bash drive", command: `bash -c "ln -s {EM}/y L && echo k >> L/config.yaml"`, rule: diskLinkStateRule, windowsOnly: true},
 		{name: "command link in sh -c", command: `sh -c 'ln -s {E}/y L && echo k >> L/config.yaml'`, rule: diskLinkStateRule},
 		{name: "command link in sh -c Git Bash drive", command: `sh -c 'ln -s {EM}/y L && echo k >> L/config.yaml'`, rule: diskLinkStateRule, windowsOnly: true},
-		{name: "command link in bash -c then cd", command: `bash -c "ln -s {E}/y L && cd L && echo k >> config.yaml"`, rule: diskLinkAnyRule},
+		{name: "command link in bash -c then cd", command: `bash -c "ln -s {E}/y L && cd L && echo k >> config.yaml"`, rule: diskLinkUncertain},
 		{name: "through the junction", command: `echo k >> {J}/y/config.yaml`, rule: diskLinkStateRule, windowsOnly: true},
 		{name: "through the junction Git Bash drive", command: `echo k >> {JM}/y/config.yaml`, rule: diskLinkStateRule, windowsOnly: true},
 		{name: "command link to the junction in bash -c", command: `bash -c "ln -s {JM}/y L && echo k >> L/config.yaml"`, rule: diskLinkStateRule, windowsOnly: true},
