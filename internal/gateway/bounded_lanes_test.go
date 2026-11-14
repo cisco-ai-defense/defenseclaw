@@ -565,23 +565,28 @@ func TestBoundRuleLaneTableRejectsMisuse(t *testing.T) {
 		t.Fatalf("a valid lane is rejected: %v", errs)
 	}
 	route := func(*testing.T, *APIServer, boundedEnv, boundedLaneCall) (string, []string) { return "", nil }
-	for name, edit := range map[string]func(*boundedLaneCap){
-		"legacy outside the shell rows": func(l *boundedLaneCap) { l.path = boundedLegacyShellReading },
-		"unknown path":                  func(l *boundedLaneCap) { l.path = boundedLegacyShellReading + 1 },
-		"own route, no judge row":       func(l *boundedLaneCap) { l.decide, l.connector = route, "codex" },
-		"own route, no connector":       func(l *boundedLaneCap) { l.decide, l.judge = route, route },
-		"judge row without own route":   func(l *boundedLaneCap) { l.judge = route },
-		"work on a non-time cap":        func(l *boundedLaneCap) { l.work = true },
-		"time cap without work":         func(l *boundedLaneCap) { l.cap = bounded.Time },
-		"OPEN for a whole tier":         func(l *boundedLaneCap) { l.open = map[string]string{"default": "rel-1-0-10:GAP-0312"} },
-		"OPEN wildcard":                 func(l *boundedLaneCap) { l.open = map[string]string{"*/seen": "rel-1-0-10:GAP-0312"} },
-		"OPEN without a gap id":         func(l *boundedLaneCap) { l.open = map[string]string{"default/seen": "later"} },
-		"no seen element":               func(l *boundedLaneCap) { l.seen = nil },
+	// Each edit is one defect, matched by the error it must raise.
+	for _, tc := range []struct {
+		name, want string
+		edit       func(*boundedLaneCap)
+	}{
+		{"legacy outside the shell rows", "only the rel shell reading bounds", func(l *boundedLaneCap) { l.path = boundedLegacyShellReading }},
+		{"unknown path", "unknown path", func(l *boundedLaneCap) { l.path = boundedLegacyShellReading + 1 }},
+		{"own route, no judge row", "has its own route and no judge row", func(l *boundedLaneCap) { l.decide, l.connector = route, "codex" }},
+		{"own route, no connector", "names its connector", func(l *boundedLaneCap) { l.decide, l.judge = route, route }},
+		{"judge row without own route", "judge row without its own route", func(l *boundedLaneCap) { l.judge = route }},
+		{"work on a non-time cap", "only a time cap", func(l *boundedLaneCap) { l.work = true }},
+		{"time cap without work", "only a time cap", func(l *boundedLaneCap) { l.cap = bounded.Time }},
+		{"OPEN for a whole tier", "OPEN entry", func(l *boundedLaneCap) { l.open = map[string]string{"default": "rel-1-0-10:GAP-0312"} }},
+		{"OPEN wildcard", "OPEN entry", func(l *boundedLaneCap) { l.open = map[string]string{"*/seen": "rel-1-0-10:GAP-0312"} }},
+		{"OPEN without a gap id", "OPEN entry", func(l *boundedLaneCap) { l.open = map[string]string{"default/seen": "later"} }},
+		{"no seen element", "registers gen, seen and a positive limit", func(l *boundedLaneCap) { l.seen = nil }},
 	} {
 		lane := good
-		edit(&lane)
-		if errs := boundedLaneTableErrors([]boundedLaneCap{lane}); len(errs) == 0 {
-			t.Errorf("%s: accepted", name)
+		tc.edit(&lane)
+		errs := boundedLaneTableErrors([]boundedLaneCap{lane})
+		if len(errs) != 1 || !strings.Contains(errs[0], tc.want) {
+			t.Errorf("%s: errors %q, want exactly one containing %q", tc.name, errs, tc.want)
 		}
 	}
 }

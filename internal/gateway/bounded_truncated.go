@@ -5,8 +5,12 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
@@ -27,6 +31,29 @@ import (
 // regex_judge a call whose only basis is the limit still goes to the judge
 // where one is configured (regexJudgeLocalVerdictDecisive), and the floor
 // stands when the judge fails or answers lower (rel-1-0-10:GAP-0320).
+
+// An internal bound misuse (a reader's Counter never bound with NewCounter,
+// or bound to another call's Truncated) floors the call it read: the misuse
+// mark is in that call's CapSet, its reason names "internal bound misuse",
+// and on the trusted-action path it counts once in the parser uncertainty
+// metric (no new telemetry field). The process logs each kind once.
+func init() { bounded.OnMisuse(logBoundedMisuse) }
+
+var (
+	boundedMisuseLogged [3]sync.Once
+	boundedMisuses      atomic.Int64
+)
+
+func logBoundedMisuse(m bounded.Misuse) {
+	boundedMisuses.Add(1)
+	if int(m) >= len(boundedMisuseLogged) {
+		m = 0
+	}
+	boundedMisuseLogged[m].Do(func() {
+		fmt.Fprintf(os.Stderr, "[guardrail] %s: %s; the call is judged as truncated (a reader bug: please report it)\n",
+			bounded.MisuseReason, m)
+	})
+}
 
 // boundedTruncatedTitle is the ship-authored title of a truncated input. The
 // reason (a closed set of cap names) follows it; it carries no input text.
@@ -96,6 +123,9 @@ func boundedLimitIndex(findings []RuleFinding) int {
 func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request trustedActionRequest) []RuleFinding {
 	if !set.Any() {
 		return findings
+	}
+	if set.Misuse() && request.recordTelemetry != nil {
+		request.recordTelemetry(trustedActionTelemetry{ParserUncertaintyCount: 1})
 	}
 	bound := boundedTruncatedFinding(set, request.EnforcementCapable)
 	index := boundedLimitIndex(findings)
