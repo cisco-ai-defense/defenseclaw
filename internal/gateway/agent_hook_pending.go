@@ -510,7 +510,10 @@ func (a *APIServer) journalHookDelivery(
 	panicked bool, extra map[string]string, sandboxReceipt ...bool,
 ) (*pendingHookOccurrence, error) {
 	p := &pendingHookOccurrence{
-		ID: uuid.NewString(), Request: pendingRequest(*req),
+		// Time ordered: the call's audit rows are keyed by this ID, and a
+		// random one put each insert on a random leaf of the audit_events
+		// primary key (GAP-0286).
+		ID: observability.NewTimeOrderedID(), Request: pendingRequest(*req),
 		Proposed:    pendingResponse(proposed),
 		NoReceipt:   pendingResponse(a.deliveredHookDecision(req.ConnectorName, proposed, "")),
 		Provenance:  a.pendingHookProvenanceFor(ctx, *req, proposed),
