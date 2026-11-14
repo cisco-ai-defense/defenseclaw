@@ -52,7 +52,12 @@ func TestTruncatedHostCall(t *testing.T) {
 		{"iex word", "pwsh", "", "$s = '" + long + "'; iex $s", true},
 		{"one long PowerShell statement", "PowerShell", "", "Set-Content notes.txt -Value @'\n" + long + "'@", false},
 		{"index is not iex", "PowerShell", "", "Set-Content index.txt -Value @'\n" + long + "'@", false},
-		{"launcher word in a POSIX script", "Bash", "", "echo " + long + "; echo powershell", false},
+		{"no launcher in a long POSIX script", "Bash", "", "echo " + strings.ReplaceAll(long, "\n", " "), false},
+		{"launcher after another POSIX statement", "Bash", "", "echo a; powershell -EncodedCommand " + strings.Repeat("QQBB", 20000), true},
+		{"cmd /c wrapper under a POSIX tool", "Bash", "", "cmd /c powershell -EncodedCommand " + strings.Repeat("QQBB", 20000), true},
+		{"Git Bash cmd //c wrapper", "Bash", "", "cmd //c echo " + strings.Repeat("QQBB", 20000), true},
+		{"quoted launcher path", "Bash", "", `"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -enc ` + strings.Repeat("QQBB", 20000), true},
+		{"cmdkey is not cmd", "Bash", "", "cmdkey /list " + strings.Repeat("a", 70000), false},
 	} {
 		args, err := json.Marshal(map[string]string{"command": test.command})
 		if err != nil {
@@ -61,5 +66,19 @@ func TestTruncatedHostCall(t *testing.T) {
 		if got := TruncatedHostCall(Input{Tool: test.tool, Args: args, DialectHint: test.hint}); got != test.want {
 			t.Errorf("%s: TruncatedHostCall = %v, want %v", test.name, got, test.want)
 		}
+	}
+	// An argv launcher, and a command that is an array of words.
+	if !TruncatedHostCall(Input{Tool: "Bash", Argv: []string{`C:\Windows\System32\cmd.exe`, "/c", "ver"}}) {
+		t.Error("an argv cmd launcher is not a host call")
+	}
+	if TruncatedHostCall(Input{Tool: "Bash", Argv: []string{"git", "status"}}) {
+		t.Error("an ordinary argv is a host call")
+	}
+	words, err := json.Marshal(map[string][]string{"command": {"powershell", "-EncodedCommand", strings.Repeat("QQBB", 20000)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !TruncatedHostCall(Input{Tool: "Bash", Args: words}) {
+		t.Error("a launcher as an array of words is not a host call")
 	}
 }

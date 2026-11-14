@@ -694,16 +694,22 @@ func plainHostLauncherLine(source string) bool {
 
 // TruncatedHostCall reports a call the tokenizer stopped reading at its input
 // bound that holds a Windows host script the script reading would have read:
-// a command text that is one plain powershell or pwsh launcher line
-// (plainHostLauncherLine) under any tool label, or a PowerShell or cmd call
-// (by its tool label or dialect hint) that names a launcher, a call block or
-// Invoke-Expression (overSizeHostScriptMention). The text is read from the
-// arguments as given, up to their size limit. Such a call is judged as
-// truncated, never a clean allow (rel-1-0-10:GAP-0345); one long ordinary
-// statement past the bound stays as the readers left it (GAP-0318). The
-// caller asks only for a call past the input bound.
+// a call that names a powershell, pwsh or cmd launcher in any shape and under
+// any tool label (hostLauncherMention: beside other statements, behind a cmd
+// /c wrapper, by a quoted or path launcher, in an argv, in a JSON array
+// command), or a PowerShell or cmd call (by its tool label or dialect hint)
+// that names a call block or Invoke-Expression (overSizeHostScriptMention).
+// The text is read from the arguments as given, up to their size limit. Such
+// a call is judged as truncated, never a clean allow (rel-1-0-10:GAP-0345,
+// GAP-0608); one long ordinary statement past the bound stays as the readers
+// left it (GAP-0318). The caller asks only for a call past the input bound.
 func TruncatedHostCall(input Input) bool {
 	if len(input.Argv) != 0 {
+		for _, word := range input.Argv {
+			if hostLauncherWord(word) {
+				return true
+			}
+		}
 		return false
 	}
 	windows := input.DialectHint == DialectPowerShell || input.DialectHint == DialectCMD
@@ -723,13 +729,39 @@ func TruncatedHostCall(input Input) bool {
 		var args struct {
 			Command string `json:"command"`
 		}
-		if json.Unmarshal(input.Args, &args) != nil {
-			return false
+		if json.Unmarshal(input.Args, &args) == nil && args.Command != "" {
+			text = args.Command
+		} else {
+			// A command that is not one string (an array of words): its
+			// words are screened as the arguments carry them.
+			text = string(input.Args)
 		}
-		text = args.Command
 	}
-	return plainHostLauncherLine(text) || windows && overSizeHostScriptMention(text)
+	return hostLauncherMention(text) || windows && overSizeHostScriptMention(text)
 }
+
+// hostLauncherWord reports an argv word whose program is powershell, pwsh or
+// cmd, by its last path element.
+func hostLauncherWord(word string) bool {
+	base := strings.ToLower(word[strings.LastIndexAny(word, `/\`)+1:])
+	switch strings.TrimSuffix(base, ".exe") {
+	case "powershell", "pwsh", "cmd":
+		return true
+	}
+	return false
+}
+
+// hostLauncherMention reports a text that names a powershell or pwsh launcher
+// (the word anywhere), or a cmd launcher with its /c, /r, /k, /s, /d or /q
+// switch. One pass over the text, no parse.
+func hostLauncherMention(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "powershell") || strings.Contains(lower, "pwsh") || cmdLauncherMention.MatchString(lower)
+}
+
+// cmdLauncherMention is a cmd or cmd.exe word, bare, quoted or at the end of
+// a path, followed by a cmd.exe switch (Git Bash spells it //c).
+var cmdLauncherMention = lazyMustCompile(`(?:^|[\s;&|(){}"'\x60/\\])cmd(?:\.exe)?["'\x60]?\s+//?[cdqskr]\b`)
 
 // maxTruncatedHostCallArgsBytes bounds the arguments TruncatedHostCall
 // screens (four times the analysis bound, the hook body size).

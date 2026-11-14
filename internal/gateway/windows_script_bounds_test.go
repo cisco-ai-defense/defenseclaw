@@ -240,6 +240,10 @@ func TestWindowsEncodedLauncherUnderAPOSIXToolIsReadAsUnderPowerShell(t *testing
 				{"payload past the word limit", windowsEncodedLayers(padded, 1), true},
 				{"past the wrapper depth", windowsEncodedLayers(command, actionfacts.MaxWrapperDepth+1), false},
 				{"past the command size", windowsEncodedLayers(command, 7), false},
+				// Past the word limit in other shapes (rel-1-0-10:GAP-0608).
+				{"behind a cmd /c wrapper, past the word limit", "cmd /c " + windowsEncodedLayers(padded, 1), false},
+				{"after another statement, past the word limit", "echo a; " + windowsEncodedLayers(padded, 1), false},
+				{"behind a cmd /c wrapper, padded 6 KB", "cmd /c " + windowsEncodedLayers(command+"; Write-Output '"+strings.Repeat("a", 6000)+"'", 1), false},
 			} {
 				t.Run(pack+"/"+tool+"/"+shape.name, func(t *testing.T) {
 					findings := windowsBoundsFindings(t, pack, tool, shape.command, `C:\Users\alice`, strict)
