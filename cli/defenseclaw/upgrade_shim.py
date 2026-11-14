@@ -394,6 +394,7 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
         raise
     if _key(version) < _key(installed):
         try:
+            _release_route_only(version)
             _set_aside_newer_keys(version)
         except BaseException:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -402,6 +403,98 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     # for its installer and drops the helper (rel-1-0-4:GAP-2503).
     newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
     return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer, rerun=rerun)
+
+
+# Route-only (1.0.10) points Claude Code and Codex at the gateway route
+# listener in their own settings; a release before it has no such listener,
+# so the agent got 401 on every call after a rollback or a downgrade
+# (rel-1-0-10 GAP-0602).
+ROUTE_ONLY_SINCE = (1, 0, 10)
+
+
+def _route_only_rendered() -> list[str]:
+    """The connectors whose agent settings still hold a route-only render."""
+
+    def home(variable: str, default_dir: str) -> str:
+        configured = os.environ.get(variable, "").strip()
+        if configured:
+            return os.path.abspath(os.path.expanduser(os.path.expandvars(configured)))
+        return os.path.join(os.path.expanduser("~"), default_dir)
+
+    def read(path: str) -> str:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                return handle.read(4 << 20)
+        except OSError:
+            return ""
+
+    found = []
+    claude = read(os.path.join(home("CLAUDE_CONFIG_DIR", ".claude"), "settings.json"))
+    if "/r/claudecode" in claude or "X-DC-Route-Auth" in claude:
+        found.append("claudecode")
+    if "defenseclaw_route" in read(os.path.join(home("CODEX_HOME", ".codex"), "config.toml")):
+        found.append("codex")
+    return found
+
+
+class _RouteOnlyPartlyRestored(ShimError):
+    """Some agent settings were put back, others were not."""
+
+    changed_nothing = False
+
+
+def _release_route_only(target: str | None) -> None:
+    """Put back the agent model settings route-only changed, before an install
+    of ``target`` (``None``: not known) that has no route-only replaces this one.
+
+    The gateway is stopped first, so its connector repair cannot write the
+    render again; the installer starts the gateway of the release it installs.
+    When the settings cannot be put back, nothing else is changed and the
+    command that does it is named.
+    """
+
+    if target is not None and _VERSION.fullmatch(target) and _key(target) >= ROUTE_ONLY_SINCE:
+        return
+    rendered = _route_only_rendered()
+    if not rendered:
+        return
+    from defenseclaw.gateway_path import canonical_install_path, path_gateway
+
+    gateway = path_gateway(honor_override=False) or canonical_install_path()
+    home = _data_home()
+    stopped = False
+    if _gateway_running(home):
+        try:
+            stopped = subprocess.call([gateway, "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120) == 0  # noqa: S603 - the installed gateway
+        except (OSError, subprocess.TimeoutExpired):
+            stopped = False
+    try:
+        subprocess.call(  # noqa: S603 - the installed gateway
+            [gateway, "connector", "route-restore", "--all"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    left = _route_only_rendered()
+    if left:
+        if stopped:
+            try:
+                subprocess.call([gateway, "start"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)  # noqa: S603
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        names = ", ".join(left)
+        disable = " && ".join(f"defenseclaw routing disable --connector {name}" for name in left)
+        error = ShimError if left == rendered else _RouteOnlyPartlyRestored
+        raise error(
+            f"the {names} settings still point at the DefenseClaw route-only listener, which "
+            f"{'DefenseClaw ' + target if target else 'the release you go back to'} does not have, so the agent "
+            f"would get 401 on every call. Run: {disable}, then run this command again"
+        )
+    names = ", ".join(rendered)
+    print(f"  → Put back the {names} model settings that route-only changed (the release you go back to has no route-only).")
+    print("    Restart the agent. Installing 1.0.10 or later again routes it again from config.yaml.")
 
 
 def _refuse_unguarding_downgrade(version: str) -> None:
@@ -665,7 +758,23 @@ def _rollback(*, yes: bool) -> int:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
     rerun = "defenseclaw rollback" + (" --yes" if yes else "")
+    try:
+        _release_route_only(_previous_version(home))
+    except BaseException:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
     return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir, rerun=rerun)
+
+
+def _previous_version(home: str) -> str | None:
+    """The release ``previous/`` holds (the one a rollback goes back to)."""
+
+    try:
+        with open(os.path.join(home, "previous", "VERSION"), encoding="utf-8-sig") as handle:
+            text = handle.read(64).strip()
+    except OSError:
+        return None
+    return text if _VERSION.fullmatch(text) else None
 
 
 INSTALLER_RECORD = os.path.join("receipts", "installer.sha256")

@@ -94,6 +94,9 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv(update_notice.NO_CHECK_ENV, raising=False)
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    # The agents' own settings of this test, never the runner's (GAP-0602).
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "agent" / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "agent" / "codex"))
     for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
         monkeypatch.delenv(name, raising=False)
     # A developer's own cosign must not take part; the signature tests add a fake one.
@@ -1911,3 +1914,86 @@ def test_a_good_defenseclaw_repo_is_still_accepted(
 ) -> None:
     monkeypatch.setenv(upgrade_shim.REPO_ENV, value)
     assert upgrade_shim.release_source() == base
+
+
+# rel-1-0-10 GAP-0602: a rollback or downgrade to a release without route-only
+# puts the agent model settings back first, with the gateway stopped, or
+# refuses with the command that does it.
+_CLAUDE_ROUTED = '{"env": {"ANTHROPIC_BEDROCK_BASE_URL": "http://127.0.0.1:18970/r/claudecode", "ANTHROPIC_CUSTOM_HEADERS": "X-DC-Route-Auth: dcr1-x", "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1"}}'
+_CLAUDE_DIRECT = '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}'
+
+
+def _route_only_install(home: Path, previous: str) -> Path:
+    saved = home / "installer" / "install.sh"
+    saved.parent.mkdir()
+    saved.write_text("#!/bin/bash\n", encoding="utf-8")
+    _record(home, saved)
+    (home / "previous").mkdir()
+    (home / "previous" / "VERSION").write_text(previous + "\n", encoding="utf-8")
+    settings = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(_CLAUDE_ROUTED, encoding="utf-8")
+    return settings
+
+
+def _fake_gateway(monkeypatch: pytest.MonkeyPatch, settings: Path, *, restores: bool, running: bool = True) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def call(argv: list[str], **_kw: object) -> int:
+        calls.append(list(argv[1:]))
+        if argv[1:3] == ["connector", "route-restore"] and restores:
+            settings.write_text(_CLAUDE_DIRECT, encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "call", call)
+    monkeypatch.setattr(upgrade_shim, "_gateway_running", lambda _home: running)
+    return calls
+
+
+def test_rollback_to_a_release_without_route_only_restores_the_agent_settings_first(
+    home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = _route_only_install(home, "1.0.9")
+    calls = _fake_gateway(monkeypatch, settings, restores=True)
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+
+    # The gateway is stopped before the restore, so it cannot render again.
+    assert calls == [["stop"], ["connector", "route-restore", "--all"]]
+    assert "/r/claudecode" not in settings.read_text(encoding="utf-8")
+    assert execs[0][2:] == ["--rollback", "--yes"]
+    assert "Put back the claudecode model settings" in capsys.readouterr().out
+
+
+def test_rollback_refuses_when_the_route_only_settings_stay(
+    home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = _route_only_install(home, "1.0.9")
+    calls = _fake_gateway(monkeypatch, settings, restores=False)
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    assert execs == []
+    assert calls[-1] == ["start"]  # the gateway it stopped runs again
+    err = capsys.readouterr().err
+    assert "defenseclaw routing disable --connector claudecode" in err and "401" in err
+
+
+def test_rollback_to_a_route_only_release_leaves_the_settings(
+    home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _route_only_install(home, "1.0.10")
+    calls = _fake_gateway(monkeypatch, settings, restores=True)
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+
+    assert calls == []
+    assert "/r/claudecode" in settings.read_text(encoding="utf-8")
+
+
+def test_codex_route_render_is_found() -> None:
+    codex = Path(os.environ["CODEX_HOME"])
+    codex.mkdir(parents=True)
+    assert upgrade_shim._route_only_rendered() == []
+    (codex / "config.toml").write_text('model_provider = "defenseclaw_route"\n', encoding="utf-8")
+    assert upgrade_shim._route_only_rendered() == ["codex"]

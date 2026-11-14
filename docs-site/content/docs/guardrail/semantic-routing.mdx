@@ -89,6 +89,10 @@ X-Semantic-Router-Reason: decision=… model=… confidence=…
 
 Each routed request also records one `defenseclaw.semantic_routing.decision` count and a `defenseclaw.semantic_routing.latency` measurement. The labels are a closed set: `result` (`applied` or `fallback`), `error.code` (`none`, `timeout`, `upstream_status`, `decode_failure`, `unknown_alias`, `credential_failure` or `configuration_failure`) and `decision` (`override` or `default`). Prompt text, credentials, endpoints and the header reason string are never labels.
 
+## Going back to a release before 1.0.10
+
+`defenseclaw rollback` and `defenseclaw upgrade --version 1.0.9` (or any release before 1.0.10, which has no route-only listener) stop the gateway and put the Claude Code and Codex model settings that route-only changed back before the older release is installed; restart the agent afterwards. If they cannot be put back, nothing is changed and the command names `defenseclaw routing disable --connector <name>`. When you run an older release's installer yourself (`install.sh --version 1.0.9`), run `defenseclaw routing disable --connector <name>` for each route-only connector first.
+
 ## Disable routing
 
 ```bash
