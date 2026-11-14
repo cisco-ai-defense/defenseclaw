@@ -162,6 +162,44 @@ def test_v8_panels_read_canonical_sqlite_without_gateway_jsonl(tmp_path) -> None
     assert egress[0].branch == "shape"
 
 
+def test_compat_row_without_payload_json_reads_its_body_from_the_record(tmp_path) -> None:
+    # rel-1-0-10:GAP-0421: since S8 R4 a legacy.audit.* row keeps no payload_json;
+    # the TUI reads its body from the canonical record, as 1.0.9 read payload_json.
+    store = _store()
+    body = {"actor": "operator", "details": "connector=claudecode", "target": "claudecode"}
+    record = {"outcome": "allowed", "body": body}
+    store.db.executemany(
+        """INSERT INTO audit_events (
+               id, timestamp, bucket, event_name, source, signal, severity, action,
+               actor, details, connector, payload_json, projected_record_json
+           ) VALUES (?, ?, 'compliance.activity', ?, 'gateway', 'logs', 'INFO',
+                     'setup.hook.connector', 'operator', 'connector=claudecode', 'claudecode', ?, ?)""",
+        [
+            ("compat-r4", "2026-07-07T12:00:05Z", "legacy.audit.setup.hook.connector", None, json.dumps(record)),
+            (
+                "compat-109",
+                "2026-07-07T12:00:04Z",
+                "legacy.audit.setup.hook.connector",
+                json.dumps({**body, "target": "codex"}),
+                json.dumps(record),
+            ),
+            ("native-null", "2026-07-07T12:00:03Z", "setup.hook.connector", None, json.dumps(record)),
+        ],
+    )
+    store.db.commit()
+
+    rows = {row.id: row for row in V8EventHistoryReader(store).load_mutations(500)}
+    assert dict(rows["compat-r4"].payload) == body
+    assert rows["compat-r4"].payload_truncated is False
+    assert rows["compat-109"].payload["target"] == "codex"  # payload_json still wins when present
+    assert dict(rows["native-null"].payload) == {}  # only compatibility rows read the record body
+
+    activity = ActivityPanelModel(tmp_path, store=store)
+    activity.load_mutations()
+    targets = [row.target_id for row in activity.mutations if row.action == "setup.hook.connector"]
+    assert targets == ["claudecode", "codex", ""]  # newest first; 1.0.9 showed the body target too
+
+
 def test_exact_v8_alerts_do_not_reingest_retired_jsonl(tmp_path) -> None:
     (tmp_path / "gateway.jsonl").write_text(
         '{"ts":"2026-07-07T12:00:00Z","event_type":"egress",'
