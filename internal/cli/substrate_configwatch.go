@@ -77,6 +77,11 @@ func substrateConfigMapFetch(kube configMapGetter, ns, name string) configwatch.
 	}
 }
 
+// substrateRoleDeployment is the chart's Deployment of each role
+// (templates/gateway.yaml, templates/leader.yaml; defenseclaw-leader is the
+// leader's Service, not its Deployment).
+var substrateRoleDeployment = map[string]string{"gateway": "defenseclaw-gateway", "leader": "defenseclaw-gateway-leader"}
+
 // substrateFollower keeps a gateway or leader pod on config.yaml: on a
 // change it applies the parts this pod takes live (apply) and names the
 // ones that wait for the pod's next start (substrateRestartOnly).
@@ -131,7 +136,7 @@ func (f *substrateFollower) step(ctx context.Context) {
 	msg := fmt.Sprintf("[substrate] %s: config.yaml %s in force (was %s)", f.role, ch.Digest, prev)
 	if pending := substrateRestartOnly(f.boot, ch.Config); len(pending) > 0 {
 		msg += "; these keys changed and apply when this pod restarts: " + strings.Join(pending, ", ") +
-			" (helm upgrade rolls the pods; after a direct ConfigMap edit run kubectl rollout restart deploy/defenseclaw-" + f.role + ")"
+			" (helm upgrade rolls the pods; after a direct ConfigMap edit run kubectl rollout restart deploy/" + substrateRoleDeployment[f.role] + ")"
 	}
 	fmt.Fprintln(f.out, msg)
 }

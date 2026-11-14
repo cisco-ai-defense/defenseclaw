@@ -92,6 +92,9 @@ func TestGAP0276GatewayAndLeaderFollowChainEgressAction(t *testing.T) {
 	if got := chains.EgressAction(); got != chainstate.EgressBlock {
 		t.Fatalf("leader chain egress action = %q after the edit", got)
 	}
+	if !strings.Contains(gwOut.String(), "deploy/defenseclaw-gateway)") || !strings.Contains(ldOut.String(), "deploy/defenseclaw-gateway-leader)") {
+		t.Fatalf("the restart hint names a Deployment the chart does not have: %q / %q", gwOut.String(), ldOut.String())
+	}
 	for _, out := range []string{gwOut.String(), ldOut.String()} {
 		if !strings.Contains(out, configwatch.Digest([]byte("v2"))+" in force") || !strings.Contains(out, "substrate.identity") ||
 			!strings.Contains(out, "rollout restart") {

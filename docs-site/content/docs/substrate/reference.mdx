@@ -170,7 +170,7 @@ A direct edit of the `defenseclaw-config` ConfigMap, for example with `kubectl e
 | `substrate.identity`, `substrate.rate_limits`, `substrate.llm`, `llm_providers`, `substrate.workspace_max_bytes`, `substrate.unattended.ask_timeout`, `deployment_mode` | At the next restart of the gateway or the leader. Each logs the keys that wait for it |
 | `substrate.extproc`, and the callout's copy of `url_rules`, `ask_hosts`, `actor_secrets` and unattended asks | Only through `helm upgrade`, which renders the callout's own ConfigMap |
 
-After a direct edit of a setting that waits for a restart, run `kubectl -n defenseclaw-system rollout restart deploy/defenseclaw-gateway` (or `deploy/defenseclaw-leader`). With `substrate.bundles` on, the stage bundles are layered over the profiles that config.yaml had when the controller started, so a profile change in config.yaml applies when the controller restarts.
+After a direct edit of a setting that waits for a restart, run `kubectl -n defenseclaw-system rollout restart deploy/defenseclaw-gateway` (or `deploy/defenseclaw-gateway-leader`). With `substrate.bundles` on, the stage bundles are layered over the profiles that config.yaml had when the controller started, so a profile change in config.yaml applies when the controller restarts.
 
 ## Chart values
 
