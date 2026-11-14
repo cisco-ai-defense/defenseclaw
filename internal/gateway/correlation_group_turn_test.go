@@ -30,13 +30,6 @@ func setHookCorrelationGroupLimits(t *testing.T, limits audit.CorrelationGroupLi
 	t.Cleanup(func() { hookCorrelationGroupLimits = previous })
 }
 
-func setHookCorrelationGroupOccurrences(t *testing.T, occurrences int) {
-	t.Helper()
-	limits := hookCorrelationGroupLimits
-	limits.Occurrences = occurrences
-	setHookCorrelationGroupLimits(t, limits)
-}
-
 type groupHookCall struct{ session, event, tool string }
 
 // groupIdentityCalls are two Claude Code sessions interleaved, in waves: a

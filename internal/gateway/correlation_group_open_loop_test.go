@@ -136,6 +136,15 @@ func runHookPerUserOpenLoop(t *testing.T, sessions, perSecond int) {
 	}
 }
 
+// setHookCorrelationGroupOccurrences sets the group size of a leg; only
+// these opt-in, non-Windows legs use it.
+func setHookCorrelationGroupOccurrences(t *testing.T, occurrences int) {
+	t.Helper()
+	limits := hookCorrelationGroupLimits
+	limits.Occurrences = occurrences
+	setHookCorrelationGroupLimits(t, limits)
+}
+
 // perUserOpenLoopClient opens a new connection per call, as the hook does.
 var perUserOpenLoopClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true, MaxIdleConnsPerHost: -1}}
 
