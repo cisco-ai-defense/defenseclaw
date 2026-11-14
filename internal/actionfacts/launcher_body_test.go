@@ -49,3 +49,32 @@ func TestShellLauncherBody(t *testing.T) {
 		}
 	}
 }
+
+// ShellLauncherBodyOfText reads the same launchers when they are one command
+// string (rel-1-0-10:GAP-0735).
+func TestShellLauncherBodyOfText(t *testing.T) {
+	tests := []struct {
+		name, text, want string
+		dialect          Dialect
+		ok               bool
+	}{
+		{"single quoted", `powershell.exe -Command 'Get-ChildItem .'`, "Get-ChildItem .", DialectPowerShell, true},
+		{"doubled quote", `pwsh -c 'echo ''hi'''`, "echo 'hi'", DialectPowerShell, true},
+		{"double quoted", `powershell -NoProfile -Command "Get-Date"`, "Get-Date", DialectPowerShell, true},
+		{"call operator", `& 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -Command 'dir'`, "dir", DialectPowerShell, true},
+		{"cmd quoted", `cmd /c "dir C:\"`, `dir C:\`, DialectCMD, true},
+		{"cmd d c", `cmd.exe /d /c "echo hi"`, "echo hi", DialectCMD, true},
+		{"newline inside quotes", "pwsh -Command 'a\nb'", "a\nb", DialectPowerShell, true},
+		{"statement after", `powershell -Command 'dir' ; echo done`, "dir", DialectPowerShell, true},
+		{"unterminated quote", `pwsh -Command 'dir`, "", DialectNone, false},
+		{"not a launcher", `git status`, "", DialectNone, false},
+		{"file", `powershell -File x.ps1`, "", DialectPowerShell, false},
+		{"empty", ``, "", DialectNone, false},
+	}
+	for _, tc := range tests {
+		got, dialect, ok := ShellLauncherBodyOfText(tc.text)
+		if ok != tc.ok || got != tc.want || (tc.ok && dialect != tc.dialect) {
+			t.Errorf("%s: got (%q, %q, %t), want (%q, %q, %t)", tc.name, got, dialect, ok, tc.want, tc.dialect, tc.ok)
+		}
+	}
+}

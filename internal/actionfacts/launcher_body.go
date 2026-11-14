@@ -157,25 +157,111 @@ func cmdLauncherBody(argv []string) (string, bool) {
 	return "", false
 }
 
-// ShellLauncherBodyOfFacts is the body of the first top-level PowerShell or
-// CMD launcher command with a static argv in the reading of a command string
-// (facts.Parse.Dialect PowerShell or CMD), such as `powershell.exe -Command
-// '<script>'` as the Codex shell tool sends it on a Windows host. A call that
-// runs more commands around it is read the same way: the body runs as
-// written, and the reading is judged as if every member runs.
-func ShellLauncherBodyOfFacts(facts Facts) (body string, dialect Dialect, ok bool) {
-	if facts.Parse.Dialect != DialectPowerShell && facts.Parse.Dialect != DialectCMD {
+// maxLauncherTextWords bounds the words read from the head of a launcher
+// command string.
+const maxLauncherTextWords = 64
+
+// ShellLauncherBodyOfText returns the script of a launcher written as one
+// command string, such as `powershell.exe -Command '<script>'` or
+// `cmd /c "<script>"` as the Codex shell tool sends it on a Windows host
+// (rel-1-0-10:GAP-0735), read from the launcher's own grammar like
+// ShellLauncherBody. The line is split into words as PowerShell splits it
+// (single quotes, a doubled single quote for a quote, double quotes with `" or "" for a
+// quote) up to its first statement or redirect operator outside quotes
+// (newline, ; | & < >): what follows is the rest of the call, which the
+// call's own analysis reads. A leading call operator & is skipped.
+func ShellLauncherBodyOfText(text string) (body string, dialect Dialect, ok bool) {
+	if text == "" || len(text) > maxCommandBytes {
 		return "", DialectNone, false
 	}
-	for _, command := range facts.Commands {
-		if command.ParentCommandID != 0 || !command.ArgvComplete || len(command.Argv) < 2 {
-			continue
-		}
-		if body, dialect, ok = ShellLauncherBody(command.Argv); ok && dialect != DialectPOSIX {
-			return body, dialect, true
+	words, ok := launcherTextWords(text)
+	if !ok {
+		return "", DialectNone, false
+	}
+	return ShellLauncherBody(words)
+}
+
+func launcherTextWords(text string) ([]string, bool) {
+	var (
+		words []string
+		word  strings.Builder
+		in    bool
+	)
+	flush := func() {
+		if in {
+			words = append(words, word.String())
+			word.Reset()
+			in = false
 		}
 	}
-	return "", DialectNone, false
+	i := 0
+	for i < len(text) && len(words) < maxLauncherTextWords {
+		c := text[i]
+		switch {
+		case c == ' ' || c == '\t':
+			flush()
+			i++
+		case c == '\n' || c == '\r' || c == ';' || c == '|' || c == '<' || c == '>':
+			flush()
+			return words, len(words) > 0
+		case c == '&':
+			if len(words) == 0 && !in {
+				i++ // the call operator before the program
+				continue
+			}
+			flush()
+			return words, len(words) > 0
+		case c == '\'':
+			in = true
+			i++
+			for i < len(text) {
+				if text[i] == '\'' {
+					if i+1 < len(text) && text[i+1] == '\'' {
+						word.WriteByte('\'')
+						i += 2
+						continue
+					}
+					break
+				}
+				word.WriteByte(text[i])
+				i++
+			}
+			if i >= len(text) {
+				return nil, false // unterminated quote
+			}
+			i++
+		case c == '"':
+			in = true
+			i++
+			for i < len(text) {
+				if text[i] == '`' && i+1 < len(text) {
+					word.WriteByte(text[i+1])
+					i += 2
+					continue
+				}
+				if text[i] == '"' {
+					if i+1 < len(text) && text[i+1] == '"' {
+						word.WriteByte('"')
+						i += 2
+						continue
+					}
+					break
+				}
+				word.WriteByte(text[i])
+				i++
+			}
+			if i >= len(text) {
+				return nil, false
+			}
+			i++
+		default:
+			in = true
+			word.WriteByte(c)
+			i++
+		}
+	}
+	flush()
+	return words, len(words) > 0
 }
 
 // posixLauncherBody is the script word of a POSIX shell invoked with -c in

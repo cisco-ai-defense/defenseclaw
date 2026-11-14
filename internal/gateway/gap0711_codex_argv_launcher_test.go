@@ -102,6 +102,8 @@ func TestGAP0711CodexArgvLauncherBodiesFiveTiers(t *testing.T) {
 		{"ordinary-200", gap0589Join(gap0589Filler(200)), strings.Join(gap0711CmdFiller(200), " & "), "floor", true},
 		{"ordinary-over-64KiB", "Get-ChildItem .\n# " + strings.Repeat("z", 64<<10), "echo hi & rem " + strings.Repeat("z", 64<<10), "floor", true},
 		{"ordinary-listing", `Get-ChildItem C:\Users\alice\project`, `dir C:\Users\alice\project`, "allow", false},
+		{"benign-git", `git log --oneline -5`, `git log --oneline -5`, "allow", false},
+		{"benign-build", `npm test -- --watch=false`, `npm test -- --watch=false`, "allow", false},
 		{"ordinary-30", gap0589Join(gap0589Filler(30)), strings.Join(gap0711CmdFiller(30), " & "), "allow", false},
 	}
 	for _, tier := range boundedTestTiers {
@@ -121,7 +123,7 @@ func TestGAP0711CodexArgvLauncherBodiesFiveTiers(t *testing.T) {
 					return resp.Action, resp.Findings
 				}
 				argvAction, argvFindings := decide(l.argv(body))
-				textAction, _ := decide(l.text(body))
+				textAction, textFindings := decide(l.text(body))
 				t.Logf("ROW %s | %s | %s | argv %s | string %s", tier.name, l.name, r.id, argvAction, textAction)
 				want := bounded.Allow
 				switch r.want {
@@ -142,11 +144,13 @@ func TestGAP0711CodexArgvLauncherBodiesFiveTiers(t *testing.T) {
 				if r.limit && !boundedHasLimit(argvFindings, bounded.Items, false) {
 					t.Errorf("%s/%s/%s: no %s finding on the argv call: %v", tier.name, l.name, r.id, evaluationLimitRuleID, argvFindings)
 				}
-				// The same launcher as one string is read by the string path,
-				// which keeps its own gaps (GAP-0719); the argv call is never
-				// judged below it.
-				if got < boundedParse(textAction) {
-					t.Errorf("%s/%s/%s: argv action %s is below the same command as a string, %s", tier.name, l.name, r.id, argvAction, textAction)
+				// The same launcher as one command string gets the same
+				// verdict (rel-1-0-10:GAP-0735).
+				if argvAction != textAction {
+					t.Errorf("%s/%s/%s: argv action %s differs from the same command as a string, %s", tier.name, l.name, r.id, argvAction, textAction)
+				}
+				if r.limit && !boundedHasLimit(textFindings, bounded.Items, false) && !boundedHasLimit(textFindings, bounded.Bytes, false) {
+					t.Errorf("%s/%s/%s: no %s finding on the string call: %v", tier.name, l.name, r.id, evaluationLimitRuleID, textFindings)
 				}
 			}
 		}
