@@ -1128,7 +1128,13 @@ func TestManagedAIDOnly_NativeHookSelectedAllowAccountsAfterCancellation(t *test
 	api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
 	api.scannerCfg.Guardrail.Connector = "hermes"
 	api.SetCiscoInspector(inspector)
+	// The client of this call leaves before its answer, which the hook
+	// capacity counter takes as a managed deadline outcome and exports as its
+	// own metric (S8 DESIGN 18). This test pins the AID fail-open metric, so
+	// the capacity export stays off here; the count itself is asserted below.
+	withHookCapacity(t, time.Now())
 	api.bindObservabilityV8Lifecycle(capture)
+	hookCapacity.setSink(nil)
 
 	request := httptest.NewRequest(
 		http.MethodPost,
@@ -1153,6 +1159,9 @@ func TestManagedAIDOnly_NativeHookSelectedAllowAccountsAfterCancellation(t *test
 	}
 	if len(capture.deadlineRemaining) != 1 || capture.deadlineRemaining[0] <= 0 || capture.deadlineRemaining[0] > time.Second {
 		t.Fatalf("metric deadline remaining=%v, want one live <=1s bound", capture.deadlineRemaining)
+	}
+	if got := hookCapacity.snapshot().Window; got.DeadlineDenies != 1 {
+		t.Fatalf("hook capacity = %+v, want the call whose client left as one deadline deny", got)
 	}
 }
 
