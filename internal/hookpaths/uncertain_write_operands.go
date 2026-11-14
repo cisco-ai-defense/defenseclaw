@@ -130,7 +130,13 @@ func sedEditsInPlace(call *syntax.CallExpr, home string) bool {
 	for _, arg := range call.Args[1:] {
 		text, fixed := StaticWord(arg, home)
 		if !fixed {
-			return true
+			// A word with a glob or an expansion is an operand or the script;
+			// an option the shell has to expand first could hide an -i, so a
+			// word that starts with a dash and is not fixed counts as in place.
+			if literal := arg.Lit(); strings.HasPrefix(literal, "-") || len(arg.Parts) > 0 && !isLitPart(arg.Parts[0]) {
+				return true
+			}
+			continue
 		}
 		if text == "--" {
 			return false
@@ -143,4 +149,9 @@ func sedEditsInPlace(call *syntax.CallExpr, home string) bool {
 		}
 	}
 	return false
+}
+
+func isLitPart(part syntax.WordPart) bool {
+	_, ok := part.(*syntax.Lit)
+	return ok
 }
