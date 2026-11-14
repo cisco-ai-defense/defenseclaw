@@ -53,7 +53,7 @@ type engineCacheEntry struct {
 }
 
 func newEngineRouter(boot *config.Config, classifier engine.Classifier, dotenv string) *engineRouter {
-	return &engineRouter{boot: boot, classifier: classifier, dotenv: dotenv, sticky: engine.NewStickyCache(), marks: engine.NewStickyCache()}
+	return &engineRouter{boot: boot, classifier: classifier, dotenv: dotenv, sticky: engine.NewStickyCache(), marks: engine.NewSensitiveMarkCache()}
 }
 
 // SetAdminEvaluator installs the routing.admin rules and budgets evaluator

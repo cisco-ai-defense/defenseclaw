@@ -68,6 +68,11 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		d.Warnings = append(d.Warnings, verdict.Warnings...)
 		d.RuleIDs, d.ChargeKeys = verdict.RuleIDs, verdict.ChargeKeys
 		if verdict.Deny != nil && e.managed {
+			if e.SensitiveConfigured() && e.sensitiveFloor(req, signals) != "" {
+				// The refused turn may stay in the agent history: keep the
+				// conversation narrowed (GAP-0576 review r3).
+				e.markSensitiveSticky(req)
+			}
 			d.Outcome, d.Deny, d.FailureCode, d.verdict = OutcomeDenied, verdict.Deny, FailureFiltered, verdict
 			return d
 		}

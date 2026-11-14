@@ -87,7 +87,7 @@ func New(cfg *config.Config, opts Options) (*Engine, error) {
 		// classifier answers stay cached only for systemone.
 		e.marks = opts.SensitiveMarks
 		if e.marks == nil {
-			e.marks = NewStickyCache()
+			e.marks = NewSensitiveMarkCache()
 		}
 	}
 	if r.EffectiveClassifier() == config.RoutingClassifierSystemOne {

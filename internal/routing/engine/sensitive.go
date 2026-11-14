@@ -46,8 +46,8 @@ func (e *Engine) SensitiveFloor(req Request) string {
 // sensitiveStickyKey keys the sensitive mark of a conversation: the caller,
 // connector and the agent session id. A request with no session id has no
 // mark (each turn is judged alone). Every narrowed turn renews the mark, so
-// it ends 30 minutes after the last turn of the conversation that was
-// narrowed.
+// it ends SensitiveMarkTTL after the last narrowed turn of the
+// conversation; marks are in memory and a gateway restart clears them.
 func sensitiveStickyKey(req Request) (stickyKey, bool) {
 	if req.ConversationID == "" {
 		return stickyKey{}, false

@@ -131,14 +131,14 @@ func TestSensitiveConversationMarkSlidesAndExpires(t *testing.T) {
 	}
 	turn("key AKIA1234")
 	for i := 0; i < 3; i++ {
-		now = now.Add(20 * time.Minute)
+		now = now.Add(SensitiveMarkTTL - time.Minute)
 		if d := turn("keep refactoring"); d.Sensitive.Source != SensitiveSourceSticky {
-			t.Fatalf("turn %d, 20 minutes after the last narrowed turn: %+v", i, d.Sensitive)
+			t.Fatalf("turn %d, just inside the mark TTL: %+v", i, d.Sensitive)
 		}
 	}
-	now = now.Add(31 * time.Minute)
+	now = now.Add(SensitiveMarkTTL + time.Minute)
 	if d := turn("keep refactoring"); d.SensitiveNarrowed() {
-		t.Fatalf("31 minutes after the last narrowed turn: %+v", d.Sensitive)
+		t.Fatalf("past the mark TTL: %+v", d.Sensitive)
 	}
 	if e.sticky != nil {
 		t.Fatal("routing.sensitive alone must not cache classifier answers")
