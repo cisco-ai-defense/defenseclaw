@@ -292,6 +292,7 @@ func TestCascadePolicyLatencyAt100PerSecond(t *testing.T) {
 	sort.Strings(names)
 	for _, name := range names {
 		api := cascadeModuleConfig(t, "default", modules[name], "")
+		api.scannerCfg.Guardrail.Cascade.Policy.TimeoutMs = 0 // the production budget (5 ms)
 		verdict := func(i int) *ToolInspectVerdict {
 			findings := []RuleFinding{{RuleID: "SEC-AWS-KEY", Severity: "MEDIUM"}, {RuleID: "COG-CLAUDE-MD", Severity: "HIGH"},
 				{RuleID: "SHELL-EXFIL", Severity: "HIGH", Tags: []string{"exfil", "network"}}}

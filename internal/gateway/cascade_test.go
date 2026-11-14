@@ -302,8 +302,12 @@ func cascadeModuleConfig(t *testing.T, posture, module, extra string) *APIServer
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(module))
+	// The tests pin what the policy decides, not the 5 ms production budget:
+	// under -race on a loaded box an evaluation can exceed it and go to the
+	// unknown tier (rel-1-0-10:GAP-0620). The budget itself is measured by
+	// TestCascadePolicyLatencyAt100PerSecond.
 	raw := []byte("config_version: 9\ndata_dir: " + filepath.Join(dir, "state") + "\nguardrail:\n  cascade:\n" + extra +
-		"    policy:\n      module: {path: " + path + ", digest: \"sha256:" + hex.EncodeToString(sum[:]) + "\"}\n")
+		"    policy:\n      module: {path: " + path + ", digest: \"sha256:" + hex.EncodeToString(sum[:]) + "\"}\n      timeout_ms: 50\n")
 	loaded, err := config.LoadRuntimeV8FromBytes("config.yaml", raw)
 	if err != nil {
 		t.Fatal(err)

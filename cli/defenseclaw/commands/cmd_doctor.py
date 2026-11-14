@@ -13794,7 +13794,9 @@ def _check_guardrail_cascade(cfg, r: _DoctorResult) -> None:
     view = (payload or {}).get("cascade") or {}
     invalid = view.get("invalid")
     if invalid:
-        fallback = "the last-known-good cascade" if invalid.get("fallback") == "last_known_good" else "the rule pack defaults"
+        fallback = (
+            "the last-known-good cascade" if invalid.get("fallback") == "last_known_good" else "the rule pack defaults"
+        )
         detail = (
             f"invalid: {invalid.get('error')}; a running gateway refuses the reload and keeps its current "
             f"configuration; a gateway started now decides with {fallback}"
