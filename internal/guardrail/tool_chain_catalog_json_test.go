@@ -52,7 +52,7 @@ var toolChainDisplay = map[string]struct{ domain, note string }{
 	ToolChainPermissionDeniedThenBypass:            {"security-controls", toolChainNoteAlertOnly},
 	ToolChainPrivilegeDiscoveryThenElevation:       {"host", toolChainNoteAlertOnly},
 	ToolChainSecretManagerReadThenEgress:           {"data-egress", toolChainNoteAlertOnly},
-	ToolChainSecretReadThenEgress:                  {"data-egress", toolChainNoteAlertOnly},
+	ToolChainSecretReadThenEgress:                  {"data-egress", "Can block only with the strict rule pack, when both steps are proven and name one file; alert in the default and permissive packs"},
 	ToolChainWorkloadIdentityThenLateralExec:       {"kubernetes", toolChainNoteAlertOnly},
 	ToolChainDownloadDecodeExecuteSameArtifact:     {"host", toolChainNoteAlertOnly},
 	ToolChainDownloadThenExecuteSameArtifact:       {"host", toolChainNoteAlertOnly},

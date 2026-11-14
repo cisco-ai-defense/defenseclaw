@@ -275,6 +275,36 @@ func PowerShellReadingStopsEarly(command string) bool {
 // powerShellStatements counts the statements of command, stopping at limit,
 // and reports whether it met an opaque construct.
 func powerShellStatements(command string, limit int) (int, bool) {
+	return powerShellStatementScan(command, limit, nil)
+}
+
+// powerShellTopLevelStatements returns the top-level statements of command,
+// in order, as the statement budget scanner reads them: the text between the
+// ; and line ends that end a statement outside every bracket, quote, comment
+// and here-string. A pipeline, an && or || chain and a background & stay in
+// their statement. ok is false past limit statements or when a construct does
+// not close.
+func powerShellTopLevelStatements(command string, limit int) (statements []string, ok bool) {
+	var cuts []int
+	count, _ := powerShellStatementScan(command, limit+1, &cuts)
+	if count > limit {
+		return nil, false
+	}
+	runes := []rune(command)
+	start := 0
+	for _, cut := range append(cuts, len(runes)) {
+		if text := strings.TrimSpace(string(runes[start:min(cut, len(runes))])); text != "" {
+			statements = append(statements, text)
+		}
+		start = cut + 1
+	}
+	return statements, true
+}
+
+// powerShellStatementScan is powerShellStatements; with cuts set it also
+// records where each top-level statement that ends at a ; or a line end ends
+// (a rune index of command).
+func powerShellStatementScan(command string, limit int, cuts *[]int) (int, bool) {
 	const (
 		frameCode = iota
 		frameHashtable
@@ -467,6 +497,9 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			// A line end inside a bare ( ) or after a trailing comma
 			// continues the statement.
 		case r == ';' || r == '|' || r == '\n' || r == '\r':
+			if cuts != nil && r != '|' && inStatement && len(frames) == 1 {
+				*cuts = append(*cuts, i)
+			}
 			boundary()
 			argumentMode[len(argumentMode)-1] = false
 			statementStart[len(statementStart)-1] = true
