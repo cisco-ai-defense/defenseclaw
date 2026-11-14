@@ -49,8 +49,9 @@ const tokenUnavailableWarnCooldown = 60 * time.Second
 //
 //  2. Payload: messages[].content is an object {"text": "..."} matching
 //     the DefenseClaw proto's MessageContent, rather than a plain
-//     string. device_id and dc_metadata are intentionally omitted —
-//     the cloud derives them server-side from the token.
+//     string. device_id is intentionally omitted — the cloud derives
+//     the device from the token. Under the Secure Client integration
+//     metadata.user and dc_metadata.user name the end user.
 //
 // The client also handles HTTP 401 by invalidating the provider's
 // cached token and retrying once. See doInspectHTTP for the shared
@@ -283,8 +284,8 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 
 	// Body: messages[].content is the DefenseClaw MessageContent shape
 	// ({"text": ...}), matching the proto and the sample curl in the
-	// task description. No device_id, no dc_metadata — cloud derives
-	// both from the bearer token.
+	// task description. No device_id — cloud derives the device from the
+	// bearer token.
 	chatMsgs := make([]map[string]interface{}, len(messages))
 	for i, m := range messages {
 		msg := map[string]interface{}{
@@ -306,6 +307,12 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 	// cisco_ai_defense.enabled_rules is set; otherwise it omits config
 	// too and the tenant's own rules apply.
 	payload := map[string]interface{}{"messages": chatMsgs}
+	// Under the Secure Client integration the request names its end user,
+	// so AI Defense can attribute the inspection and choose that person's
+	// policy (secure_client_user.go). An AI Defense that rejects the fields
+	// gets the request again without them (onValidationError below), so
+	// they can never cost an inspection.
+	sentUser := attachDefenseClawInspectUser(ctx, payload, c.endpoint)
 
 	// currentToken is captured by both setAuth and onUnauthorized so
 	// the retry can attach the refreshed token without re-invoking
@@ -320,6 +327,7 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		setAuth: func(req *http.Request) {
 			req.Header.Set("Authorization", "Bearer "+currentToken)
 		},
+		onValidationError: defenseClawInspectUserFallback(sentUser, payload, c.endpoint),
 		onUnauthorized: func(retryCtx context.Context) bool {
 			c.provider.Invalidate()
 			ctx, cancel := context.WithTimeout(retryCtx, c.timeout)

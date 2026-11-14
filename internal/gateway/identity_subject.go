@@ -186,8 +186,11 @@ func processOwnerIdentity(userID string) *llmEventIdentity {
 // Verified facts are attached only when the record names the verified
 // subject, so they can never be stamped onto another account's record.
 func requestIdentityFor(ctx context.Context, userID string) *llmEventIdentity {
-	if ctx == nil || !identityFactsEnabled.Load() {
+	if ctx == nil {
 		return nil
+	}
+	if !identityFactsEnabled.Load() {
+		return secureClientRequestIdentity(ctx, userID)
 	}
 	if identity, ok := actingForRequestIdentity(ctx, userID); ok {
 		// The person a trusted connector acts for: facts the gateway
@@ -249,7 +252,20 @@ func (id *llmEventIdentity) v8() v8IdentityAttrs {
 		SessionKind: observability.Absent[string](), KerberosPrincipal: observability.Absent[string](),
 		ClientAddress: observability.Absent[string](),
 	}
-	if id == nil || !identityFactsEnabled.Load() {
+	if id == nil {
+		return attrs
+	}
+	if !identityFactsEnabled.Load() {
+		// Secure Client: only the verified principal of the end user
+		// (secure_client_user.go), never domain, directory, source or
+		// session facts.
+		if secureClientUserAttribution.Load() && userPrincipalCollectionEnabled.Load() &&
+			id.Directory.Assurance == useridentity.AssuranceVerified {
+			attrs.Principal = v8IdentityText(id.Directory.Principal, 512)
+			if attrs.Principal.IsPresent() {
+				attrs.Assurance = observability.Present(string(useridentity.AssuranceVerified))
+			}
+		}
 		return attrs
 	}
 	dir := id.Directory
@@ -357,7 +373,7 @@ var v8IdentityFieldIndex sync.Map // reflect.Type -> [len(v8IdentityFieldNames)]
 // correlation.identity names the fields identically, so one helper serves
 // them all; a field the family lacks is skipped.
 func (id *llmEventIdentity) applyTo(input any) {
-	if id == nil || !identityFactsEnabled.Load() {
+	if id == nil || !identityFactsEnabled.Load() && !secureClientUserAttribution.Load() {
 		return
 	}
 	value := reflect.ValueOf(input)
@@ -407,7 +423,10 @@ func applyIdentityPosture(cfg *config.Config) {
 	}
 	enabled := !cfg.SecureClientIntegration()
 	setIdentityFactsEnabled(enabled)
-	SetUserPrincipalCollectionEnabled(enabled && cfg.AIDiscovery.IncludeUserPrincipal)
+	// Under Secure Client the end user's verified UPN is the principal
+	// Cisco AI Defense keys per-user policy on (secure_client_user.go).
+	setSecureClientUserAttribution(!enabled)
+	SetUserPrincipalCollectionEnabled(enabled && cfg.AIDiscovery.IncludeUserPrincipal || !enabled)
 	// An account of a child AD domain is verified only when
 	// ai_discovery.trusted_ad_child_domains lists its domain (GAP-1255). A
 	// changed list drops the cached facts, so a reload applies it at the
