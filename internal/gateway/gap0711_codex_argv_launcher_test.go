@@ -66,6 +66,14 @@ func (l gap0711Launcher) text(body string) string {
 	return strings.Join(append(append([]string{l.prog}, l.flags...), quoted), " ")
 }
 
+func gap0711Pipelines(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("$o%d = & git log | Select-Object -First 1 | Out-String | Write-Output | Out-String | Write-Output | Out-String | Write-Output | Out-String | Out-Null", i)
+	}
+	return out
+}
+
 func gap0711CmdFiller(n int) []string {
 	out := make([]string, n)
 	for i := range out {
@@ -74,7 +82,16 @@ func gap0711CmdFiller(n int) []string {
 	return out
 }
 
-func TestGAP0711CodexArgvLauncherBodiesFiveTiers(t *testing.T) {
+// One top-level test per tier, so the CI shards can split the -race cost.
+func TestGAP0711CodexArgvLauncherBodiesDefault(t *testing.T)    { gap0711LauncherBodies(t, 0) }
+func TestGAP0711CodexArgvLauncherBodiesPermissive(t *testing.T) { gap0711LauncherBodies(t, 1) }
+func TestGAP0711CodexArgvLauncherBodiesStrict(t *testing.T)     { gap0711LauncherBodies(t, 2) }
+func TestGAP0711CodexArgvLauncherBodiesManaged(t *testing.T)    { gap0711LauncherBodies(t, 3) }
+func TestGAP0711CodexArgvLauncherBodiesManagedStrict(t *testing.T) {
+	gap0711LauncherBodies(t, 4)
+}
+
+func gap0711LauncherBodies(t *testing.T, tierIndex int) {
 	gap0589WindowsHost(t)
 	cwd := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
@@ -99,6 +116,25 @@ func TestGAP0711CodexArgvLauncherBodiesFiveTiers(t *testing.T) {
 			strings.Join(append(gap0711CmdFiller(100), redirect), " & "), "floor", false},
 		{"redirect-after-200", gap0589Join(gap0589Filler(200), []string{redirect}),
 			strings.Join(append(gap0711CmdFiller(200), redirect), " & "), "floor", true},
+		// The remaining psfchk probe rows of GAP-0711/0712 (same fixtures,
+		// layouts of the s7-psfchk matrix): the redirect first, after an
+		// unreadable statement, in the middle, after ';' lists, after 120
+		// ten-stage pipelines, behind a variable, and the atomic fixture.
+		{"redirect-first-100", gap0589Join([]string{redirect}, gap0589Filler(100)),
+			strings.Join(append([]string{redirect}, gap0711CmdFiller(100)...), " & "), "floor", false},
+		{"redirect-unreadable-100-last", gap0589Join([]string{windowsUnreadableStatement}, gap0589Filler(100), []string{redirect}),
+			strings.Join(append(gap0711CmdFiller(100), redirect), " & "), "floor", false},
+		{"redirect-60-mid-60", gap0589Join(gap0589Filler(60), []string{redirect}, gap0589Filler(60)),
+			strings.Join(append(append(gap0711CmdFiller(60), redirect), gap0711CmdFiller(60)...), " & "), "floor", false},
+		{"redirect-semi-100-last", strings.Join(append(gap0589Filler(100), redirect), "; "),
+			strings.Join(append(gap0711CmdFiller(100), redirect), " & "), "floor", false},
+		{"redirect-pipelines-120-last", gap0589Join(gap0711Pipelines(120), []string{redirect}),
+			strings.Join(append(gap0711CmdFiller(120), redirect), " & "), "floor", false},
+		{"variable-5", "$k = 'C:\\Users\\alice\\.ssh\\authorized_keys'\n" + gap0589Join(gap0589Filler(5), []string{strings.Replace(redirect, `C:\Users\alice\.ssh\authorized_keys`, `$k`, 1)}),
+			redirect, "same", false},
+		{"variable-100", "$k = 'C:\\Users\\alice\\.ssh\\authorized_keys'\n" + gap0589Join(gap0589Filler(100), []string{strings.Replace(redirect, `C:\Users\alice\.ssh\authorized_keys`, `$k`, 1)}),
+			redirect, "same", false},
+		{"atomic-fixture", windowsAtomicParityPositives[3].command, windowsAtomicParityPositives[3].command, "same", false},
 		{"ordinary-200", gap0589Join(gap0589Filler(200)), strings.Join(gap0711CmdFiller(200), " & "), "floor", true},
 		{"ordinary-over-64KiB", "Get-ChildItem .\n# " + strings.Repeat("z", 64<<10), "echo hi & rem " + strings.Repeat("z", 64<<10), "floor", true},
 		{"ordinary-listing", `Get-ChildItem C:\Users\alice\project`, `dir C:\Users\alice\project`, "allow", false},
@@ -106,7 +142,7 @@ func TestGAP0711CodexArgvLauncherBodiesFiveTiers(t *testing.T) {
 		{"benign-build", `npm test -- --watch=false`, `npm test -- --watch=false`, "allow", false},
 		{"ordinary-30", gap0589Join(gap0589Filler(30)), strings.Join(gap0711CmdFiller(30), " & "), "allow", false},
 	}
-	for _, tier := range boundedTestTiers {
+	for _, tier := range boundedTestTiers[tierIndex : tierIndex+1] {
 		floor := bounded.Unknown(tier.tier)
 		api := gap0589TierAPI(t, "codex", tier.posture, tier.managed, tier.tier)
 		for _, l := range gap0711Launchers {
@@ -133,7 +169,9 @@ func TestGAP0711CodexArgvLauncherBodiesFiveTiers(t *testing.T) {
 					want = floor
 				}
 				got := boundedParse(argvAction)
-				if r.want == "floor" {
+				if r.want == "same" {
+					// Only the parity with the string form below.
+				} else if r.want == "floor" {
 					// A proven block in the read part keeps its verdict.
 					if got < want {
 						t.Errorf("%s/%s/%s: argv action %s, want at least %s; findings %v", tier.name, l.name, r.id, argvAction, want, argvFindings)

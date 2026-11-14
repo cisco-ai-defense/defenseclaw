@@ -62,10 +62,11 @@ func trustedArgvCommandInput(input actionfacts.Input) ([]string, bool) {
 //
 // The body runs as written whatever a profile or AutoRun entry does before
 // it, so every finding of its reading counts. A POSIX launcher is read only
-// when its own analysis hit a bound; a PowerShell or CMD launcher whenever
-// its analysis is not authoritative.
+// when its own analysis hit a bound; a PowerShell or CMD launcher always, as an
+// authoritative -NoProfile reading still missed what the string form of the
+// same script finds (the atomic parity fixture, alert as a string).
 func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Facts) (trustedActionRequest, bool) {
-	if request.simpleCommandPass || request.readingTwin || request.launcherDepth >= maxLauncherBodyDepth || launcherBodyAlreadyRead(facts) {
+	if request.simpleCommandPass || request.readingTwin || request.launcherDepth >= maxLauncherBodyDepth {
 		return trustedActionRequest{}, false
 	}
 	var (
@@ -123,22 +124,4 @@ func trustedArgvReadingCut(input actionfacts.Input, facts actionfacts.Facts) bou
 		return bounded.Of(bounded.Items)
 	}
 	return bounded.Of(bounded.Bytes)
-}
-
-// launcherBodyAlreadyRead reports a reading that is authoritative and has
-// already read the launcher's script as a child of the launcher command (a
-// PowerShell launcher with -NoProfile, cmd with /d): the script's own
-// reading adds nothing. A launcher whose script was not read as a child (an
-// authoritative cmd /k "<script>" reading is the launcher's own argv, or a
-// reading that stopped at a cap) is read on its own.
-func launcherBodyAlreadyRead(facts actionfacts.Facts) bool {
-	if !facts.Authoritative() {
-		return false
-	}
-	for _, command := range facts.Commands {
-		if command.ParentCommandID != 0 {
-			return true
-		}
-	}
-	return false
 }
