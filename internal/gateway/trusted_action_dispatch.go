@@ -539,16 +539,18 @@ func dispatchTrustedAction(
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
-		if facts.Parse.Status == actionfacts.StatusLimitExceeded &&
-			(facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell) {
-			// A CMD or PowerShell reading stopped at a cap of its own
-			// (commands, tokens, nesting) under the statement budget: what
-			// it read still decides, and the call is never judged below the
-			// unknown tier of its pack (the one bound rule). A CMD reading
-			// capped at 127 to 257 statements had no limit finding at all
-			// and was allowed in strict (rel-1-0-10:GAP-0426). A POSIX
-			// reading keeps its statement budget (ShellStatementsOverBudget),
-			// under which an ordinary long script stays allowed.
+		if facts.Parse.Status == actionfacts.StatusLimitExceeded && facts.Parse.Dialect == actionfacts.DialectCMD {
+			// A CMD reading stopped at a cap of its own (commands, tokens,
+			// nesting) under the statement budget: what it read still
+			// decides, and the call is never judged below the unknown tier
+			// of its pack (the one bound rule). A CMD reading capped at 127
+			// to 257 statements had no limit finding at all and was allowed
+			// in strict (rel-1-0-10:GAP-0426). A POSIX or PowerShell reading
+			// keeps its own statement budget (ShellStatementsOverBudget,
+			// PowerShellStatementsOverBudget in trustedStatementBudgetExceeded),
+			// under which an ordinary long script stays allowed: 70 lines of
+			// $oN = & git rev-parse HEAD fill the PowerShell command cap with
+			// 70 statements and allow, as on rel (rel-1-0-6:GAP-0331).
 			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Items), request) }()
 		}
 	}
