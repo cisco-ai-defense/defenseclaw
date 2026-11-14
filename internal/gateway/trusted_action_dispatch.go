@@ -539,19 +539,34 @@ func dispatchTrustedAction(
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
-		if facts.Parse.Status == actionfacts.StatusLimitExceeded && facts.Parse.Dialect == actionfacts.DialectCMD {
-			// A CMD reading stopped at a cap of its own (commands, tokens,
-			// nesting) under the statement budget: what it read still
-			// decides, and the call is never judged below the unknown tier
-			// of its pack (the one bound rule). A CMD reading capped at 127
-			// to 257 statements had no limit finding at all and was allowed
-			// in strict (rel-1-0-10:GAP-0426). A POSIX or PowerShell reading
-			// keeps its own statement budget (ShellStatementsOverBudget,
-			// PowerShellStatementsOverBudget in trustedStatementBudgetExceeded),
-			// under which an ordinary long script stays allowed: 70 lines of
-			// $oN = & git rev-parse HEAD fill the PowerShell command cap with
-			// 70 statements and allow, as on rel (rel-1-0-6:GAP-0331).
+		if facts.Parse.Status == actionfacts.StatusLimitExceeded &&
+			(facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell) {
+			// A CMD or PowerShell reading stopped at its command cap under the
+			// statement budget is truncated (the one bound rule): the call is
+			// never judged below the unknown tier of its pack. A CMD reading
+			// capped at 127 to 257 statements had no limit finding and was
+			// allowed in strict (rel-1-0-10:GAP-0426), and so was a PowerShell
+			// one: one `$o = & git rev-parse HEAD` statement is two commands,
+			// so about 64 statements fill the cap, and a registry write beside
+			// 100 such lines was found but allowed in every pack
+			// (rel-1-0-10:GAP-0589). A POSIX reading is not truncated by its
+			// command cap: its per-statement split (SimpleCommands) reads every
+			// statement up to the statement budget (ShellStatementsOverBudget),
+			// and each is judged.
 			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Items), request) }()
+			if facts.Parse.Dialect == actionfacts.DialectPowerShell && !request.readingTwin {
+				// The statements of the call are also read in runs that fit
+				// under the cap, so a block proven on a run keeps its own
+				// verdict (actionfacts.PowerShellCappedRuns).
+				for _, run := range actionfacts.PowerShellCappedRuns(request.Input, facts) {
+					twin := windowsReadingTwin(request)
+					twin.Input = run
+					twin.LegacyText = run.Command
+					defer func() {
+						findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+					}()
+				}
+			}
 		}
 	}
 	// A ~<active user> tilde-prefix names the active home from the password
