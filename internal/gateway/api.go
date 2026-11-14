@@ -71,6 +71,19 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
+	// apiBindFoundHeld: the first API bind of Run found the port held
+	// (another process, possibly another account, had it while this
+	// gateway restarted); set by acquireAPIListener, read by Run.
+	apiBindFoundHeld bool
+	// apiPortHolderNoted: a bind conflict of this acquire named the holder
+	// (noteHeldAPIPort); reset by acquireAPIListener.
+	apiPortHolderNoted atomic.Bool
+
+	// routeOnly serves /r/<connector>/ (route-only mode); nil = not mounted.
+	routeOnly atomic.Pointer[routeOnlyServer]
+	// onRouteKeyRotated renders the route-only agent configs again after
+	// rotateRouteKeyAfterHeldPort replaced the OSS route key (set by Sidecar).
+	onRouteKeyRotated func()
 	// modelUsage is the local usage store behind GET /usage (nil until the
 	// sidecar binds it; the store itself reports whether it is on).
 	modelUsage atomic.Pointer[usageQuerierBox]
@@ -1085,6 +1098,14 @@ func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
 	a.connectorRegistry = reg
 }
 
+// SetRouteOnly installs the route-only server for hook connectors.
+func (a *APIServer) SetRouteOnly(s *routeOnlyServer) {
+	if s != nil {
+		s.api = a
+	}
+	a.routeOnly.Store(s)
+}
+
 // SetFleetAPI registers the Edge Connector fleet management API so its
 // routes are mounted when the HTTP server starts.
 func (a *APIServer) SetFleetAPI(api *fleet.API) {
@@ -1295,11 +1316,26 @@ func (a *APIServer) servesOpenClawRoutes() bool {
 // kernel reclaim the port so the restarted gateway can bind it. Non-address-in-use
 // errors and context cancellation return immediately.
 func listenWithRetry(ctx context.Context, addr string, budget time.Duration) (net.Listener, error) {
+	return listenWithRetryNotingHeld(ctx, addr, budget, nil, nil)
+}
+
+// listenWithRetryNotingHeld is listenWithRetry that sets *held when any
+// attempt found the address held (a bind conflict), even if a later one won,
+// and calls onHeld (when set) with the error of every such attempt.
+func listenWithRetryNotingHeld(ctx context.Context, addr string, budget time.Duration, held *bool, onHeld func(error)) (net.Listener, error) {
 	deadline := time.Now().Add(budget)
 	for attempt := 1; ; attempt++ {
 		ln, err := apiListenTCP(ctx, addr)
 		if err == nil {
 			return ln, nil
+		}
+		if isBindConflict(err) {
+			if held != nil {
+				*held = true
+			}
+			if onHeld != nil {
+				onHeld(err)
+			}
 		}
 		if !isBindConflict(err) || time.Now().After(deadline) || ctx.Err() != nil {
 			if isBindConflict(err) {
@@ -1454,6 +1490,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	inspectMux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
 	mux.Handle("/api/v1/inspect/", hookLimiter(a.guardrailProfileInspectMiddleware(inspectMux)))
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
+	mux.HandleFunc(openClawRuntimePath, a.handleOpenClawRuntime)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 	mux.HandleFunc("/api/v1/telemetry/canary", a.handleTelemetryCanary)
 	mux.HandleFunc("/api/v1/watchdog/recovery", a.handleWatchdogRecovery)
@@ -1529,6 +1566,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		mux.Handle("/api/v1/fleet/", http.StripPrefix("/api/v1/fleet", a.fleetAPI.Handler()))
 	}
 	a.registerSandboxRoutes(mux)
+	a.registerRoutingRoutes(mux)
 
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
 	handler = a.apiCSRFProtect(handler)
@@ -1541,6 +1579,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 		reg = InstallSharedAgentRegistry("", "")
 	}
 	handler = CorrelationMiddleware(reg)(handler)
+	// Route-only requests leave before Correlation, token auth, CSRF and
+	// the body limit (DESIGN 16.1); everything else is untouched.
+	handler = routeOnlyDispatch(a.routeOnly.Load, handler)
 	// request-ID then scoped W3C extraction so generated hook spans retain the
 	// agent parent without creating an unregistered SDK server span.
 	handler = requestIDMiddleware(handler)
@@ -1557,6 +1598,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 		Handler:     handler,
 		BaseContext: apiRequestBaseContext(baseCtx),
 		ConnContext: acpPeerConnContext,
+		// Slow-header and idle-connection bounds (no WriteTimeout: model
+		// streams on /r/ and long hook answers stay open) (DESIGN 16.12).
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		// A standalone hook sends the asset facts of its request in a header
 		// (assetfacts.Header) that can pass the net/http default of 1 MiB.
 		MaxHeaderBytes: assetfacts.MaxRequestHeaderBytes,
@@ -1636,12 +1681,19 @@ func (a *APIServer) Run(ctx context.Context) error {
 		}()
 	}
 
-	serveTCP := func(ln net.Listener) {
+	serveTCP := func(ln net.Listener, portWasHeld bool) {
 		if err := a.recordRuntimeAPIAddress(ln); err != nil {
 			_ = ln.Close()
 			errCh <- fmt.Errorf("record the running gateway listener: %w; check data directory permissions and run defenseclaw-gateway start", err)
 			return
 		}
+		// The port is ours: a managed Windows gateway keeps its route epoch,
+		// or rotates it before the first request when the port was held
+		// during the restart (S1 DESIGN 17.1, 18.4, 19, 20.1).
+		a.startRouteEpoch(portWasHeld)
+		// OSS: a route key another account could have received is replaced
+		// before the first request (S1 DESIGN 17.1).
+		a.rotateRouteKeyAfterHeldPort()
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -1657,7 +1709,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	ln, lnErr := a.acquireAPIListener(ctx)
 	switch {
 	case lnErr == nil:
-		serveTCP(ln)
+		serveTCP(ln, a.apiBindFoundHeld)
 		a.health.SetAPI(StateRunning, "", apiDetails)
 	case a.apiPortHeld(hookSrv != nil, lnErr) && ctx.Err() == nil:
 		// Another process holds the TCP port. Keep serving the hook socket
@@ -1669,7 +1721,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		case hookSrv != nil:
 			fmt.Fprintf(os.Stderr, "[sidecar-api] %s is held by another process; the hook socket stays up while the API bind is retried: %v\n", a.addr, lnErr)
 		case isAPIPortHeldByAnotherAccount(lnErr):
-			fmt.Fprintf(os.Stderr, "[sidecar-api] another account holds the port of %s on its wildcard address; hooks fail closed while the API bind is retried until the port is released: %v\n", a.addr, lnErr)
+			fmt.Fprintf(os.Stderr, "[sidecar-api] the bind of %s is refused (another account listens on the wildcard address, or the port is in an excluded range); hooks fail closed while the API bind is retried: %v\n", a.addr, lnErr)
 		default:
 			fmt.Fprintf(os.Stderr, "[sidecar-api] %s is held by another process; hooks fail closed while the API bind is retried until the port is released: %v\n", a.addr, lnErr)
 		}
@@ -1708,7 +1760,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		case ln := <-tcpBound:
 			tcpBound = nil
 			fmt.Fprintf(os.Stderr, "[sidecar-api] %s was released; the API is bound again\n", a.addr)
-			serveTCP(ln)
+			serveTCP(ln, true)
 			a.health.SetAPI(StateRunning, "", apiDetails)
 		case err := <-errCh:
 			a.health.SetAPI(StateError, err.Error(), nil)
@@ -2118,6 +2170,9 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if warnings := standaloneProfileWarnings(set, cfg); len(warnings) > 0 {
 				status["profile_warnings"] = warnings
 			}
+			if broker := routePeerBrokerProbe(r, cfg); broker != nil {
+				status["route_peer_broker"] = broker
+			}
 		}
 	}
 
@@ -2321,6 +2376,11 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		intercept = false
 		surface = "agent_lifecycle_hooks"
 	}
+	// OpenClaw blocks tool calls (and prompts with the prompt gate) through
+	// its plugin hooks next to the proxy (rel-1-0-10 GAP-0063).
+	if name == "openclaw" && intercept {
+		surface = "llm_proxy_and_plugin_hooks"
+	}
 
 	// A host install registers only the connector's hooks: setup turns the
 	// native OTel exporters off (they run only in the OpenShell sandbox
@@ -2417,7 +2477,7 @@ func (a *APIServer) handleSkillDisable(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := a.client.DisableSkill(ctx, req.SkillKey); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2452,7 +2512,7 @@ func (a *APIServer) handleSkillEnable(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := a.client.EnableSkill(ctx, req.SkillKey); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2493,7 +2553,7 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
 		return a.client.DisablePlugin(callCtx, req.PluginName)
 	}); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2530,7 +2590,7 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
 		return a.client.EnablePlugin(callCtx, req.PluginName)
 	}); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2664,7 +2724,7 @@ func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := a.client.PatchConfig(ctx, req.Path, req.Value); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2853,6 +2913,30 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 // enableAllowedRuntime restores a disabled skill or plugin in OpenClaw. The
 // caller chooses the mutation order: Secure Client retains the legacy flow;
 // config-driven policy commits before this is called.
+// openClawRemediationSkipped reports a re-enable OpenClaw was not asked for
+// because DefenseClaw runs without operator.admin. The allow still counts and
+// the disable record is cleared; the operator re-enables it in OpenClaw if
+// OpenClaw had disabled it (rel-1-0-10 REVIEW-4 P2-2).
+func openClawRemediationSkipped(targetType, name string, err error) bool {
+	if !errors.Is(err, ErrOpenClawRemediationUnavailable) {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "[api] allow %s %s: OpenClaw not asked to re-enable it (no operator.admin); re-enable it in OpenClaw if it is still disabled there\n",
+		targetType, name)
+	return true
+}
+
+// writeOpenClawRPCError answers an OpenClaw RPC failure: 409 with code
+// openclaw_remediation_unavailable for the local operator_admin refusal, 502
+// for an OpenClaw failure.
+func (a *APIServer) writeOpenClawRPCError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrOpenClawRemediationUnavailable) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "code": openClawRemediationUnavailableAction})
+		return
+	}
+	a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+}
+
 func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementRequest, runtimeName, policyName, actionConnector string) (int, error) {
 	if a.store == nil {
 		return 0, nil
@@ -2873,13 +2957,13 @@ func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementReq
 	case "skill":
 		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
 			return a.client.EnableSkill(ctx, req.TargetName)
-		}); err != nil {
+		}); err != nil && !openClawRemediationSkipped(req.TargetType, req.TargetName, err) {
 			return http.StatusBadGateway, err
 		}
 	case "plugin":
 		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
 			return a.client.EnablePlugin(ctx, runtimeName)
-		}); err != nil {
+		}); err != nil && !openClawRemediationSkipped(req.TargetType, runtimeName, err) {
 			return http.StatusBadGateway, err
 		}
 		if runtimeName != policyName {
@@ -3427,6 +3511,9 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if a.refuseOpenClawPluginPath(w, r, req.Target) {
+		return
+	}
 	if a.rejectWindowsGatewayPath(w, "skill", req.Target, req.Target) {
 		return
 	}
@@ -3465,7 +3552,13 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), componentScanTimeout(cfg, "skill"))
 	defer cancel()
 
-	result, err := ss.Scan(ctx, req.Target)
+	scanTarget, release, ok := a.openClawScanPath(w, r, req.Target)
+	if !ok {
+		return
+	}
+	defer release()
+	result, err := ss.Scan(ctx, scanTarget)
+	rebaseOpenClawScanResult(result, scanTarget, req.Target)
 	if err == nil && !cfg.SecureClientIntegration() {
 		err = scanner.JudgeFailure(result)
 	}
@@ -3653,6 +3746,9 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if a.refuseOpenClawPluginPath(w, r, req.Target) {
+		return
+	}
 	if a.rejectWindowsGatewayPath(w, "plugin", req.Target, req.Target) {
 		return
 	}
@@ -3679,7 +3775,13 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
-	result, err := ps.Scan(ctx, req.Target)
+	scanTarget, release, ok := a.openClawScanPath(w, r, req.Target)
+	if !ok {
+		return
+	}
+	defer release()
+	result, err := ps.Scan(ctx, scanTarget)
+	rebaseOpenClawScanResult(result, scanTarget, req.Target)
 	if err != nil {
 		a.recordAPIScanErrorV8(r.Context(), "plugin-scanner", "plugin", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -4384,13 +4486,15 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			return
 		}
 		if isGatewayTokenListenerProofRequest(r) && (a.scannerCfg == nil || !a.scannerCfg.SecureClientIntegration()) {
-			// The per-user OpenClaw plugin proves this listener with the
-			// gateway token before it sends that token (GAP-0594).
+			// The per-user OpenClaw plugin proves this listener with its
+			// credential before it sends it (GAP-0594): the connector-scoped
+			// plugin token (DESIGN-REVIEW-1 P1-2), or the gateway token.
 			expected := ""
 			if a.scannerCfg != nil {
 				expected = a.scannerCfg.Gateway.Token
 			}
-			if !writeGatewayTokenListenerProof(w, r, expected, a.client.RefreshedToken()) {
+			if !writeGatewayTokenListenerProof(w, r, a.openClawPluginProofToken(), expected) &&
+				!writeOpenClawPluginAccountProof(w, r, a.openClawPluginProofToken(), a.openClawPluginAccount()) {
 				a.emitHTTPAuthFailure(r.Context(), r, connector.UserScopedListenerProofPath,
 					gatewaylog.ErrCodeAuthInvalidToken, userScopedListenerProofRefusedReason)
 				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -4587,12 +4691,24 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
+		// The OpenClaw plugin credential authenticates only the closed route
+		// table in openclaw_plugin_scope.go, on loopback; everything else
+		// falls through to the master gateway token check below.
+		if token != "" && !userScoped && connector.IsLoopback(r) && openClawPluginRoute(r.Method, r.URL.Path) &&
+			a.openClawConnectorRegistered() && a.hookAPITokenMatches(openClawPluginScope, token) {
+			r = r.WithContext(withAuthenticatedInspectConnector(
+				a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
+				openClawPluginScope,
+			))
+			next.ServeHTTP(w, r)
+			return
+		}
 		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
 			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		if !constantTimeStringMatch(token, expected) && !a.matchesRefreshedGatewayToken(token) {
+		if !constantTimeStringMatch(token, expected) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
 			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
@@ -4607,16 +4723,6 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})
-}
-
-// matchesRefreshedGatewayToken accepts the gateway token the OpenClaw
-// client adopted from openclaw.json after boot. Auth repair persists that
-// token to .env and hooks/.token, so the CLI (for example the graceful
-// shutdown during 'setup openclaw') presents it before this process
-// restarts (GAP-2259). The boot token stays valid until the restart.
-func (a *APIServer) matchesRefreshedGatewayToken(token string) bool {
-	refreshed := a.client.RefreshedToken()
-	return refreshed != "" && constantTimeStringMatch(token, refreshed)
 }
 
 // constantTimeStringMatch returns true iff a == b without leaking
@@ -5152,7 +5258,16 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	if a.codeScanner != nil {
 		codeScanner = a.codeScanner
 	}
-	result, err := codeScanner(r.Context(), req.Path, rulesDir)
+	if a.refuseOpenClawPluginPath(w, r, req.Path) {
+		return
+	}
+	scanPath, release, ok := a.openClawScanPath(w, r, req.Path)
+	if !ok {
+		return
+	}
+	defer release()
+	result, err := codeScanner(r.Context(), scanPath, rulesDir)
+	rebaseOpenClawScanResult(result, scanPath, req.Path)
 	if err != nil {
 		a.recordAPIScanErrorV8(r.Context(), "codeguard", "code", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

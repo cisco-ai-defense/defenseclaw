@@ -111,6 +111,27 @@ class RemediationAuthorizationError(ValueError):
         super().__init__(code)
 
 
+def _openclaw_compatibility_summary(public_name: str, raw_version: str) -> str:
+    # The doctor row names the hook mode OpenClaw runs in, from the OS and the
+    # probed version only (rel-1-0-10 GAP-0047): Windows is native, before
+    # 2026.8.35 the proxy, otherwise hybrid.
+    from defenseclaw.connector_contracts import openclaw_lacks_native_hooks
+    from defenseclaw.platform_support import uses_guardrail_proxy
+
+    if not uses_guardrail_proxy("openclaw"):
+        # Windows: no proxy; setup refuses an OpenClaw before 2026.8.35.
+        return (
+            f"{public_name} uses its native plugin hooks (no guardrail proxy on this host) "
+            "and is not agent-version gated"
+        )
+    if raw_version and openclaw_lacks_native_hooks(raw_version):
+        return (
+            f"{public_name} uses the guardrail proxy and is not agent-version gated "
+            "(native hooks need OpenClaw 2026.8.35 or later)"
+        )
+    return f"{public_name} uses its plugin hooks next to the proxy and is not agent-version gated"
+
+
 def authorize_remediation(
     choice: RemediationChoice,
     *,
@@ -962,7 +983,11 @@ def assess_connector_health(
                     status=HealthStatus.SUPPORTED,
                     reason_code="proxy-connector-not-version-gated" if proxy else "connector-not-version-gated",
                     summary=(
-                        f"{public_name} uses a proxy contract and is not agent-version gated"
+                        (
+                            _openclaw_compatibility_summary(public_name, raw_version)
+                            if connector == "openclaw"
+                            else f"{public_name} uses a proxy contract and is not agent-version gated"
+                        )
                         if proxy
                         else f"{public_name} is not agent-version gated"
                     ),

@@ -18,7 +18,7 @@
 
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { INSPECT_BODY_BUDGET_BYTES, fitInspectBody } from "../inspect-body-limit.js";
+import { GATEWAY_BODY_LIMIT_BYTES, INSPECT_BODY_BUDGET_BYTES, fitInspectBody } from "../inspect-body-limit.js";
 
 const limits = JSON.parse(
   readFileSync(new URL("../../../../schemas/inspect-tool-request-limits.json", import.meta.url), "utf8"),
@@ -63,13 +63,12 @@ describe("fitInspectBody", () => {
   });
 
   it("cuts only the longest strings, as little as the call needs (GAP-0436)", () => {
-    // 1,044,000 bytes: just over what fits, where a cut of every string by 5% lost a key.
+    // A call 500 bytes over the gateway limit: only the longest string is cut, by what is needed.
     const long = `${"w ".repeat(60_000)}${KEY}${" w".repeat(60_000)}`;
     const base = bodyBytes({ tool: "message", args: { message: long, caption: "" }, direction: "outbound" });
-    const text = "y".repeat(INSPECT_BODY_BUDGET_BYTES - base + 500);
+    const text = "y".repeat(GATEWAY_BODY_LIMIT - base + 500);
     const payload = { tool: "message", args: { message: long, caption: text }, direction: "outbound" };
-    expect(bodyBytes(payload)).toBeGreaterThan(INSPECT_BODY_BUDGET_BYTES);
-    expect(bodyBytes(payload)).toBeLessThan(GATEWAY_BODY_LIMIT);
+    expect(bodyBytes(payload)).toBe(GATEWAY_BODY_LIMIT + 500);
     const got = fitInspectBody(payload);
     expect(got.partial).toBe(true);
     expect(bodyBytes(got.payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
@@ -77,7 +76,7 @@ describe("fitInspectBody", () => {
     // The string that holds the key is shorter than the filler and is left whole.
     expect(args.message).toBe(long);
     expect(args.message).toContain(KEY);
-    expect(args.caption.length).toBeGreaterThan(text.length - 3000);
+    expect(args.caption.length).toBeGreaterThan(text.length - 5000);
   });
 
   it("keeps the head and the tail of a very long text", () => {
@@ -200,3 +199,69 @@ describe("fitInspectBody", () => {
     expect(buffer).not.toContain("attachment bytes not sent");
   });
 });
+
+// GAP-0436, round 5: a call whose body is over the cut target by a few bytes but
+// under the gateway's limit is sent whole: rel read these calls whole (its body
+// is the params plus a copy of the text) and blocked the key in them. The shapes
+// are the review's band shapes; the Go side (TestInspectToolMessageMarginBandStillBlocksTheKey)
+// builds the same bytes and reads them through the gateway.
+describe("fitInspectBody margin band (GAP-0436)", () => {
+  const prose = (n: number) => "the quarterly plan is attached for review. ".repeat(Math.ceil(n / 43) + 1).slice(0, n);
+  const keyText = `${prose(7000)} key: ${KEY} ${prose(7000)}`;
+  const wrap = (params: Record<string, unknown>) => ({ tool: "message", args: params, direction: "outbound", approval_surface: "native" });
+  const rows = (n: number) => Array.from({ length: n }, (_, r) => Array.from({ length: 10 }, (_, c) => r * 10 + c));
+
+  // The call whose JSON is exactly `target` bytes: `coarse(n)` grows with n; a list of small numbers fills the rest.
+  const exact = (target: number, coarse: (n: number) => Record<string, unknown>, most: number): Record<string, unknown> => {
+    const sized = (n: number, pad: number[]) => bodyBytes(wrap({ ...coarse(n), pad }));
+    let lo = 0;
+    let hi = most;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (sized(mid, []) <= target - 4) lo = mid;
+      else hi = mid - 1;
+    }
+    let count = 0;
+    let top = target;
+    while (count < top) {
+      const mid = (count + top + 1) >> 1;
+      if (sized(lo, new Array<number>(mid).fill(0)) <= target) count = mid;
+      else top = mid - 1;
+    }
+    const pad = new Array<number>(count).fill(0);
+    for (let i = 0; i < target - sized(lo, pad); i++) pad[i] = 10;
+    expect(sized(lo, pad)).toBe(target);
+    return { ...coarse(lo), pad };
+  };
+
+  const shapes: Array<[string, number, number, (n: number) => Record<string, unknown>]> = [
+    ["band-body-numtable-1b", 1, 30_000, (n) => ({ action: "send", to: "+15550001111", body: keyText, presentation: { blocks: [{ type: "table", rows: rows(n) }] } })],
+    ["band-body-numtable", 100, 30_000, (n) => ({ action: "send", to: "+15550001111", body: keyText, presentation: { blocks: [{ type: "table", rows: rows(n) }] } })],
+    ["band-content-numtable", 100, 30_000, (n) => ({ action: "send", to: "+15550001111", content: keyText, presentation: { blocks: [{ type: "table", rows: rows(n) }] } })],
+    ["band-body-short", 200, 20_000, (n) => ({ action: "send", to: "+15550001111", body: keyText, notes: Array.from({ length: n }, () => "y".repeat(100)) })],
+    ["band-body-eqstrings", 150, 100, (n) => ({ action: "send", to: "+15550001111", body: keyText, ...Object.fromEntries(Array.from({ length: n }, (_, i) => [`f${i}`, "y".repeat(keyText.length)])) })],
+  ];
+
+  it.each(shapes)("%s is sent whole", (_name, over, most, coarse) => {
+    const params = exact(INSPECT_BODY_BUDGET_BYTES + over, coarse, most);
+    const payload = wrap(params);
+    expect(bodyBytes(payload)).toBe(INSPECT_BODY_BUDGET_BYTES + over);
+    expect(bodyBytes(payload)).toBeLessThanOrEqual(GATEWAY_BODY_LIMIT_BYTES);
+    const got = fitInspectBody(payload);
+    expect(got.partial).toBe(false);
+    expect(got.payload).toBe(payload);
+    expect(got.payload).not.toHaveProperty("args_partial");
+  });
+
+  it("sends a call of exactly the limit whole and cuts one byte more", () => {
+    const text = "x".repeat(GATEWAY_BODY_LIMIT_BYTES - bodyBytes(wrap({ message: "" })));
+    const atLimit = wrap({ message: text });
+    expect(bodyBytes(atLimit)).toBe(GATEWAY_BODY_LIMIT_BYTES);
+    expect(fitInspectBody(atLimit).partial).toBe(false);
+    const over = wrap({ message: `${text}x` });
+    const got = fitInspectBody(over);
+    expect(got.partial).toBe(true);
+    expect(bodyBytes(got.payload)).toBeLessThanOrEqual(INSPECT_BODY_BUDGET_BYTES);
+  });
+});
+

@@ -335,7 +335,9 @@ func updateWindowsPerUserManagedEnrollment(
 		if err != nil {
 			return err
 		}
-		if exists && !sameWindowsEnterprisePath(current.HookExecutable, hookExecutable) {
+		// An enrollment an older launch image of this install recorded is
+		// rewritten with the current one: that is the switch (GAP-0751).
+		if exists && !sameWindowsManagedHookImage(current.HookExecutable, hookExecutable) {
 			return fmt.Errorf(
 				"enterprise hooks: %s enrollment belongs to hook executable %s, not %s",
 				connectorName,
@@ -439,7 +441,9 @@ func resolveWindowsPerUserManagedHookRuntime(
 		return result, nil
 	}
 	result.PolicyActive = true
-	if !sameWindowsEnterprisePath(enrollment.HookExecutable, hookExecutable) {
+	// The invoking hook may be an older launch image of this install
+	// (GAP-0751); the generation it reads is resolved for that executable.
+	if !sameWindowsManagedHookImage(enrollment.HookExecutable, hookExecutable) {
 		return result, fmt.Errorf(
 			"enterprise hooks: invoking hook executable %s does not match the %s enrollment executable %s",
 			hookExecutable,

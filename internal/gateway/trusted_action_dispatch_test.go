@@ -2530,13 +2530,13 @@ func TestTrustedActionCredentialOwnersRequireExactLivePathShapeAndStayAdvisory(t
 		{
 			name:    "cloud live candidate",
 			path:    "/home/alice/.config/gcloud/application_default_credentials.json",
-			matches: matchesCloudCredentialFile,
+			matches: matchesCredentialFileShape,
 			want:    true,
 		},
 		{
 			name:    "cloud fixture candidate",
 			path:    "/repo/testdata/application_default_credentials.json",
-			matches: matchesCloudCredentialFile,
+			matches: matchesCredentialFileShape,
 		},
 		{
 			name:    "browser live candidate",

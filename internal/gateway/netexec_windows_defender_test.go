@@ -6,7 +6,10 @@
 package gateway
 
 import (
+	"context"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -44,26 +47,93 @@ func TestNetExecWindowsDefenderMultiControlProfilePosture(t *testing.T) {
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = connector
 			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile.name)
-			response := (&APIServer{scannerCfg: cfg}).evaluateCodexHook(
-				t.Context(),
-				codexHookRequest{
-					HookEventName: "PreToolUse",
-					ToolName:      "shell",
-					CWD:           "/repo",
-					ToolInput: map[string]interface{}{
-						"command": netExecDefenderCommand,
+			// The call runs as the hook judges it on a Linux host and, through
+			// the Windows-only dialect gate (windowsHookHost), as on Windows.
+			for _, windowsHost := range []bool{false, true} {
+				previous := windowsHookHost
+				windowsHookHost = func() bool { return windowsHost }
+				response := (&APIServer{scannerCfg: cfg}).evaluateCodexHook(
+					t.Context(),
+					codexHookRequest{
+						HookEventName: "PreToolUse",
+						ToolName:      "shell",
+						CWD:           "/repo",
+						ToolInput: map[string]interface{}{
+							"command": netExecDefenderCommand,
+						},
 					},
-				},
-			)
-			if response.Action != profile.action || response.RawAction != profile.action ||
-				response.Severity != profile.severity ||
-				!findingStringHasRuleID(
-					response.Findings,
-					"tamper.windows_defender_multi_control_disable",
-				) {
-				t.Fatalf("response=%+v want %s/%s", response, profile.action, profile.severity)
+				)
+				windowsHookHost = previous
+				if response.Action != profile.action || response.RawAction != profile.action ||
+					response.Severity != profile.severity ||
+					!findingStringHasRuleID(
+						response.Findings,
+						"tamper.windows_defender_multi_control_disable",
+					) ||
+					!findingStringHasRuleID(
+						response.Findings,
+						"credential.directory_ticket_request",
+					) {
+					t.Fatalf("windows host=%v response=%+v want %s/%s with both rules",
+						windowsHost, response, profile.action, profile.severity)
+				}
 			}
 		})
+	}
+}
+
+// TestNetExecWindowsDefenderMultiControlIsDialectIndependent proves the
+// Defender and the credentialed-NetExec findings of one call whichever shell
+// reading the Windows hook ends up with: the reading its dialect choice picks
+// (selectWindowsShellDialect, which runs on every OS), PowerShell forced, and
+// the POSIX reading where a POSIX shell can spell the call. The spellings are
+// the one program identity of rel-1-0-10:GAP-0366 (bare, launcher extension,
+// upper case, a pipx path, a Windows path), built from
+// netExecDefenderCommand by a prefix transform, so no new command text is
+// kept here. An earlier fix made the PowerShell parse partial instead, which
+// lost the credential finding of the same call under a PowerShell reading.
+func TestNetExecWindowsDefenderMultiControlIsDialectIndependent(t *testing.T) {
+	rest := strings.TrimPrefix(netExecDefenderCommand, "nxc ")
+	spellings := []struct {
+		name, prefix string
+		posix        bool
+	}{
+		{"bare", "nxc ", true},
+		{"exe", "nxc.exe ", true},
+		{"upper exe", "NXC.EXE ", true},
+		{"pipx path", "/home/fixture/.local/bin/nxc ", true},
+		{"windows path", `C:\Tools\nxc.exe `, false},
+		{"call operator path", `& 'C:\Tools\nxc.exe' `, false},
+	}
+	for _, spelling := range spellings {
+		command := spelling.prefix + rest
+		base := actionfacts.Input{Tool: "shell", Command: command, CWD: `C:\repo`}
+		readings := map[string]actionfacts.Dialect{
+			"powershell": actionfacts.DialectPowerShell,
+			"selected":   selectWindowsShellDialect("shell", command, base),
+		}
+		if spelling.posix {
+			readings["posix"] = actionfacts.DialectPOSIX
+		}
+		for name, dialect := range readings {
+			for _, pack := range []string{"default", "permissive", "strict"} {
+				t.Run(spelling.name+"/"+name+"/"+pack, func(t *testing.T) {
+					input := base
+					input.DialectHint = dialect
+					got := EvaluateDeterministicAction(context.Background(), input, command, "benchmark-"+pack, pack)
+					wantAction := "alert"
+					if pack == "strict" {
+						wantAction = "block"
+					}
+					if got.Action != wantAction ||
+						!slices.Contains(got.RuleIDs, "tamper.windows_defender_multi_control_disable") ||
+						!slices.Contains(got.RuleIDs, "credential.directory_ticket_request") {
+						t.Fatalf("dialect=%q action=%q rules=%v parse=%q, want %s with the Defender and the NetExec credential rules",
+							dialect, got.Action, got.RuleIDs, got.ParseStatus, wantAction)
+					}
+				})
+			}
+		}
 	}
 }
 

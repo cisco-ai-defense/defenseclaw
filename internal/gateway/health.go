@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -207,6 +208,17 @@ type HealthSnapshot struct {
 	// signal for OpenClaw. Omitted until the interceptor reports a
 	// result or the proxy sees an authenticated X-DC-Target-URL hop.
 	Interception *InterceptionHealth `json:"interception,omitempty"`
+	// OpenClawPlugin is when the OpenClaw plugin last called in with its
+	// scoped credential, and the hook mode it runs. Omitted until it does:
+	// a status that names a hook mode before then only repeats what setup
+	// expects (rel-1-0-10 REVIEW-4 P1-1).
+	OpenClawPlugin *OpenClawPluginHealth `json:"openclaw_plugin,omitempty"`
+}
+
+// OpenClawPluginHealth is the evidence that OpenClaw loaded the plugin.
+type OpenClawPluginHealth struct {
+	LastSeenAt string `json:"last_seen_at"`
+	HookMode   string `json:"hook_mode,omitempty"`
 }
 
 // InterceptionSelfTestFreshness is three plugin self-test cadences.
@@ -325,6 +337,8 @@ type SidecarHealth struct {
 	guardianStateReaderEpoch uint64
 
 	interceptionReported     bool
+	openClawPluginSeenAt     time.Time
+	openClawPluginHookMode   string
 	interceptionVerified     bool
 	interceptionVerifiedAt   time.Time
 	lastAgentProxyTrafficAt  time.Time
@@ -358,6 +372,9 @@ type SidecarHealth struct {
 	// HealthSnapshot.Connector field.
 	connStats   map[string]*connectorStats
 	primaryConn string
+
+	// routeOnly is merged into routing.details.route_only by Snapshot.
+	routeOnly []routeOnlyReadiness
 }
 
 // connectorStats holds one connector's static health plus its atomic live
@@ -938,6 +955,24 @@ func (h *SidecarHealth) connectorHookAdmission(name string) (string, connectorHo
 	return "", connectorHookReady
 }
 
+// RecordOpenClawPluginSeen stores that the OpenClaw plugin called in with
+// its scoped credential, and the hook mode it reported (hybrid, native,
+// proxy; anything else is dropped).
+func (h *SidecarHealth) RecordOpenClawPluginSeen(hookMode string) {
+	if h == nil {
+		return
+	}
+	switch hookMode {
+	case "hybrid", "native", "proxy":
+	default:
+		hookMode = ""
+	}
+	h.mu.Lock()
+	h.openClawPluginSeenAt = time.Now().UTC()
+	h.openClawPluginHookMode = hookMode
+	h.mu.Unlock()
+}
+
 // RecordInterceptionResult stores the plugin's sentinel self-test.
 // A true result means a classified LLM URL was rewritten to the
 // local guardrail proxy before any upstream hop.
@@ -1029,6 +1064,35 @@ func (h *SidecarHealth) SetRouting(state SubsystemState, lastErr string, details
 	}
 	h.mu.Unlock()
 	h.notifySubscribers()
+}
+
+// SetRouteOnlyReadiness publishes the route-only readiness of every routed
+// connector (nil: none), shown as routing.details.route_only.
+func (h *SidecarHealth) SetRouteOnlyReadiness(r []routeOnlyReadiness) {
+	h.mu.Lock()
+	if reflect.DeepEqual(h.routeOnly, r) {
+		// The periodic recheck found nothing new: no subscriber wake-up.
+		h.mu.Unlock()
+		return
+	}
+	h.routeOnly = r
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// routingWithRouteOnly is the routing subsystem with the route-only
+// readiness in a copy of its details (the stored map is never written).
+func routingWithRouteOnly(routing SubsystemHealth, ro []routeOnlyReadiness) SubsystemHealth {
+	if len(ro) == 0 {
+		return routing
+	}
+	details := make(map[string]interface{}, len(routing.Details)+1)
+	for k, v := range routing.Details {
+		details[k] = v
+	}
+	details["route_only"] = append([]routeOnlyReadiness(nil), ro...)
+	routing.Details = details
+	return routing
 }
 
 func (h *SidecarHealth) SetTelemetry(state SubsystemState, lastErr string, details map[string]interface{}) {
@@ -1783,7 +1847,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Config:                h.config,
 		API:                   h.api,
 		Guardrail:             withJudgeHealth(h.guardrail),
-		Routing:               h.routing,
+		Routing:               routingWithRouteOnly(h.routing, h.routeOnly),
 		Telemetry:             h.telemetry,
 		AIDiscovery:           h.aiDiscovery,
 		AIRuntime:             h.aiRuntime,
@@ -1873,6 +1937,12 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 			info.LastProxiedModelCallAt = h.lastProxiedModelCallAt.UTC().Format(time.RFC3339)
 		}
 		snap.Interception = info
+	}
+	if !h.openClawPluginSeenAt.IsZero() {
+		snap.OpenClawPlugin = &OpenClawPluginHealth{
+			LastSeenAt: h.openClawPluginSeenAt.Format(time.RFC3339),
+			HookMode:   h.openClawPluginHookMode,
+		}
 	}
 	h.mu.RUnlock()
 

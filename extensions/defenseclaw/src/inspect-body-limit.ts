@@ -28,8 +28,9 @@ import limits from "./inspect-tool-request-limits.json" with { type: "json" };
  * The plugin sends a message call as it is, the params and nothing else: the
  * gateway reads the text, the recipients and the attachments out of them, and
  * judges them as the rules of its pack say. It cuts a call only when it does
- * not fit the gateway's request body limit (less a small margin for the
- * envelope), and then as little as it must:
+ * not fit the gateway's request body limit (a call that fits is sent whole,
+ * up to the byte), and then aims a small margin under the limit and cuts as
+ * little as it must:
  *
  *  1. an attachment's bytes become its size, media type and SHA-256;
  *  2. the longest strings are cut to one common length (head and tail around a
@@ -44,8 +45,17 @@ import limits from "./inspect-tool-request-limits.json" with { type: "json" };
  * as it always has and the check fails closed, as the shell hooks do.
  */
 
-/** The body a call may take and still be sent as it is, which is what the gateway reads whole. */
-export const INSPECT_BODY_BUDGET_BYTES = limits.body_max_bytes - limits.plugin_envelope_margin_bytes;
+/**
+ * The most a request body may be: the gateway reads, and a call is sent as it
+ * is, up to exactly this (the client sends JSON.stringify of the payload).
+ */
+export const GATEWAY_BODY_LIMIT_BYTES = limits.body_max_bytes;
+/**
+ * The size a cut aims at: under the limit by a margin, so the cut call and the
+ * flag it carries (args_partial) surely fit. A call that fits the limit is
+ * never cut, so the margin costs nothing a call could use.
+ */
+export const INSPECT_BODY_BUDGET_BYTES = GATEWAY_BODY_LIMIT_BYTES - limits.plugin_envelope_margin_bytes;
 
 /** Cut strings never go below this (characters). */
 const MIN_CUT_CHARS = 128;
@@ -229,8 +239,13 @@ function cutLongest(out: Record<string, unknown>, slots: Slot[], budget: number,
  * Returns the payload to send. The payload is copied before it is cut. The work
  * is bounded: one pass for the attachments, one cut, one note.
  */
-export function fitInspectBody(payload: Record<string, unknown>, budget = INSPECT_BODY_BUDGET_BYTES): FittedPayload {
-  if (String(payload.tool).toLowerCase() !== "message" || size(payload) <= budget) return { payload, partial: false };
+export function fitInspectBody(
+  payload: Record<string, unknown>,
+  budget = INSPECT_BODY_BUDGET_BYTES,
+  limit = GATEWAY_BODY_LIMIT_BYTES,
+): FittedPayload {
+  // Whole while the body fits the gateway's limit, margin or not (GAP-0436).
+  if (String(payload.tool).toLowerCase() !== "message" || size(payload) <= limit) return { payload, partial: false };
   const out: Record<string, unknown> = { ...payload };
   const hasArgs = out.args !== null && typeof out.args === "object";
   const slots: Slot[] = [];

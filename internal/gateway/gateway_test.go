@@ -399,7 +399,7 @@ func (s *stubConnector) Authenticate(*http.Request) bool                     { r
 func (s *stubConnector) Route(*http.Request, []byte) (*connector.ConnectorSignals, error) {
 	return nil, nil
 }
-func (s *stubConnector) SetCredentials(string, string)         {}
+func (s *stubConnector) SetCredentials(string)                 {}
 func (s *stubConnector) VerifyClean(connector.SetupOpts) error { return nil }
 
 // TestProxyShouldBindForConnector pins the routing decision behind
@@ -1184,34 +1184,6 @@ func TestSidecarRunGuardrailZeroConfigDoesNotDefaultOpenClaw(t *testing.T) {
 	}
 	if snap.Guardrail.LastError != "no connector configured" {
 		t.Fatalf("Guardrail.LastError = %q, want no connector configured", snap.Guardrail.LastError)
-	}
-}
-
-func TestDeriveMasterKey(t *testing.T) {
-	tmpDir := t.TempDir()
-	keyFile := filepath.Join(tmpDir, "device.key")
-	if err := os.WriteFile(keyFile, []byte("test-key-data"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	key := deriveMasterKey(tmpDir)
-	if key == "" {
-		t.Fatal("deriveMasterKey() returned empty string")
-	}
-	if !strings.HasPrefix(key, "sk-dc-") {
-		t.Errorf("deriveMasterKey() = %q, want sk-dc- prefix", key)
-	}
-
-	key2 := deriveMasterKey(tmpDir)
-	if key != key2 {
-		t.Error("deriveMasterKey() should be deterministic")
-	}
-}
-
-func TestDeriveMasterKeyMissing(t *testing.T) {
-	key := deriveMasterKey(t.TempDir())
-	if key != "" {
-		t.Errorf("deriveMasterKey() with missing key file should return empty, got %q", key)
 	}
 }
 
@@ -2863,6 +2835,8 @@ func TestAPIStatusRejectsPost(t *testing.T) {
 // the Guardrail field plumbing could silently regress the contract
 // and the TUI would render a misleading panel.
 func TestAPIStatusEmitsConnectorMode(t *testing.T) {
+	// OpenClaw cases use the Linux/macOS proxy topology on every host.
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cases := []struct {
 		name             string
 		connector        string
@@ -3074,6 +3048,7 @@ func TestAPIStatusAMPActionPolicyModeUsesHooksWithoutProxy(t *testing.T) {
 // This is the API-contract guard behind the gateway-status "Connector Mode"
 // fan-out so a 3-connector install never collapses to a single posture.
 func TestAPIStatusConnectorModesFansOut(t *testing.T) {
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	cfg := &config.Config{}
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
 		"codex":    {},

@@ -21,10 +21,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -870,5 +873,124 @@ func TestInspectToolMessageLongTextIsReadWhole(t *testing.T) {
 	}
 	if short := "a short text"; messageJudgeText(short) != short {
 		t.Error("a short text must go to the judge whole")
+	}
+}
+
+// The margin band of the round-5 review (GAP-0436): calls whose body is a few
+// bytes over the cut target and under the body limit are sent whole by the
+// plugin and read whole by the gateway, behind the production body limit: the
+// key blocks CRITICAL in every pack, as on rel. The five shapes are built to the
+// same byte counts as the plugin test (inspect-body-limit.test.ts).
+func TestInspectToolMessageMarginBandStillBlocksTheKey(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user")
+	}
+	prose := func(n int) string { return strings.Repeat("the quarterly plan is attached for review. ", n/43+1)[:n] }
+	keyText := prose(7000) + " key: " + messageTestSecret + " " + prose(7000)
+	rows := func(n int) []any {
+		out := make([]any, n)
+		for r := range out {
+			row := make([]any, 10)
+			for c := range row {
+				row[c] = r*10 + c
+			}
+			out[r] = row
+		}
+		return out
+	}
+	wrap := func(params map[string]any) []byte {
+		b, err := json.Marshal(map[string]any{"tool": "message", "args": params, "direction": "outbound", "approval_surface": "native"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	// exact grows coarse(n) to the largest that fits, then fills to target bytes with small numbers.
+	exact := func(target int, coarse func(n int) map[string]any) []byte {
+		sized := func(n, pad int) int {
+			params := coarse(n)
+			params["pad"] = make([]int, pad)
+			return len(wrap(params))
+		}
+		lo, hi := 0, 200000
+		for lo < hi {
+			mid := (lo + hi + 1) / 2
+			if sized(mid, 0) <= target-4 {
+				lo = mid
+			} else {
+				hi = mid - 1
+			}
+		}
+		count, top := 0, target
+		for count < top {
+			mid := (count + top + 1) / 2
+			if sized(lo, mid) <= target {
+				count = mid
+			} else {
+				top = mid - 1
+			}
+		}
+		pad := make([]int, count)
+		params := coarse(lo)
+		params["pad"] = pad
+		for i := 0; i < target-len(wrap(params)); i++ {
+			pad[i] = 10
+		}
+		body := wrap(params)
+		if len(body) != target {
+			t.Fatalf("built %d bytes, want %d", len(body), target)
+		}
+		return body
+	}
+	table := func(field string) func(int) map[string]any {
+		return func(n int) map[string]any {
+			return map[string]any{"action": "send", "to": "+15550001111", field: keyText,
+				"presentation": map[string]any{"blocks": []any{map[string]any{"type": "table", "rows": rows(n)}}}}
+		}
+	}
+	target := int(apiRequestBodyMaxBytes) - 1024
+	shapes := map[string][]byte{
+		"band-body-numtable-1b": exact(target+1, table("body")),
+		"band-body-numtable":    exact(target+100, table("body")),
+		"band-content-numtable": exact(target+100, table("content")),
+		"band-body-short": exact(target+200, func(n int) map[string]any {
+			notes := make([]string, n)
+			for i := range notes {
+				notes[i] = strings.Repeat("y", 100)
+			}
+			return map[string]any{"action": "send", "to": "+15550001111", "body": keyText, "notes": notes}
+		}),
+		"band-body-eqstrings": exact(target+150, func(n int) map[string]any {
+			params := map[string]any{"action": "send", "to": "+15550001111", "body": keyText}
+			for i := 0; i < n; i++ {
+				params["f"+strconv.Itoa(i)] = strings.Repeat("y", len(keyText))
+			}
+			return params
+		}),
+	}
+	env := boundedLaneEnv(t)
+	t.Setenv("HOME", env.home)
+	for _, tier := range boundedTestTiers {
+		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+		api.inspectToolScanTimeout = 20 * time.Second
+		handler := apiBodyLimitMiddleware(http.HandlerFunc(api.handleInspectTool), apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
+		for name, body := range shapes {
+			if len(body) <= target || int64(len(body)) > apiRequestBodyMaxBytes {
+				t.Fatalf("%s: %d bytes is not in the band (%d, %d]", name, len(body), target, apiRequestBodyMaxBytes)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(withAuthenticatedInspectConnector(req.Context(), "openclaw"))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			var got ToolInspectVerdict
+			if err := json.NewDecoder(rec.Result().Body).Decode(&got); err != nil || rec.Code != http.StatusOK {
+				t.Errorf("%s %s: status %d (%v), want the verdict", tier.name, name, rec.Code, err)
+				continue
+			}
+			if got.Action != "block" || got.Severity != "CRITICAL" || !slices.ContainsFunc(got.Findings, func(f string) bool { return strings.HasPrefix(f, "SEC-ANTHROPIC") }) {
+				t.Errorf("%s %s: action = %q severity = %q findings = %v, want block CRITICAL on the key", tier.name, name, got.Action, got.Severity, got.Findings)
+			}
+		}
 	}
 }

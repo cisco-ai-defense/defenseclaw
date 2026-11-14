@@ -54,7 +54,7 @@ func TestCustodyRefusalOfOneActiveConnectorKeepsTheOthersEnforcing(t *testing.T)
 		peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 		return s.setupConnectorsIsolatedTransaction(
 			context.Background(), []connector.Connector{peer, connector.NewOpenCodeConnector()},
-			"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+			"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 		)
 	}
 
@@ -164,7 +164,7 @@ func TestOnlyCustodyRefusalsOfAnActiveConnectorAreScopedToIt(t *testing.T) {
 			peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 			got, err := s.setupConnectorsIsolatedTransaction(
 				context.Background(), []connector.Connector{refused, peer},
-				"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+				"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 			)
 			if !tc.skipped {
 				if err == nil || !strings.Contains(err.Error(), "connector claudecode refresh failed") {

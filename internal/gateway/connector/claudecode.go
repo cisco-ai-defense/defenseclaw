@@ -46,7 +46,6 @@ import (
 // Implements ComponentScanner, StopScanner.
 type ClaudeCodeConnector struct {
 	gatewayToken string
-	masterKey    string
 }
 
 // NewClaudeCodeConnector creates a new Claude Code connector.
@@ -178,6 +177,11 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := c.patchClaudeCodeHooks(opts, hookScript); err != nil {
 		return fmt.Errorf("claudecode settings hooks: %w", err)
 	}
+	// Route-only keys come from config.yaml on every setup, repair and
+	// upgrade; a connector no longer routed gets its values back.
+	if err := c.ApplyRouteOnly(opts, opts.RouteOnly); err != nil {
+		return err
+	}
 
 	// Host installs disable native exporters and remove endpoints that an
 	// earlier setup wrote. Native exporters cannot verify who owns a replaced
@@ -275,6 +279,12 @@ func jsonErrorPosition(data []byte, err error) string {
 
 func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 	var errs []string
+
+	// The model base URL goes back first: a dead route-only URL would break
+	// every agent turn (DESIGN 7.4).
+	if err := c.ApplyRouteOnly(opts, nil); err != nil {
+		errs = append(errs, fmt.Sprintf("route-only: %v", err))
+	}
 
 	if err := c.restoreClaudeCodeHooks(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("restore hooks: %v", err))
@@ -425,17 +435,8 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	if c.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
-			return true
-		}
-	}
-
-	// No gateway token configured: trust loopback callers. The masterKey is
-	// an alternative credential for programmatic/remote access — its presence
-	// alone should not revoke loopback trust. The operator opts into requiring
-	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
+	// No gateway token configured: trust loopback callers. The operator opts
+	// into requiring auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
 	if c.gatewayToken == "" {
 		return isLoopback
 	}
@@ -443,9 +444,8 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 	return false
 }
 
-func (c *ClaudeCodeConnector) SetCredentials(gatewayToken, masterKey string) {
+func (c *ClaudeCodeConnector) SetCredentials(gatewayToken string) {
 	c.gatewayToken = gatewayToken
-	c.masterKey = masterKey
 }
 
 func (c *ClaudeCodeConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, error) {

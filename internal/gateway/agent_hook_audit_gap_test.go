@@ -212,13 +212,15 @@ func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, event := range []string{"tool_start", "tool.invocation.requested"} {
+	// The tool call of each audited PreToolUse is in its hook_decision row;
+	// tool_start and tool.invocation.requested are exported only (#1384).
+	for event, want := range map[string]int{"hook_decision": 2, "tool_start": 0, "tool.invocation.requested": 0} {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE event_name = ?`, event).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
-		if count != 2 {
-			t.Errorf("%s rows after two audited PreToolUse calls = %d, want 2", event, count)
+		if count != want {
+			t.Errorf("%s rows after two audited PreToolUse calls = %d, want %d", event, count, want)
 		}
 	}
 }

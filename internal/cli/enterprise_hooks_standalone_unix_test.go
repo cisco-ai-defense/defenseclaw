@@ -268,6 +268,16 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		}
 		return "", "not installed"
 	}
+	if mode == "slow-discover" || mode == "blocked-private" || mode == "blocked-version" {
+		// These scans end only at the scan deadline (or never): a test-sized
+		// deadline and grace instead of 3/4 of the request's limit and 2 s.
+		// The parent still kills the worker at the request's limit, so a
+		// worker that does not answer by its own deadline still fails.
+		// TestEnterpriseHookWorkerScanDeadlineLeavesTimeToAnswer checks the
+		// real share.
+		enterpriseHookWorkerScanTimeout = func(time.Duration) time.Duration { return time.Second }
+		enterpriseHookWorkerScanGrace = 200 * time.Millisecond
+	}
 	if mode == "slow-discover" {
 		enterpriseHookWorkerDiscoverSurfaces = func(context.Context, string, string, bool) ([]connector.AgentSurface, bool) {
 			return nil, true
@@ -490,6 +500,19 @@ func TestEnterpriseHookWorkerDiscoverRunsAsTheUser(t *testing.T) {
 			t.Fatalf("static discover response = %+v, want the static finding only", response)
 		}
 	})
+}
+
+// The discover worker's own scan deadline, with the grace after it, ends
+// before the parent's limit, which kills a worker that has not answered: for
+// the default and retry limits and for the limits the two discover tests
+// above ask for with a test-sized scan deadline.
+func TestEnterpriseHookWorkerScanDeadlineLeavesTimeToAnswer(t *testing.T) {
+	for _, limit := range []time.Duration{12 * time.Second, 20 * time.Second, enterpriseHookWorkerTimeout, enterpriseHookWorkerRetryTimeout} {
+		scan := enterpriseHookWorkerScanTimeout(limit)
+		if scan <= 0 || scan+enterpriseHookWorkerScanGrace >= limit {
+			t.Fatalf("limit %s: scan deadline %s + grace %s leaves no time to answer", limit, scan, enterpriseHookWorkerScanGrace)
+		}
+	}
 }
 
 func TestEnterpriseHookWorkerSlowPrivateScanReturnsPartialResponse(t *testing.T) {

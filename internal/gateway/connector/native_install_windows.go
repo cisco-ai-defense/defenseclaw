@@ -19,6 +19,8 @@
 package connector
 
 import (
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -51,6 +53,31 @@ func canonicalStandaloneWindowsHookBinary() string {
 		return ""
 	}
 	return filepath.Join(layout.BinDir, windowsHookBinaryName)
+}
+
+// standaloneWindowsHookLaunchImages is each hook launch image under the
+// standalone install's bin\hooks (GAP-0751): bin\hooks\<16 hex>\defenseclaw-hook.exe
+// for every launch folder there. Teardown and ownership recognize the
+// registrations an earlier release of this install wrote for one of them.
+func standaloneWindowsHookLaunchImages() []string {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil || strings.TrimSpace(layout.BinDir) == "" {
+		return nil
+	}
+	root := winpath.EnterpriseHookImagesRoot(layout.BinDir)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var images []string
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0 ||
+			!winpath.IsEnterpriseHookImageDirName(entry.Name()) {
+			continue
+		}
+		images = append(images, filepath.Join(root, entry.Name(), windowsHookBinaryName))
+	}
+	return images
 }
 
 // canonicalNativeWindowsHookBinary is the stable launcher path native Setup

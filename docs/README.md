@@ -15,7 +15,7 @@ procedures, package-local notes, generated schema references, and test fixtures.
 | Area | Repository documentation | Implementation authority |
 | --- | --- | --- |
 | System boundaries | [`ARCHITECTURE.md`](ARCHITECTURE.md) | `cli/`, `cmd/`, `internal/`, `extensions/defenseclaw/` |
-| Guardrail | [`GUARDRAIL.md`](GUARDRAIL.md), [`GUARDRAIL_RULE_PACKS.md`](GUARDRAIL_RULE_PACKS.md) | `internal/gateway/`, `internal/guardrail/`, `policies/` |
+| Guardrail | [`GUARDRAIL.md`](GUARDRAIL.md), [`GUARDRAIL_RULE_PACKS.md`](GUARDRAIL_RULE_PACKS.md), [`PARSELIMITS.md`](PARSELIMITS.md) | `internal/gateway/`, `internal/guardrail/`, `internal/shellparse/`, `policies/` |
 | Observability v8 | [`OBSERVABILITY.md`](OBSERVABILITY.md) | `schemas/telemetry/v8/`, `schemas/config/v8/`, `internal/observability/` |
 | Gateway | [`reference/GATEWAY_SPEC.md`](reference/GATEWAY_SPEC.md) | `internal/gateway/` |
 | OpenShell sandbox | [`SANDBOX.md`](SANDBOX.md) (architecture, and what the retired standalone install left), [`OPENSHELL_SANDBOX_EVENTS.md`](OPENSHELL_SANDBOX_EVENTS.md) (telemetry) | `internal/openshell/`, `internal/sandboxauth/`, `policies/sandbox/` |

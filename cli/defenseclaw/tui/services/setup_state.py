@@ -1629,6 +1629,7 @@ _FLOAT_FIELD_KEYS = frozenset(
         "decision_model.timeout",
         "decision_model.allow_threshold",
         "decision_model.block_threshold",
+        "decision_model.block_risk_score",
     }
 )
 

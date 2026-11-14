@@ -115,6 +115,9 @@ func prepareLauncherRoot(root *cobra.Command) {
 	if status := newLauncherStatusCommand(); status != nil {
 		root.AddCommand(status)
 	}
+	// The three own routing reads the table offers (REVIEW-final F1): a
+	// standard account here has no per-user CLI to read them with.
+	root.AddCommand(newManagedRoutingCmd())
 	root.Use = launcherCommand
 	root.Short = "Run coding agents in sandboxes on this managed computer"
 	root.Long = `Your organization manages DefenseClaw on this computer. Here defenseclaw runs
@@ -126,7 +129,8 @@ your coding agents in sandboxes under the policy your organization set for you:
   defenseclaw sandbox policy explain show the policy that applies to you
 
 "defenseclaw guardrail profile explain" shows the guardrail profile that
-applies to your agents. Administrator status, verify and audit export use the
+applies to your agents, and "defenseclaw routing status" your own model
+routing. Administrator status, verify and audit export use the
 installed defenseclaw-gateway binary; doctor, alerts and tui are not offered
 by this managed launcher.`
 	root.CompletionOptions.DisableDefaultCmd = true
@@ -362,6 +366,9 @@ func launcherAuditedWriter(args []string) (string, bool) {
 	}
 	if launcherSingleWordWriters[args[0]] {
 		return args[0], true
+	}
+	if args[0] == "routing" {
+		return managedRoutingWriter(args[1:])
 	}
 	if len(args) > 1 && launcherWriters[args[0]][args[1]] {
 		if args[0] == "guardrail" && args[1] == "protection" && len(args) > 2 && args[2] == "list" {
