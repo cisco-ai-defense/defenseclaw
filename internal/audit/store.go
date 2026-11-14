@@ -2281,9 +2281,6 @@ func (s *Store) Init() error {
 	if err := s.trimUnreadAuditIndexes(); err != nil {
 		return err
 	}
-	if err := s.ensureHookLoneTracking(); err != nil {
-		return err
-	}
 	if err := s.keepSecureClientSparseKeyIndexes(); err != nil {
 		return err
 	}
@@ -2367,6 +2364,12 @@ func (s *Store) Init() error {
 		return fmt.Errorf("audit: verify mandatory finding lifecycle identity: %w", err)
 	} else if !present {
 		return fmt.Errorf("audit: mandatory finding lifecycle identity is missing")
+	}
+	// After the mandatory schema checks: its reconcile reads
+	// correlation_observations, so a partial store fails on the missing
+	// table or column, not inside the lone-row reconcile.
+	if err := s.ensureHookLoneTracking(); err != nil {
+		return err
 	}
 	if err := s.verifyMandatoryPragmas(context.Background()); err != nil {
 		return err
