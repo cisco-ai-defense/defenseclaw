@@ -216,6 +216,8 @@ func TestCallReadsProgramFilesAndComputedWords(t *testing.T) {
 		"none.awk": `{print $1}`,
 	}
 	read := func(name string) (string, bool) { text, ok := files[name]; return text, ok }
+	includes := map[string]string{"inc.awk": `BEGIN{system("a")}`}
+	includeFiles := func(name string) (string, bool) { text, ok := includes[name]; return text, ok }
 	type tc struct {
 		name    string
 		words   []string
@@ -247,7 +249,20 @@ func TestCallReadsProgramFilesAndComputedWords(t *testing.T) {
 		{name: "computed program", words: []string{"awk", ""}, dynamic: []bool{false, true}, unknown: true},
 		{name: "computed program with a command in its text", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", `BEGIN{system("d"); x = ` + Hole + `}`}, want: []string{"d"}, unknown: true},
 		{name: "computed program, a command with a hole", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", `BEGIN{system("touch ` + Hole + `")}`}, unknown: true},
-		{name: "computed program with no command text", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", Hole + `==3 || ` + Hole + `==4 {print}`}},
+		{name: "computed program with no command text", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", Hole + `==3 || ` + Hole + `==4 {print}`}, unknown: true},
+		{name: "a hole inside a string literal", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", `{print "x` + Hole + `"}`}, unknown: true},
+		{name: "-i", words: []string{"gawk", "-i", "inc.awk", `BEGIN{}`}, files: includeFiles, want: []string{"a"}},
+		{name: "-i attached", words: []string{"gawk", "-iinc.awk", `BEGIN{}`}, files: includeFiles, want: []string{"a"}},
+		{name: "--include", words: []string{"gawk", "--include", "inc.awk", `BEGIN{}`}, files: includeFiles, want: []string{"a"}},
+		{name: "--include=", words: []string{"gawk", "--include=inc.awk", `BEGIN{}`}, files: includeFiles, want: []string{"a"}},
+		{name: "-i name with .awk added", words: []string{"gawk", "-i", "inc", `BEGIN{system("c")}`}, files: includeFiles, want: []string{"a", "c"}},
+		{name: "-i of a library of the installation", words: []string{"gawk", "-i", "inplace", `{print}`}, files: includeFiles},
+		{name: "-i of a missing path", words: []string{"gawk", "-i", "./missing.awk", `{print}`}, files: includeFiles, unknown: true, unread: true},
+		{name: "-i of a computed name", words: []string{"gawk", "-i", "", `{print}`}, dynamic: []bool{false, false, true, false}, files: includeFiles, unknown: true, unread: true},
+		{name: "-i with no reach is not unknown", words: []string{"gawk", "-i", "inc.awk", `{print}`}},
+		{name: "-l", words: []string{"gawk", "-l", "ext", `{print}`}, unknown: true},
+		{name: "-lext", words: []string{"gawk", "-lext", `{print}`}, unknown: true},
+		{name: "--load=", words: []string{"gawk", "--load=./ext.so", `{print}`}, unknown: true},
 		{name: "computed program, one hole", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", Hole}, unknown: true},
 		{name: "computed program, a pipe", words: []string{"awk", ""}, dynamic: []bool{false, true}, holed: []string{"", `{print ` + Hole + ` | "sort"}`}, want: []string{"sort"}, unknown: true},
 		{name: "computed input operand", words: []string{"awk", `{print $1}`, ""}, dynamic: []bool{false, false, true}},

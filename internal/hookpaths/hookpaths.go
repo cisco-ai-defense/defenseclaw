@@ -2229,7 +2229,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					// not listed (GAP-0499).
 					if awkTwin.Text != "" && awkTwin.Text != command && !awkTwinTouchesNoLink(awkTwin, cwd, home) {
 						addReading(awkTwin.Text, true)
+						// A runner, an assignment, a time or a function in front
+						// of or around the awk call changes where the sh call
+						// that stands for the commands sits in the text, not
+						// what each command is: awk starts it in a shell of its
+						// own, as the hook would run it directly. Each command
+						// is listed as that plain reading too, so the targets
+						// are the same behind every spelling (GAP-0731). The
+						// gateway cannot read a program file behind ProtectHome
+						// and reads these targets only from this map.
 						for _, body := range awkTwin.Bodies {
+							addReading(body, true)
 							protectedDecision = protectedDecision || clientProtectedDecision(body, cwd, home)
 						}
 					}

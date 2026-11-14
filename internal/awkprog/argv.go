@@ -160,6 +160,18 @@ func callOption(word string) (name, value string, attached bool) {
 		return "W", "", false
 	case strings.HasPrefix(word, "-W"):
 		return "W", word[2:], true
+	case word == "-i" || word == "--include":
+		return "i", "", false
+	case strings.HasPrefix(word, "--include="):
+		return "i", word[len("--include="):], true
+	case strings.HasPrefix(word, "-i") && !strings.HasPrefix(word, "--"):
+		return "i", word[2:], true
+	case word == "-l" || word == "--load":
+		return "l", "", false
+	case strings.HasPrefix(word, "--load="):
+		return "l", word[len("--load="):], true
+	case strings.HasPrefix(word, "-l") && !strings.HasPrefix(word, "--"):
+		return "l", word[2:], true
 	}
 	return "", "", false
 }
@@ -201,6 +213,32 @@ func (c Call) readFile(value string, dynamic bool, out *callPrograms) {
 			return
 		}
 		out.texts = append(out.texts, text)
+	}
+}
+
+// readInclude reads the gawk -i / --include source file value of a call. gawk
+// looks the name up as given, then with .awk added, in the working folder or
+// through a path; a bare name that is no file there is a library of the
+// installation (inplace, ordchr, ...), which names no file the user can have
+// changed: it adds no text. A name with a path that cannot be read, or a
+// computed name, is code the reading cannot know.
+func (c Call) readInclude(value string, dynamic bool, out *callPrograms) {
+	out.files++
+	switch {
+	case dynamic:
+		out.unknown, out.unread = true, true
+	case c.Files == nil:
+	default:
+		text, ok := c.Files(value)
+		if !ok && !strings.HasSuffix(value, ".awk") {
+			text, ok = c.Files(value + ".awk")
+		}
+		switch {
+		case ok:
+			out.texts = append(out.texts, text)
+		case strings.ContainsAny(value, `/\`) || value == "":
+			out.unknown, out.unread = true, true
+		}
 	}
 }
 
@@ -273,6 +311,12 @@ func (c Call) programs() callPrograms {
 				supplied = true
 				c.readFile(value, valueDynamic, &out)
 				options = false
+			case "i":
+				c.readInclude(value, valueDynamic, &out)
+			case "l":
+				// A loaded extension is code the reading cannot see, as the
+				// @load directive is.
+				out.unknown = true
 			case "W":
 				if valueDynamic {
 					out.unknown = true
@@ -300,9 +344,13 @@ func (c Call) programs() callPrograms {
 				if i < len(c.Holed) {
 					holed = c.Holed[i]
 				}
-				if holed == "" || holed == Hole {
-					out.unknown = true
-				} else {
+				// A hole anywhere in the program text is run-time text the
+				// reading cannot see: it can close an expression and add a
+				// command, so the call is the unknown tier whatever the text
+				// around it says (GAP-0729). What the text around it starts is
+				// still read, and a command it proves keeps its verdict.
+				out.unknown = true
+				if holed != "" && holed != Hole {
 					out.holed = append(out.holed, len(out.texts))
 					out.texts = append(out.texts, holed)
 				}
@@ -340,11 +388,10 @@ func (c Call) commands() (commands []string, reading Reading) {
 		program := Parse(text)
 		more, dynamic := program.Commands()
 		if slices.Contains(programs.holed, index) {
-			// A program with a computed part: a command with a hole in it is
-			// not known, and a program that starts any command may start
-			// another through the hole.
+			// A program with a computed part is the unknown tier (set when it
+			// was read); a command with a hole in it is not known, so it is
+			// left out.
 			more = slices.DeleteFunc(slices.Clone(more), func(command string) bool { return strings.Contains(command, Hole) })
-			dynamic = dynamic || program.RunsCommand()
 		}
 		commands = append(commands, more...)
 		reading.Dynamic = reading.Dynamic || dynamic
