@@ -1531,6 +1531,85 @@
       "pattern": "^(|[Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
       "description": "Lowest severity that takes the action: CRITICAL, HIGH, MEDIUM or LOW, in any case. Empty inherits: a connector falls back to the global value, and the global value to the rule pack's level."
     },
+    "effectsRulesTier": {
+      "type": "string",
+      "enum": [
+        "restricted",
+        "full"
+      ]
+    },
+    "cascadeLane": {
+      "type": "string",
+      "description": "A cascade lane switch: off, or shadow (compute and record beside today's rules, never change the answer), in any case. The lane ships shadow-only in 1.0.10, so on is refused (internal/config/cascade_lanes.go lists the open gaps).",
+      "pattern": "^\\s*([Oo][Ff][Ff]|[Ss][Hh][Aa][Dd][Oo][Ww])\\s*$"
+    },
+    "cascadeLiveLane": {
+      "type": "string",
+      "description": "A cascade lane switch that ships live: on, shadow or off, in any case. Only on is live; shadow and off add nothing, so the verdicts are those of a build without the lane.",
+      "pattern": "^\\s*([Oo][Nn]|[Ss][Hh][Aa][Dd][Oo][Ww]|[Oo][Ff][Ff])\\s*$"
+    },
+    "cascade": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "guardrail.cascade: how the guardrail cascade runs. Per-lane live/shadow switches so far.",
+      "properties": {
+        "lanes": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "One switch per lane, read in any case. A lane that ships shadow-only takes off or shadow; nonshell takes on, shadow or off.",
+          "properties": {
+            "effects": {
+              "$ref": "#/$defs/cascadeLane",
+              "default": "shadow"
+            },
+            "secret_flow": {
+              "$ref": "#/$defs/cascadeLane",
+              "default": "shadow"
+            },
+            "nonshell": {
+              "$ref": "#/$defs/cascadeLiveLane",
+              "default": "on",
+              "description": "The MCP and app tool lane (tool-call effects and the table rules on shell and native file-tool calls). on (default) judges them; shadow and off compute nothing and add nothing, so the verdicts are those of a build without the lane. Any other value is refused at load."
+            }
+          }
+        }
+      }
+    },
+    "secretFlow": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Secret flow tracking (guardrail.secret_flow): label the secrets a session reads and alert or block when a labeled secret reaches an external sink. Its live/shadow switch is guardrail.cascade.lanes.secret_flow; these are the feature's own settings.",
+      "properties": {
+        "label_sets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "credentials": { "type": "boolean", "default": true, "description": "Label the built-in credential set (.env, SSH private keys, cloud/token files, keychain exports, /proc/*/environ)." },
+            "extra_path_globs": { "type": "array", "items": { "type": "string" }, "description": "Extra absolute or ~ path globs to label as secret." },
+            "extra_secret_patterns": { "type": "array", "items": { "type": "string" }, "description": "Extra basename globs to label as secret." }
+          }
+        },
+        "sink_action": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Action per pack when a labeled secret reaches an external sink. The default pack never blocks; a managed install follows its pack.",
+          "properties": {
+            "default": { "type": "string", "enum": ["alert"], "default": "alert", "description": "The default pack never blocks; alert only." },
+            "strict": { "type": "string", "enum": ["alert", "block"], "default": "block" }
+          }
+        },
+        "reencodings": { "type": "boolean", "default": true, "description": "Index base64/hex/URL-encoded forms of each secret value so a re-encoded secret still matches." },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_labeled_paths": { "type": "integer", "minimum": 0, "maximum": 100000, "default": 512, "description": "Max labeled file paths held per session (LRU). 0 uses the default." },
+            "max_value_digests": { "type": "integer", "minimum": 0, "maximum": 100000, "default": 256, "description": "Max secret-value digests held per session. 0 uses the default." }
+          }
+        },
+        "destination_allowlist": { "type": "array", "items": { "type": "string" }, "description": "Hosts (and dotted suffixes) that do not count as external sinks, e.g. your own git remote or a package registry." }
+      }
+    },
     "detectionStrategy": {
       "type": "string",
       "enum": [
@@ -2200,24 +2279,6 @@
           },
           "description": "The organization's own domains. A download from a host equal to or under one does not start the download-then-execute alert."
         },
-        "cascade": {
-          "type": "object",
-          "additionalProperties": false,
-          "description": "guardrail.cascade: the live/shadow switches of the guardrail lanes.",
-          "properties": {
-            "lanes": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "nonshell": {
-                  "type": "string",
-                  "pattern": "^\\s*([Oo][Nn]|[Ss][Hh][Aa][Dd][Oo][Ww]|[Oo][Ff][Ff])\\s*$",
-                  "description": "The MCP and app tool lane (tool-call effects and the table rules on shell and native file-tool calls). on (default) judges them; shadow and off compute nothing and add nothing, so the verdicts are those of a build without the lane. Any case; any other value is refused at load. Interim type: s7/cascade-config owns guardrail.cascade and takes over the key and these values."
-                }
-              }
-            }
-          }
-        },
         "detection_strategy": {
           "$ref": "#/$defs/detectionStrategy"
         },
@@ -2229,6 +2290,15 @@
         },
         "detection_strategy_tool_call": {
           "$ref": "#/$defs/detectionStrategyOrInherit"
+        },
+        "cascade": {
+          "$ref": "#/$defs/cascade"
+        },
+        "effects_rules_tier": {
+          "$ref": "#/$defs/effectsRulesTier"
+        },
+        "secret_flow": {
+          "$ref": "#/$defs/secretFlow"
         },
         "judge_sweep": {
           "type": "boolean"

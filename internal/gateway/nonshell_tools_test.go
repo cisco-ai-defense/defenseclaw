@@ -412,7 +412,7 @@ func TestNonShellRedirectIsAnAlertAtMost(t *testing.T) {
 func nonShellLaneCtx(mode string) context.Context {
 	cfg := &config.Config{}
 	if mode != "" {
-		cfg.Guardrail.Cascade.Lanes = map[string]string{config.NonShellLane: mode}
+		cfg.Guardrail.Cascade.Lanes.NonShell = &mode
 	}
 	return withPinnedGeneration(context.Background(), &Generation{Config: cfg, N: 1})
 }
@@ -462,7 +462,8 @@ func TestNonShellLaneSpellings(t *testing.T) {
 		ctx := nonShellLaneCtx(c.value)
 		if c.value == "" {
 			cfg := &config.Config{}
-			cfg.Guardrail.Cascade.Lanes = map[string]string{config.NonShellLane: ""}
+			empty := ""
+			cfg.Guardrail.Cascade.Lanes.NonShell = &empty
 			ctx = withPinnedGeneration(context.Background(), &Generation{Config: cfg, N: 1})
 		}
 		got := nonShellToolFindings(ctx, req, prior, "")

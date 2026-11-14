@@ -346,6 +346,25 @@ guardrail:
   detection_strategy_prompt: ""      # per-lane override; empty -> detection_strategy
   detection_strategy_completion: regex_only  # default for tool results and completions; regex_judge also sends them to the judge
   detection_strategy_tool_call: ""   # per-lane override; empty -> detection_strategy
+  cascade:
+    lanes:                     # one live/shadow switch per lane, any case; effects and secret_flow: off | shadow (on is not available in 1.0.10)
+      effects: shadow          # the effect-model rule lane: computes and records beside today's rules, never changes the answer
+      secret_flow: shadow      # Secret flow tracking (needs the effects lane not off)
+      nonshell: "on"           # the MCP and app tool lane: on (default) | shadow | off; shadow and off add nothing
+  effects_rules_tier: restricted  # restricted | full: how far the effect lane may block (ships restricted)
+  secret_flow:                 # Secret flow tracking: alert when a labeled secret reaches an external sink
+    label_sets:
+      credentials: true        # label .env, SSH keys, cloud/token files, keychain, /proc/*/environ
+      extra_path_globs: []      # extra ~ or absolute path globs to label as secret
+      extra_secret_patterns: [] # extra basename globs to label as secret
+    sink_action:
+      default: alert           # the default pack never blocks; alert only
+      strict: block            # alert | block (a managed install follows its pack)
+    reencodings: true          # also match base64/hex/URL-encoded forms of a secret value
+    memory:
+      max_labeled_paths: 512   # per-session labeled-path cap (LRU)
+      max_value_digests: 256   # per-session secret-value-digest cap
+    destination_allowlist: []   # hosts (and dotted suffixes) that are not external, e.g. your git remote
 
   # judge.llm omitted: the judge inherits the top-level llm block.
   judge:

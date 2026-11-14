@@ -111,18 +111,27 @@ func TestPerUserLinuxWaitsOnlyForMissingAcceptedTuple(t *testing.T) {
 			t.Fatalf("unaccepted owner was accepted or not rechecked: reads=%d err=%v", reads, err)
 		}
 	})
+	// A root owner on an accepted row is read settledRootReads times before
+	// it is final: the kernel can tear the owner and inode reads while
+	// accept() gives the socket its file (GAP-0395). Any other owner and a
+	// table error are final at once.
+	rootReads := 1
+	if self != 0 {
+		rootReads = settledRootReads
+	}
 	for _, tc := range []struct {
 		name    string
 		inspect func() (int, error)
+		reads   int
 	}{
-		{"foreign owner", func() (int, error) { return self + 1, nil }},
+		{"foreign owner", func() (int, error) { return self + 1, nil }, 1},
 		{"accepted root owner", func() (int, error) {
 			if self == 0 {
 				return 4242, nil
 			}
 			return 0, nil
-		}},
-		{"table read error", func() (int, error) { return -1, errors.New("table unreadable") }},
+		}, rootReads},
+		{"table read error", func() (int, error) { return -1, errors.New("table unreadable") }, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reads := 0
@@ -130,7 +139,7 @@ func TestPerUserLinuxWaitsOnlyForMissingAcceptedTuple(t *testing.T) {
 				reads++
 				return tc.inspect()
 			})
-			if err == nil || reads != 1 {
+			if err == nil || reads != tc.reads {
 				t.Fatalf("unverified peer retried or allowed: reads=%d err=%v", reads, err)
 			}
 		})

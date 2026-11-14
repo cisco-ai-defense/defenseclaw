@@ -3091,6 +3091,61 @@ class GuardrailProfile:
 
 
 @dataclass
+class SecretFlowLabelSets:
+    credentials: bool = True
+    extra_path_globs: list[str] = field(default_factory=list)
+    extra_secret_patterns: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SecretFlowSinkAction:
+    default: str = "alert"  # the default pack never blocks
+    strict: str = "block"  # a managed install follows its pack
+
+
+@dataclass
+class SecretFlowMemory:
+    max_labeled_paths: int = 512
+    max_value_digests: int = 256
+
+
+@dataclass
+class SecretFlowConfig:
+    """guardrail.secret_flow: Secret flow tracking settings. The live/shadow
+    switch is guardrail.cascade.lanes.secret_flow; these are the feature's own
+    settings. Mirrors internal/config.SecretFlowConfig."""
+
+    label_sets: SecretFlowLabelSets = field(default_factory=SecretFlowLabelSets)
+    sink_action: SecretFlowSinkAction = field(default_factory=SecretFlowSinkAction)
+    reencodings: bool = True
+    memory: SecretFlowMemory = field(default_factory=SecretFlowMemory)
+    destination_allowlist: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CascadeLanesConfig:
+    """guardrail.cascade.lanes: one live/shadow switch per lane, each off |
+    shadow | on, read trimmed and in any case (stored lower-cased). effects and
+    secret_flow ship shadow-only in 1.0.10 ("on" is refused by the Go
+    validator). nonshell (the MCP and app tool lane) ships on; None means the
+    key is not written, which the gateway reads as on, and a value that is no
+    lane value (an empty one included) is kept as written so the gateway refuses
+    it. Mirrors internal/config.CascadeLanes."""
+
+    effects: str = "shadow"
+    secret_flow: str = "shadow"
+    nonshell: str | None = None
+
+
+@dataclass
+class CascadeConfig:
+    """guardrail.cascade (the per-lane switches so far). Mirrors
+    internal/config.CascadeConfig."""
+
+    lanes: CascadeLanesConfig = field(default_factory=CascadeLanesConfig)
+
+
+@dataclass
 class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"  # observe | action
@@ -3118,6 +3173,9 @@ class GuardrailConfig:
     detection_strategy_prompt: str = ""  # per-direction override
     detection_strategy_completion: str = ""  # per-direction override
     detection_strategy_tool_call: str = ""  # per-direction override
+    cascade: CascadeConfig = field(default_factory=CascadeConfig)  # per-lane live/shadow switches
+    effects_rules_tier: str = "restricted"  # restricted | full (effect block scope)
+    secret_flow: SecretFlowConfig = field(default_factory=SecretFlowConfig)  # Secret flow tracking
     # Run full judge classification on content with no regex signal
     # (regex_judge mode). Flipped from False to True in the
     # multi-provider-adapters PR: pure-regex triage misses enough
@@ -3139,12 +3197,6 @@ class GuardrailConfig:
     # under one does not start the download-then-execute alert (#1390).
     # Mirrors ``GuardrailConfig.InternalDomains`` in internal/config/config.go.
     internal_domains: list[str] = field(default_factory=list)
-    # guardrail.cascade, kept as written: today only ``lanes`` (``nonshell``:
-    # ``on`` | ``shadow`` | ``off``, any case, default on). The gateway
-    # validates it and refuses any other value. Interim type: s7/cascade-config
-    # owns guardrail.cascade and takes it over. Mirrors
-    # ``GuardrailConfig.Cascade`` in internal/config/config.go.
-    cascade: dict[str, Any] = field(default_factory=dict)
     # Lowest severity a tool call is blocked / alerted at (``CRITICAL``
     # | ``HIGH`` | ``MEDIUM`` | ``LOW``). Empty keeps the rule pack's
     # profile levels (strict: MEDIUM / LOW, permissive: CRITICAL / HIGH,
@@ -5776,8 +5828,10 @@ def _serialize_v9_guardrail_keys(guardrail: Any) -> None:
         guardrail.pop("cisco_trust_level", None)
     if not guardrail.get("internal_domains"):
         guardrail.pop("internal_domains", None)
-    if not guardrail.get("cascade"):
-        guardrail.pop("cascade", None)
+    cascade = guardrail.get("cascade")
+    lanes = cascade.get("lanes") if isinstance(cascade, dict) else None
+    if isinstance(lanes, dict) and lanes.get("nonshell") is None:
+        lanes.pop("nonshell", None)
     judge = guardrail.get("judge")
     if isinstance(judge, dict) and not judge.get("trace"):
         judge.pop("trace", None)
@@ -7062,13 +7116,15 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_prompt=raw.get("detection_strategy_prompt", ""),
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
+        cascade=_merge_cascade(raw.get("cascade")),
+        effects_rules_tier=raw.get("effects_rules_tier", "restricted"),
+        secret_flow=_merge_secret_flow(raw.get("secret_flow")),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack=str(raw.get("rule_pack", "") or ""),
         custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
         rules=_merge_guardrail_rules(raw.get("rules")) or GuardrailRulesConfig(),
         cisco_trust_level=str(raw.get("cisco_trust_level", "") or ""),
         internal_domains=_string_list(raw.get("internal_domains")),
-        cascade=dict(raw["cascade"]) if isinstance(raw.get("cascade"), dict) else {},
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
         connector=raw.get("connector", ""),
@@ -7265,6 +7321,63 @@ def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
     return HILTConfig(
         enabled=bool(raw.get("enabled", False)),
         min_severity=str(raw.get("min_severity", "HIGH") or "HIGH").upper(),
+    )
+
+
+def _merge_cascade(raw: dict[str, Any] | None) -> CascadeConfig:
+    if not isinstance(raw, dict):
+        return CascadeConfig()
+    lanes_raw = raw.get("lanes") or {}
+    if not isinstance(lanes_raw, dict):
+        return CascadeConfig()
+    nonshell = _cascade_lane_value(lanes_raw.get("nonshell"))
+    return CascadeConfig(
+        lanes=CascadeLanesConfig(
+            effects=_cascade_lane_value(lanes_raw.get("effects")) or "shadow",
+            secret_flow=_cascade_lane_value(lanes_raw.get("secret_flow")) or "shadow",
+            nonshell=nonshell,
+        )
+    )
+
+
+def _cascade_lane_value(value: Any) -> str | None:
+    """A guardrail.cascade.lanes value as the gateway reads it: trimmed and
+    lower-cased (internal/config normalizeCascadeLaneValue). None when the key
+    is absent. A value that is no lane value stays (lower-cased) so the gateway
+    refuses it with the key named."""
+    if value is None:
+        return None
+    return str(value).strip().lower()
+
+
+def _merge_secret_flow(raw: dict[str, Any] | None) -> SecretFlowConfig:
+    if not isinstance(raw, dict):
+        return SecretFlowConfig()
+    label_raw = raw.get("label_sets") or {}
+    sink_raw = raw.get("sink_action") or {}
+    mem_raw = raw.get("memory") or {}
+    allow_raw = raw.get("destination_allowlist", [])
+    allow = (
+        [str(v).strip() for v in allow_raw if str(v).strip()]
+        if isinstance(allow_raw, list | tuple)
+        else []
+    )
+    return SecretFlowConfig(
+        label_sets=SecretFlowLabelSets(
+            credentials=bool(label_raw.get("credentials", True)),
+            extra_path_globs=_string_list(label_raw.get("extra_path_globs")),
+            extra_secret_patterns=_string_list(label_raw.get("extra_secret_patterns")),
+        ),
+        sink_action=SecretFlowSinkAction(
+            default=str(sink_raw.get("default", "alert") or "alert"),
+            strict=str(sink_raw.get("strict", "block") or "block"),
+        ),
+        reencodings=bool(raw.get("reencodings", True)),
+        memory=SecretFlowMemory(
+            max_labeled_paths=int(mem_raw.get("max_labeled_paths", 512) or 512),
+            max_value_digests=int(mem_raw.get("max_value_digests", 256) or 256),
+        ),
+        destination_allowlist=allow,
     )
 
 

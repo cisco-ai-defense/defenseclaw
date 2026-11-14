@@ -73,6 +73,13 @@ type DeterministicActionEvaluation struct {
 	// stateful benchmark runner. It is never copied into a Prediction.
 	ValueJoinDigests    [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests
 	CELEvaluationStatus string
+	// EffectShadow is the effect-model rule lane verdict for this call,
+	// computed beside today's when guardrail.cascade.lanes.effects is shadow or on.
+	// It never changes result.Action in shadow; it is the measurement the
+	// benchmark diffs against today's answer. EffectShadow is the restricted
+	// tier; EffectShadowFull is the full tier, so one run compares both.
+	EffectShadow     *EffectShadowResult
+	EffectShadowFull *EffectShadowResult
 }
 
 // DeterministicToolResultInput models one already-validated, exact
@@ -184,8 +191,9 @@ func EvaluateDeterministicAction(
 }
 
 // evaluateDeterministicAction is EvaluateDeterministicAction, and with
-// windowsReadings the call as a Windows hook judges it: a partial reading is
-// also judged as the other shell and as its readable statements.
+// windowsReadings the call as a Windows hook judges it: a partial PowerShell
+// reading is also judged as its readable statements
+// (windowsReadingTwinRequests).
 func evaluateDeterministicAction(
 	ctx context.Context,
 	input actionfacts.Input,
@@ -283,6 +291,15 @@ func evaluateDeterministicAction(
 		result.Route = "mixed"
 	}
 	result.Action = strings.ToLower(strings.TrimSpace(result.Action))
+	if mode := effectsRulesModeFor(); mode != effectRulesOff {
+		base := trustedActionRequest{
+			Input: input, Connector: connector, EnforcementCapable: true,
+			StrictPolicy: profile == "strict",
+		}
+		both := effectShadowRun(base, mode, tierRestricted, tierFull)
+		result.EffectShadow = &both[0]
+		result.EffectShadowFull = &both[1]
+	}
 	return result
 }
 

@@ -180,3 +180,28 @@ func TestAnswerFirstRequestGivesUpWithoutARequest(t *testing.T) {
 		t.Fatalf("expected no response, got %q", out.String())
 	}
 }
+
+// An agent the user updated (kiro-cli 2.35.1 to 3.3.0) changes the pinned
+// digest, and the editor showed only "Run defenseclaw acp verify, then
+// defenseclaw acp setup ..." (rel-1-0-10:GAP-0250). The per-user text names
+// the command that re-pins an updated agent first.
+func TestStartupErrorForAnUpdatedAgentNamesTheAgentRefresh(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "zed-kiro.contract-lock.json")
+	drift := fmt.Errorf("validate runtime contract: %w", acp.ErrAgentExecutableDrift)
+	var startup *startupError
+	if !errors.As(newStartupError(drift, "zed", "kiro", "default", "observe", lock), &startup) {
+		t.Fatal("want a startup error")
+	}
+	for _, want := range []string{"defenseclaw acp refresh --agent kiro", "defenseclaw acp setup --client zed --agent kiro"} {
+		if !strings.Contains(startup.message, want) {
+			t.Fatalf("message %q lacks %q", startup.message, want)
+		}
+	}
+	other := errors.New("ACP guard executable digest does not match the runtime contract")
+	if !errors.As(newStartupError(other, "zed", "kiro", "default", "observe", lock), &startup) {
+		t.Fatal("want a startup error")
+	}
+	if strings.Contains(startup.message, "refresh --agent") {
+		t.Fatalf("only a changed agent names the agent refresh: %q", startup.message)
+	}
+}

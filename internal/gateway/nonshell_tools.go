@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
@@ -39,13 +40,14 @@ const (
 
 // nonShellLaneShadow is the one switch of the whole non-shell lane (the MCP
 // effects and the table rules on shell and native file-tool calls):
-// guardrail.cascade.lanes.nonshell, on, shadow or off (default on). Only on is
-// live: in shadow and in off the lane computes nothing and adds nothing, so
-// the verdicts are those of rel/1.0.10. The configuration is the request's (its pinned generation, or
-// its profile's); with none the lane is on.
+// guardrail.cascade.lanes.nonshell, on, shadow or off (default on), read
+// through the cascade lane registry (config.CascadeLanes.NonShellMode). Only on
+// is live: in shadow and in off the lane computes nothing and adds nothing, so
+// the verdicts are those of rel/1.0.10. The configuration is the request's (its
+// pinned generation, or its profile's); with none the lane is on.
 func nonShellLaneShadow(ctx context.Context) bool {
 	cfg := requestPolicyConfig(ctx)
-	return cfg != nil && cfg.Guardrail.NonShellLaneMode() != "on"
+	return cfg != nil && cfg.Guardrail.Cascade.Lanes.NonShellMode() != config.CascadeLaneOn
 }
 
 // nonShellToolFindings reads a non-shell tool call (an MCP or app tool) as

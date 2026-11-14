@@ -839,6 +839,13 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 			&eventHistoryWriteError{cause: err},
 		)
 	}
+	// rel-1-0-10:GAP-0316: the lone hook_decision rows, by key.
+	if err := writer.store.trackHookRowTx(ctx, tx, action, record.RecordID(), correlation.SemanticEventID); err != nil {
+		return eventHistoryAppendOutcome{}, eventHistoryFailure(
+			EventHistoryHealthWriteFailed,
+			&eventHistoryWriteError{cause: err},
+		)
+	}
 	if correlation.SemanticEventID != "" {
 		observationTraceID, observationSpanID := exactObservationTopology(correlation.TraceID, correlation.SpanID)
 		observationLifecycleID, observationExecutionID := exactLogLifecycleAndExecution(record)

@@ -168,6 +168,12 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		DetectionOnly: true,
 	},
 	{
+		// Secret flow tracking (internal/flow, S7) supersedes this entry: when
+		// guardrail.cascade.lanes.secret_flow is on it carries the same credential-read
+		// -> external-egress behavior with a per-session data/value join. This
+		// entry stays while the flow lane ships in shadow so turning the flow
+		// lane off keeps today's answer; it is removed when the flow lane
+		// becomes authoritative by default.
 		ID: ToolChainSecretReadThenEgress, Version: "1.8",
 		Title:       "Secret read followed by external egress",
 		Severity:    "CRITICAL",

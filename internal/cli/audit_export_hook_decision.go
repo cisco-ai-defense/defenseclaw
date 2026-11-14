@@ -105,6 +105,6 @@ func hookExportFirstNonEmpty(values ...string) string {
 // loneHookDecisionBodySQL selects the body of a hook_decision row that is
 // its decision's only local hook row (audit.LoneHookDecisionSQL), NULL for
 // every other row.
-func loneHookDecisionBodySQL() string {
-	return `CASE WHEN ` + audit.LoneHookDecisionSQL("") + ` THEN ` + audit.HookDecisionBodySQL("") + ` END`
+func loneHookDecisionBodySQL(tracked bool) string {
+	return `CASE WHEN ` + audit.LoneHookDecisionSQL("", tracked) + ` THEN ` + audit.HookDecisionBodySQL("") + ` END`
 }

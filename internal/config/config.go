@@ -1832,10 +1832,6 @@ type GuardrailConfig struct {
 	// (#1390). Empty by default. Read through IsInternalDomainHost.
 	InternalDomains []string `mapstructure:"internal_domains" yaml:"internal_domains,omitempty"`
 
-	// Cascade is guardrail.cascade: the live/shadow switches of the
-	// guardrail lanes (guardrail_lanes.go).
-	Cascade GuardrailCascade `mapstructure:"cascade" yaml:"cascade,omitempty"`
-
 	// BlockAt and AlertAt replace the block and alert levels the rule
 	// pack's profile implies (strict / default / permissive) when the
 	// gateway maps a finding's severity to an action: BlockAt is the
@@ -1856,7 +1852,15 @@ type GuardrailConfig struct {
 	DetectionStrategyPrompt     string `mapstructure:"detection_strategy_prompt"     yaml:"detection_strategy_prompt,omitempty"`
 	DetectionStrategyCompletion string `mapstructure:"detection_strategy_completion" yaml:"detection_strategy_completion,omitempty"`
 	DetectionStrategyToolCall   string `mapstructure:"detection_strategy_tool_call"  yaml:"detection_strategy_tool_call,omitempty"`
-	JudgeSweep                  bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
+	// Cascade holds the per-lane live/shadow switches (cascade.lanes.effects,
+	// cascade.lanes.secret_flow, cascade.lanes.nonshell), see cascade_lanes.go.
+	Cascade CascadeConfig `mapstructure:"cascade" yaml:"cascade,omitempty"`
+	// EffectsRulesTier selects how far the effect lane may block: "restricted"
+	// (a listed command on an exact canonical known protected target) or
+	// "full" (any known mutation of a known protected target). Ships
+	// "restricted". It only matters while cascade.lanes.effects is shadow or on.
+	EffectsRulesTier string `mapstructure:"effects_rules_tier"            yaml:"effects_rules_tier,omitempty"`
+	JudgeSweep       bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
 
 	// RetainJudgeBodies controls whether raw LLM-judge responses are
 	// persisted to the local SQLite audit store for later forensics.
@@ -1993,6 +1997,12 @@ type GuardrailConfig struct {
 
 	// Chains tunes tool-call chain evaluation (trusted_connectors.go).
 	Chains GuardrailChainsConfig `mapstructure:"chains" yaml:"chains,omitempty"`
+
+	// SecretFlow configures Secret flow tracking (secret_flow.go). Unset
+	// keeps the shipped defaults (credentials only; the sink action follows the
+	// pack: default alerts, strict blocks). Its live/shadow switch is
+	// cascade.lanes.secret_flow; these are its own settings.
+	SecretFlow SecretFlowConfig `mapstructure:"secret_flow" yaml:"secret_flow,omitempty"`
 
 	// profileConnectors is set only on a configuration DerivedForProfile
 	// returns: the profile's own connectors map, keyed by normalized
@@ -2370,10 +2380,13 @@ func (g *GuardrailConfig) Validate() error {
 	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
 		return err
 	}
-	if err := validateInternalDomains(g.InternalDomains); err != nil {
+	if err := g.Cascade.Validate(); err != nil {
 		return err
 	}
-	return validateGuardrailCascade(g.Cascade)
+	if err := g.SecretFlow.Validate(); err != nil {
+		return err
+	}
+	return validateInternalDomains(g.InternalDomains)
 }
 
 // validateGuardrailMode accepts the empty string (inherit/default) and
@@ -4169,6 +4182,15 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
 	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
+	viper.SetDefault("guardrail.cascade.lanes.effects", "shadow")
+	viper.SetDefault("guardrail.cascade.lanes.secret_flow", "shadow")
+	viper.SetDefault("guardrail.effects_rules_tier", "restricted")
+	viper.SetDefault("guardrail.secret_flow.label_sets.credentials", true)
+	viper.SetDefault("guardrail.secret_flow.reencodings", true)
+	viper.SetDefault("guardrail.secret_flow.sink_action.default", "alert")
+	viper.SetDefault("guardrail.secret_flow.sink_action.strict", "block")
+	viper.SetDefault("guardrail.secret_flow.memory.max_labeled_paths", 512)
+	viper.SetDefault("guardrail.secret_flow.memory.max_value_digests", 256)
 	// judge_sweep runs the full LLM judge on content the regex
 	// triager classified as no-signal. Flipped from false to true
 	// in the multi-provider-adapters PR after internal red-team
