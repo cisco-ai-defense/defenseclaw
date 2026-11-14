@@ -451,11 +451,11 @@ Defaults from the loader. Omitted keys take these values.
 | `tenant_id`, `workspace_id`, `discovery_source` | empty | Identity stamped on every record. Restart required. |
 | `deployment_mode` | empty | `managed_enterprise` on a managed device. Restart required. |
 | `claw.mode` | `openclaw` | The primary connector. With several active it names the first; the OTel attribute `defenseclaw.claw.mode` is set only while a single connector is active. |
-| `claw.home_dir`, `claw.config_file` | `~/.openclaw`, `~/.openclaw/openclaw.json` | Where the OpenClaw install is looked up. |
+| `claw.home_dir`, `claw.config_file` | `~/.openclaw`, `~/.openclaw/openclaw.json` | Where the OpenClaw install is looked up, and the home and `openclaw.json` that the OpenClaw connector patches (honoured since 1.0.10). A `config_file` left at its default follows a moved `home_dir`. |
 | `claw.workspace_dir` | empty | Set by `setup <connector> --workspace` or `config set`; scopes hooks to one folder, and setup without `--workspace` keeps it ([Per-connector files](#per-connector-files)). |
 | `gateway.host`, `gateway.port` | `127.0.0.1`, `18789` | The upstream agent gateway (OpenClaw and ZeptoClaw fleet link). |
 | `gateway.fleet_mode` | `auto` | `auto`, `enabled` or `disabled`: when to dial `host:port` ([OpenClaw fleet link](#openclaw-fleet-link)). |
-| `gateway.token_env` | `DEFENSECLAW_GATEWAY_TOKEN` | The variable that holds the sidecar API token ([Keys](/docs/reference/keys)). |
+| `gateway.token_env` | `DEFENSECLAW_GATEWAY_TOKEN` | The variable that holds the sidecar API token ([Keys](/docs/reference/keys)). `OPENCLAW_GATEWAY_TOKEN` is not accepted here: it holds the OpenClaw gateway credential, and the gateway skips it. `defenseclaw doctor --fix` changes it to `DEFENSECLAW_GATEWAY_TOKEN`. |
 | `gateway.api_port`, `gateway.api_bind` | `18970`, empty | The sidecar REST API. Empty `api_bind` binds `127.0.0.1` ([Gateway API](/docs/reference/gateway-api#bind-address)). |
 | `gateway.device_key_file` | `<data_dir>/device.key` | The device key. |
 | `gateway.auto_approve_safe` | `false` | Auto-approve safe requests from the upstream gateway. |
@@ -674,6 +674,24 @@ The gateway dials the OpenClaw or ZeptoClaw gateway at `gateway.host` and `gatew
 `claw.mode` defaults to `openclaw` for older configs, so an install that never picked a connector names OpenClaw without having it. When only that default names OpenClaw (`guardrail.connector` and `guardrail.connectors` are empty) and OpenClaw is not installed, the gateway and CLI resolve no agent connector; with a loopback `gateway.host` and `fleet_mode` unset or `auto`, the gateway does not dial. OpenClaw counts as installed when an `openclaw.json` exists at `claw.config_file` or in `claw.home_dir`, or an `openclaw` binary is on `PATH` or in `/usr/local/bin`, `/opt/homebrew/bin`, `~/.npm-global/bin` or `~/.local/bin`. Then `defenseclaw-gateway status` shows the Gateway subsystem `DISABLED` with `OpenClaw gateway off (OpenClaw is not installed)`, doctor reports `OpenClaw gateway: off (OpenClaw is not installed)`, the TUI and Mac app show the same text, and `OPENCLAW_GATEWAY_TOKEN` is not required. The gateway checks at start: restart it after installing OpenClaw, or set `fleet_mode: enabled`.
 
 When `guardrail.connectors` lists agents, the active connector comes from that roster. An older `claw.mode` default does not add OpenClaw to it.
+
+### OpenClaw connector (`connectors.openclaw`)
+
+Optional keys that DefenseClaw 1.0.10 reads. With none set, the plugin is managed, OpenClaw and DefenseClaw run as one account and the hook mode is `auto`. A signed bundle that sets any of them must require `min_product_version` 1.0.10. The block is refused with the Secure Client integration. Setup, the plugin and the checks are on the [OpenClaw connector](/docs/connectors/openclaw) page.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `connectors.openclaw.plugin_install` | `managed` | `managed`: setup writes the plugin into `extensions/defenseclaw` in the OpenClaw home. `external`: an administrator installed it at `plugin_dir`; DefenseClaw checks that its files equal this build and never writes or deletes them ([Administrator-installed plugin](/docs/connectors/openclaw#administrator-installed-plugin)). |
+| `connectors.openclaw.plugin_dir` | empty | Clean absolute path of the administrator-installed plugin, ending in a folder named `defenseclaw`. Used only with `plugin_install: external` and required there. Set it before `plugin_install`. |
+| `connectors.openclaw.operator_admin` | `true` | Ask OpenClaw for the `operator.admin` scope, used only to turn off a blocked skill, plugin or MCP server through OpenClaw. `false` keeps read, write and approvals; blocks are still enforced by DefenseClaw admission and inspection. |
+| `connectors.openclaw.hooks.mode` | `auto` | `auto` or `proxy`. `auto` uses the native plugin hooks on OpenClaw 2026.8.35 and later (with the guardrail proxy on Linux and macOS, alone on Windows) and the guardrail proxy below that. `proxy` keeps the 1.0.9 behaviour; refused on Windows ([Hook modes](/docs/connectors/openclaw#hook-modes)). |
+| `connectors.openclaw.hooks.prompt_gate` | `false` | Check every user prompt in `before_agent_run` before the model reads it; blocks it in action mode. Always on in native mode (Windows), where it is the only request check ([Prompt gate](/docs/connectors/openclaw#prompt-gate)). |
+| `connectors.openclaw.plugin_account` | empty | OS account of the OpenClaw gateway when it is not the account of the DefenseClaw gateway (the [separate-user layout](/docs/connectors/openclaw#separate-users-linux-and-macos)). Linux and macOS only. Needs `plugin_install: external` and `plugin_token_file`. |
+| `connectors.openclaw.plugin_token_file` | empty | Clean absolute path where DefenseClaw publishes the plugin credential for `plugin_account`. Its folder must be owned by the DefenseClaw account and not writable by group or others. Needs `plugin_account`. |
+| `connectors.openclaw.plugin_token_group` | none (required with `plugin_account`) | Group of the OpenClaw account that may read `plugin_token_file` (mode 0640). It must contain `plugin_account` and must not be a group every account is in, such as `staff` or `users`. Linux and macOS. |
+| `connectors.openclaw.install_policy` | `auto` | `auto`, `on` or `off`. When on (OpenClaw 2026.8.35 and later), OpenClaw asks DefenseClaw admission before it installs or updates a skill or plugin. `auto` is on in the strict tier and on managed installs, off in the default and permissive tiers ([Install admission](/docs/connectors/openclaw#install-admission)). |
+
+`plugin_account` and `plugin_token_group` take letters, digits, `_`, `.` and `-`, at most 64 characters, and do not start with `.` or `-`.
 
 ### Routing and observability behavior
 
@@ -1092,7 +1110,7 @@ There is no `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR` or `DEFENSECLAW_L
 
 | Connector | File DefenseClaw mutates |
 | --- | --- |
-| OpenClaw | `~/.openclaw/openclaw.json`, `~/.openclaw/extensions/defenseclaw/` |
+| OpenClaw | `openclaw.json` and `extensions/defenseclaw/` in the OpenClaw home (`claw.home_dir`, `~/.openclaw` by default); with `connectors.openclaw.plugin_install: external` the plugin is read from `plugin_dir` and not written; with `plugin_account` DefenseClaw writes only `plugin_token_file` |
 | ZeptoClaw | `~/.zeptoclaw/config.json` |
 | Claude Code | `~/.claude/settings.json` |
 | Codex | `~/.codex/config.toml` |

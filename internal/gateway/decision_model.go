@@ -103,7 +103,10 @@ type decisionResult struct {
 	risk   float64
 	// riskScore is the risk score answer (0..2), -1 when it is missing.
 	riskScore float64
-	latencyMs int64
+	// flowGuarded: a confident allow the flow guard turned into an
+	// escalation.
+	flowGuarded bool
+	latencyMs   int64
 	// failure is set when the model gave no usable answer; route is then
 	// decisionEscalate.
 	failure      gatewaylog.JudgeFailureClass
@@ -134,10 +137,18 @@ type decisionModel struct {
 	// escalateRuleFlagged: no confident block on a call the rules flagged
 	// (decision_model.escalate_rule_flagged).
 	escalateRuleFlagged bool
+	// historyTurns and historyResults shape the session history it sees;
+	// flowGuard asks the flow questions (decision_model_history.go).
+	historyTurns   int
+	historyResults bool
+	flowGuard      bool
+	questions      map[string]any
 	// alone: no judge follows (cascade 2), so the model may use all of the
 	// time left rather than a quarter of it.
 	alone  bool
 	client *http.Client
+	// inflight is the request semaphore (decisionMaxInflight).
+	inflight chan struct{}
 
 	// The breaker stops calling a model that keeps failing, so an outage
 	// costs the judge no time and the log one line per outage.
@@ -157,6 +168,11 @@ const (
 	decisionBudgetShare = 4
 	// decisionMinBudget: below this the model is not called at all.
 	decisionMinBudget = 50 * time.Millisecond
+	// decisionMaxInflight bounds the requests one decision model has in
+	// flight: the 100 hook calls/s target at a p99 of about 0.6 s is 60. A
+	// call past it skips the model, as when the breaker is open (review
+	// round 4, P4-2).
+	decisionMaxInflight = 64
 )
 
 // newDecisionModel builds the decision model from cfg, or returns nil when
@@ -190,6 +206,11 @@ func newDecisionModel(cfg *config.Config, dotenvPath string) *decisionModel {
 		blockAt:             dm.EffectiveBlockThreshold(),
 		blockRiskScore:      dm.EffectiveBlockRiskScore(),
 		escalateRuleFlagged: dm.EffectiveEscalateRuleFlagged(),
+		historyTurns:        min(dm.EffectiveHistoryTurns(), maxDecisionHistoryTurns),
+		historyResults:      dm.HistoryToolResults,
+		flowGuard:           dm.EffectiveFlowGuard(),
+		questions:           decisionQuestionsFor(dm.EffectiveFlowGuard()),
+		inflight:            make(chan struct{}, decisionMaxInflight),
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   timeout,
@@ -206,6 +227,10 @@ type decisionModelState struct {
 	SessionUserIntent string                  `json:"session_user_intent,omitempty"`
 	RecentToolCalls   []decisionModelToolCall `json:"recent_tool_calls,omitempty"`
 	CurrentToolCall   decisionModelToolCall   `json:"current_tool_call"`
+	// SessionHistory is the rendered, nonce-delimited session history
+	// (decision_model_history.go). System One gets it in its state; the
+	// Decisions API input gets it as text before the STATE section.
+	SessionHistory string `json:"session_history,omitempty"`
 }
 
 type decisionModelToolCall struct {
@@ -224,18 +249,29 @@ type decisionModelResponse struct {
 }
 
 // budget is the time the model may take for this call: its timeout, capped
-// at a quarter of what is left before the hook answer window or the judge
-// deadline ends.
+// at a quarter of what is left before the hook answer window, the judge
+// deadline or the hook's shared judge budget ends (all of it alone, in
+// cascade 2). A call with none of them (a legacy curl hook, a Copilot
+// envelope without progress reports, an in-process caller) is capped as if
+// the hook's default answer window had just started, so it never waits the
+// whole decision_model.timeout (review round 4, P4-1).
 func (d *decisionModel) budget(ctx context.Context) time.Duration {
 	limit, share := d.timeout, time.Duration(decisionBudgetShare)
 	if d.alone {
 		share = 1
 	}
+	bounded := false
 	if end, ok := hookJudgeAnswerEnd(ctx); ok {
-		limit = min(limit, time.Until(end)/share)
+		limit, bounded = min(limit, time.Until(end)/share), true
 	}
 	if dl, ok := ctx.Deadline(); ok {
-		limit = min(limit, time.Until(dl)/share)
+		limit, bounded = min(limit, time.Until(dl)/share), true
+	}
+	if end, ok := ctx.Value(hookJudgeBudgetKey{}).(time.Time); ok {
+		limit, bounded = min(limit, time.Until(end)/share), true
+	}
+	if !bounded {
+		limit = min(limit, hookJudgeAnswerWindow/share)
 	}
 	return limit
 }
@@ -302,8 +338,21 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	// The routing of the call's scope: decision_model, with the
 	// guardrail.cascade.system_one overrides of its connector and profile.
 	routing := d.routingFor(ctx)
+	if d.inflight != nil {
+		select {
+		case d.inflight <- struct{}{}:
+			defer func() { <-d.inflight }()
+		default:
+			// At capacity: skip the model for this call, as for an open
+			// breaker (the judge decides, or the rule verdict stands).
+			res.failure = gatewaylog.JudgeFailureProvider
+			res.failureCause = "skipped: decision model at capacity"
+			res.skipped = true
+			return res
+		}
+	}
 	cctx, cancel := context.WithTimeout(ctx, budget)
-	choice, probs, score, err := d.call(cctx, state)
+	choice, probs, score, flow, err := d.call(cctx, state)
 	cancel()
 	res.latencyMs = time.Since(start).Milliseconds()
 	var rerr decisionRefusalError
@@ -329,6 +378,12 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	res.risk = 1 - probs["allow"]
 	res.riskScore = score
 	switch {
+	case choice == "allow" && res.risk <= routing.allowAt && d.flowGuard && flow.guards():
+		// The flow guard: an allow the user did not ask for is not
+		// confident (S1FLOW); it escalates. Without the judge (cascade 2)
+		// the rule verdict stands, so a call escalated on a CRITICAL rule
+		// finding is refused under a closed hook fail mode.
+		res.flowGuarded = true
 	case choice == "allow" && res.risk <= routing.allowAt:
 		res.route = decisionAllow
 	case choice == "block" && res.risk >= routing.blockAt && score >= routing.blockRiskScore &&
@@ -340,21 +395,32 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	return res
 }
 
+// ruleFlagEscalates reports whether the rules flagged this call and
+// decision_model.escalate_rule_flagged keeps a confident block off it.
+func (d *decisionModel) ruleFlagEscalates(ctx context.Context) bool {
+	return d.escalateRuleFlagged && decisionRuleFloorFrom(ctx)
+}
+
 type decisionParseError struct{ msg string }
 
 func (e decisionParseError) Error() string { return e.msg }
 
-func (d *decisionModel) call(ctx context.Context, state decisionModelState) (choice string, probs map[string]float64, score float64, err error) {
+func (d *decisionModel) call(ctx context.Context, state decisionModelState) (choice string, probs map[string]float64, score float64, flow decisionFlowAnswers, err error) {
 	score = -1
+	flow = decisionFlowAnswers{userAuthorized: -1, servesLatest: -1}
 	usage := beginGatewayCallUsage(ctx, modelusage.RoleDecisionModel, "decision_model", d.model)
 	defer func() { usage.End(err) }()
-	body, err := decisionWireBody(d.protocol, d.model, state, decisionModelQuestions)
+	questions := d.questions
+	if questions == nil {
+		questions = decisionModelQuestions
+	}
+	body, err := decisionWireBody(d.protocol, d.model, state, questions)
 	if err != nil {
-		return "", nil, score, decisionParseError{"encode request: " + err.Error()}
+		return "", nil, score, flow, decisionParseError{"encode request: " + err.Error()}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", nil, score, errors.New("decision model request could not be built")
+		return "", nil, score, flow, errors.New("decision model request could not be built")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	setDecisionWireAuth(req, d.protocol, d.apiKey)
@@ -363,21 +429,21 @@ func (d *decisionModel) call(ctx context.Context, state decisionModelState) (cho
 		usage.UpstreamHeader(resp.StatusCode, nil)
 	}
 	if err != nil {
-		return "", nil, score, fmt.Errorf("decision model unreachable: %s", redactDecisionModelError(err))
+		return "", nil, score, flow, fmt.Errorf("decision model unreachable: %s", redactDecisionModelError(err))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDecisionModelResponseBytes+1))
 	if err != nil {
-		return "", nil, score, fmt.Errorf("decision model read failed: %w", err)
+		return "", nil, score, flow, fmt.Errorf("decision model read failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, score, decisionHTTPError(d.protocol, resp.StatusCode, raw)
+		return "", nil, score, flow, decisionHTTPError(d.protocol, resp.StatusCode, raw)
 	}
 	if len(raw) > maxDecisionModelResponseBytes {
-		return "", nil, score, decisionParseError{"decision model answer exceeds 64 KiB"}
+		return "", nil, score, flow, decisionParseError{"decision model answer exceeds 64 KiB"}
 	}
 	choice, probs, err = parseDecisionModelAnswer(raw)
-	return choice, probs, decisionRiskScore(raw), err
+	return choice, probs, decisionRiskScore(raw), parseDecisionFlowAnswers(raw), err
 }
 
 // decisionRiskScore reads the risk score answer (0..2), or -1 when it is
@@ -413,11 +479,17 @@ func decisionWireBody(protocol, model string, state any, questions map[string]an
 	if protocol != config.DecisionModelProtocolGeminiDecisions {
 		return json.Marshal(map[string]any{"model": model, "state": state, "questions": questions})
 	}
+	history := ""
+	if st, ok := state.(decisionModelState); ok && st.SessionHistory != "" {
+		// The history goes before the STATE section as its own text.
+		history, st.SessionHistory = st.SessionHistory, ""
+		state = st
+	}
 	input, err := decisionModelInput(state)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(map[string]any{"model": model, "input": input, "questions": questions})
+	return json.Marshal(map[string]any{"model": model, "input": history + input, "questions": questions})
 }
 
 // decisionModelInput renders state as the labeled input text: one-space
@@ -606,7 +678,7 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 	if dm == nil {
 		return j.runToolJudgeLLM(ctx, toolName, args, sample)
 	}
-	res := dm.decide(ctx, j.takeDecisionState(sample, toolName, args))
+	res := j.decideOnce(ctx, sample, toolName, args)
 	if res.failure == "" && res.logLine != "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", res.logLine)
 	}
@@ -624,17 +696,13 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 		recordCascadeSystemOne(ctx, res, v)
 		return v
 	case decisionBlock:
-		floor := &ScanVerdict{
-			Action:     "block",
-			Severity:   "HIGH",
-			Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f, risk score %.2f >= %.2f)", res.risk, dm.routingFor(ctx).blockAt, res.riskScore, dm.routingFor(ctx).blockRiskScore),
-			Findings:   []string{decisionModelFindingID},
-			Scanner:    decisionModelScanner,
-			Confidence: res.risk,
-		}
+		floor := dm.blockFloor(res)
+		floor.systemOneBlocked = true
 		emitDecisionModel(ctx, dm.model, toolName, args, res, floor)
 		recordCascadeSystemOne(ctx, res, floor)
-		floor.systemOneBlocked = true
+		// The hook sees the floor before the judge runs, so a judge that
+		// misses the hook answer window cannot drop it (GAP-0392).
+		decisionFloorSlotFrom(ctx).set(floor)
 		// The judge always runs (a decision-model block is never final) and
 		// can raise the verdict; the decision model's finding is the floor,
 		// and stands when the judge gives no verdict.
@@ -680,7 +748,21 @@ func newDecisionOnlyJudge(cfg *config.Config) *LLMJudge {
 // is never an allow of its own.
 func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 	dm := j.decision
-	res := dm.decide(ctx, j.takeDecisionState(sample, toolName, args))
+	res := j.decideOnce(ctx, sample, toolName, args)
+	if res.flowGuarded {
+		// GAP-0458: the flow guard only takes the confidence away from an
+		// allow. Alone (cascade 2) that leaves the rule verdict: the model
+		// abstains; it is never a confirm that a strict block_at blocks.
+		v := &ScanVerdict{
+			Action:          guardrailActionAllow,
+			Severity:        "NONE",
+			Reason:          fmt.Sprintf("decision-model: flow guard: the user may not have asked for this call (risk %.2f); not a confident allow, the rule verdict stands", res.risk),
+			Scanner:         decisionModelScanner,
+			decisionAbstain: true,
+		}
+		emitDecisionModel(ctx, dm.model, toolName, args, res, nil)
+		return v
+	}
 	if res.failure != "" && res.refusal == "" {
 		if res.logLine != "" {
 			fmt.Fprintf(os.Stderr, "[guardrail] %s (%s)\n", res.logLine, res.failureCause)
@@ -791,7 +873,10 @@ func decisionConfirmWithoutAsk(verdict *ToolInspectVerdict, action string) strin
 // model's floor is stronger or the judge failed.
 func strongerDecisionVerdict(judged, floor *ScanVerdict) *ScanVerdict {
 	if judged == nil || judged.JudgeFailed {
-		return floor
+		// Only the floor: the judge gave no verdict.
+		out := *floor
+		out.decisionFloorOnly = true
+		return &out
 	}
 	if guardrailSeverityRank(judged.Severity) >= guardrailSeverityRank(floor.Severity) {
 		if judged.systemOneBlocked == floor.systemOneBlocked {
@@ -848,6 +933,10 @@ func emitDecisionModel(ctx context.Context, model, toolName, args string, res de
 		payload.Severity = deriveSeverity(v.Severity)
 		payload.Findings = judgeFindingsPayload(v)
 	}
+	if res.flowGuarded {
+		// The flow guard's escalation is named on the event (GAP-0458).
+		payload.Findings = []gatewaylog.Finding{{Category: decisionModelFindingID, Severity: payload.Severity, Rule: decisionModelFindingID, RuleID: "flow_guard_escalated", Source: "judge"}}
+	}
 	if res.refusal != "" {
 		// The refusal class rides on the decision-model finding: the event
 		// is a confirm or an escalation, not an error.
@@ -887,6 +976,132 @@ func judgeCompletionAction(kind, action string) string {
 func judgeInputHash(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// blockFloor is the cascade-3 verdict of a confident block: a HIGH
+// JUDGE-DECISION-MODEL finding the judge can raise and never remove.
+func (d *decisionModel) blockFloor(res decisionResult) *ScanVerdict {
+	return &ScanVerdict{
+		Action:     "block",
+		Severity:   "HIGH",
+		Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f, risk score %.2f >= %.2f)", res.risk, d.blockAt, res.riskScore, d.blockRiskScore),
+		Findings:   []string{decisionModelFindingID},
+		Scanner:    decisionModelScanner,
+		Confidence: res.risk,
+	}
+}
+
+// decisionPrepass is a decision-model answer the hook lane got before it
+// took a judge slot (P3-1, S7 sysone review round 3): the decision model is
+// fast and cheap, so it answers even when the judge cannot run (all slots
+// busy, the hook judge budget spent, a deadline too short), and a
+// confident block then still stands as the HIGH floor. The judge path, when
+// it runs, uses this answer and this sample instead of asking again.
+type decisionPrepass struct {
+	judge  *LLMJudge
+	sample string
+	res    decisionResult
+}
+
+type decisionPrepassKey struct{}
+
+// prepareDecision records the call in the judge's session context, asks the
+// decision model once and keeps the answer on ctx. nil when the call is not
+// eligible for the judge (then no model runs, as before) or the judge has no
+// decision model.
+func (j *LLMJudge) prepareDecision(ctx context.Context, toolName, args string) (context.Context, *decisionPrepass) {
+	if j == nil || j.decision == nil {
+		return ctx, nil
+	}
+	sample, eligible := j.prepareToolJudgeSample(ctx, toolName, args)
+	if !eligible {
+		return ctx, nil
+	}
+	p := &decisionPrepass{judge: j, sample: sample, res: j.decision.decide(ctx, j.takeDecisionState(sample, toolName, args))}
+	if p.res.route == decisionBlock && !j.decisionOnly {
+		// Visible to the hook before the judge starts (GAP-0392).
+		decisionFloorSlotFrom(ctx).set(j.decision.blockFloor(p.res))
+	}
+	return context.WithValue(ctx, decisionPrepassKey{}, p), p
+}
+
+// decisionPrepassFrom returns the prepass of ctx made for judge j, or nil.
+func decisionPrepassFrom(ctx context.Context, j *LLMJudge) *decisionPrepass {
+	p, _ := ctx.Value(decisionPrepassKey{}).(*decisionPrepass)
+	if p == nil || p.judge != j {
+		return nil
+	}
+	return p
+}
+
+// decideOnce returns the prepass answer when the hook lane already asked
+// the decision model for this call, else asks it now.
+func (j *LLMJudge) decideOnce(ctx context.Context, sample, toolName, args string) decisionResult {
+	if p := decisionPrepassFrom(ctx, j); p != nil && p.sample == sample {
+		return p.res
+	}
+	return j.decision.decide(ctx, j.takeDecisionState(sample, toolName, args))
+}
+
+type judgeUnavailableKey struct{}
+
+// withJudgeUnavailable marks ctx so the LLM judge is not called: the hook
+// lane has no slot, budget or time for it, and only the decision model's
+// answer (the prepass) decides.
+func withJudgeUnavailable(ctx context.Context) context.Context {
+	return context.WithValue(ctx, judgeUnavailableKey{}, true)
+}
+
+func judgeUnavailableFrom(ctx context.Context) bool {
+	v, _ := ctx.Value(judgeUnavailableKey{}).(bool)
+	return v
+}
+
+// decisionFloorSlot carries a cascade-3 decision-model floor (a confident
+// block on its way to the judge) out of the judge goroutine, so the hook
+// can answer with it when the judge is late or fails (GAP-0392). A late
+// judge can only add to it; nothing removes it.
+type decisionFloorSlot struct {
+	mu    sync.Mutex
+	floor *ScanVerdict
+}
+
+type decisionFloorSlotKey struct{}
+
+func withDecisionFloorSlot(ctx context.Context, slot *decisionFloorSlot) context.Context {
+	return context.WithValue(ctx, decisionFloorSlotKey{}, slot)
+}
+
+// decisionFloorSlotFrom returns the slot of ctx, or nil (set and get are
+// nil-safe) when the call is not a hook-lane judge call.
+func decisionFloorSlotFrom(ctx context.Context) *decisionFloorSlot {
+	slot, _ := ctx.Value(decisionFloorSlotKey{}).(*decisionFloorSlot)
+	return slot
+}
+
+func (s *decisionFloorSlot) set(v *ScanVerdict) {
+	if s == nil || v == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := *v
+	s.floor = &c
+}
+
+func (s *decisionFloorSlot) get() *ScanVerdict {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.floor == nil {
+		return nil
+	}
+	c := *s.floor
+	// A floor read from the slot stands in for a judge that gave nothing.
+	c.decisionFloorOnly = true
+	return &c
 }
 
 type decisionRuleFloorKey struct{}

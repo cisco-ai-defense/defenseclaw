@@ -245,3 +245,33 @@ func TestBoundedGatewayUntruncatedAllocatesNothing(t *testing.T) {
 		t.Fatalf("untruncated gateway path allocated %.0f times per run", allocs)
 	}
 }
+
+// An internal bound misuse in production floors only the call it read: its
+// finding names "internal bound misuse", the call counts once in the parser
+// uncertainty metric, the gateway hook logs it, and another call is not
+// affected (review round 4 P3-1 (3)).
+func TestBoundedMisuseFloorsItsCallAndIsCounted(t *testing.T) {
+	bounded.PanicOnMisuse(false)
+	t.Cleanup(func() { bounded.PanicOnMisuse(true) })
+	before := boundedMisuses.Load()
+	var trunc, other bounded.Truncated
+	var unbound bounded.Counter
+	unbound.Take()
+	set := trunc.Set(&unbound)
+	var counted int64
+	request := trustedActionRequest{EnforcementCapable: true,
+		recordTelemetry: func(o trustedActionTelemetry) { counted += o.ParserUncertaintyCount }}
+	findings := withBoundedTruncation(nil, set, request)
+	if len(findings) != 1 || !strings.Contains(findings[0].Title, bounded.MisuseReason) {
+		t.Fatalf("misuse finding %+v, want the reason to name %q", findings, bounded.MisuseReason)
+	}
+	if got := guardrailActionForProfile(findings, false, func() bool { return false }, boundedTestActionFor); got != guardrailActionAlert {
+		t.Fatalf("misuse in the default pack: %s, want the floor (alert)", got)
+	}
+	if counted != 1 || boundedMisuses.Load() != before+1 {
+		t.Fatalf("metric count %d, hook count %d, want 1 and 1", counted, boundedMisuses.Load()-before)
+	}
+	if other.Any() || other.Set().Any() {
+		t.Fatal("the misuse reached another call")
+	}
+}

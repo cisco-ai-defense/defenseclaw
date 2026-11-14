@@ -10,7 +10,7 @@
 
 """GAP-1956: human approval on an OpenClaw without plugin approvals.
 
-OpenClaw before 2026.3.28 (the install.sh pin is 2026.3.24) has no plugin
+OpenClaw before 2026.3.28 (as the install.sh pin before 1.0.10, 2026.3.24, was) has no plugin
 approval hook and rejects approvals.plugin in openclaw.json, so its gateway
 stopped starting after `setup openclaw --human-approval`. Setup's version
 gate now refuses that combination before it writes anything.
@@ -22,6 +22,8 @@ from types import SimpleNamespace
 
 import pytest
 from defenseclaw.commands import cmd_setup
+
+pytestmark = pytest.mark.usefixtures("openclaw_proxy_topology")
 
 
 def _discovery(version: str) -> SimpleNamespace:

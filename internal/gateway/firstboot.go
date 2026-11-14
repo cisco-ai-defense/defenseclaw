@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -38,6 +39,16 @@ var firstBootMu sync.Mutex
 // is returned unchanged. Otherwise a 32-byte CSPRNG hex token is
 // generated, persisted to dotenvPath with mode 0o600, and returned.
 //
+// The DefenseClaw gateway token is never the OpenClaw gateway token
+// (R-TOK). OPENCLAW_GATEWAY_TOKEN, from the environment or the dotenv
+// file, is only the OpenClaw WebSocket credential and is never returned.
+// A DEFENSECLAW_GATEWAY_TOKEN equal to it, or to any value in notMaster
+// (the caller passes the openclaw.json gateway.auth.token), is not usable
+// either: a 1.0.9 auth repair copied the OpenClaw token under both names.
+// Then a new token is minted and replaces that line. A 1.0.8 or 1.0.9
+// install whose .env holds only OPENCLAW_GATEWAY_TOKEN gets its own token
+// on the first boot of 1.0.10 the same way.
+//
 // Plan B2 / S0.2: this closes the empty-token loopback-trust path.
 // Before this helper, sidecar boot logged a WARNING and silently
 // trusted every loopback caller; downstream (zeptoclaw / codex /
@@ -48,33 +59,45 @@ var firstBootMu sync.Mutex
 // The helper is idempotent: a second call (or a sidecar restart) reads
 // the same value back. Callers MUST NOT mutate the returned string;
 // use SetCredentials on the connector to inject it into the auth path.
-func EnsureGatewayToken(dotenvPath string) (string, error) {
+func EnsureGatewayToken(dotenvPath string, notMaster ...string) (string, error) {
 	firstBootMu.Lock()
 	defer firstBootMu.Unlock()
+
+	var dotenv map[string]string
+	if dotenvPath != "" {
+		if values, err := loadDotEnv(dotenvPath); err == nil {
+			dotenv = values
+		}
+	}
+	openClaw := map[string]bool{}
+	for _, t := range append([]string{os.Getenv(config.OpenClawGatewayTokenEnv), dotenv[config.OpenClawGatewayTokenEnv]}, notMaster...) {
+		if t = strings.TrimSpace(t); t != "" {
+			openClaw[t] = true
+		}
+	}
+	// SecretRef text an earlier build saved as a token is never one (#1404).
+	replaced := false
+	usable := func(t string) bool {
+		if t == "" || envvars.IsSecretRefText(t) {
+			return false
+		}
+		if openClaw[t] {
+			replaced = true
+			return false
+		}
+		return true
+	}
 
 	// Check the process environment directly (not via ResolveAPIKey, which
 	// prefers the in-memory key store). In enterprise/sidecar mode the
 	// gateway token is injected via ConfigMap envFrom.
-	// SecretRef text an earlier build saved as a token is never one (#1404).
-	usable := func(t string) bool { return t != "" && !envvars.IsSecretRefText(t) }
 	if t := strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")); usable(t) {
 		return t, nil
 	}
-	if t := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_TOKEN")); usable(t) {
+	// Fall back to the dotenv file (covers standalone CLI installs where
+	// the token lives in ~/.defenseclaw/.env).
+	if t := strings.TrimSpace(dotenv["DEFENSECLAW_GATEWAY_TOKEN"]); usable(t) {
 		return t, nil
-	}
-
-	// Fall back to dotenv file lookup (covers standalone CLI installs
-	// where the token lives in ~/.defenseclaw/.env).
-	if dotenvPath != "" {
-		if dotenv, err := loadDotEnv(dotenvPath); err == nil {
-			if t := strings.TrimSpace(dotenv["DEFENSECLAW_GATEWAY_TOKEN"]); usable(t) {
-				return t, nil
-			}
-			if t := strings.TrimSpace(dotenv["OPENCLAW_GATEWAY_TOKEN"]); usable(t) {
-				return t, nil
-			}
-		}
 	}
 
 	if dotenvPath == "" {
@@ -91,7 +114,16 @@ func EnsureGatewayToken(dotenvPath string) (string, error) {
 		return "", fmt.Errorf("ensureGatewayToken: persist %s: %w", dotenvPath, err)
 	}
 
-	fmt.Fprintf(os.Stderr, "[guardrail] generated first-boot DEFENSECLAW_GATEWAY_TOKEN at %s (mode 0600)\n", dotenvPath)
+	switch {
+	case replaced:
+		fmt.Fprintf(os.Stderr, "[guardrail] DEFENSECLAW_GATEWAY_TOKEN held the OpenClaw gateway token; "+
+			"generated a separate DEFENSECLAW_GATEWAY_TOKEN at %s (mode 0600). OPENCLAW_GATEWAY_TOKEN stays the OpenClaw credential\n", dotenvPath)
+	case len(openClaw) > 0:
+		fmt.Fprintf(os.Stderr, "[guardrail] generated first-boot DEFENSECLAW_GATEWAY_TOKEN at %s (mode 0600); "+
+			"OPENCLAW_GATEWAY_TOKEN is only the OpenClaw credential\n", dotenvPath)
+	default:
+		fmt.Fprintf(os.Stderr, "[guardrail] generated first-boot DEFENSECLAW_GATEWAY_TOKEN at %s (mode 0600)\n", dotenvPath)
+	}
 	return tok, nil
 }
 

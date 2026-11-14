@@ -116,6 +116,16 @@ type ScanVerdict struct {
 	// on_unsure or no_verdict answer): the hook lane does not map it by
 	// severity again. In-process only.
 	cascadeFixed bool
+	// decisionFloorOnly marks a verdict that is only the decision model's
+	// confident-block floor because the LLM judge gave no verdict (failed,
+	// late, busy, no budget). It is not a judge answer: a closed-mode
+	// refusal of an escalated CRITICAL call still applies. In-process only.
+	decisionFloorOnly bool
+	// decisionAbstain marks the decision model's no-answer in cascade 2 (the
+	// flow guard took the confidence away from an allow): an allow that is
+	// not a verdict, so the rule verdict stands and a closed-mode refusal
+	// still applies. In-process only.
+	decisionAbstain bool
 }
 
 func allowVerdict(scanner string) *ScanVerdict {

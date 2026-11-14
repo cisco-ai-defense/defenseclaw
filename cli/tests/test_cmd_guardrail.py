@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import click
+import pytest
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -672,6 +673,7 @@ class DisableCommandTests(unittest.TestCase):
         app.cfg.save.assert_not_called()
 
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class EnableCommandTests(unittest.TestCase):
     def test_enable_already_enabled(self):
         runner = CliRunner()

@@ -65,8 +65,21 @@ func requireRestoredButFailed(t *testing.T, response enterpriseHookWorkerRespons
 	}
 }
 
+// measuredWorkerLimit is a worker limit sized to this machine: four times
+// what one worker for the same target takes here to start, repair and answer,
+// at least 2 s and at most the 10 s this test used before (on an idle
+// machine about 2 s instead of 10 s).
+func measuredWorkerLimit(t *testing.T) time.Duration {
+	t.Helper()
+	started := time.Now()
+	if response, _, err := runUnfinishedRepairWorker(t, "slow-second", 0); err != nil || len(response.Targets) != 1 {
+		t.Fatalf("the probe worker: %+v, %v", response.Targets, err)
+	}
+	return min(max(2*time.Second, 4*time.Since(started)), 10*time.Second)
+}
+
 func TestEnterpriseHookWorkerTimedOutInsideInstallKeepsTheRestore(t *testing.T) {
-	response, script, err := runUnfinishedRepairWorker(t, "hang-after-write", 10*time.Second)
+	response, script, err := runUnfinishedRepairWorker(t, "hang-after-write", measuredWorkerLimit(t))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want the worker reported as timed out", err)
 	}

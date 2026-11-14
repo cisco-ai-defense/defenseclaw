@@ -342,14 +342,12 @@ func exactNetExecPowerShellParseStatus(parse ParseResult) bool {
 
 func exactNetExecPowerShellCommand(command CommandFact) (string, bool) {
 	if !exactUnconditionalTopLevelCommand(command) || !command.ArgvComplete ||
-		(command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
-		!staticArguments(command.Arguments) ||
-		!exactPOSIXProgramIdentity(command.Executable, command.Program) {
+		(command.Dialect != DialectPOSIX && command.Dialect != DialectArgv &&
+			command.Dialect != DialectPowerShell) ||
+		!staticArguments(command.Arguments) {
 		return "", false
 	}
-	switch command.Program {
-	case "nxc", "netexec", "crackmapexec":
-	default:
+	if family, ok := netExecProgramFamily(command.Executable); !ok || family != command.Program {
 		return "", false
 	}
 	if len(command.Argv) < 11 || !strings.EqualFold(command.Argv[1], "smb") {
@@ -403,7 +401,7 @@ func exactNetExecPowerShellCommand(command CommandFact) (string, bool) {
 			}
 			methodSeen = true
 		case "-x":
-			if body != "" || command.Dialect == DialectPOSIX &&
+			if body != "" || command.Dialect != DialectArgv &&
 				command.Arguments[valueIndex].Quote != QuoteSingle {
 				return "", false
 			}

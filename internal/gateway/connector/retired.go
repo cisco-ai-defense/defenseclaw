@@ -179,7 +179,7 @@ func (c *retiredDesktopConnector) Route(*http.Request, []byte) (*ConnectorSignal
 	return nil, fmt.Errorf("connector %q is retired", legacyconnector.RetiredDesktopID)
 }
 
-func (c *retiredDesktopConnector) SetCredentials(string, string) {}
+func (c *retiredDesktopConnector) SetCredentials(string) {}
 
 // retiredCascadeHooksPaths resolves the legacy hooks files to clean. An
 // explicit absolute ConfigHome from native maintenance is the only profile

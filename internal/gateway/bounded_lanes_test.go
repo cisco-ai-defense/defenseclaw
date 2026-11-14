@@ -75,7 +75,8 @@ type boundedLaneCap struct {
 	// checks that the answer is the same on a second run.
 	work bool
 	// connector is the connector the lane's route judges for (claudecode
-	// when empty); its tier is asserted at the route.
+	// when empty; required with decide); its tier is asserted at the route
+	// and the judge stub is enabled for it.
 	connector string
 	// decide runs one call through the lane's route; nil is the Claude Code
 	// PreToolUse hook.
@@ -396,6 +397,12 @@ func boundedLaneTableErrors(lanes []boundedLaneCap) []string {
 		if lane.decide != nil && lane.judge == nil {
 			errs = append(errs, fmt.Sprintf("%s: lane %s has its own route and no judge row", name, lane.lane))
 		}
+		if lane.decide == nil && lane.judge != nil {
+			errs = append(errs, fmt.Sprintf("%s: a judge row without its own route (decide) would never run", name))
+		}
+		if lane.decide != nil && lane.connector == "" {
+			errs = append(errs, fmt.Sprintf("%s: a lane with its own route names its connector", name))
+		}
 		for key, gap := range lane.open {
 			tier, shape, ok := strings.Cut(key, "/")
 			if !ok || !tierNames[tier] || !shapeNames[shape] || !boundedOpenGap.MatchString(gap) {
@@ -492,12 +499,14 @@ func first(action string, _ []string) string { return action }
 // boundedJudgeAPI is a tier's test API with a regex_judge tool-call judge
 // for claudecode whose provider fails, so the test sees both that the judge
 // is asked and that the floor stands when it gives no verdict.
-func boundedJudgeAPI(t *testing.T, posture string, managedInstall bool, tier bounded.Tier) (*APIServer, *mockLLMProvider) {
+func boundedJudgeAPI(t *testing.T, posture string, managedInstall bool, tier bounded.Tier,
+) (*APIServer, *mockLLMProvider) {
 	t.Helper()
 	api := boundedTierAPI(t, posture, managedInstall, tier)
 	api.scannerCfg.DataDir = t.TempDir()
 	api.scannerCfg.Guardrail.DetectionStrategy = "regex_judge"
-	api.scannerCfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"claudecode"}}
+	api.scannerCfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, ToolInjection: true,
+		HookConnectors: boundedTierConnectors()}
 	mock := &mockLLMProvider{err: errors.New("judge down")}
 	api.SetHookJudge(&LLMJudge{cfg: &api.scannerCfg.Guardrail.Judge, model: "test-model", provider: mock, rp: &guardrail.RulePack{}})
 	return api, mock
@@ -518,8 +527,7 @@ func TestBoundRuleJudgeStillDecides(t *testing.T) {
 				judge = boundedDecideClaudeCode
 			}
 			if judge == nil {
-				t.Errorf("%s/%s: lane %s has its own route and no judge row", tier.name, lane.lane, lane.lane)
-				continue
+				continue // the lane table check reports it
 			}
 			call, _ := lane.gen(lane.limit+1, boundedShape{})
 			asked := boundedJudgeCalls(mock)
@@ -549,26 +557,36 @@ func boundedJudgeCalls(mock *mockLLMProvider) int {
 // non-time cap (and a time cap without it), an OPEN entry for a whole tier
 // or with no gap id, a missing seen element.
 func TestBoundRuleLaneTableRejectsMisuse(t *testing.T) {
-	good := boundedLanes[len(boundedLanes)-1]
+	// A valid lane built here, not taken from the live table, so a lane an
+	// adopter registers does not change what each edit tests.
+	good := boundedLaneCap{lane: "table check", cap: bounded.Items, limit: 8,
+		gen: boundedShellLane(boundedListOperands, boundedSplitOperands), seen: boundedShellSeenCall}
 	if errs := boundedLaneTableErrors([]boundedLaneCap{good}); len(errs) != 0 {
 		t.Fatalf("a valid lane is rejected: %v", errs)
 	}
 	route := func(*testing.T, *APIServer, boundedEnv, boundedLaneCall) (string, []string) { return "", nil }
-	for name, edit := range map[string]func(*boundedLaneCap){
-		"legacy outside the shell rows": func(l *boundedLaneCap) { l.path = boundedLegacyShellReading },
-		"unknown path":                  func(l *boundedLaneCap) { l.path = boundedLegacyShellReading + 1 },
-		"own route, no judge row":       func(l *boundedLaneCap) { l.decide = route },
-		"work on a non-time cap":        func(l *boundedLaneCap) { l.work = true },
-		"time cap without work":         func(l *boundedLaneCap) { l.cap = bounded.Time },
-		"OPEN for a whole tier":         func(l *boundedLaneCap) { l.open = map[string]string{"default": "rel-1-0-10:GAP-0312"} },
-		"OPEN wildcard":                 func(l *boundedLaneCap) { l.open = map[string]string{"*/seen": "rel-1-0-10:GAP-0312"} },
-		"OPEN without a gap id":         func(l *boundedLaneCap) { l.open = map[string]string{"default/seen": "later"} },
-		"no seen element":               func(l *boundedLaneCap) { l.seen = nil },
+	// Each edit is one defect, matched by the error it must raise.
+	for _, tc := range []struct {
+		name, want string
+		edit       func(*boundedLaneCap)
+	}{
+		{"legacy outside the shell rows", "only the rel shell reading bounds", func(l *boundedLaneCap) { l.path = boundedLegacyShellReading }},
+		{"unknown path", "unknown path", func(l *boundedLaneCap) { l.path = boundedLegacyShellReading + 1 }},
+		{"own route, no judge row", "has its own route and no judge row", func(l *boundedLaneCap) { l.decide, l.connector = route, "codex" }},
+		{"own route, no connector", "names its connector", func(l *boundedLaneCap) { l.decide, l.judge = route, route }},
+		{"judge row without own route", "judge row without its own route", func(l *boundedLaneCap) { l.judge = route }},
+		{"work on a non-time cap", "only a time cap", func(l *boundedLaneCap) { l.work = true }},
+		{"time cap without work", "only a time cap", func(l *boundedLaneCap) { l.cap = bounded.Time }},
+		{"OPEN for a whole tier", "OPEN entry", func(l *boundedLaneCap) { l.open = map[string]string{"default": "rel-1-0-10:GAP-0312"} }},
+		{"OPEN wildcard", "OPEN entry", func(l *boundedLaneCap) { l.open = map[string]string{"*/seen": "rel-1-0-10:GAP-0312"} }},
+		{"OPEN without a gap id", "OPEN entry", func(l *boundedLaneCap) { l.open = map[string]string{"default/seen": "later"} }},
+		{"no seen element", "registers gen, seen and a positive limit", func(l *boundedLaneCap) { l.seen = nil }},
 	} {
 		lane := good
-		edit(&lane)
-		if errs := boundedLaneTableErrors([]boundedLaneCap{lane}); len(errs) == 0 {
-			t.Errorf("%s: accepted", name)
+		tc.edit(&lane)
+		errs := boundedLaneTableErrors([]boundedLaneCap{lane})
+		if len(errs) != 1 || !strings.Contains(errs[0], tc.want) {
+			t.Errorf("%s: errors %q, want exactly one containing %q", tc.name, errs, tc.want)
 		}
 	}
 }

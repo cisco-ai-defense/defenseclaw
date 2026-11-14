@@ -1923,6 +1923,39 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		}
 	}()
 
+	// A decision-model floor set while the judge runs is the answer when
+	// the judge is late (GAP-0392).
+	floorSlot := &decisionFloorSlot{}
+	ctx = withDecisionFloorSlot(ctx, floorSlot)
+	// System One routes with the call's scope (guardrail.cascade.system_one
+	// overrides of its connector and profile), the pre-pass included.
+	ctx = withCascadeSystemOne(ctx, cfg, connector)
+	// A rule finding is a floor: the decision model cannot skip the judge on
+	// a call the rules flagged (escalate-on-confirm). Read it here, before
+	// the judge can run apart from the answer: the caller folds this run's
+	// verdict (an escalated fail-closed refusal included) into current while
+	// a late judge is still running.
+	ruleFloor := rulesFlagged(current)
+	// The decision model answers before the judge's own gates (deadline,
+	// hook budget, judge slots), so a confident block exists under load
+	// (S7 sysone review round 3, P3-1). Action mode only: an observe answer
+	// does not wait for any model.
+	var prepass *decisionPrepass
+	if strings.EqualFold(strategyDirection, "tool_call") &&
+		sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) == "action" {
+		ctx, prepass = judge.prepareDecision(withDecisionRuleFloor(ctx, ruleFloor), toolName, content)
+	}
+	// noJudgeVerdict answers a call the judge cannot take: the decision
+	// model's answer alone (an allow, the HIGH floor of a confident block,
+	// or nothing), else the rule verdict.
+	noJudgeVerdict := func() *ScanVerdict {
+		if prepass == nil {
+			return nil
+		}
+		v := judge.runToolJudgeSample(withJudgeUnavailable(withDecisionRuleFloor(ctx, ruleFloor)), toolName, content, prepass.sample)
+		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+	}
+
 	// The generic /inspect handlers run under a 200ms deadline
 	// (inspectScanTimeout) — no judge round-trip fits, and blowing
 	// that deadline would 504 the whole verdict. Skip unless the
@@ -1932,7 +1965,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < time.Second {
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (deadline too short) connector=%s direction=%s; keeping regex/AID verdict\n",
 			connector, strategyDirection)
-		return nil
+		return noJudgeVerdict()
 	}
 
 	if strategy == "regex_judge" && regexJudgeEscalatedCritical(cfg, current) &&
@@ -1947,7 +1980,9 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		// tiers of a per-user install) keeps the rule verdict with the
 		// fallback warning and metric below. Secure Client never escalates.
 		defer func() {
-			if out == nil {
+			// A decision-model floor is not a judge verdict: it never
+			// replaces the closed-mode refusal (review round 3, P3-2).
+			if out == nil || out.decisionFloorOnly || out.decisionAbstain {
 				fmt.Fprintf(os.Stderr, "[inspect] hook judge gave no verdict on an escalated CRITICAL finding connector=%s direction=%s; hook_fail_mode closed: refusing\n",
 					connector, strategyDirection)
 				out = escalatedJudgeFailClosedVerdict()
@@ -1964,7 +1999,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 			fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (hook judge budget spent) connector=%s direction=%s; keeping regex/AID verdict\n",
 				connector, strategyDirection)
 			a.recordHookJudgeFallback(ctx, connector, judgeFallbackBudget)
-			return nil
+			return noJudgeVerdict()
 		}
 		timeout = min(timeout, left)
 	}
@@ -1976,7 +2011,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (at capacity) connector=%s direction=%s\n",
 			connector, strategyDirection)
 		a.recordHookJudgeFallback(ctx, connector, judgeFallbackBusy)
-		return nil
+		return noJudgeVerdict()
 	}
 	if strings.EqualFold(toolName, "message") {
 		toolName = ""
@@ -1988,12 +2023,12 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	fallback := func(reason string) {
 		fallbackOnce.Do(func() { a.recordHookJudgeFallback(context.WithoutCancel(ctx), connector, reason) })
 	}
-	// A rule finding is a floor: the decision model cannot skip the judge on
-	// a call the rules flagged (escalate-on-confirm). Read it here, before
-	// the judge can run apart from the answer: the caller folds this run's
-	// verdict (an escalated fail-closed refusal included) into current while
-	// a late judge is still running.
-	ruleFloor := rulesFlagged(current)
+	lateVerdict := func() *ScanVerdict {
+		if v := floorSlot.get(); v != nil {
+			return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+		}
+		return nil
+	}
 	call := func(callCtx context.Context) *ScanVerdict {
 		jctx, cancel := context.WithTimeout(callCtx, timeout)
 		defer cancel()
@@ -2052,7 +2087,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge late (hook answer window spent) connector=%s direction=%s; keeping regex/AID verdict\n",
 			connector, strategyDirection)
 		fallback(judgeFallbackLate)
-		return nil
+		return lateVerdict()
 	}
 	wait := time.NewTimer(left)
 	defer wait.Stop()
@@ -2067,7 +2102,9 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	fmt.Fprintf(os.Stderr, "[inspect] hook judge late (over the %s hook answer window) connector=%s direction=%s; keeping regex/AID verdict\n",
 		hookJudgeAnswerWindow, connector, strategyDirection)
 	fallback(judgeFallbackLate)
-	return nil
+	// A decision-model floor already set stands (the late judge can only
+	// have added to it).
+	return lateVerdict()
 }
 
 // claudeCodeNoEffectTools are Claude Code built-ins whose call acts on nothing

@@ -464,6 +464,17 @@
         "escalate_rule_flagged": {
           "type": "boolean"
         },
+        "history_turns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "history_tool_results": {
+          "type": "boolean"
+        },
+        "flow_guard": {
+          "type": "boolean"
+        },
         "protocol": {
           "type": "string",
           "enum": ["", "system-one", "gemini-decisions"]
@@ -7395,6 +7406,29 @@
               "pattern": "^[a-z][a-z0-9_-]{0,31}$",
               "description": "Label of the calling gateway in audit on a per-user install."
             }
+          }
+        },
+        "openclaw": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "OpenClaw connector trust settings (1.0.10). Absent keeps the 1.0.9 behaviour. Requires min_product_version 1.0.10 in a bundle.",
+          "properties": {
+            "plugin_install": {"type": "string", "enum": ["managed", "external"], "default": "managed", "description": "managed: DefenseClaw writes its plugin into <claw.home_dir>/extensions/defenseclaw. external: an administrator installed it at plugin_dir; DefenseClaw checks its files equal this build and never writes or deletes them."},
+            "plugin_dir": {"$ref": "#/$defs/pathString", "description": "Absolute path of the administrator-installed plugin (plugin_install: external only)."},
+            "operator_admin": {"type": "boolean", "default": true, "description": "Request the OpenClaw operator.admin scope (used only to turn off a skill, plugin or MCP server through OpenClaw). false keeps read, write and approvals."},
+            "plugin_account": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$", "description": "OS account of the OpenClaw gateway when it is not the sidecar account (separate-user layout)."},
+            "plugin_token_file": {"$ref": "#/$defs/pathString", "description": "Separate-user layout: where the sidecar publishes the plugin credential for plugin_account."},
+            "plugin_token_group": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$", "description": "Separate-user layout (Linux, macOS): group allowed to read plugin_token_file."},
+            "hooks": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "OpenClaw native plugin hooks.",
+              "properties": {
+                "mode": {"type": "string", "enum": ["auto", "proxy"], "default": "auto", "description": "auto: native plugin hooks on OpenClaw 2026.8.35 and later (with the guardrail proxy on Linux and macOS, alone on Windows), the guardrail proxy below that release. proxy: the 1.0.9 behaviour (not on Windows)."},
+                "prompt_gate": {"type": "boolean", "default": false, "description": "Inspect every user prompt in before_agent_run before the model reads it; blocks it in action mode."}
+              }
+            },
+            "install_policy": {"type": "string", "enum": ["auto", "on", "off"], "default": "auto", "description": "Register DefenseClaw as OpenClaw security.installPolicy (OpenClaw 2026.8.35 and later), so OpenClaw asks DefenseClaw admission before a skill or plugin install or update. auto: on in the strict tier and on managed installs, off in the default and permissive tiers."}
           }
         }
       }

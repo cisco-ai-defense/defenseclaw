@@ -160,8 +160,11 @@ func TestDecisionModelUnavailableEscalates(t *testing.T) {
 
 func TestStrongerDecisionVerdict(t *testing.T) {
 	floor := &ScanVerdict{Action: "block", Severity: "HIGH", Findings: []string{decisionModelFindingID}, Scanner: decisionModelScanner}
-	if got := strongerDecisionVerdict(errorVerdict("llm-judge-tool"), floor); got != floor {
-		t.Fatal("a failed judge must leave the decision model floor")
+	if got := strongerDecisionVerdict(errorVerdict("llm-judge-tool"), floor); got.Severity != "HIGH" || got.Action != "block" ||
+		got.Scanner != decisionModelScanner || !got.decisionFloorOnly || floor.decisionFloorOnly {
+		// A copy of the floor, marked as standing in for a judge that gave
+		// nothing (a closed-mode refusal still applies).
+		t.Fatalf("a failed judge must leave the decision model floor, marked floor-only: %+v", got)
 	}
 	critical := &ScanVerdict{Action: "block", Severity: "CRITICAL", Findings: []string{"JUDGE-TOOL-INJ-EXFIL"}, Scanner: "llm-judge-tool"}
 	if got := strongerDecisionVerdict(critical, floor); got != critical {
