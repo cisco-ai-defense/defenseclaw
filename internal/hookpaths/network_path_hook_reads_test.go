@@ -182,11 +182,12 @@ func TestOneHookCallWaitsForItsSharesOneAnswerWaitInAll(t *testing.T) {
 	}
 	start := time.Now()
 	got := Resolve(payload)
-	// One wait in all takes 2 s here on an idle host (under -race); a wait for
-	// each share takes shares x 750 ms = 6 s at least. The window stretches
-	// with the host's slowdown (a box starved of CPU took 2.03 s, GAP-0538)
-	// but stays under that 6 s, so it still tells the two apart.
-	limit := min(testenv.Scale(2*time.Second, testenv.HostSlowdown()), (shares-1)*750*time.Millisecond)
+	// One wait in all takes 2.0 s here under -race on an idle host; a wait
+	// for each share takes shares x 750 ms = 6 s at least. A window of 2 s sat on
+	// the idle time itself and failed at 2.03 s (GAP-0538). The window is
+	// 4 s, stretched with the host's slowdown, and kept under the 6 s that
+	// waiting for each share takes, so it still tells the two apart.
+	limit := min(max(4*time.Second, testenv.Scale(2*time.Second, testenv.HostSlowdown())), (shares-1)*750*time.Millisecond)
 	if took := time.Since(start); took > limit {
 		t.Fatalf("one hook call spent %v on %d shares that do not answer (%d probes); want one 750ms answer wait in all (window %v)", took, shares, probes.Load(), limit)
 	}
