@@ -386,3 +386,6 @@
 {"id": "g596r2-y13", "dialect": "", "command": "defenseclaw setup guardrail --mode observe", "want": "disable"}
 {"id": "g596r2-y14", "dialect": "", "command": "defenseclaw-gateway hook-outage-mode open", "want": "disable"}
 {"id": "g596r2-y15", "dialect": "", "command": "defenseclaw setup guardrail --fail-mode=open", "want": "disable"}
+{"id": "g596r2-y16", "dialect": "", "command": "kill $(cat \"$home/.defenseclaw/gateway.pid\")", "want": ""}
+{"id": "g596r2-y17", "dialect": "", "command": "kill $(cat /tmp/x/.defenseclaw/gateway.pid)", "want": ""}
+{"id": "g596r2-y18", "dialect": "", "command": "kill $(cat $HOME/.defenseclaw/gateway.pid)", "want": "stop"}

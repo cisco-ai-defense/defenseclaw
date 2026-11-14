@@ -782,8 +782,8 @@ func (r *controlReader) judge(facts Facts, text string, command CommandFact, arg
 		if (dynamic || len(words) == 0) && (childNamesProcess(facts, command) || r.pipelineNamesProcess(facts, command)) {
 			return proven(DefenseClawControlStop)
 		}
-		if (dynamic || name == "pkill") && pidFileInState(text) &&
-			(dynamic && name != "pkill" || slices.ContainsFunc(words, func(word string) bool { return pidFileInState(word) })) {
+		if (dynamic || name == "pkill") && pidFileInState(text, facts.ActiveHome) &&
+			(dynamic && name != "pkill" || slices.ContainsFunc(words, func(word string) bool { return pidFileInState(word, facts.ActiveHome) })) {
 			// kill of a pid read from the product's own state folder.
 			return proven(DefenseClawControlStop)
 		}
@@ -939,28 +939,59 @@ func packageManagerRemovesDefenseClaw(manager string, words, flags []string) boo
 }
 
 // pidFileInState reports a pid file in one of the product's own state folders
-// (a path component ".defenseclaw" or "defenseclaw", as in ~/.defenseclaw,
-// /var/lib/defenseclaw, /run/defenseclaw, %ProgramData%\\DefenseClaw) named by
-// the text.
-func pidFileInState(text string) bool {
-	lower := strings.ToLower(text)
+// named by the text: a path with a component ".defenseclaw" or "defenseclaw"
+// that is under the caller's home (~, $HOME, the home path, %USERPROFILE%) or
+// a system state root (/var/lib, /run, /etc, /opt, /Library,
+// %ProgramData%). A pid file in a test home (a variable that is not HOME, a
+// scratch folder) is that test's own gateway, not this host's guard.
+func pidFileInState(text, home string) bool {
 	for start := 0; ; {
-		index := strings.Index(lower[start:], ".pid")
+		index := strings.Index(strings.ToLower(text[start:]), ".pid")
 		if index < 0 {
 			return false
 		}
 		index += start
 		begin := index
-		for begin > 0 && !strings.ContainsRune(" \t\r\n'\"`();|&<>=", rune(lower[begin-1])) {
+		for begin > 0 && !strings.ContainsRune(" \t\r\n'\"`();|&<>=", rune(text[begin-1])) {
 			begin--
 		}
-		token := lower[begin : index+len(".pid")]
-		for _, component := range strings.FieldsFunc(token, func(char rune) bool { return char == '/' || char == '\\' }) {
-			if component == defenseClawNamespace || component == "."+defenseClawNamespace {
+		token := text[begin : index+len(".pid")]
+		start = index + len(".pid")
+		slash := func(char rune) bool { return char == '/' || char == '\\' }
+		prefix, found := "", false
+		for rest, consumed := token, 0; ; {
+			cut := strings.IndexFunc(rest, slash)
+			segment := rest
+			if cut >= 0 {
+				segment = rest[:cut]
+			}
+			if lower := strings.ToLower(segment); lower == defenseClawNamespace || lower == "."+defenseClawNamespace {
+				prefix, found = token[:consumed], true
+				break
+			}
+			if cut < 0 {
+				break
+			}
+			consumed += cut + 1
+			rest = rest[cut+1:]
+		}
+		if !found {
+			continue
+		}
+		lowerPrefix := strings.ToLower(prefix)
+		switch {
+		case strings.HasPrefix(prefix, "~/"), strings.HasPrefix(prefix, "$HOME/"), strings.HasPrefix(prefix, "${HOME}/"),
+			strings.HasPrefix(lowerPrefix, "%userprofile%"), strings.HasPrefix(lowerPrefix, "$env:userprofile"),
+			strings.HasPrefix(lowerPrefix, "%programdata%"), strings.HasPrefix(lowerPrefix, "$env:programdata"):
+			return true
+		case home != "" && strings.HasPrefix(prefix, strings.TrimRight(home, `/\`)+"/"):
+			return true
+		}
+		for _, root := range []string{"/var/lib/", "/var/run/", "/run/", "/etc/", "/opt/", "/library/", "/private/var/", "c:\\programdata\\"} {
+			if strings.HasPrefix(lowerPrefix, root) {
 				return true
 			}
 		}
-		start = index + len(".pid")
 	}
 }
 
