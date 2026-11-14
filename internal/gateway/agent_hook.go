@@ -3696,7 +3696,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	rawActionBeforeAssets := rawAction
 	caps := profile.Capabilities
 	effectiveMode := mode
-	if mode != "action" && a.provenHookActionMustEnforce(ctx, verdict) {
+	if mode != "action" && a.hookActionMustEnforce(ctx, verdict) {
 		effectiveMode = "action"
 	}
 	action, wouldBlock := mapHookActionForProfile(rawAction, effectiveMode, req.HookEventName, caps, profile, req.Payload)
@@ -4713,6 +4713,14 @@ func (a *APIServer) provenHookActionMustEnforce(ctx context.Context, verdict *To
 		}
 	}
 	return false
+}
+
+// hookActionMustEnforce is provenHookActionMustEnforce on a hook route, where
+// observe mode also enforces a call the evaluation failed on: the hook
+// recovery's failed-check answer was a block in every mode, and the
+// contained fault keeps that answer (rel-1-0-10:GAP-0486).
+func (a *APIServer) hookActionMustEnforce(ctx context.Context, verdict *ToolInspectVerdict) bool {
+	return a.provenHookActionMustEnforce(ctx, verdict) || a.evaluationFaultMustEnforce(ctx, verdict)
 }
 
 func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookCapability, profile connector.HookProfile, payload map[string]interface{}) (string, bool) {

@@ -33,6 +33,7 @@ var unprovenReasonTitles = map[string]string{
 	"interpreter-argument":   "An interpreter has a dynamic argument after writable code",
 	"shell-parse":            "A shell parse error leaves a protected write unproved",
 	"shell-parse-bound":      "A shell parse exceeded the protected write proof bound",
+	UnprovenParserFault:      "The command could not be parsed safely",
 	"copy-directory":         "A copy into a directory can select a protected file",
 	"cdpath":                 "CDPATH can select a directory containing a protected file link",
 	"nested-shell":           "A nested shell or shell script can write a protected file",
@@ -79,6 +80,14 @@ const (
 	UnprovenTargetUnresolved = "target-unresolved"
 )
 
+// UnprovenParserFault is the class of a command the shell parser failed on
+// internally (shellparse.ErrParserFault: a contained panic, or text the
+// recovering parse refuses because it could loop). Nothing about the command
+// was read, so every pack blocks it, as the gateway's failed-check answer did
+// when the panic reached it (rel-1-0-10:GAP-0437, GAP-0486). It wins over
+// every other class of the same command.
+const UnprovenParserFault = "parser-fault"
+
 // UnprovenWriteTitle gives the operator the class that prevented a proof.
 func UnprovenWriteTitle(reason string) string {
 	return unprovenReasonTitles[reason]
@@ -124,7 +133,11 @@ var (
 // dynamic interpreter write operand can name the protected file directly.
 func UnprovenProtectedWrite(command, cwd, home string) string {
 	budget := unprovenParseBudget{bytes: 8 * MaxPayloadBytes, calls: 512}
-	return unprovenProtectedWriteDepth(command, cwd, home, 0, &budget)
+	reason := unprovenProtectedWriteDepth(command, cwd, home, 0, &budget)
+	if budget.fault {
+		return UnprovenParserFault
+	}
+	return reason
 }
 
 // The budget is shared by every nested and recovered parse of one hook call.
@@ -134,8 +147,9 @@ type unprovenParseBudget struct {
 	bytes   int
 	calls   int
 	bounded bool
-	// trunc records a recovered parse the parser could not finish
-	// (shellparse.ParseRecovering); bounded is set with it.
+	// fault records a recovering parse the parser failed on
+	// (shellparse.ErrParserFault), at any depth; trunc carries its cap.
+	fault bool
 	trunc bounded.Truncated
 }
 
@@ -473,10 +487,10 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 	}
 	file, err := shellparse.ParseRecovering(command, 8, &budget.trunc)
 	if errors.Is(err, shellparse.ErrParserFault) {
-		// The parser failed internally on this text (rel-1-0-10:GAP-0437).
-		// The reading is truncated (budget.trunc): nothing proves its
-		// effects, so it is past the proof bound, the pack's unknown tier.
-		budget.bounded = true
+		// The parser failed on this text (rel-1-0-10:GAP-0437, GAP-0487):
+		// nothing of it was read. UnprovenProtectedWrite answers
+		// UnprovenParserFault for the whole command, whatever else it found.
+		budget.fault = true
 		return true
 	}
 	if file == nil {

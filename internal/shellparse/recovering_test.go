@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
@@ -41,6 +42,34 @@ func TestParseRecoveringContainsParserFault(t *testing.T) {
 	}
 }
 
+// rel-1-0-10:GAP-0487: text that is not valid UTF-8 made the recovering
+// parse loop forever (mvdan.cc/sh keeps lexing after its encoding error). It
+// is refused before the parse, as a parser fault; the plain grammar reads it
+// as a syntax error. The shapes are the corpus entry ad64e538f1aab24f of
+// FuzzUnprovenProtectedWrite and its shortest looping prefix, built here.
+func TestParseRecoveringInvalidUTF8IsAFaultNotALoop(t *testing.T) {
+	loop := "${0:+$((0 0!" + string([]byte{0x85})
+	for _, command := range []string{loop, loop + strings.Repeat(string([]byte{0x85}), 7) + "))}~/.zshrc", "echo " + string([]byte{0xff})} {
+		done := make(chan error, 1)
+		var trunc bounded.Truncated
+		go func() {
+			_, err := ParseRecovering(command, 8, &trunc)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if !errors.Is(err, ErrParserFault) || !trunc.Set().Has(bounded.Nodes) {
+				t.Errorf("ParseRecovering(%q) = %v (truncation %q), want ErrParserFault with cap=nodes", command, err, trunc.Set().Reason())
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("ParseRecovering(%q) did not return in 10 s", command)
+		}
+		if file, ok := Parse(command); ok || file != nil {
+			t.Errorf("Parse(%q) = (%v, %v), want a syntax error", command, file, ok)
+		}
+	}
+}
+
 func TestParseRecoveringKeepsRecoveredTree(t *testing.T) {
 	// A recoverable syntax error still yields its readable statements.
 	file, err := ParseRecovering("echo a > out; if", 8, nil)
@@ -62,6 +91,7 @@ func FuzzParseRecovering(f *testing.F) {
 	for _, seed := range append(parserFaultShapes,
 		"echo a > out; if", "x=$((1+2)); y=$[3*4]", "cat <<E\nbody\nE\n", "f() { g; }; f",
 		"a[1]=x b+=y c=$(echo $((d e)))", "${x:-$((y z))}", "((a b))", "let 'a b'",
+		"${0:+$((0 0!"+string([]byte{0x85})+"))}", "echo "+string([]byte{0xff}),
 	) {
 		f.Add(seed)
 	}

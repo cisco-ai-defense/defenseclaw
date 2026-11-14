@@ -282,10 +282,17 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	var verdict *ToolInspectVerdict
 	reportOnly := false
 	func() {
-		// A check that fails internally answers "unavailable", which the
-		// ACP client resolves by the profile's fail mode (GAP-0437). The
-		// recover covers the frame-action path as well as the message scan.
-		defer recoverGatewayGoroutine("acp evaluate", func() { verdict, reportOnly = nil, false })
+		// A check that fails internally (rel-1-0-10:GAP-0437) answers the
+		// evaluation-fault block as a normal verdict, as the hook and
+		// /inspect/tool routes do (GAP-0486): recorded, then mapped by the
+		// profile's mode below (observe reports would_block). Answered
+		// "unavailable", an observe guard delivered the frame unchecked and
+		// nothing was recorded. The recover covers the frame-action path as
+		// well as the message scan.
+		defer recoverGatewayGoroutine("acp evaluate", func() { verdict, reportOnly = toolCheckFaultVerdict(), false })
+		if acpEvaluateFaultHook != nil {
+			acpEvaluateFaultHook()
+		}
 		if isAction {
 			verdict, reportOnly = a.inspectACPFrameAction(ctx, req, agent.ConnectorID, frameAction, inspectContent)
 		} else {
