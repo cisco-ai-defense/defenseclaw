@@ -28,6 +28,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tests.environment import isolated_home_env
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -354,6 +356,7 @@ class DoctorHermesPathTests(unittest.TestCase):
             self.assertIn(config_path, result.checks[0]["detail"])
             self.assertIn("live=false", result.checks[0]["detail"])
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class DoctorGuardrailTests(unittest.TestCase):
     def setUp(self):
         from defenseclaw.commands import cmd_doctor
@@ -1783,6 +1786,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             self.assertEqual(result.passed, 1)
 
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
     """Regression: provider routing must be prefix-based, not substring-based.
 
@@ -2299,6 +2303,7 @@ class VerifyBedrockTests(unittest.TestCase):
             self.assertEqual(_bedrock_region(), "us-east-1")
 
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class BedrockRoutingTests(unittest.TestCase):
     """Check ``_check_llm_api_key`` routes Bedrock configs to
     :func:`_verify_bedrock` (M3 hook)."""

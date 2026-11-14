@@ -13738,6 +13738,15 @@ def _check_decision_model(cfg, r: _DoctorResult) -> None:
     if problem:
         _emit("fail", "Decision model", problem, r=r, remediation="defenseclaw setup decision-model")
         return
+    if dm.effective_on_confident_block() == "decide":
+        _emit(
+            "warn",
+            "Decision model",
+            "decision_model.on_confident_block: decide is retired in 1.0.10 and acts as escalate "
+            "(a confident block always goes to the LLM judge); remove the key",
+            r=r,
+            remediation="defenseclaw setup decision-model --on-confident-block escalate",
+        )
     if dmod.managed_host(cfg) and dm.credential:
         detail = f"{dm.model}: token from the managed credential {dm.credential} (the gateway checks it)"
         if dmod.cascade_lines(cfg):
