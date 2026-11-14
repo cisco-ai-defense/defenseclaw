@@ -53,6 +53,10 @@ type routeOnlyServer struct {
 	// APIServer.SetRouteOnly); goos selects the credential custody rule.
 	api  *APIServer
 	goos string
+	// metrics is the generated-metric runtime of the sidecar (nil until it
+	// is wired): the route-only listener records its routing decisions
+	// through it like the guardrail proxy does.
+	metrics func() hookLifecycleMetricV8Runtime
 
 	mu        sync.Mutex
 	inflight  map[string]int
@@ -292,6 +296,9 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The verified caller (OSS gateway owner or managed kernel peer).
 	original.usage.Subject = subject
 	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body, engine.Caller{Verified: true, Key: subject, Source: subjectSourceKernelPeer})
+	if routedOutcome.Result != "" && s.metrics != nil {
+		recordSemanticRoutingDecisionMetricsV8(r.Context(), s.metrics(), connector, "route_only", routedOutcome)
+	}
 	original.usage.Route = usageDecision(usageRouteFacts(routedOutcome, true), false)
 	if routedOutcome.Result == "" {
 		original.usage.Route.Decision = modelusage.DecisionPassthrough

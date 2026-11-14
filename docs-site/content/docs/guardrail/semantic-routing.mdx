@@ -87,7 +87,7 @@ X-Semantic-Router: routed
 X-Semantic-Router-Reason: decision=… model=… confidence=…
 ```
 
-Each routed request also records one `defenseclaw.semantic_routing.decision` count and a `defenseclaw.semantic_routing.latency` measurement. The labels are a closed set: `result` (`applied` or `fallback`), `error.code` (`none`, `timeout`, `upstream_status`, `decode_failure`, `unknown_alias`, `credential_failure` or `configuration_failure`) and `decision` (`override` or `default`). Prompt text, credentials, endpoints and the header reason string are never labels.
+Each routed request also records one `defenseclaw.semantic_routing.decision` count and a `defenseclaw.semantic_routing.latency` measurement. The labels are a closed set: `result` (`applied`, `fallback` or, on a managed gateway, `denied`), `error.code` (`none`, `timeout`, `upstream_status`, `decode_failure`, `unknown_alias`, `credential_failure` or `configuration_failure`) and `decision` (`override` or `default`), plus `connector`, `route_source`, `route_category`, `filtered_by`, `listener`, `deny_reason` and `budget_id` (see [Tokenomics](/docs/observability/tokenomics#routing-and-budget-metrics)). Both listeners record the count. Prompt text, credentials, endpoints and the header reason string are never labels.
 
 ## Disable routing
 

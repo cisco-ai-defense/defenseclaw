@@ -9231,6 +9231,10 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	if router, ok := s.modelRouter.(*engineRouter); ok && router != nil {
 		ro := newRouteOnlyServer(router, s.currentConfig, s.currentConfig().DataDir)
+		ro.metrics = func() hookLifecycleMetricV8Runtime {
+			r, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+			return r
+		}
 		api.SetRouteOnly(ro)
 		api.onRouteKeyRotated = func() { s.rerenderRouteOnly(s.currentConfig()) }
 		go s.runRouteOnlyReadiness(ctx, ro)

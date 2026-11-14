@@ -209,6 +209,9 @@ func buildModelUsageLogInput(envelope observability.FamilyEnvelopeInput, rec mod
 	in.DefenseClawRouteSource = hookModelV8OptionalText(f.Route.Source)
 	in.DefenseClawRouteCategory = hookModelV8OptionalText(f.Route.Category)
 	in.DefenseClawRouteRuleID = hookModelV8OptionalID(f.Route.RuleID)
+	in.DefenseClawRouteFilteredBy = hookModelV8OptionalText(routeFilteredByLabel(f.Route.FilteredBy))
+	in.DefenseClawRouteListener = hookModelV8OptionalText(routeListenerLabel(f.Listener))
+	in.DefenseClawRouteFallbackReason = hookModelV8OptionalText(routeFallbackReasonLabel(f.Route.FallbackReason, f.Route.Decision))
 	if usageProfileNamePattern.MatchString(f.ProfileName) {
 		in.DefenseClawGuardrailProfileName = observability.Present(f.ProfileName)
 	}
@@ -217,6 +220,7 @@ func buildModelUsageLogInput(envelope observability.FamilyEnvelopeInput, rec mod
 	}
 	in.DefenseClawCostUsd = optFloat(c.USD)
 	in.DefenseClawCostBasis = observability.Present(c.Basis)
+	in.DefenseClawCostBaselineUsd = optFloat(c.BaselineUSD)
 	in.DefenseClawCostComputedUsd = optFloat(c.ComputedUSD)
 	in.DefenseClawCostReportedUsd = optFloat(c.ReportedUSD)
 	in.DefenseClawCostPriceEntry = hookModelV8OptionalText(c.PriceEntry)
@@ -264,6 +268,37 @@ func emitModelUsageMetricsV8(ctx context.Context, runtime hookLifecycleMetricV8R
 				DefenseClawGuardrailProfileName: labelValue(rec, "profile"),
 			})
 		})
+	}
+	// The routing counterfactual: what the same tokens cost on the requested
+	// model, next to what those same calls cost. Both count only when both
+	// are known, so their difference is the saving of exactly those calls.
+	if c.USD != nil && c.BaselineUSD != nil && *c.BaselineUSD > 0 && !math.IsNaN(*c.BaselineUSD) && !math.IsInf(*c.BaselineUSD, 0) &&
+		!math.IsNaN(*c.USD) && !math.IsInf(*c.USD, 0) {
+		baseline, actual := *c.BaselineUSD, *c.USD
+		add(observability.TelemetryInstrumentDefenseClawModelCostBaseline, func(b *observability.FamilyBuilder, e observability.FamilyEnvelopeInput) (observability.Record, error) {
+			return b.BuildMetricDefenseClawModelCostBaseline(observability.MetricDefenseClawModelCostBaselineInput{
+				Envelope: e, Value: baseline,
+				DefenseClawConnectorSource:      labelValue(rec, "connector"),
+				GenAIProviderName:               labelValue(rec, "provider"),
+				DefenseClawCostPriceEntry:       labelValue(rec, "model"),
+				DefenseClawRouteDecision:        labelValue(rec, "route_decision"),
+				DefenseClawCallRole:             labelValue(rec, "call_role"),
+				DefenseClawGuardrailProfileName: labelValue(rec, "profile"),
+			})
+		})
+		if actual > 0 {
+			add(observability.TelemetryInstrumentDefenseClawModelCostCompared, func(b *observability.FamilyBuilder, e observability.FamilyEnvelopeInput) (observability.Record, error) {
+				return b.BuildMetricDefenseClawModelCostCompared(observability.MetricDefenseClawModelCostComparedInput{
+					Envelope: e, Value: actual,
+					DefenseClawConnectorSource:      labelValue(rec, "connector"),
+					GenAIProviderName:               labelValue(rec, "provider"),
+					DefenseClawCostPriceEntry:       labelValue(rec, "model"),
+					DefenseClawRouteDecision:        labelValue(rec, "route_decision"),
+					DefenseClawCallRole:             labelValue(rec, "call_role"),
+					DefenseClawGuardrailProfileName: labelValue(rec, "profile"),
+				})
+			})
+		}
 	}
 	// Disjoint kinds: uncached input, cache read, cache creation, output
 	// without reasoning, reasoning. Absent counts add nothing.
@@ -366,7 +401,11 @@ func applyModelUsageToSpanV8(in *observability.SpanModelChatInput, rec modelusag
 	in.DefenseClawRouteSource = hookModelV8OptionalText(f.Route.Source)
 	in.DefenseClawRouteCategory = hookModelV8OptionalText(f.Route.Category)
 	in.DefenseClawRouteRuleID = hookModelV8OptionalID(f.Route.RuleID)
+	in.DefenseClawRouteFilteredBy = hookModelV8OptionalText(routeFilteredByLabel(f.Route.FilteredBy))
+	in.DefenseClawRouteListener = hookModelV8OptionalText(routeListenerLabel(f.Listener))
+	in.DefenseClawRouteFallbackReason = hookModelV8OptionalText(routeFallbackReasonLabel(f.Route.FallbackReason, f.Route.Decision))
 	in.DefenseClawCostUsd = optFloat(c.USD)
+	in.DefenseClawCostBaselineUsd = optFloat(c.BaselineUSD)
 	in.DefenseClawCostBasis = observability.Present(c.Basis)
 	in.DefenseClawCostComputedUsd = optFloat(c.ComputedUSD)
 	in.DefenseClawCostReportedUsd = optFloat(c.ReportedUSD)

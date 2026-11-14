@@ -32,6 +32,10 @@ type Cost struct {
 	TableDigest  string
 	ComputedUSD  *float64 // kept next to a reported cost for comparison
 	ReportedUSD  *float64
+	// BaselineUSD is what the same tokens cost on the model the client asked
+	// for (the counterfactual of routing). Nil when that model has no price,
+	// the call has no known cost or it is not an agent call: absent, never 0.
+	BaselineUSD *float64
 }
 
 type priceEntry struct {

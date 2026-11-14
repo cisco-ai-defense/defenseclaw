@@ -378,3 +378,69 @@ func NextReset(period string, now time.Time) time.Time {
 		return time.Date(u.Year(), u.Month(), u.Day()+1, 0, 0, 0, 0, time.UTC)
 	}
 }
+
+// BudgetSnapshot is the spend of every subject of one budget in its current
+// window, for the budget gauges: Total is every subject added, Peak the
+// highest single subject, Exceeded how many subjects are at or over the limit.
+type BudgetSnapshot struct {
+	Total, Peak float64
+	Subjects    int
+	Exceeded    int
+}
+
+// Snapshot summarises the spend of every key that starts with prefix
+// (<scope>:<id>:). The second result is false while the budget's remote spend
+// is still loading, so an absent spend is never reported as 0.
+func (l *Ledger) Snapshot(prefix, period string, limit float64, now time.Time) (BudgetSnapshot, bool) {
+	var snap BudgetSnapshot
+	if l == nil {
+		return snap, false
+	}
+	today, from := dayNumber(now), windowStart(period, now)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.seeded[budgetIDOfKey(prefix)] {
+		return snap, false
+	}
+	keys := map[string]bool{}
+	for _, m := range []map[string]map[int32]float64{l.local, l.remote} {
+		for k := range m {
+			if strings.HasPrefix(k, prefix) {
+				keys[k] = true
+			}
+		}
+	}
+	sorted := make([]string, 0, len(keys))
+	for k := range keys {
+		sorted = append(sorted, k)
+	}
+	sort.Strings(sorted)
+	for _, k := range sorted {
+		v := l.windowLocked(k, from, today)
+		snap.Total += v
+		snap.Subjects++
+		if v > snap.Peak {
+			snap.Peak = v
+		}
+		if limit > 0 && v >= limit {
+			snap.Exceeded++
+		}
+	}
+	return snap, true
+}
+
+// StoreStatus is the state of the fleet counter for the store gauges: how
+// long ago a sync last worked (ok false: none yet) and whether the last sync
+// and the last push both worked.
+func (l *Ledger) StoreStatus(now time.Time) (age time.Duration, synced, healthy bool) {
+	if l == nil {
+		return 0, false, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	healthy = l.syncErr == "" && l.pushErr == ""
+	if l.lastSync.IsZero() {
+		return 0, false, healthy
+	}
+	return now.Sub(l.lastSync), true, healthy
+}
