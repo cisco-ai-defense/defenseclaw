@@ -130,6 +130,13 @@ type Config struct {
 	// with the bundled stack name is the administrator collector and dials
 	// like any operator destination (GAP-2608).
 	ManagedService bool
+	// DeferProhibitedAnswer starts the destination deferred, as a DNS failure
+	// does, when its endpoint's DNS answer is an address the policy refuses,
+	// rather than failing Prepare: config validate cannot see DNS answers, so the
+	// refusal crashed a gateway on a config validate accepted (GAP-0272).
+	// Every dial still re-resolves and refuses the address, and
+	// Factory.Deferred says why. Secure Client keeps the refusal.
+	DeferProhibitedAnswer bool
 }
 
 type Dependencies struct {
@@ -165,6 +172,8 @@ type signalConfig struct {
 	// destination: its loopback collector gets no byte until
 	// verifyBundledCollector proves the listener's account (GAP-1087).
 	bundledStack bool
+	// deferred is why activation-time resolution did not pass (Factory.Deferred).
+	deferred error
 }
 
 // Factory is immutable after Prepare. Exporter/adapter constructors are
@@ -173,8 +182,21 @@ type signalConfig struct {
 type Factory struct {
 	config  Config
 	signals map[observability.Signal]signalConfig
-	mu      sync.Mutex
-	created map[observability.Signal]bool
+	// deferred is the activation error a deferred signal started with
+	// (a netguard sentinel, never an address), or nil.
+	deferred error
+	mu       sync.Mutex
+	created  map[observability.Signal]bool
+}
+
+// Deferred returns why a selected signal started deferred: a
+// netguard.ErrV8ResolutionFailed or netguard.ErrV8AddressProhibited
+// (V8ProhibitedOption names the fix), or nil when every signal resolved.
+func (factory *Factory) Deferred() error {
+	if factory == nil {
+		return nil
+	}
+	return factory.deferred
 }
 
 // Prepare performs offline validation, exact TLS preparation, and guarded
@@ -214,6 +236,7 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 	}
 	seen := make(map[observability.Signal]bool, len(config.Selected))
 	signals := make(map[observability.Signal]signalConfig, len(config.Selected))
+	var deferred error
 	for _, signal := range config.Selected {
 		if seen[signal] || (signal != observability.SignalLogs && signal != observability.SignalTraces && signal != observability.SignalMetrics) {
 			return nil, newError(ErrorInvalidConfig, nil)
@@ -224,9 +247,15 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 		if override.Endpoint != "" {
 			endpoint = override.Endpoint
 		}
-		resolved, resolveErr := resolveSignal(ctx, protocol, endpoint, override.Path, config.TLS.Insecure, policy, dependencies)
+		resolved, resolveErr := resolveSignal(
+			ctx, protocol, endpoint, override.Path, config.TLS.Insecure, policy, config.DeferProhibitedAnswer, dependencies,
+		)
 		if resolveErr != nil {
 			return nil, resolveErr
+		}
+		// A prohibited answer is the stronger reason to report.
+		if resolved.deferred != nil && (deferred == nil || errors.Is(resolved.deferred, netguard.ErrV8AddressProhibited)) {
+			deferred = resolved.deferred
 		}
 		resolved.signal = signal
 		resolved.tls = cloneTLS(tlsConfig)
@@ -257,7 +286,7 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 	config.Headers = cloneHeaders(config.Headers)
 	config.SignalOverride = cloneOverrides(config.SignalOverride)
 	config.TLS.CABundle = append([]byte(nil), config.TLS.CABundle...)
-	return &Factory{config: config, signals: signals, created: make(map[observability.Signal]bool)}, nil
+	return &Factory{config: config, signals: signals, deferred: deferred, created: make(map[observability.Signal]bool)}, nil
 }
 
 func normalizeProtocol(value string) (string, bool) {
@@ -276,6 +305,7 @@ func resolveSignal(
 	protocol, endpoint, overridePath string,
 	insecure bool,
 	policy netguard.V8NetworkSafetyPolicy,
+	deferProhibitedAnswer bool,
 	dependencies Dependencies,
 ) (signalConfig, error) {
 	if endpoint == "" || len(endpoint) > maxEndpointBytes || strings.ContainsAny(endpoint, "\x00\r\n\t ") {
@@ -314,18 +344,28 @@ func resolveSignal(
 			resolvedPath = u.EscapedPath()
 		}
 	}
+	var activation error
 	if err := netguard.ResolveV8PushURL(ctx, u, policy, dependencies.Resolver); err != nil {
 		// A temporary/no-answer DNS failure cannot prove the endpoint unsafe.
 		// Keep the optional signal pipeline inactive-but-constructible and let
-		// the guarded dial path re-resolve on every attempt. Prohibited/mixed
-		// answers, invalid endpoints, and cancellation remain activation errors.
-		if !errors.Is(err, netguard.ErrV8ResolutionFailed) {
+		// the guarded dial path re-resolve on every attempt. A prohibited or
+		// mixed DNS answer does the same when the caller asks for it
+		// (DeferProhibitedAnswer, GAP-0272); the dial path still refuses the
+		// address on every attempt. Literal addresses were checked by
+		// ParseV8PushURL above; invalid endpoints and cancellation remain
+		// activation errors.
+		switch {
+		case errors.Is(err, netguard.ErrV8ResolutionFailed):
+			activation = netguard.ErrV8ResolutionFailed
+		case errors.Is(err, netguard.ErrV8AddressProhibited) && deferProhibitedAnswer:
+			activation = err
+		default:
 			return signalConfig{}, networkError(err)
 		}
 	}
 	return signalConfig{
 		protocol: protocol, url: cloneURL(u), path: resolvedPath, policy: policy,
-		resolver: dependencies.Resolver, dialer: dependencies.Dialer,
+		resolver: dependencies.Resolver, dialer: dependencies.Dialer, deferred: activation,
 	}, nil
 }
 

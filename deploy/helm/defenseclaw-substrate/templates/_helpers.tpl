@@ -127,6 +127,21 @@ identity.keys_url and keys_ca_file unless config sets them. */ -}}
 {{- $_ := set $sub "identity" $id -}}
 {{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
+{{- /* The local collector (observability.local.enabled) is the try-out
+target: export to it unless config names a destination chart-collector
+(GAP-0272). Its Service address is private, so the destination allows
+private networks, and plain http needs tls.insecure. */ -}}
+{{- if .Values.observability.local.enabled -}}
+{{- $obs := get $cfg "observability" | default dict -}}
+{{- $dests := get $obs "destinations" | default list -}}
+{{- $named := false -}}
+{{- range $dests }}{{ if eq (toString (get . "name")) "chart-collector" }}{{ $named = true }}{{ end }}{{ end -}}
+{{- if not $named -}}
+{{- $dest := dict "name" "chart-collector" "kind" "otlp" "protocol" "http/protobuf" "endpoint" (printf "http://defenseclaw-otel-collector.%s.svc:4318" .Release.Namespace) "tls" (dict "insecure" true) "network_safety" (dict "allow_private_networks" true) -}}
+{{- $_ := set $obs "destinations" (append $dests $dest) -}}
+{{- $_ := set $cfg "observability" $obs -}}
+{{- end -}}
+{{- end -}}
 {{- with .Values.deploymentMode }}{{ $_ := set $cfg "deployment_mode" . }}{{ end -}}
 {{- if and (include "dc.managed" .) (not (hasKey $cfg "data_dir")) -}}
 {{- $_ := set $cfg "data_dir" (include "dc.managedDataDir" .) -}}

@@ -356,8 +356,12 @@ metrics:
     enabled: false
     labels: {}
 
-# A local OpenTelemetry collector for trying the chart out. Point
-# config.otel at a real backend in production.
+# A local OpenTelemetry collector for trying the chart out (the debug
+# exporter: records show in the collector's log). It also adds an otlp
+# destination chart-collector to config.observability.destinations, unless
+# one with that name is there. In production, put your own backend in
+# config.observability.destinations instead (docs: Agent Substrate,
+# Reference, "Turn on OTLP export").
 observability:
   local:
     enabled: false

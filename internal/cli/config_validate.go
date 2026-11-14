@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -244,6 +246,72 @@ func configValidateManagedStandaloneWarnings(loaded *loadedConfigV8File) []strin
 			port, config.DefaultGatewayAPIPort)}
 	}
 	return nil
+}
+
+// configValidateDestinationWarnings names two push destination settings that
+// validate accepts offline but that deliver nothing (GAP-0272):
+//   - a Kubernetes Service host (NAME.NAMESPACE.svc[.cluster.local]) resolves
+//     to a cluster address, private on most clusters: without
+//     network_safety.allow_private_networks the gateway starts the
+//     destination deferred and refuses that address on every delivery;
+//   - an otlp destination on port 4318 (OTLP/HTTP) with protocol grpc, the
+//     default.
+func configValidateDestinationWarnings(loaded *loadedConfigV8File) []string {
+	if loaded == nil || loaded.compiled == nil || loaded.compiled.Plan == nil {
+		return nil
+	}
+	var warnings []string
+	for _, shown := range loaded.compiled.Plan.Destinations() {
+		destination, ok := loaded.compiled.Plan.RuntimeDestination(shown.Name)
+		if !ok || !destination.Enabled {
+			continue
+		}
+		switch destination.Kind {
+		case config.ObservabilityV8DestinationOTLP, config.ObservabilityV8DestinationSplunkHEC,
+			config.ObservabilityV8DestinationHTTPJSONL:
+		default:
+			continue
+		}
+		host, port := configValidateEndpointHostPort(destination.Transport.Endpoint)
+		safety := destination.Transport.NetworkSafety
+		allowed := safety != nil && (safety.AllowPrivateNetworks || safety.AllowCGNAT)
+		if !allowed && configValidateKubernetesServiceHost(host) {
+			warnings = append(warnings, fmt.Sprintf(
+				"private_service_endpoint: observability destination %q: %s is a Kubernetes Service name, which resolves to a cluster address; "+
+					"set network_safety.allow_private_networks: true on it, or the gateway runs without it and refuses that address on every delivery",
+				destination.Name, host))
+		}
+		if destination.Kind == config.ObservabilityV8DestinationOTLP && port == "4318" &&
+			(destination.Transport.Protocol == "grpc" || destination.Transport.Protocol == "grpc/protobuf") {
+			warnings = append(warnings, fmt.Sprintf(
+				"otlp_protocol_port: observability destination %q: protocol is grpc (the default) on port 4318, the OTLP/HTTP port; "+
+					"set protocol: http/protobuf, or use the gRPC port 4317", destination.Name))
+		}
+	}
+	return warnings
+}
+
+// configValidateKubernetesServiceHost reports a Service DNS name of the
+// default cluster domain: NAME.NAMESPACE.svc or NAME.NAMESPACE.svc.cluster.local.
+func configValidateKubernetesServiceHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	return strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local")
+}
+
+// configValidateEndpointHostPort splits a URL or a gRPC host:port authority.
+func configValidateEndpointHostPort(endpoint string) (string, string) {
+	if strings.Contains(endpoint, "://") {
+		parsed, err := url.Parse(endpoint)
+		if err != nil {
+			return "", ""
+		}
+		return parsed.Hostname(), parsed.Port()
+	}
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return endpoint, ""
+	}
+	return host, port
 }
 
 func configValidateShownPath(path string) string {

@@ -179,10 +179,13 @@ type Sidecar struct {
 	aiRestartCh        chan struct{}
 	// endpointHealthReloadCh asks the endpoint health reporter for a
 	// config_reload report after a committed reload.
-	endpointHealthReloadCh   chan struct{}
-	aiRuntimeRestartCh       chan struct{}
-	runCancelMu              sync.Mutex
-	runCancel                context.CancelFunc
+	endpointHealthReloadCh chan struct{}
+	aiRuntimeRestartCh     chan struct{}
+	runCancelMu            sync.Mutex
+	runCancel              context.CancelFunc
+	// observabilityV8Resolver, when set (tests), resolves destination
+	// endpoints instead of the system resolver (GAP-0272).
+	observabilityV8Resolver  netguard.V8Resolver
 	observabilityV8Mu        sync.Mutex
 	observabilityV8          sidecarRuntimeEmitter
 	observabilityV8Lifecycle lifecycleV8Runtime

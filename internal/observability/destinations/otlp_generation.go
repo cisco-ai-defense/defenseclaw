@@ -177,8 +177,12 @@ func (factory *Factory) PrepareOTLPGenerationPipelines(
 			ctx, candidate.destination, candidate.signals, metricSpec, canaryRegistry,
 		)
 		if err != nil {
+			// Name the destination and the cause: the runtime reduces this
+			// to runtime_unavailable (GAP-0272).
+			factory.noteFailure(ctx, candidate.destination, err)
 			return fail(err)
 		}
+		factory.noteDeferred(candidate.destination, prepared.Deferred())
 		if containsSignal(candidate.signals, observability.SignalTraces) && candidate.galileo {
 			if traceProjection == nil {
 				evaluator, evaluatorErr := router.New(plan)
@@ -448,6 +452,8 @@ func (factory *Factory) prepareOTLPTelemetryFactory(
 			ExportTimeout:       metricSpec.ExportTimeout,
 		},
 		ManagedService: factory.managedService,
+		// As for OTLP logs (prepareOTLPLogs, GAP-0272).
+		DeferProhibitedAnswer: !factory.secureClient,
 	}, otlp.Dependencies{
 		Resolver: factory.resolver,
 		Dialer:   factory.dialer,

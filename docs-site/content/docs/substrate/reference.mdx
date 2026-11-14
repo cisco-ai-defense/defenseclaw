@@ -185,7 +185,41 @@ The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate
 | `networkPolicy.egress.extra` | Extra NetworkPolicy egress rules for every key-holding pod (gateway, leader, callout). The default allows DNS, the Kubernetes and Substrate APIs, the release's own Services, OTLP and model providers on 443 only. Use it for a private OIDC issuer, a private registry or EKS Pod Identity. See [the EKS page](/docs/substrate/eks#attested-templates-in-a-private-registry) |
 | `networkPolicy.adminFrom` | Who can reach the admin Service |
 | `metrics.prometheusRule.enabled` | Install the alert rules |
-| `observability.local.enabled` | A local collector for trying the chart |
+| `observability.local.enabled` | A local collector for trying the chart, and a destination `chart-collector` that exports to it. See [Turn on OTLP export](#turn-on-otlp-export) |
+
+## Turn on OTLP export
+
+Export destinations go under `config.observability.destinations` in the chart values. The chart renders `config` into the `defenseclaw-config` ConfigMap, and the gateway reads it from there. There is no `config.otel` key.
+
+```yaml
+config:
+  observability:
+    destinations:
+      - name: my-collector
+        kind: otlp
+        protocol: http/protobuf
+        endpoint: http://opentelemetry-collector.otel-system.svc:4318
+        tls:
+          insecure: true
+        network_safety:
+          allow_private_networks: true
+```
+
+- **TLS.** An `http://` endpoint needs `tls.insecure: true`. An `https://` endpoint must not set it. `config validate` refuses a mismatch.
+- **Private addresses.** A Kubernetes Service name resolves to a cluster address, and on most clusters that address is private. The gateway sends to a loopback or private address only when the destination sets `network_safety.allow_private_networks: true`. For an address in 100.64.0.0/10, set `network_safety.allow_cgnat: true`. Without the option, the gateway still starts. It runs without that destination and logs one line that names the destination and the option.
+- **Protocol.** `protocol` defaults to `grpc`, the collector's port 4317. For port 4318, set `protocol: http/protobuf`.
+- **Network policy.** The chart's egress policy allows OTLP on ports 4317 and 4318 (`networkPolicy.egress.otlpPorts`). Add other ports there.
+
+`defenseclaw-gateway config validate` warns about the last two mistakes. `private_service_endpoint` is a Service name without `allow_private_networks`. `otlp_protocol_port` is `grpc` on port 4318.
+
+To try it out, set `observability.local.enabled: true`. The chart then installs a collector that prints what it receives, and adds a destination `chart-collector` that points at it with the settings above. If you name your own destination `chart-collector`, the chart keeps yours.
+
+Check that it works:
+
+1. `defenseclaw substrate status --cluster --install-file install.yaml` shows every gateway replica ready.
+2. If a gateway pod restarts instead, `kubectl -n <namespace> logs deploy/defenseclaw-gateway --previous` names the destination and the cause, for example `observability v8 bootstrap failed: runtime_unavailable: destination "my-collector": ...`.
+3. A line `observability destination "my-collector": endpoint host ...` in the gateway log means the destination is not sending. The line says why: the option to set, or a host that does not resolve.
+4. With the local collector, `kubectl -n <namespace> logs deploy/defenseclaw-otel-collector` shows the records arriving.
 
 ## Telemetry
 
