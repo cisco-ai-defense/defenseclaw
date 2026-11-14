@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
@@ -185,20 +184,11 @@ func TestRouteOnlySensitiveConversationStaysLocal(t *testing.T) {
 
 func TestRouteOnlySensitiveRefusalIsAudited(t *testing.T) {
 	f := sensitiveRouteOnlyFixture(t, config.RoutingModelBackend{Provider: "ollama", Model: "qwen2.5", APIs: []string{"messages"}, APIKeyEnv: "S1C_UNSET_LOCAL_KEY_9931"})
-	store, err := audit.NewStore(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Init(); err != nil {
-		t.Fatal(err)
-	}
-	logger := audit.NewLogger(store)
+	store, logger := testStoreAndLogger(t)
 	f.srv.router.SetAuditLogger(logger)
 	if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("my password is hunter2"), loginInbound); rec.Code != 403 {
 		t.Fatalf("status %d", rec.Code)
 	}
-	logger.Close()
 	events, err := store.ListEvents(20)
 	if err != nil {
 		t.Fatal(err)
