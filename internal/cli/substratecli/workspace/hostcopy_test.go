@@ -26,7 +26,7 @@ func TestHostCopyRoundTrip(t *testing.T) {
 	t.Cleanup(func() { hostCopy = old })
 
 	o := newHCEnv(t)
-	proj := filepath.Join(t.TempDir(), "lc proj", "my app") // spaces, as on dc-win2
+	proj := filepath.Join(t.TempDir(), "lc proj", "my app") // spaces, as on lab-host
 	if err := os.MkdirAll(proj, 0o755); err != nil {
 		t.Fatal(err)
 	}
