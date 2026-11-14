@@ -107,8 +107,7 @@ func newLiveRig(t *testing.T) *liveRig {
 	cm := &cmFake{raw: "v1", configs: map[string]*config.Config{"v1": boot}}
 	w := configwatch.New("/etc/defenseclaw/config.yaml", boot, []byte("v1"))
 	w.Fetch, w.Load = cm.fetch, cm.load
-	var r *rig
-	r = newRig(t, func(cfg *config.Config, o *controller.Options) {
+	r := newRig(t, func(cfg *config.Config, o *controller.Options) {
 		*cfg = *boot
 		o.Resolver = &controller.ConfigResolver{Config: boot}
 		o.Config = w
