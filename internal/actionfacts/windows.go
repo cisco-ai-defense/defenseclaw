@@ -1687,6 +1687,12 @@ func windowsClassifyCommand(
 	if expectedProgram == "" || command.Program != expectedProgram {
 		// Basenames alone are not enough to trust a path-qualified binary:
 		// C:\tmp\reg.exe does not inherit the grammar of the system reg.exe.
+		// NetExec is the exception: it is installed per user (for example
+		// pipx under %USERPROFILE%), and its recognizer only ever adds a
+		// credential-use finding, never a safe grammar.
+		if windowsClassifyPathQualifiedNetExec(command, builder) {
+			return
+		}
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
@@ -1921,6 +1927,8 @@ func windowsClassifyPowerShell(
 		windowsClassifyLSASSDump(command, args, builder)
 	case "ntdsutil", "ntdsutil.exe":
 		windowsClassifyNTDSIFMDump(command, args, builder)
+	case "nxc", "netexec", "crackmapexec":
+		windowsClassifyNetExec(command, builder)
 	case "fsutil", "fsutil.exe":
 		windowsClassifyFSUtil(command, args, builder)
 	case "vssadmin", "vssadmin.exe":
@@ -2139,6 +2147,8 @@ func windowsClassifyCMD(
 		windowsClassifyLSASSDump(command, args, builder)
 	case "ntdsutil", "ntdsutil.exe":
 		windowsClassifyNTDSIFMDump(command, args, builder)
+	case "nxc", "netexec", "crackmapexec":
+		windowsClassifyNetExec(command, builder)
 	case "fsutil", "fsutil.exe":
 		windowsClassifyFSUtil(command, args, builder)
 	case "vssadmin", "vssadmin.exe":
@@ -5757,4 +5767,40 @@ func windowsEndpoint(word windowsWord) (string, string, int64, bool) {
 		return "", "", 0, false
 	}
 	return scheme, host, port, true
+}
+
+// windowsClassifyNetExec gives a NetExec / CrackMapExec call under PowerShell or
+// cmd the same closed recognizers as the POSIX classifier
+// (rel-1-0-10:GAP-0051): an NTDS dump, or a complete statically credentialed
+// domain-service call, adds a credential-read operation; anything else stays
+// partial.
+func windowsClassifyNetExec(command *CommandFact, builder *windowsFactBuilder) {
+	if _, ok := exactDirectoryCredentialCommand(*command); ok ||
+		ExactNetExecDomainServiceAuth(*command) {
+		windowsAddOperation(command, OperationCredentialRead)
+		return
+	}
+	builder.out.markPartial(IssueUnknownOperandGrammar)
+}
+
+// windowsClassifyPathQualifiedNetExec classifies C:\Tools\nxc.exe and other
+// path-qualified NetExec binaries as the nxc family, but only when the argv is a
+// recognized credentialed call. Otherwise it leaves the command untouched.
+func windowsClassifyPathQualifiedNetExec(command *CommandFact, builder *windowsFactBuilder) bool {
+	// Program is empty here (the path is untrusted); the executable basename
+	// names the binary.
+	base := path.Base(strings.ReplaceAll(command.Executable, "\\", "/"))
+	family := strings.TrimSuffix(strings.ToLower(base), ".exe")
+	if _, ok := netExecDirectoryPrograms[family]; !ok {
+		return false
+	}
+	candidate := *command
+	candidate.Program = family
+	if _, ok := exactDirectoryCredentialCommand(candidate); !ok &&
+		!ExactNetExecDomainServiceAuth(candidate) {
+		return false
+	}
+	command.Program = family
+	windowsClassifyNetExec(command, builder)
+	return true
 }

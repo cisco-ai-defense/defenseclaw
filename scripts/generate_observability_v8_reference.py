@@ -169,6 +169,10 @@ YAML_ANNOTATIONS_TEMPLATE = {
     ),
     "    retention_days: 7": ("    # Applies to eligible local event/evidence/judge/correlation history; zero means retain forever.",),
     "    max_store_mb: 0": ("    # Opt-in size cap in MiB (64 or more); 0 keeps retention by days only.",),
+    "    keep_rejected_records: false": (
+        "    # Opt-in: keep a redacted copy of each record the v8 schema gate refuses (defenseclaw audit rejected).",
+    ),
+    "    rejected_records_max_rows: 10000": ("    # Row cap of that store, 100 to 1000000; ignored while it is off.",),
     "  destinations:": (
         "  # Optional exports. Presence defaults enabled:true. Every example is disabled",
         "  # so this exhaustive reference is safe to inspect without exporting data.",
@@ -350,6 +354,8 @@ def _reference_document(version: int) -> dict[str, Any]:
                 "judge_bodies_path": "~/.defenseclaw/judge_bodies.db",
                 "retention_days": 7,
                 "max_store_mb": 0,
+                "keep_rejected_records": False,
+                "rejected_records_max_rows": 10000,
             },
             "destinations": [
                 {

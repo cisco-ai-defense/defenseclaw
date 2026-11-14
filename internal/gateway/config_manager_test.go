@@ -2293,8 +2293,12 @@ func TestConnectorModeMatchesDeclaredTrafficMode(t *testing.T) {
 		mode, _ := row["mode"].(string)
 		surface, _ := row["enforcement_surface"].(string)
 		if wantProxy {
-			if mode != "guardrail" || surface != "llm_proxy" {
-				t.Errorf("%s: mode=%q surface=%q, want guardrail/llm_proxy", name, mode, surface)
+			want := "llm_proxy"
+			if name == "openclaw" {
+				want = "llm_proxy_and_plugin_hooks"
+			}
+			if mode != "guardrail" || surface != want {
+				t.Errorf("%s: mode=%q surface=%q, want guardrail/%s", name, mode, surface, want)
 			}
 			continue
 		}
@@ -2785,5 +2789,24 @@ func TestConfigManagerRejectedV8CandidateKeepsTheActiveScannerKey(t *testing.T) 
 	}
 	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "vt-rejected-key" {
 		t.Fatal("the accepted candidate's rotated key is not exported")
+	}
+}
+
+// rel-1-0-10 GAP-0058: the OpenClaw prompt gate reloads hot (the plugin polls
+// GET /api/v1/openclaw/runtime); the other connectors.openclaw keys, which
+// setup applies at start, stay restart-required.
+func TestDiffConfigsOpenClawPromptGateIsHot(t *testing.T) {
+	oldCfg, newCfg := &config.Config{}, &config.Config{}
+	newCfg.Connectors.OpenClaw.Hooks.PromptGate = true
+	diff := diffConfigs(oldCfg, newCfg)
+	if slices.Contains(diff.RestartRequired, "connectors") || slices.Contains(diff.RestartRequired, "connectors.openclaw.hooks.prompt_gate") {
+		t.Fatalf("prompt_gate marked restart-required: %v", diff.RestartRequired)
+	}
+	if !slices.Contains(diff.Changed, "connectors.openclaw.hooks.prompt_gate") {
+		t.Fatalf("changed = %v, missing the prompt gate", diff.Changed)
+	}
+	newCfg.Connectors.OpenClaw.Hooks.Mode = "proxy"
+	if diff := diffConfigs(oldCfg, newCfg); !slices.Contains(diff.RestartRequired, "connectors") {
+		t.Fatalf("hooks.mode must stay restart-required: %v", diff.RestartRequired)
 	}
 }

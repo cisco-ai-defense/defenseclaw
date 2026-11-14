@@ -52,6 +52,8 @@ var apiListenTCP = func(ctx context.Context, addr string) (net.Listener, error) 
 // default address only. A standalone managed gateway must adopt that socket;
 // only other profiles may bind a configured address in its place.
 func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error) {
+	a.apiBindFoundHeld = false
+	a.apiPortHolderNoted.Store(false)
 	listener, inherited, err := inheritedAPIListener()
 	if err != nil {
 		return nil, err
@@ -63,7 +65,7 @@ func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error
 				return nil, err
 			}
 			fmt.Fprintf(os.Stderr, "[sidecar-api] %v; binding the configured address instead\n", err)
-			return listenWithRetry(ctx, a.addr, apiListenRetryBudget)
+			return listenWithRetryNotingHeld(ctx, a.addr, apiListenRetryBudget, &a.apiBindFoundHeld, a.noteHeldAPIPort)
 		}
 		return listener, nil
 	}
@@ -77,7 +79,7 @@ func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error
 		if declares, known := apiLaunchdDefinitionDeclaresSocket(); known && !declares {
 			fmt.Fprintln(os.Stderr, "[sidecar-api] the installed launchd job definition declares no API socket "+
 				"(a rolled-back upgrade); binding the API port until the next ensure installs this build's definition")
-			return listenWithRetry(ctx, a.addr, apiListenRetryBudget)
+			return listenWithRetryNotingHeld(ctx, a.addr, apiListenRetryBudget, &a.apiBindFoundHeld, a.noteHeldAPIPort)
 		}
 		// GAP-1086: launchd holds the managed API port across restarts only
 		// while its job declares the socket. Under an older job the gateway
@@ -88,7 +90,7 @@ func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error
 			"system/com.cisco.defenseclaw.gateway, then launchctl bootstrap system " +
 			"/Library/LaunchDaemons/com.cisco.defenseclaw.gateway.plist")
 	}
-	return listenWithRetry(ctx, a.addr, apiListenRetryBudget)
+	return listenWithRetryNotingHeld(ctx, a.addr, apiListenRetryBudget, &a.apiBindFoundHeld, a.noteHeldAPIPort)
 }
 
 // apiLaunchdGatewayDefinition is the managed gateway's launchd job
@@ -148,6 +150,10 @@ func (a *APIServer) retryAPIListenerBind(ctx context.Context, bound chan<- net.L
 		}
 		ln, err := apiListenTCP(ctx, a.addr)
 		if err != nil {
+			if isBindConflict(err) {
+				// The holder can change while the port stays held.
+				a.noteHeldAPIPort(err)
+			}
 			if time.Since(lastLogged) >= time.Minute {
 				fmt.Fprintf(os.Stderr, "[sidecar-api] %s still unavailable; retrying the API bind: %v\n", a.addr, err)
 				lastLogged = time.Now()

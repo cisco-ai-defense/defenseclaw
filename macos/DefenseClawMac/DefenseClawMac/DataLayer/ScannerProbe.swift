@@ -52,6 +52,7 @@ enum ScannerProbe {
         binDirs.contains { FileManager.default.isExecutableFile(atPath: "\($0)/\(name)") }
     }
 
+    /// The OpenClaw WebSocket credential. It is never the DefenseClaw API token.
     private static let openClawGatewayToken = "OPENCLAW_GATEWAY_TOKEN"
 
     /// Mirrors DefenseClaw credentials._openclaw_gateway_token: the upstream
@@ -111,6 +112,15 @@ enum ScannerProbe {
             }
         }
         return .missing
+    }
+
+    /// Whether the runtime can run `name`. Runtime 1.0.7 resolves scanner
+    /// binaries from its own venv before PATH (resolve_scanner_binary), so
+    /// the install's unlinked copy is usable by the CLI and gateway even
+    /// though a shell would not find it. `shellFound` is the startup PATH
+    /// scan (MacPorts/pipx/custom dirs the standard probe misses).
+    static func available(_ name: String, cliPath: String?, shellFound: Set<String>) -> Bool {
+        shellFound.contains(name) || locate(name, cliPath: cliPath) != .missing
     }
 
     enum FixError: LocalizedError {
@@ -245,8 +255,11 @@ enum ScannerProbe {
             case .onPath:
                 rows.append(.init(name: scanner, detail: "installed", level: .active))
             case .unlinked(let source):
-                rows.append(.init(name: scanner, detail: "found — not in PATH",
-                                  level: .warn, fixSource: source))
+                // The runtime runs its venv copy (1.0.7 resolve_scanner_binary),
+                // so this is installed, not degraded; Fix (a Mac extra) links
+                // it into ~/.local/bin for shells and older runtimes.
+                rows.append(.init(name: scanner, detail: "installed (runtime venv) — not in PATH",
+                                  level: .active, fixSource: source))
             case .missing:
                 rows.append(.init(name: scanner, detail: "missing", level: .missing))
             }

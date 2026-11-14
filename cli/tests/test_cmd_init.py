@@ -4816,12 +4816,15 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
     def test_note_proxy_connectors_warns_when_unsupported_on_windows(self):
         from defenseclaw.commands import cmd_init
 
-        disc = self._disc({"codex", "openclaw"})
+        # ZeptoClaw needs the guardrail proxy; OpenClaw runs native plugin
+        # hooks on Windows and is no longer warned about.
+        disc = self._disc({"codex", "openclaw", "zeptoclaw"})
         with patch.object(cmd_init.platform_support, "host_os", return_value="windows"), \
                 patch.object(cmd_init.ux, "warn") as warn:
             cmd_init._note_proxy_connectors(disc)
         emitted = " ".join(call.args[0] for call in warn.call_args_list if call.args)
-        self.assertIn("openclaw", emitted)
+        self.assertIn("zeptoclaw", emitted)
+        self.assertNotIn("openclaw", emitted)
         self.assertIn("unsupported on windows", emitted)
         self.assertIn("guardrail proxy", emitted)
 

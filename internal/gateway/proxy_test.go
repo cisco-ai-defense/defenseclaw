@@ -1231,7 +1231,7 @@ func TestProxyEdgeCases(t *testing.T) {
 		prov := &mockProvider{}
 		insp := newMockInspector()
 		proxy := newTestProxy(t, prov, insp, "action")
-		proxy.masterKey = "secret-key-123"
+		proxy.gatewayToken = "secret-key-123"
 		// This sub-test specifically exercises the auth path, so
 		// undo the test-only bypass that newTestProxy installs.
 		proxy.skipAuthForTest = false
@@ -1265,7 +1265,7 @@ func TestProxyEdgeCases(t *testing.T) {
 		// Correct auth header
 		req3 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
 		req3.Header.Set("Content-Type", "application/json")
-		req3.Header.Set("Authorization", "Bearer secret-key-123")
+		req3.Header.Set("X-DC-Auth", "Bearer secret-key-123")
 		rec3 := httptest.NewRecorder()
 		proxy.handleChatCompletion(rec3, req3)
 
@@ -3917,13 +3917,12 @@ func TestSwitchConnectorLocked_TearsDownOldAndSetsUpNew(t *testing.T) {
 
 	// Start with codex as the active connector.
 	codexConn, _ := reg.Get("codex")
-	codexConn.SetCredentials("tok", "mk")
+	codexConn.SetCredentials("tok")
 
 	p := &GuardrailProxy{
 		connector:    codexConn,
 		registry:     reg,
 		gatewayToken: "tok",
-		masterKey:    "mk",
 		setupOpts: connector.SetupOpts{
 			DataDir:   dir,
 			ProxyAddr: "127.0.0.1:4000",
@@ -3996,13 +3995,12 @@ func TestSwitchConnectorLocked(t *testing.T) {
 	dir := t.TempDir()
 	reg := connector.NewDefaultRegistry()
 	codexConn, _ := reg.Get("codex")
-	codexConn.SetCredentials("tok", "mk")
+	codexConn.SetCredentials("tok")
 
 	p := &GuardrailProxy{
 		connector:    codexConn,
 		registry:     reg,
 		gatewayToken: "tok",
-		masterKey:    "mk",
 		setupOpts: connector.SetupOpts{
 			DataDir:   dir,
 			ProxyAddr: "127.0.0.1:4000",

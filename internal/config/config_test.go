@@ -28,15 +28,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-func stringSliceContains(values []string, needle string) bool {
-	for _, value := range values {
-		if value == needle {
-			return true
-		}
-	}
-	return false
-}
-
 func TestGatewayConfigResolvedToken(t *testing.T) {
 	t.Run("explicit token env", func(t *testing.T) {
 		t.Setenv("MY_GATEWAY_TOKEN", "from-custom-env")
@@ -46,11 +37,38 @@ func TestGatewayConfigResolvedToken(t *testing.T) {
 			t.Errorf("got %q, want from-custom-env", got)
 		}
 	})
-	t.Run("empty token env uses openclaw env", func(t *testing.T) {
-		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "from-dotenv-style")
-		g := GatewayConfig{TokenEnv: "", Token: ""}
-		if got := g.ResolvedToken(); got != "from-dotenv-style" {
-			t.Errorf("got %q, want from-dotenv-style", got)
+	t.Run("OPENCLAW_GATEWAY_TOKEN alone is never the gateway token", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "openclaw-ws-token")
+		for _, tokenEnv := range []string{"", "OPENCLAW_GATEWAY_TOKEN"} {
+			g := GatewayConfig{TokenEnv: tokenEnv, Token: ""}
+			if got := g.ResolvedToken(); got != "" {
+				t.Errorf("token_env %q: got %q, want empty (R-TOK)", tokenEnv, got)
+			}
+		}
+	})
+	t.Run("a value equal to the OpenClaw credential is skipped", func(t *testing.T) {
+		// A 1.0.9 auth repair copied the OpenClaw token into
+		// DEFENSECLAW_GATEWAY_TOKEN; it is not a gateway token, in the
+		// environment or as the literal.
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "oc-token")
+		t.Setenv("MY_GATEWAY_TOKEN", "oc-token")
+		for _, g := range []GatewayConfig{
+			{OpenClawToken: "oc-token"},
+			{TokenEnv: "MY_GATEWAY_TOKEN", OpenClawToken: "oc-token"},
+		} {
+			if got := g.ResolvedToken(); got != "" {
+				t.Errorf("%+v: got %q, want empty", g.TokenEnv, got)
+			}
+		}
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+		t.Setenv("MY_GATEWAY_TOKEN", "")
+		if got := (&GatewayConfig{Token: "oc-token", OpenClawToken: "oc-token"}).ResolvedToken(); got != "" {
+			t.Errorf("literal equal to the OpenClaw token: got %q, want empty", got)
+		}
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "master-token")
+		if got := (&GatewayConfig{TokenEnv: "OPENCLAW_GATEWAY_TOKEN", OpenClawToken: "oc-token"}).ResolvedToken(); got != "master-token" {
+			t.Errorf("got %q, want master-token", got)
 		}
 	})
 	t.Run("empty token env falls back to inline token", func(t *testing.T) {
@@ -98,12 +116,12 @@ func TestGatewayConfigResolvedToken(t *testing.T) {
 			t.Errorf("got %q, want new-style", got)
 		}
 	})
-	t.Run("empty defenseclaw env falls back to openclaw env", func(t *testing.T) {
+	t.Run("empty defenseclaw env falls to the literal, not openclaw env", func(t *testing.T) {
 		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
-		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "legacy-token")
-		g := GatewayConfig{TokenEnv: "", Token: ""}
-		if got := g.ResolvedToken(); got != "legacy-token" {
-			t.Errorf("got %q, want legacy-token", got)
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "openclaw-ws-token")
+		g := GatewayConfig{TokenEnv: "", Token: "inline"}
+		if got := g.ResolvedToken(); got != "inline" {
+			t.Errorf("got %q, want inline", got)
 		}
 	})
 	t.Run("stale OPENCLAW_ TokenEnv falls through to DEFENSECLAW_ canonical", func(t *testing.T) {
@@ -115,7 +133,7 @@ func TestGatewayConfigResolvedToken(t *testing.T) {
 		// canonical token via fall-through — every Go caller of
 		// ResolvedToken outside the EnsureGatewayToken safety net
 		// silently failed. Post-fix, Go matches Python.
-		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "openclaw-ws-token")
 		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "real-live-token")
 		g := GatewayConfig{TokenEnv: "OPENCLAW_GATEWAY_TOKEN", Token: ""}
 		if got := g.ResolvedToken(); got != "real-live-token" {
@@ -1437,5 +1455,34 @@ func TestResolvedTokenSkipsSecretRefText(t *testing.T) {
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "real-token-1404")
 	if got := (&GatewayConfig{TokenEnv: "OPENCLAW_GATEWAY_TOKEN"}).ResolvedToken(); got != "real-token-1404" {
 		t.Fatalf("ResolvedToken() = %q, want the canonical token", got)
+	}
+}
+
+// The OpenClaw WebSocket credential comes from OPENCLAW_GATEWAY_TOKEN in the
+// environment, else <data_dir>/.env; SecretRef text is not a token.
+func TestResolveOpenClawGatewayToken(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"),
+		[]byte("DEFENSECLAW_GATEWAY_TOKEN=master-token\nOPENCLAW_GATEWAY_TOKEN=\"dotenv-oc-token\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	if got := resolveOpenClawGatewayToken(dir); got != "dotenv-oc-token" {
+		t.Fatalf("from .env: got %q, want dotenv-oc-token", got)
+	}
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "env-oc-token")
+	if got := resolveOpenClawGatewayToken(dir); got != "env-oc-token" {
+		t.Fatalf("from env: got %q, want env-oc-token", got)
+	}
+	const ref = "{\"source\": \"env\", \"id\": \"X\"}"
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", ref)
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("OPENCLAW_GATEWAY_TOKEN="+ref+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveOpenClawGatewayToken(dir); got != "" {
+		t.Fatalf("SecretRef text: got %q, want empty", got)
+	}
+	if got := resolveOpenClawGatewayToken(""); got != "" {
+		t.Fatalf("no data dir: got %q, want empty", got)
 	}
 }

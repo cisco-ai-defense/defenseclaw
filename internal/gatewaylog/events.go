@@ -176,6 +176,21 @@ const (
 	// envelope payload and no envelope row: the v7 ai_discovery envelope shape
 	// was retired, so the schema's event_type enum deliberately omits it.
 	EventAIDiscovery EventType = "ai_discovery"
+
+	// EventModelUsage is the classification key the canonical v8 model usage
+	// records (log.model.usage, observability.tokenomics) are routed under --
+	// observability.ProducerGatewayEvent with ProducerKey("model_usage"). Like
+	// EventAIDiscovery it has no envelope payload and no envelope row: it is not
+	// a v7 gateway event, so it stays out of the v7 audit-sink derivation
+	// (scripts/generate_telemetry_registry.py expected_audit_gateway_keys) and a
+	// migrated v7 audit sink never receives a usage record.
+	EventModelUsage EventType = "model_usage"
+
+	// EventEndpointHealth is the classification key of the periodic managed
+	// endpoint health report (observability.ProducerGatewayEvent with
+	// ProducerKey("endpoint_health")). Like EventAIDiscovery it exists only as a
+	// v8 log identity and has no envelope payload or envelope row.
+	EventEndpointHealth EventType = "endpoint_health"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with
