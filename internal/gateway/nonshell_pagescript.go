@@ -14,10 +14,11 @@ import (
 // pageScriptSessionEgressRuleID is the finding of the page-script check
 // (experiment EXP-1xx, rel-1-0-10:GAP-0560): a script that a browser-automation
 // tool runs in the page reads session state (cookies, web storage, IndexedDB)
-// and sends it to a host other than the page's. It is data in the rule packs:
-// an alert in the default and permissive packs; the strict pack blocks only a
-// proven flow (a literal destination host and a known page origin), and an
-// unknown destination or origin alerts in every pack.
+// and sends it to a host other than the page's. It is data in the rule packs
+// and an alert in every pack, strict and managed included: the tier with a
+// literal destination host and a known page origin (proven) was measured by
+// unit tests only, because no corpus navigates before a script, so a block in
+// strict waits for that measurement (rel-1-0-10:GAP-0560).
 const pageScriptSessionEgressRuleID = "PAGE-SCRIPT-SESSION-EGRESS"
 
 // maxPageOriginSessions bounds the sessions whose page the gateway remembers.

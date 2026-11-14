@@ -170,13 +170,14 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 			if e.Kind == toolshape.KindPageScript {
 				// A script bound (bytes, tokens, sends, definitions, depth) is a
 				// bound of this call: judged unknown at least, never clean.
+				// 1.0.10 ships the check as an alert in every pack: a proven flow
+				// (a literal host that is not the page host, the page known) is not
+				// promoted to a block in strict or managed until a corpus that
+				// navigates before a script measures it (GAP-0560).
 				proven, uncertain, host, caps := pageScriptEgress(request, mapping, e.Code)
 				trunc.Merge(caps)
-				switch {
-				case proven:
-					add(pageScriptSessionEgressRuleID, pageScriptNote(true, host), false)
-				case uncertain:
-					add(pageScriptSessionEgressRuleID, pageScriptNote(false, ""), true)
+				if proven || uncertain {
+					add(pageScriptSessionEgressRuleID, pageScriptNote(proven, host), true)
 				}
 			}
 		case toolshape.KindSetting:
