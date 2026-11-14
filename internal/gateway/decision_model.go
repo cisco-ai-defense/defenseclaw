@@ -103,7 +103,10 @@ type decisionResult struct {
 	risk   float64
 	// riskScore is the risk score answer (0..2), -1 when it is missing.
 	riskScore float64
-	latencyMs int64
+	// flowGuarded: a confident allow the flow guard turned into an
+	// escalation.
+	flowGuarded bool
+	latencyMs   int64
 	// failure is set when the model gave no usable answer; route is then
 	// decisionEscalate.
 	failure      gatewaylog.JudgeFailureClass
@@ -134,6 +137,12 @@ type decisionModel struct {
 	// escalateRuleFlagged: no confident block on a call the rules flagged
 	// (decision_model.escalate_rule_flagged).
 	escalateRuleFlagged bool
+	// historyTurns and historyResults shape the session history it sees;
+	// flowGuard asks the flow questions (decision_model_history.go).
+	historyTurns   int
+	historyResults bool
+	flowGuard      bool
+	questions      map[string]any
 	// alone: no judge follows (cascade 2), so the model may use all of the
 	// time left rather than a quarter of it.
 	alone  bool
@@ -190,6 +199,10 @@ func newDecisionModel(cfg *config.Config, dotenvPath string) *decisionModel {
 		blockAt:             dm.EffectiveBlockThreshold(),
 		blockRiskScore:      dm.EffectiveBlockRiskScore(),
 		escalateRuleFlagged: dm.EffectiveEscalateRuleFlagged(),
+		historyTurns:        min(dm.EffectiveHistoryTurns(), maxDecisionHistoryTurns),
+		historyResults:      dm.HistoryToolResults,
+		flowGuard:           dm.EffectiveFlowGuard(),
+		questions:           decisionQuestionsFor(dm.EffectiveFlowGuard()),
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   timeout,
@@ -206,6 +219,10 @@ type decisionModelState struct {
 	SessionUserIntent string                  `json:"session_user_intent,omitempty"`
 	RecentToolCalls   []decisionModelToolCall `json:"recent_tool_calls,omitempty"`
 	CurrentToolCall   decisionModelToolCall   `json:"current_tool_call"`
+	// SessionHistory is the rendered, nonce-delimited session history
+	// (decision_model_history.go). System One gets it in its state; the
+	// Decisions API input gets it as text before the STATE section.
+	SessionHistory string `json:"session_history,omitempty"`
 }
 
 type decisionModelToolCall struct {
@@ -300,7 +317,7 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 		return res
 	}
 	cctx, cancel := context.WithTimeout(ctx, budget)
-	choice, probs, score, err := d.call(cctx, state)
+	choice, probs, score, flow, err := d.call(cctx, state)
 	cancel()
 	res.latencyMs = time.Since(start).Milliseconds()
 	var rerr decisionRefusalError
@@ -326,6 +343,10 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	res.risk = 1 - probs["allow"]
 	res.riskScore = score
 	switch {
+	case choice == "allow" && res.risk <= d.allowAt && d.flowGuard && flow.guards():
+		// The flow guard: an allow the user did not ask for is not
+		// confident (S1FLOW); it escalates and never blocks.
+		res.flowGuarded = true
 	case choice == "allow" && res.risk <= d.allowAt:
 		res.route = decisionAllow
 	case choice == "block" && res.risk >= d.blockAt && score >= d.blockRiskScore && !d.ruleFlagEscalates(ctx):
@@ -346,17 +367,22 @@ type decisionParseError struct{ msg string }
 
 func (e decisionParseError) Error() string { return e.msg }
 
-func (d *decisionModel) call(ctx context.Context, state decisionModelState) (choice string, probs map[string]float64, score float64, err error) {
+func (d *decisionModel) call(ctx context.Context, state decisionModelState) (choice string, probs map[string]float64, score float64, flow decisionFlowAnswers, err error) {
 	score = -1
+	flow = decisionFlowAnswers{userAuthorized: -1, servesLatest: -1}
 	usage := beginGatewayCallUsage(ctx, modelusage.RoleDecisionModel, "decision_model", d.model)
 	defer func() { usage.End(err) }()
-	body, err := decisionWireBody(d.protocol, d.model, state, decisionModelQuestions)
+	questions := d.questions
+	if questions == nil {
+		questions = decisionModelQuestions
+	}
+	body, err := decisionWireBody(d.protocol, d.model, state, questions)
 	if err != nil {
-		return "", nil, score, decisionParseError{"encode request: " + err.Error()}
+		return "", nil, score, flow, decisionParseError{"encode request: " + err.Error()}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", nil, score, errors.New("decision model request could not be built")
+		return "", nil, score, flow, errors.New("decision model request could not be built")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	setDecisionWireAuth(req, d.protocol, d.apiKey)
@@ -365,21 +391,21 @@ func (d *decisionModel) call(ctx context.Context, state decisionModelState) (cho
 		usage.UpstreamHeader(resp.StatusCode, nil)
 	}
 	if err != nil {
-		return "", nil, score, fmt.Errorf("decision model unreachable: %s", redactDecisionModelError(err))
+		return "", nil, score, flow, fmt.Errorf("decision model unreachable: %s", redactDecisionModelError(err))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDecisionModelResponseBytes+1))
 	if err != nil {
-		return "", nil, score, fmt.Errorf("decision model read failed: %w", err)
+		return "", nil, score, flow, fmt.Errorf("decision model read failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, score, decisionHTTPError(d.protocol, resp.StatusCode, raw)
+		return "", nil, score, flow, decisionHTTPError(d.protocol, resp.StatusCode, raw)
 	}
 	if len(raw) > maxDecisionModelResponseBytes {
-		return "", nil, score, decisionParseError{"decision model answer exceeds 64 KiB"}
+		return "", nil, score, flow, decisionParseError{"decision model answer exceeds 64 KiB"}
 	}
 	choice, probs, err = parseDecisionModelAnswer(raw)
-	return choice, probs, decisionRiskScore(raw), err
+	return choice, probs, decisionRiskScore(raw), parseDecisionFlowAnswers(raw), err
 }
 
 // decisionRiskScore reads the risk score answer (0..2), or -1 when it is
@@ -415,11 +441,17 @@ func decisionWireBody(protocol, model string, state any, questions map[string]an
 	if protocol != config.DecisionModelProtocolGeminiDecisions {
 		return json.Marshal(map[string]any{"model": model, "state": state, "questions": questions})
 	}
+	history := ""
+	if st, ok := state.(decisionModelState); ok && st.SessionHistory != "" {
+		// The history goes before the STATE section as its own text.
+		history, st.SessionHistory = st.SessionHistory, ""
+		state = st
+	}
 	input, err := decisionModelInput(state)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(map[string]any{"model": model, "input": input, "questions": questions})
+	return json.Marshal(map[string]any{"model": model, "input": history + input, "questions": questions})
 }
 
 // decisionModelInput renders state as the labeled input text: one-space

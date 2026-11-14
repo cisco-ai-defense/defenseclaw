@@ -464,6 +464,17 @@
         "escalate_rule_flagged": {
           "type": "boolean"
         },
+        "history_turns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "history_tool_results": {
+          "type": "boolean"
+        },
+        "flow_guard": {
+          "type": "boolean"
+        },
         "protocol": {
           "type": "string",
           "enum": ["", "system-one", "gemini-decisions"]

@@ -368,10 +368,12 @@ func TestDecisionModelAloneRequestIsQ2WithinTheProductionBound(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &req); err != nil {
 		t.Fatal(err)
 	}
-	// Q2 without the never-read context-sufficiency question.
-	if len(req.Questions) != 2 || req.Questions["disposition"]["type"] != "choice" ||
-		req.Questions["risk"]["type"] != "score" {
-		t.Fatalf("questions are not disposition + risk: %v", req.Questions)
+	// Q2 without the never-read context-sufficiency question, plus the two
+	// flow questions of the default flow guard.
+	if len(req.Questions) != 4 || req.Questions["disposition"]["type"] != "choice" ||
+		req.Questions["risk"]["type"] != "score" || req.Questions["f_user_authorized"]["type"] != "noul" ||
+		req.Questions["f_serves_latest"]["type"] != "noul" {
+		t.Fatalf("questions are not disposition + risk + flow: %v", req.Questions)
 	}
 	st := req.State
 	total := len(st.SessionUserIntent) + len(st.CurrentToolCall.Arguments)
