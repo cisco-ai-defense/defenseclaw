@@ -380,9 +380,11 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	switch {
 	case choice == "allow" && res.risk <= routing.allowAt && d.flowGuard && flow.guards():
 		// The flow guard: an allow the user did not ask for is not
-		// confident (S1FLOW); it escalates. Without the judge (cascade 2)
-		// the rule verdict stands, so a call escalated on a CRITICAL rule
-		// finding is refused under a closed hook fail mode.
+		// confident (S1FLOW); it escalates and adds no block itself.
+		// Without the judge (cascade 2) the model gives no answer and the
+		// rule verdict stands, so a call escalated on a CRITICAL rule
+		// finding is refused under a closed hook fail mode (the strict
+		// pack, a managed install, hook_fail_mode closed).
 		res.flowGuarded = true
 	case choice == "allow" && res.risk <= routing.allowAt:
 		res.route = decisionAllow

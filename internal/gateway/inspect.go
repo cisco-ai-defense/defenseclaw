@@ -1918,7 +1918,8 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	// decides before it). An observe hook's judge answers after the hook.
 	observeAnswer := false
 	defer func() {
-		if out == nil && !observeAnswer && cfg.ResolveCascade(connector).JudgeNoVerdict == config.CascadeNoVerdictUnknown {
+		// System One's abstention (the flow guard, cascade 2) is no answer.
+		if (out == nil || out.decisionAbstain) && !observeAnswer && cfg.ResolveCascade(connector).JudgeNoVerdict == config.CascadeNoVerdictUnknown {
 			out = cascadeNoVerdict(cfg, connector, a.boundedTier(ctx, connector))
 		}
 	}()
