@@ -3640,6 +3640,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
 	}
 	t0 := time.Now()
+	ctx = withCascadeTrace(ctx, a.decisionConfig(ctx), req.ConnectorName)
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
@@ -3723,6 +3724,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// onto the context so the downstream emit choke points and the OS
 	// toast honor it (managed_enterprise only; no-op otherwise).
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+	verdict = a.applyCascadeFinal(ctx, req.ConnectorName, hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction

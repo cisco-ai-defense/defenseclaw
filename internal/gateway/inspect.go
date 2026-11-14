@@ -1921,10 +1921,25 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		return nil
 	}
 
+	// guardrail.cascade.judge.no_verdict: a call the model lane was asked
+	// about and gave no verdict on is at least the unknown tier when set to
+	// unknown (registered first, so the escalated fail-closed refusal below
+	// decides before it). An observe hook's judge answers after the hook.
+	observeAnswer := false
+	defer func() {
+		// System One's abstention (the flow guard, cascade 2) is no answer.
+		if (out == nil || out.decisionAbstain) && !observeAnswer && cfg.ResolveCascade(connector).JudgeNoVerdict == config.CascadeNoVerdictUnknown {
+			out = cascadeNoVerdict(cfg, connector, a.boundedTier(ctx, connector))
+		}
+	}()
+
 	// A decision-model floor set while the judge runs is the answer when
 	// the judge is late (GAP-0392).
 	floorSlot := &decisionFloorSlot{}
 	ctx = withDecisionFloorSlot(ctx, floorSlot)
+	// System One routes with the call's scope (guardrail.cascade.system_one
+	// overrides of its connector and profile), the pre-pass included.
+	ctx = withCascadeSystemOne(ctx, cfg, connector)
 	// A rule finding is a floor: the decision model cannot skip the judge on
 	// a call the rules flagged (escalate-on-confirm). Read it here, before
 	// the judge can run apart from the answer: the caller folds this run's
@@ -2031,6 +2046,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		jctx, cancel := context.WithTimeout(callCtx, timeout)
 		defer cancel()
 		jctx = withJudgeSuppressionPack(jctx, pack)
+		jctx = withCascadeSystemOne(jctx, cfg, connector)
 		var v *ScanVerdict
 		if strings.EqualFold(strategyDirection, "tool_call") {
 			jctx = withDecisionRuleFloor(jctx, ruleFloor)
@@ -2051,7 +2067,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		resume := yieldHookRunSlot(ctx)
 		v := call(ctx)
 		resume()
-		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, effectsModeled, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+		return a.finishHookJudge(ctx, cfg, connector, strategyDirection, judge, ruleFloor, effectsModeled, v)
 	}
 
 	// A bounded action hook cancels the model request when its answer
@@ -2077,6 +2093,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	if observe {
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge does not hold the answer (observe) connector=%s direction=%s\n",
 			connector, strategyDirection)
+		observeAnswer = true
 		return nil
 	}
 	left := time.Until(answerEnd)
@@ -2092,7 +2109,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	defer resume()
 	select {
 	case v := <-done:
-		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, effectsModeled, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+		return a.finishHookJudge(ctx, cfg, connector, strategyDirection, judge, ruleFloor, effectsModeled, v)
 	case <-wait.C:
 	case <-ctx.Done():
 	}
@@ -2303,6 +2320,9 @@ func hookJudgeLaneVerdict(cfg *config.Config, connector, strategyDirection strin
 			connector, strategyDirection, failedScanner)
 		return nil
 	}
+	if v.cascadeFixed {
+		return v
+	}
 	if !cfg.SecureClientIntegration() {
 		// The judge severity goes through block_at / alert_at like every
 		// other finding: the judges block any HIGH verdict on their own,
@@ -2349,6 +2369,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Connector = serverConnector
 	r = r.WithContext(openClawInspectIdentity(r.Context(), serverConnector))
+	r = r.WithContext(withCascadeTrace(r.Context(), a.decisionConfig(r.Context()), serverConnector))
 
 	scanTimeout := inspectScanTimeout
 	if a.inspectToolScanTimeout > 0 {
@@ -2426,6 +2447,11 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		if req.BoundedPrefixReview {
 			verdict.markOversizeUninspected()
 		}
+		surface := "tool_call"
+		if strings.EqualFold(req.Tool, "message") {
+			surface = "message"
+		}
+		verdict = a.applyCascadeFinal(r.Context(), serverConnector, surface, "", req.Tool, verdict)
 		verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
 		a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 		// A lock that appeared during the scan still decides this request.

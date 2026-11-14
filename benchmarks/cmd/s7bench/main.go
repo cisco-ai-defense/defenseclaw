@@ -382,7 +382,7 @@ func main() {
 	cfg.Guardrail.DetectionStrategy = *strategy
 	cfg.Guardrail.DetectionStrategyToolCall = *strategy
 	if *effectsRules != "" {
-		cfg.Guardrail.Cascade.Lanes.Effects = *effectsRules
+		cfg.Guardrail.Cascade.SetLane(config.CascadeLaneEffects, *effectsRules)
 	}
 	if *judgeModel != "" {
 		cfg.Guardrail.Judge.Enabled = true
