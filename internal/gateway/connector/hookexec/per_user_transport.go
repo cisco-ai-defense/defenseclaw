@@ -342,7 +342,7 @@ func verifiedPerUserHTTPClient(
 				// hook-post reads the process behind the proven socket, for
 				// a no-answer during a restart (PerUserGatewayRestartProven).
 				if record, _ := ctx.Value(perUserPeerRecordKey{}).(*PerUserPeerRecord); record != nil {
-					record.capture(conn.LocalAddr(), conn.RemoteAddr())
+					record.capture(perUserCallHomes(ctx), conn.LocalAddr(), conn.RemoteAddr())
 				}
 				return conn, nil
 			},
