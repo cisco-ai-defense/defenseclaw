@@ -65,7 +65,9 @@ func parseCommand(command string, comments bool) (*syntax.File, bool) {
 		return nil, false
 	}
 	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
-		file, err := syntax.NewParser(syntax.Variant(variant), syntax.KeepComments(comments)).Parse(Reader(command), "")
+		file, err := containParse(nil, func() (*syntax.File, error) {
+			return syntax.NewParser(syntax.Variant(variant), syntax.KeepComments(comments)).Parse(Reader(command), "")
+		})
 		if err == nil {
 			return file, true
 		}

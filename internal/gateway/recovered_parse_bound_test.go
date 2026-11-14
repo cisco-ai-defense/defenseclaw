@@ -90,7 +90,7 @@ func TestGAP0534HookCallIsAnsweredWithoutCrash(t *testing.T) {
 				}
 			}
 			findings, action := judge(ordinary, false)
-			bound := !managed && hookpaths.ShellParseBound(connector, tool, ordinary, cwd, home)
+			bound := !managed && (hookpaths.ShellParseReason(connector, tool, ordinary, cwd, home) == "shell-parse-bound")
 			if !managed && runtime.GOOS != "windows" && !bound {
 				t.Errorf("%s: ordinary twin is not read as shell-parse-bound", cell)
 			}

@@ -371,7 +371,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	stateMutation := a.provenHookActionMustEnforce(ctx, verdict)
+	stateMutation := a.hookActionMustEnforce(ctx, verdict)
 	effectiveMode := mode
 	if stateMutation {
 		effectiveMode = "action"
