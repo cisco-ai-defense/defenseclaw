@@ -1629,6 +1629,104 @@ def test_upgrade_keeps_keys_the_target_release_has(
 _DOMAINS_CONFIG = "config_version: 9\nguardrail:\n  internal_domains:\n  - corp.example.com\n"
 
 
+# 1.0.10 keys: 1.0.9's gateway (LoadRuntimeV8File) and every 1.0.9 config
+# write (ValidateCandidate) refuse each one ("additionalProperties"), so a
+# downgrade to 1.0.9 sets them aside (s7-nscfg).
+_KEYS_1_0_10 = (
+    "config_version: 9\n"
+    "guardrail:\n"
+    "  mode: observe\n"
+    "  cascade:\n    lanes:\n      nonshell: \"off\"\n      effects: shadow\n"
+    "  secret_flow:\n    sink_action:\n      strict: alert\n"
+    "  effects_rules_tier: restricted\n"
+    "decision_model:\n  escalate_rule_flagged: true\n"
+    "observability:\n  local:\n    keep_rejected_records: true\n"
+    "routing:\n  min_confidence: 0.5\n"
+)
+
+
+def test_downgrade_to_1_0_9_sets_aside_the_1_0_10_keys(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_KEYS_1_0_10, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    assert len(execs) == 1
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    guardrail = config["guardrail"]
+    for key in ("cascade", "secret_flow", "effects_rules_tier"):
+        assert key not in guardrail, key
+    assert guardrail["mode"] == "observe"
+    assert "escalate_rule_flagged" not in (config.get("decision_model") or {})
+    assert "keep_rejected_records" not in ((config.get("observability") or {}).get("local") or {})
+    assert "min_confidence" not in (config.get("routing") or {})
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record["for"] == "1.0.9"
+    assert record["keys"] == {
+        "guardrail.cascade": {"lanes": {"nonshell": "off", "effects": "shadow"}},
+        "guardrail.secret_flow": {"sink_action": {"strict": "alert"}},
+        "guardrail.effects_rules_tier": "restricted",
+        "decision_model.escalate_rule_flagged": True,
+        "observability.local.keep_rejected_records": True,
+        "routing.min_confidence": 0.5,
+    }
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CONFIG_KEYS_1_0_9 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.9.txt"
+
+
+def _schema_key_paths(schema: dict) -> set[str]:
+    """Every dotted key the v8 config schema names (properties, through $ref and *Of)."""
+
+    defs = schema.get("$defs", {})
+    out: set[str] = set()
+
+    def walk(node: object, prefix: str, refs: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            return
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/") and ref.count("/") == 2:
+            name = ref.rsplit("/", 1)[-1]
+            if name not in refs:
+                walk(defs.get(name), prefix, (*refs, name))
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            for branch in node.get(keyword, []):
+                walk(branch, prefix, refs)
+        for key, child in node.get("properties", {}).items():
+            dotted = f"{prefix}.{key}" if prefix else key
+            out.add(dotted)
+            walk(child, dotted, refs)
+
+    walk(schema, "", ())
+    return out
+
+
+def test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade() -> None:
+    # fixtures/config_keys/1.0.9.txt is _schema_key_paths of the published
+    # 1.0.9 schema (git show 1.0.9:schemas/config/v8/defenseclaw-config.schema.json).
+    # A key the schema adds after 1.0.9 is refused by 1.0.9, so it must be in
+    # NEWER_CONFIG_KEYS (itself or a block that holds it), or a downgrade
+    # leaves a config.yaml 1.0.9 does not start with.
+    old = set(_CONFIG_KEYS_1_0_9.read_text(encoding="utf-8").split())
+    schema = json.loads(
+        (_REPO_ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json").read_text(encoding="utf-8")
+    )
+    listed = [key for key, since in upgrade_shim.NEWER_CONFIG_KEYS if since > (1, 0, 9)]
+    missing = sorted(
+        path
+        for path in _schema_key_paths(schema) - old
+        if not any(path == key or path.startswith(key + ".") for key in listed)
+    )
+    assert missing == [], f"add these to upgrade_shim.NEWER_CONFIG_KEYS: {missing}"
+
+
+
 @pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
 def test_downgrade_below_1_0_6_sets_aside_internal_domains(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str

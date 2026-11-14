@@ -78,6 +78,9 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # guardrail.chains and connectors (connectors.agent_gateway) are set aside
 # whole: an older release refuses the block itself, so taking only the inner
 # key out would leave an empty block behind.
+# Every key the schema has and the previous release's schema lacks is listed
+# (test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade); 1.0.9 refuses
+# each 1.0.10 key below, at gateway start and on every config write.
 NEWER_CONFIG_KEYS = (
     ("openshell.trusted_ca_bundle", (1, 0, 3)),
     ("guardrail.internal_domains", (1, 0, 6)),
@@ -85,6 +88,25 @@ NEWER_CONFIG_KEYS = (
     ("connectors", (1, 0, 6)),
     ("connectors.openclaw", (1, 0, 10)),
     ("guardrail.cascade", (1, 0, 10)),
+    ("guardrail.secret_flow", (1, 0, 10)),
+    ("guardrail.effects_rules_tier", (1, 0, 10)),
+    ("decision_model.block_risk_score", (1, 0, 10)),
+    ("decision_model.escalate_rule_flagged", (1, 0, 10)),
+    ("decision_model.protocol", (1, 0, 10)),
+    ("observability.local.keep_rejected_records", (1, 0, 10)),
+    ("observability.local.rejected_records_max_rows", (1, 0, 10)),
+    ("observability.pricing", (1, 0, 10)),
+    ("observability.tokenomics", (1, 0, 10)),
+    ("routing.admin", (1, 0, 10)),
+    ("routing.allow_user_override", (1, 0, 10)),
+    ("routing.categories", (1, 0, 10)),
+    ("routing.classifier", (1, 0, 10)),
+    ("routing.default_alias", (1, 0, 10)),
+    ("routing.min_confidence", (1, 0, 10)),
+    ("routing.on_classifier_error", (1, 0, 10)),
+    ("routing.route_only", (1, 0, 10)),
+    ("routing.sensitive", (1, 0, 10)),
+    ("routing.systemone", (1, 0, 10)),
 )
 # Where a downgrade keeps the keys it set aside, in the data folder:
 # {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
