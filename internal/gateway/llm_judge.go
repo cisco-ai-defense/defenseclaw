@@ -929,6 +929,14 @@ func judgeResponseFormatFor(kind string, toolSafeKeys bool) json.RawMessage {
 			"required":             []string{"detection_result", "entities"},
 			"additionalProperties": false,
 		})
+	case sensitiveJudgeKind:
+		name = "defenseclaw_judge_sensitivity"
+		schema = map[string]interface{}{
+			"type":                 "object",
+			"properties":           map[string]interface{}{"sensitive": map[string]interface{}{"type": "boolean"}},
+			"required":             []string{"sensitive"},
+			"additionalProperties": false,
+		}
 	case "exfil":
 		name = "defenseclaw_judge_exfil"
 		schema = judgeCategoryObjectSchema(sortedJudgeCategoryNames(exfilCategories), judgeLabelSchema(false))
