@@ -76,7 +76,12 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	// 3. Sensitive narrowing: guardrail severity or a sensitive signal
 	// (sensitive.go). A narrowed request has only local exits.
 	if s := e.sensitive; s != nil && len(s.Aliases) > 0 {
-		if src := e.sensitiveFloor(req, signals); src != "" {
+		if src := e.sensitiveFloor(req, signals); src != "" || e.sensitiveSticky(req) {
+			if src == "" {
+				src = SensitiveSourceSticky
+			} else {
+				e.markSensitiveSticky(req)
+			}
 			pol.AllowedAliases = intersectAliases(pol.AllowedAliases, s.Aliases)
 			d.FilteredBy = "sensitive"
 			d.Sensitive = SensitiveOutcome{Source: src, Reason: "positive"}
@@ -104,6 +109,7 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		}
 	}
 	narrowed := d.SensitiveNarrowed()
+	req.Narrowed = narrowed
 	if narrowed {
 		// A sensitive request tries the local models even when the
 		// classifier and the defaults name only cloud aliases, and even

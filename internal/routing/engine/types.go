@@ -73,6 +73,10 @@ type Request struct {
 	Profiles      []string
 	ProfileDigest string
 	Caller        Caller
+	// Narrowed is set by Decide while it tries candidates: routing.sensitive
+	// narrowed the request (CredentialOK may relax for a keyless local
+	// model then). Callers leave it false.
+	Narrowed bool
 }
 
 // Backend is one routing.models entry.
@@ -174,6 +178,10 @@ type Decision struct {
 const (
 	SensitiveSourceGuardrail = "guardrail"
 	SensitiveSourceSignal    = "signal"
+	// SensitiveSourceSticky: an earlier turn of the same conversation (same
+	// caller, connector and agent session id) was sensitive, and the later
+	// turns carry it in their history.
+	SensitiveSourceSticky = "sticky"
 )
 
 // SensitiveOutcome says what decided the sensitive narrowing of one

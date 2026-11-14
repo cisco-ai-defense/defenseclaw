@@ -78,7 +78,9 @@ func New(cfg *config.Config, opts Options) (*Engine, error) {
 		managed:       opts.Managed,
 		credentialOK:  opts.CredentialOK,
 	}
-	if r.EffectiveClassifier() == config.RoutingClassifierSystemOne {
+	if r.EffectiveClassifier() == config.RoutingClassifierSystemOne || (r.Sensitive != nil && len(r.Sensitive.Aliases) > 0) {
+		// The sensitive narrowing of a conversation is sticky too: its
+		// later turns carry the earlier sensitive turn (GAP-0576).
 		e.sticky = opts.Sticky
 		if e.sticky == nil {
 			e.sticky = NewStickyCache()

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
@@ -26,9 +27,10 @@ func sensitiveRouteOnlyFixture(t *testing.T, local config.RoutingModelBackend) *
 	t.Helper()
 	f := newRouteOnlyFixture(t)
 	local.Name = "local"
-	if local.BaseURL == "-" {
+	switch local.BaseURL {
+	case "-":
 		local.BaseURL = ""
-	} else if local.BaseURL == "" {
+	case "":
 		local.BaseURL = f.alt.URL
 	}
 	f.cfg.Routing.Models = append(f.cfg.Routing.Models, local)
@@ -103,26 +105,149 @@ func TestRouteOnlySensitiveNeverFallsBackToTheCloud(t *testing.T) {
 	}
 }
 
-func TestRouteOnlyPlainRequestStillFallsBackWithACause(t *testing.T) {
+func TestRouteOnlyPlainRequestIsNotNarrowed(t *testing.T) {
 	f := sensitiveRouteOnlyFixture(t, config.RoutingModelBackend{Provider: "ollama", Model: "qwen2.5", APIs: []string{"messages"}})
 	rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("hello there"), loginInbound)
+	if rec.Code != 200 || atomic.LoadInt32(&f.origHits) != 1 || atomic.LoadInt32(&f.altHits) != 0 {
+		t.Fatalf("a plain request must keep its route: %d cloud=%d local=%d", rec.Code, f.origHits, f.altHits)
+	}
+}
+
+// The TV repro: Codex on the Responses API with a Bedrock bearer key and a
+// keyless loopback Ollama alias. The sensitive call reaches Ollama with no
+// credential, never the cloud upstream.
+func TestRouteOnlyCodexBearerSensitiveGoesToKeylessLocal(t *testing.T) {
+	f := sensitiveRouteOnlyFixture(t, config.RoutingModelBackend{Provider: "ollama", Model: "qwen2.5", APIs: []string{"responses"}})
+	f.cfg.Routing.RouteOnly.Connectors = append(f.cfg.Routing.RouteOnly.Connectors, "codex")
+	f.cfg.Routing.RouteOnly.Upstreams["codex"] = config.RoutingUpstreamConfig{BaseURL: f.orig.URL, API: "responses"}
+	tok, err := f.srv.tokens.Token("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{"model": "openai.gpt-oss-120b", "stream": true, "input": []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "input_text", "text": "the db password is hunter2"}}}}}
+	rec := f.post(t, "/r/codex/responses", body, func(r *http.Request) {
+		r.Header.Del("X-Api-Key")
+		r.Header.Set("Authorization", "Bearer ABSKbedrock-short-term-key")
+		r.Header.Set(routeTokenHeader, tok)
+	})
+	if atomic.LoadInt32(&f.origHits) != 0 || atomic.LoadInt32(&f.altHits) != 1 || rec.Code != 200 {
+		t.Fatalf("codex sensitive: %d local=%d cloud=%d %s", rec.Code, f.altHits, f.origHits, rec.Body.String())
+	}
+	if f.altHdr.Get("Authorization") != "" {
+		t.Fatal("the Bedrock bearer key crossed to the local model")
+	}
+}
+
+func TestRouteOnlySensitiveUnroutedAPIIsRefused(t *testing.T) {
+	f := sensitiveRouteOnlyFixture(t, config.RoutingModelBackend{Provider: "ollama", Model: "qwen2.5", APIs: []string{"messages"}})
+	rec := f.post(t, "/r/claudecode/v1/messages/count_tokens", messagesBody("my password is hunter2"), loginInbound)
+	if rec.Code != 403 || atomic.LoadInt32(&f.origHits) != 0 || !strings.Contains(rec.Body.String(), "sensitive") {
+		t.Fatalf("sensitive count_tokens: %d cloud=%d %s", rec.Code, f.origHits, rec.Body.String())
+	}
+	rec = f.post(t, "/r/claudecode/v1/messages/count_tokens", messagesBody("hello"), loginInbound)
 	if rec.Code != 200 || atomic.LoadInt32(&f.origHits) != 1 {
-		t.Fatalf("a plain request must keep its route: %d cloud=%d", rec.Code, f.origHits)
+		t.Fatalf("plain count_tokens must pass: %d cloud=%d", rec.Code, f.origHits)
+	}
+}
+
+func TestRouteOnlySensitiveNeverSendsAnUncheckedBody(t *testing.T) {
+	f := sensitiveRouteOnlyFixture(t, config.RoutingModelBackend{Provider: "ollama", Model: "qwen2.5", APIs: []string{"messages"}})
+	big := func(r *http.Request) { r.ContentLength = routeOnlyBodyCap + 1 }
+	if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("hello"), big); rec.Code != http.StatusRequestEntityTooLarge || atomic.LoadInt32(&f.origHits) != 0 {
+		t.Fatalf("over the cap with routing.sensitive: %d cloud=%d", rec.Code, f.origHits)
+	}
+	f.srv.heldBytes = routeOnlyBufferBudget
+	if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("hello"), nil); rec.Code != http.StatusServiceUnavailable || atomic.LoadInt32(&f.origHits) != 0 {
+		t.Fatalf("budget full with routing.sensitive: %d cloud=%d", rec.Code, f.origHits)
+	}
+	f.srv.heldBytes = 0
+	// Without routing.sensitive the 1.0.10 bound stays: forwarded unrouted.
+	plain := newRouteOnlyFixture(t)
+	plain.srv.heldBytes = routeOnlyBufferBudget
+	if rec := plain.post(t, "/r/claudecode/v1/messages", messagesBody("hello"), nil); rec.Code != 200 || atomic.LoadInt32(&plain.origHits) != 1 {
+		t.Fatalf("budget full without routing.sensitive: %d cloud=%d", rec.Code, plain.origHits)
+	}
+}
+
+func TestRouteOnlySensitiveConversationStaysLocal(t *testing.T) {
+	f := sensitiveRouteOnlyFixture(t, config.RoutingModelBackend{Provider: "ollama", Model: "qwen2.5", APIs: []string{"messages"}})
+	session := func(r *http.Request) { loginInbound(r); r.Header.Set("X-Claude-Code-Session-Id", "s1c-session-1") }
+	f.post(t, "/r/claudecode/v1/messages", messagesBody("my password is hunter2"), session)
+	rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("now refactor foo"), session)
+	if rec.Code != 200 || atomic.LoadInt32(&f.altHits) != 2 || atomic.LoadInt32(&f.origHits) != 0 {
+		t.Fatalf("the next turn of a sensitive conversation: %d local=%d cloud=%d", rec.Code, f.altHits, f.origHits)
+	}
+	other := func(r *http.Request) { loginInbound(r); r.Header.Set("X-Claude-Code-Session-Id", "s1c-session-2") }
+	if f.post(t, "/r/claudecode/v1/messages", messagesBody("now refactor foo"), other); atomic.LoadInt32(&f.origHits) != 1 {
+		t.Fatalf("another conversation is not narrowed: cloud=%d", f.origHits)
+	}
+}
+
+func TestRouteOnlySensitiveRefusalIsAudited(t *testing.T) {
+	f := sensitiveRouteOnlyFixture(t, config.RoutingModelBackend{Provider: "ollama", Model: "qwen2.5", APIs: []string{"messages"}, APIKeyEnv: "S1C_UNSET_LOCAL_KEY_9931"})
+	store, err := audit.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	logger := audit.NewLogger(store)
+	f.srv.router.SetAuditLogger(logger)
+	if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("my password is hunter2"), loginInbound); rec.Code != 403 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	logger.Close()
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Target == "routing.sensitive" && strings.Contains(e.Details, engine.DenyCodeSensitiveLocal) {
+			if strings.Contains(e.Details, "hunter2") {
+				t.Fatal("the audit row holds prompt text")
+			}
+			return
+		}
+	}
+	t.Fatalf("no routing.sensitive audit row: %+v", events)
+}
+
+func TestGuardrailChatSensitiveWithNoLocalModelIsDenied(t *testing.T) {
+	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.Routing = config.RoutingConfig{
+		Enabled: true, Classifier: config.RoutingClassifierRules,
+		Models:    []config.RoutingModelBackend{{Name: "local", Provider: "ollama", Model: "qwen2.5", BaseURL: "http://127.0.0.1:11434", APIKeyEnv: "S1C_UNSET_LOCAL_KEY_9931"}},
+		Signals:   config.RoutingSignalConfig{Keywords: []config.RoutingKeywordSignal{{Name: "secret", Keywords: []string{"password"}}}},
+		Sensitive: &config.RoutingSensitiveConfig{Signals: []string{"secret"}, Aliases: []string{"local"}},
+	}
+	if err := cfg.Routing.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p := &GuardrailProxy{modelRouter: newEngineRouter(cfg, nil, "")}
+	o := p.routeDetailed(context.Background(), &ModelRouterInput{Text: "my password is x", RequestedProvider: "openai", Model: "gpt-5", Connector: "openclaw"})
+	p.applyRouteGate(context.Background(), &o, "openai", "gpt-5")
+	if o.Result != SemanticRouteDenied || o.Deny == nil || o.Deny.Code != engine.DenyCodeSensitiveLocal {
+		t.Fatalf("chat path: %+v", o)
 	}
 }
 
 func TestAmendRoutingDecisionRecordsWhatWasDone(t *testing.T) {
 	ctx := ContextWithRequestID(context.Background(), "req-s1c-amend-1")
-	in := &ModelRouterInput{Connector: "codex", Listener: engine.ListenerRouteOnly, RequestModel: "gpt-5"}
+	in := &ModelRouterInput{Connector: "codex", Listener: engine.ListenerRouteOnly, RequestModel: "gpt-5", Caller: engine.Caller{Verified: true, Key: "1001"}}
 	d := &engine.Decision{Outcome: engine.OutcomeApplied, Backend: &engine.Backend{Alias: "local", Model: "qwen2.5"}}
-	recordRoutingDecision(ctx, in, d, false)
-	amendRoutingDecision(ctx, SemanticRouteOutcome{Result: SemanticRouteDenied, Deny: &engine.DenyReason{Code: engine.DenyCodeSensitiveLocal}, Route: d})
+	caller := recordRoutingDecision(ctx, in, d, true)
+	// Another caller that reuses the request id amends nothing.
+	if routingAdminRuntime.Decisions().Amend("req-s1c-amend-1", caller+"-other", func(e *routingadmin.DecisionEntry) { e.Outcome = "x" }) {
+		t.Fatal("another caller amended the entry")
+	}
+	amendRoutingDecision(ctx, SemanticRouteOutcome{Result: SemanticRouteDenied, Deny: &engine.DenyReason{Code: engine.DenyCodeSensitiveLocal}, Route: d, recordCaller: caller})
 	e, ok := routingAdminRuntime.Decisions().Find("req-s1c-amend-1", "", true)
 	if !ok || e.Outcome != engine.OutcomeDenied || e.SelectedAlias != "" || !slices.Contains(e.Reasons, engine.DenyCodeSensitiveLocal) {
 		t.Fatalf("amended entry = %+v (found %v)", e, ok)
 	}
-	var none routingadmin.DecisionEntry
-	if routingAdminRuntime.Decisions().Amend("", func(*routingadmin.DecisionEntry) {}) || none.Outcome != "" {
+	if routingAdminRuntime.Decisions().Amend("", caller, func(*routingadmin.DecisionEntry) {}) {
 		t.Fatal("an empty request id amends nothing")
 	}
 }

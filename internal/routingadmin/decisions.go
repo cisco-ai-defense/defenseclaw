@@ -65,10 +65,13 @@ func (d *Decisions) Record(e DecisionEntry) {
 // of a request in flight is nearly always among them.
 const amendWindow = 64
 
-// Amend updates the entry of requestID, when it is among the newest
-// entries, with what the request finally did (a routed call that ended as
-// a fallback or a refusal). It reports whether an entry was found.
-func (d *Decisions) Amend(requestID string, update func(*DecisionEntry)) bool {
+// Amend updates the entry of requestID recorded for callerKey, when it is
+// among the newest amendWindow entries, with what the request finally did
+// (a routed call that ended as a fallback or a refusal). Request ids can
+// come from client headers, so another caller's entry is never touched;
+// an entry pushed out of the window by a burst stays as decided. It
+// reports whether an entry was found.
+func (d *Decisions) Amend(requestID, callerKey string, update func(*DecisionEntry)) bool {
 	if d == nil || requestID == "" || update == nil {
 		return false
 	}
@@ -76,7 +79,7 @@ func (d *Decisions) Amend(requestID string, update func(*DecisionEntry)) bool {
 	defer d.mu.Unlock()
 	for i := 0; i < d.n && i < amendWindow; i++ {
 		j := (d.next - 1 - i + DecisionsSize) % DecisionsSize
-		if d.buf[j].RequestID == requestID {
+		if d.buf[j].RequestID == requestID && d.buf[j].CallerKey == callerKey {
 			e := d.buf[j].copy()
 			update(&e)
 			d.buf[j] = e.copy()

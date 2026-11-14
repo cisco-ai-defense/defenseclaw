@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -172,21 +174,39 @@ func (r *engineRouter) backendKey(cfg *config.Config, b engine.Backend) string {
 }
 
 // backendCredentialOK reports whether a call of req can authenticate to b:
-// the backend is keyless or its key resolves, and on the route-only
+// it has no key reference or its key resolves, and on the route-only
 // listener the inbound credential class can reach it (routeOnlyCredentialFits).
 func (r *engineRouter) backendCredentialOK(cfg *config.Config, b engine.Backend, req engine.Request) bool {
 	key := r.backendKey(cfg, b)
-	if !backendKeyless(b) && key == "" && (b.APIKeyEnv != "" || b.Credential != "") {
+	if key == "" && (b.APIKeyEnv != "" || b.Credential != "") {
 		return false
 	}
 	return routeOnlyCredentialFits(req, b, key)
 }
 
-// backendKeyless reports whether b is a model that needs no key: it names
-// no key reference and has its own base_url (a local model such as Ollama
-// or vLLM). Such a backend is called with no credential at all.
-func backendKeyless(b engine.Backend) bool {
-	return b.APIKeyEnv == "" && strings.TrimSpace(b.Credential) == "" && strings.TrimSpace(b.BaseURL) != ""
+// backendKeyless reports whether b is a model called with no credential at
+// all: no key reference, its own base_url, not Bedrock (Bedrock is signed
+// or keyed), and either a loopback base_url (Ollama, vLLM on this host) or
+// a request routing.sensitive narrowed (its local models are tried with no
+// credential rather than falling back to the cloud, GAP-0576).
+func backendKeyless(b engine.Backend, narrowed bool) bool {
+	if b.APIKeyEnv != "" || strings.TrimSpace(b.Credential) != "" || strings.TrimSpace(b.BaseURL) == "" ||
+		strings.EqualFold(strings.TrimSpace(b.Provider), "bedrock") || b.Bedrock != nil {
+		return false
+	}
+	return narrowed || isLoopbackBaseURL(b.BaseURL)
+}
+
+func isLoopbackBaseURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	if strings.EqualFold(u.Hostname(), "localhost") {
+		return true
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip != nil && ip.IsLoopback()
 }
 
 // routeOnlyCredentialFits is the route-only credential rule (DESIGN 7.3)
@@ -196,7 +216,7 @@ func backendKeyless(b engine.Backend) bool {
 // providers, and a gateway-held credential signs only Bedrock. A backend
 // with its own key, or a keyless one, always fits.
 func routeOnlyCredentialFits(req engine.Request, b engine.Backend, key string) bool {
-	if req.Listener != engine.ListenerRouteOnly || key != "" || backendKeyless(b) {
+	if req.Listener != engine.ListenerRouteOnly || key != "" || backendKeyless(b, req.Narrowed) {
 		return true
 	}
 	same := strings.EqualFold(strings.TrimSpace(b.Provider), req.RequestedProvider)
@@ -230,7 +250,7 @@ func (r *engineRouter) RouteDetailed(ctx context.Context, in *ModelRouterInput) 
 		return normalizeSemanticRouteOutcome(out)
 	}
 	d := eng.Decide(ctx, engineRequest(in))
-	recordRoutingDecision(ctx, in, &d, cfg != nil && cfg.StandaloneEnterprise())
+	out.recordCaller = recordRoutingDecision(ctx, in, &d, cfg != nil && cfg.StandaloneEnterprise())
 	out.Route = &d
 	out.Latency = time.Since(started)
 	switch d.Outcome {
@@ -244,15 +264,15 @@ func (r *engineRouter) RouteDetailed(ctx context.Context, in *ModelRouterInput) 
 			Reason: fmt.Sprintf("source=%s rule=%s model=%s", d.Source, boundedRouterLabel(d.RuleID, 64), b.Alias),
 		}
 		decision.APIKey = r.backendKey(cfg, b)
-		return mergeEngineFacts(outcomeFromDecision(in, decision, out.Latency), &d)
+		return mergeEngineFacts(outcomeFromDecision(in, decision, out.Latency), &d, out.recordCaller)
 	default:
 		out.FailureCode = d.FailureCode
 	}
 	return normalizeSemanticRouteOutcome(out)
 }
 
-func mergeEngineFacts(o SemanticRouteOutcome, d *engine.Decision) SemanticRouteOutcome {
-	o.Route = d
+func mergeEngineFacts(o SemanticRouteOutcome, d *engine.Decision, recordCaller string) SemanticRouteOutcome {
+	o.Route, o.recordCaller = d, recordCaller
 	return o
 }
 
@@ -352,6 +372,18 @@ func (p *GuardrailProxy) applyRouteGate(ctx context.Context, o *SemanticRouteOut
 		o.FailureCode = SemanticRouteFailureFiltered
 		amendRoutingDecision(ctx, *o)
 	}
+}
+
+// sensitiveFloorOf is the sensitive source of a request the router cannot
+// re-route (its floor, or an earlier sensitive turn of the conversation):
+// it would go to its own (cloud) model unchecked. "" when routing or
+// routing.sensitive is off, or the request is not sensitive.
+func (r *engineRouter) sensitiveFloorOf(ctx context.Context, req engine.Request) string {
+	if r == nil {
+		return ""
+	}
+	eng, _ := r.engineFor(ctx)
+	return eng.SensitiveFloor(req)
 }
 
 // recordRouteDeny writes the audit row of a routing refusal.

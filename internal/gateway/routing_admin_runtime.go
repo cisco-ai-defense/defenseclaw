@@ -30,9 +30,11 @@ var activeEngineRouter atomic.Pointer[engineRouter]
 
 // recordRoutingDecision keeps one routed call in the recent-decisions ring:
 // no prompt text, headers or credentials, and the verified caller key only.
-func recordRoutingDecision(ctx context.Context, in *ModelRouterInput, d *engine.Decision, managed bool) {
+// recordRoutingDecision records d in the decision ring and returns the
+// caller key of the entry.
+func recordRoutingDecision(ctx context.Context, in *ModelRouterInput, d *engine.Decision, managed bool) string {
 	if in == nil || d == nil {
-		return
+		return ""
 	}
 	entry := routingadmin.DecisionEntry{
 		Time:           time.Now().UTC(),
@@ -67,6 +69,7 @@ func recordRoutingDecision(ctx context.Context, in *ModelRouterInput, d *engine.
 		entry.Reasons = append(entry.Reasons, "sensitive:"+boundedRouterLabel(d.Sensitive.Source, 32)+":"+boundedRouterLabel(d.Sensitive.Reason, 64))
 	}
 	routingAdminRuntime.Decisions().Record(entry)
+	return entry.CallerKey
 }
 
 // amendRoutingDecision rewrites the recorded decision of the request in ctx
@@ -75,12 +78,13 @@ func recordRoutingDecision(ctx context.Context, in *ModelRouterInput, d *engine.
 // status` show what was done (GAP-0576).
 func amendRoutingDecision(ctx context.Context, o SemanticRouteOutcome) {
 	outcome := engine.OutcomeFallback
-	if o.Result == SemanticRouteDenied {
+	switch o.Result {
+	case SemanticRouteDenied:
 		outcome = engine.OutcomeDenied
-	} else if o.Result == SemanticRouteApplied {
+	case SemanticRouteApplied:
 		return
 	}
-	routingAdminRuntime.Decisions().Amend(RequestIDFromContext(ctx), func(e *routingadmin.DecisionEntry) {
+	routingAdminRuntime.Decisions().Amend(RequestIDFromContext(ctx), o.recordCaller, func(e *routingadmin.DecisionEntry) {
 		e.Outcome, e.SelectedAlias, e.SelectedModel = outcome, "", ""
 		if o.Deny != nil && o.Deny.Code != "" && !slices.Contains(e.Reasons, o.Deny.Code) {
 			e.Reasons = append(e.Reasons, o.Deny.Code)
@@ -295,21 +299,27 @@ func (p *GuardrailProxy) gateUnrouted(r *http.Request, in passthroughRouteInput)
 	if eng == nil || cfg == nil {
 		return SemanticRouteOutcome{}
 	}
+	admin := router.adminFor(cfg)
+	if admin == nil && !eng.SensitiveConfigured() {
+		return SemanticRouteOutcome{}
+	}
 	model := passthroughModel(r.URL.Path, in.Model)
 	caller, profiles := routeCallerFromContext(ctx)
-	req := engineRequest(&ModelRouterInput{
+	routerIn := &ModelRouterInput{
 		Model: model, RequestModel: model, APIFamily: in.APIFamily, Connector: p.connectorName(),
 		Listener: engine.ListenerGuardrail, Severity: in.Severity, RequestedProvider: in.Provider,
-		Text: in.Text, Caller: caller, Profiles: profiles,
-	})
+		ConversationID: r.Header.Get("X-DC-Session-Id"), Text: in.Text, Caller: caller, Profiles: profiles,
+	}
+	req := engineRequest(routerIn)
 	if src := eng.SensitiveFloor(req); src != "" {
 		// The router cannot send this request to a local model, and a
 		// sensitive request never goes to the cloud (GAP-0576).
 		deny := engine.SensitiveLocalDeny(src, "DefenseClaw cannot re-route this request (a signed Bedrock body or an API it does not rewrite)")
-		d := engine.Decision{Outcome: engine.OutcomeDenied, Deny: deny, Sensitive: engine.SensitiveOutcome{Source: src, Reason: "positive"}}
+		d := engine.Decision{Outcome: engine.OutcomeDenied, Deny: deny, FailureCode: engine.FailureFiltered, Source: engine.SourceSensitive,
+			FilteredBy: "sensitive", Sensitive: engine.SensitiveOutcome{Source: src, Reason: "positive"}}
+		recordRoutingDecision(ctx, routerIn, &d, cfg.StandaloneEnterprise())
 		return SemanticRouteOutcome{Result: SemanticRouteDenied, Deny: deny, Route: &d}
 	}
-	admin := router.adminFor(cfg)
 	if admin == nil {
 		return SemanticRouteOutcome{}
 	}

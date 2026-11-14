@@ -5,6 +5,7 @@ package engine
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -63,7 +64,7 @@ func TestSensitiveNarrowedWithNoUsableLocalAliasIsDenied(t *testing.T) {
 func TestSensitiveNarrowedTriesTheSensitiveAliases(t *testing.T) {
 	cfg := sensitiveSignalConfig()
 	// No unconditional default: only the classifier candidates (cloud).
-	cfg.Routing.Decisions = cfg.Routing.Decisions[:3]
+	cfg.Routing.Decisions = slices.DeleteFunc(cfg.Routing.Decisions, func(r config.RoutingDecisionRule) bool { return len(r.Conditions) == 0 })
 	e := mustEngine(t, cfg, Options{})
 	d := e.Decide(context.Background(), chat("refactor this, key AKIA1234"))
 	if d.Outcome != OutcomeApplied || d.Backend == nil || d.Backend.Alias != "local" || d.Source != SourceSensitive {
@@ -78,5 +79,42 @@ func TestSensitiveNarrowedWithNoAllowedLocalAliasIsDenied(t *testing.T) {
 	d := e.Decide(context.Background(), chat("AKIA1234"))
 	if d.Outcome != OutcomeDenied || d.Deny == nil || d.Deny.Code != DenyCodeSensitiveLocal {
 		t.Fatalf("a sensitive request with no allowed local alias = %+v", d)
+	}
+}
+
+func TestSensitiveNarrowedIgnoresAUserOverrideToACloudAlias(t *testing.T) {
+	e := mustEngine(t, sensitiveSignalConfig(), Options{})
+	r := chat("AKIA1234 please")
+	r.RequestedModel = "claude"
+	d := e.Decide(context.Background(), r)
+	if d.Outcome != OutcomeApplied || d.Backend == nil || d.Backend.Alias != "local" {
+		t.Fatalf("user override to a cloud alias on a sensitive request = %+v", d)
+	}
+}
+
+func TestSensitiveConversationStaysNarrowed(t *testing.T) {
+	e := mustEngine(t, sensitiveSignalConfig(), Options{})
+	first := chat("my key AKIA1234")
+	first.ConversationID = "conv-1"
+	if d := e.Decide(context.Background(), first); d.Sensitive.Source != SensitiveSourceSignal {
+		t.Fatalf("first turn = %+v", d.Sensitive)
+	}
+	next := chat("please refactor this")
+	next.ConversationID = "conv-1"
+	d := e.Decide(context.Background(), next)
+	if d.Sensitive.Source != SensitiveSourceSticky || d.Backend == nil || d.Backend.Alias != "local" {
+		t.Fatalf("the next turn of a sensitive conversation = %+v %+v", d.Sensitive, d.Backend)
+	}
+	if e.SensitiveFloor(next) != SensitiveSourceSticky {
+		t.Fatal("an unroutable request of the conversation is not marked")
+	}
+	other := chat("please refactor this")
+	other.ConversationID = "conv-2"
+	if d := e.Decide(context.Background(), other); d.SensitiveNarrowed() {
+		t.Fatalf("another conversation is narrowed: %+v", d.Sensitive)
+	}
+	noID := chat("please refactor this")
+	if d := e.Decide(context.Background(), noID); d.SensitiveNarrowed() {
+		t.Fatalf("a request without a session id is narrowed: %+v", d.Sensitive)
 	}
 }

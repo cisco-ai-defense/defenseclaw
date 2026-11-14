@@ -56,6 +56,9 @@ type SemanticRouteOutcome struct {
 	// policy digest, charge keys) for usage records; nil for routers that
 	// are not the routing engine.
 	Route *engine.Decision
+	// recordCaller is the caller key of the decision ring entry the router
+	// recorded (amendRoutingDecision only amends that caller's entry).
+	recordCaller string
 }
 
 // detailedModelRouter is implemented by routers that can classify why a

@@ -244,8 +244,16 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// fit streams to the configured upstream unrouted (never refused).
 	// A signed call cannot stream unhashed: when the budget is full it is
 	// answered overloaded (the agent retries); 413 stays for the 64 MiB cap.
+	// With routing.sensitive set, a request routing cannot read is never
+	// sent unchecked (GAP-0576): over the cap it is refused, over the
+	// shared budget the agent retries.
+	sensitive := s.sensitiveConfigured(r.Context())
 	if r.ContentLength > routeOnlyBodyCap || !s.holdBody(max(r.ContentLength, 0)) {
-		if signer != nil && r.ContentLength <= routeOnlyBodyCap {
+		switch {
+		case sensitive && r.ContentLength > routeOnlyBodyCap:
+			routeOnlyTooLargeToCheck(w)
+			return
+		case (signer != nil || sensitive) && r.ContentLength <= routeOnlyBodyCap:
 			routeOnlyOverloaded(w)
 			return
 		}
@@ -261,7 +269,11 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if extra := int64(len(body)) - charged; extra > 0 {
 		if !s.holdBody(extra) {
-			if signer != nil && over == nil {
+			switch {
+			case sensitive && over != nil:
+				routeOnlyTooLargeToCheck(w)
+				return
+			case (signer != nil || sensitive) && over == nil:
 				routeOnlyOverloaded(w)
 				return
 			}
@@ -271,6 +283,10 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		charged += extra
 	}
 	if over != nil {
+		if sensitive {
+			routeOnlyTooLargeToCheck(w)
+			return
+		}
 		s.forward(w, r, original, body, over)
 		return
 	}
@@ -343,8 +359,27 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if originalAllowed && len(body) <= routeOnlyRetryBodyCap {
 		retry = &original
 	}
+	if routedOutcome.Route != nil && routedOutcome.Route.SensitiveNarrowed() {
+		attempt.sensitive = &routedOutcome
+	}
 	w.Header().Set("X-Semantic-Router", "routed")
 	s.forwardWithRetry(w, r, *attempt, retry, body)
+}
+
+// sensitiveConfigured reports whether routing.sensitive can narrow the
+// requests of the generation ctx pinned.
+func (s *routeOnlyServer) sensitiveConfigured(ctx context.Context) bool {
+	if s == nil || s.router == nil {
+		return false
+	}
+	eng, _ := s.router.engineFor(ctx)
+	return eng.SensitiveConfigured()
+}
+
+// routeOnlyTooLargeToCheck refuses, under routing.sensitive, a body over
+// the route-only read cap: it cannot be checked, so it is not sent.
+func routeOnlyTooLargeToCheck(w http.ResponseWriter) {
+	routeOnlyError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "the request is larger than DefenseClaw can check for sensitive data (routing.sensitive), so it was not sent")
 }
 
 // routeOnlyOverloaded answers a signed call the buffer budget cannot hold.
@@ -410,6 +445,9 @@ type routeOnlyAttempt struct {
 	provider    string
 	signer      *bedrockSigner // gateway SigV4 signing (nil: none)
 	usage       modelusage.CallFacts
+	// sensitive is the outcome of a routed call routing.sensitive keeps
+	// local (nil otherwise): a failed call is refused and audited as such.
+	sensitive *SemanticRouteOutcome
 }
 
 // routeOnlyAPIFamily names the routable API family of a native path.
@@ -487,7 +525,9 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 		family, noRoute = config.RoutingAPIResponses, true
 	}
 	if family == "" {
-		return nil, SemanticRouteOutcome{}, true
+		// An API routing does not rewrite (count_tokens and the like) goes
+		// to its own model; a sensitive one is refused instead (GAP-0576).
+		return nil, s.sensitiveUnroutable(r, cfg, connector, body, caller), true
 	}
 	text, hasTools, toolTurn, images := routeOnlyHumanText(family, body)
 	var probe struct {
@@ -537,7 +577,7 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 	d := out.Decision
 	alias, keyless := d.Model, false
 	if out.Route != nil && out.Route.Backend != nil {
-		alias, keyless = out.Route.Backend.Alias, backendKeyless(*out.Route.Backend)
+		alias, keyless = out.Route.Backend.Alias, backendKeyless(*out.Route.Backend, out.Route.SensitiveNarrowed())
 	}
 	// fallback ends a routed decision the attempt cannot be prepared for:
 	// a sensitive request is refused with the cause (never sent to the
@@ -623,6 +663,29 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 		a.auth = d.APIKey
 	}
 	return a, out, originalAllowed
+}
+
+// sensitiveUnroutable is the outcome of a route-only request whose API
+// family routing does not rewrite: denied when routing.sensitive marks its
+// text (read as the connector's main API) or its conversation, else empty.
+func (s *routeOnlyServer) sensitiveUnroutable(r *http.Request, cfg *config.Config, connector string, body []byte, caller engine.Caller) SemanticRouteOutcome {
+	if !s.sensitiveConfigured(r.Context()) {
+		return SemanticRouteOutcome{}
+	}
+	family := config.RoutingAPIMessages
+	if connector == "codex" {
+		family = config.RoutingAPIResponses
+	}
+	text, _, _, _ := routeOnlyHumanText(family, body)
+	in := &ModelRouterInput{Connector: connector, Listener: engine.ListenerRouteOnly, ConversationID: routeOnlyConversationID(r.Header), Text: text, Caller: caller}
+	src := s.router.sensitiveFloorOf(r.Context(), engineRequest(in))
+	if src == "" {
+		return SemanticRouteOutcome{}
+	}
+	deny := engine.SensitiveLocalDeny(src, "DefenseClaw does not route this API ("+boundedRouterLabel(r.URL.Path, 96)+")")
+	d := engine.Decision{Outcome: engine.OutcomeDenied, Deny: deny, FailureCode: engine.FailureFiltered, Source: engine.SourceSensitive, FilteredBy: "sensitive",
+		Sensitive: engine.SensitiveOutcome{Source: src, Reason: "positive"}}
+	return SemanticRouteOutcome{Result: SemanticRouteDenied, Deny: deny, Route: &d, recordCaller: recordRoutingDecision(r.Context(), in, &d, cfg.StandaloneEnterprise())}
 }
 
 func mustUnescape(p string) string {
@@ -728,7 +791,18 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 	}
 	if err != nil {
 		call.End(err)
-		routeOnlySendError(w, err, "the routed model is unreachable")
+		msg := "the routed model is unreachable"
+		if o := routed.sensitive; o != nil && o.Route != nil {
+			// The local model of a sensitive request is down: refused, never
+			// sent to the cloud, and recorded as such (GAP-0576).
+			out := *o
+			out.Result, out.Decision = SemanticRouteDenied, nil
+			out.Deny = engine.SensitiveLocalDeny(o.Route.Sensitive.Source, "the local model is unreachable")
+			amendRoutingDecision(r.Context(), out)
+			auditRouteDeny(r.Context(), s.router.logger, r.URL.Path, out.Deny)
+			msg = out.Deny.Message
+		}
+		routeOnlySendError(w, err, msg)
 		return
 	}
 	call.End(copyRouteOnlyResponse(w, resp, call, routed.usage.Streaming))
