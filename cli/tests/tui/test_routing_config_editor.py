@@ -21,17 +21,27 @@ def test_routing_and_tokenomics_sections_exist() -> None:
     assert "Routing" in names and "Tokenomics" in names
 
 
-def test_routing_fields_are_editable_and_the_lists_are_read_only() -> None:
+def test_only_safe_routing_fields_are_editable() -> None:
     cfg = Config()
-    cfg.routing.models = [{"name": "fast", "provider": "openai", "model": "m"}]
+    cfg.routing.models = [{"name": "fast", "provider": "openai", "model": "m"}, {"name": "deep", "provider": "anthropic", "model": "m"}]
     cfg.routing.admin = {"rules": [{"id": "r"}], "budgets": []}
     fields = {f.key: f for f in section(cfg, "Routing").fields if f.key}
-    for key in ("routing.enabled", "routing.classifier", "routing.default_alias", "routing.min_confidence",
-                "routing.on_classifier_error", "routing.allow_user_override"):
+    # Turning routing on and the classifier need a model and an endpoint: read-only.
+    assert fields["routing.enabled"].kind == "header" and fields["routing.classifier"].kind == "header"
+    for key in ("routing.min_confidence", "routing.on_classifier_error", "routing.allow_user_override"):
         assert fields[key].kind != "header", key
-    assert fields["routing.classifier"].options == ("rules", "systemone", "vllm_sr")
+    # The default alias can only name an alias that exists.
+    alias = fields["routing.default_alias"]
+    assert alias.kind == "choice" and alias.options == ("", "fast", "deep")
+    assert validate_config_field(replace(alias, value="ghost")).severity == "error"
+    assert validate_config_field(replace(alias, value="deep")).severity == "ok"
     assert fields["routing.on_classifier_error"].options == ("original", "rules")
-    assert fields["routing.summary"].kind == "header" and fields["routing.summary"].value == "1 model(s), 1 rule(s), 0 budget(s)"
+    assert fields["routing.summary"].kind == "header" and fields["routing.summary"].value == "2 model(s), 1 rule(s), 0 budget(s)"
+
+
+def test_default_alias_is_read_only_without_models() -> None:
+    fields = {f.key: f for f in section(Config(), "Routing").fields if f.key}
+    assert fields["routing.default_alias"].kind == "header"
 
 
 def test_tokenomics_rows_are_read_only_and_name_the_command() -> None:
@@ -57,19 +67,15 @@ def test_routing_values_are_validated() -> None:
     assert check("routing.min_confidence", "0.6").severity == "ok"
     assert check("routing.min_confidence", "1.5").severity == "error"
     assert check("routing.min_confidence", "high").severity == "error"
-    assert check("routing.classifier", "rules").severity == "ok"
-    assert check("routing.classifier", "poetry").severity == "error"
     assert check("routing.on_classifier_error", "nope").severity == "error"
-    assert check("routing.enabled", "maybe").severity == "error"
 
 
 def test_applying_routing_values_reaches_the_config_that_saves() -> None:
     cfg = Config()
-    apply_config_field(cfg, "routing.classifier", "rules")
     apply_config_field(cfg, "routing.min_confidence", "0.7")
-    apply_config_field(cfg, "routing.enabled", "true")
+    apply_config_field(cfg, "routing.on_classifier_error", "rules")
     apply_config_field(cfg, "routing.allow_user_override", "true")
-    assert cfg.routing.classifier == "rules" and cfg.routing.min_confidence == 0.7
-    assert cfg.routing.enabled is True and cfg.routing.allow_user_override is True
+    assert cfg.routing.min_confidence == 0.7 and cfg.routing.on_classifier_error == "rules"
+    assert cfg.routing.allow_user_override is True
     saved = cfg.routing.to_dict()
-    assert saved["classifier"] == "rules" and saved["min_confidence"] == 0.7 and saved["allow_user_override"] is True
+    assert saved["min_confidence"] == 0.7 and saved["on_classifier_error"] == "rules" and saved["allow_user_override"] is True

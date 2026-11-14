@@ -54,7 +54,7 @@ func TestBuildRoutingWhenTheGatewayDoesNotReport(t *testing.T) {
 	for name, health := range map[string][]byte{"no body": nil, "not json": []byte("x"), "no routing member": []byte(`{}`)} {
 		state := BuildRouting(RoutingInputs{Config: routingConfig(), Health: health})
 		for _, row := range state.RouteOnly {
-			if row.Ready != nil || row.ReasonCode == "" {
+			if row.Ready != nil || row.ReasonCode != RoutingReasonGatewayDidNotReport {
 				t.Fatalf("%s: %+v", name, row)
 			}
 		}

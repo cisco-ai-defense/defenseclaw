@@ -283,6 +283,12 @@ func TestClientGoneIsCancelledNotFailed(t *testing.T) {
 	if rec.Outcome != "cancelled" || rec.ErrorType != "cancelled" {
 		t.Fatalf("%+v", rec)
 	}
+	// An upstream status of 400 or more stays failed when the client leaves.
+	c = e.Begin(context.Background(), facts())
+	c.UpstreamHeader(529, nil)
+	if rec = c.End(fmt.Errorf("%w: write: broken pipe", ErrClientGone)); rec.Outcome != "failed" || rec.ErrorType != "http_529" {
+		t.Fatalf("%+v", rec)
+	}
 	// An upstream failure stays failed.
 	c = e.Begin(context.Background(), facts())
 	if rec = c.End(errors.New("connection reset by peer")); rec.Outcome != "failed" || rec.ErrorType != "upstream_error" {

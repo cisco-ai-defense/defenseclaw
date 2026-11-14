@@ -9234,26 +9234,34 @@ def _count(cfg: object | Mapping[str, Any] | None, key: str) -> int:
 
 
 def _routing_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
-    """Model routing (GAP-0630). The scalar keys the Python Config persists are
-    editable; models, rules and budgets are lists with their own validation, so
-    they are read-only here and changed with the defenseclaw routing commands."""
-    models = _count(cfg, "routing.models")
-    rules = _count(cfg, "routing.admin.rules")
-    budgets = _count(cfg, "routing.admin.budgets")
-    summary = f"{models} model(s), {rules} rule(s), {budgets} budget(s)"
+    """Model routing (GAP-0630). Only values that cannot make the config
+    unloadable on their own are editable: on_classifier_error, min_confidence,
+    allow_user_override, and the default alias as a choice of the aliases that
+    exist. Turning routing on, the classifier, and the models, rules and
+    budgets have checks of their own (a model must exist, a classifier needs
+    its endpoint), so they are read-only here and changed with the
+    defenseclaw routing commands."""
+    models = get_config_value(cfg, "routing.models", None)
+    aliases = tuple(
+        str(m.get("name")) for m in (models if isinstance(models, (list, tuple)) else ()) if isinstance(m, dict) and m.get("name")
+    )
+    count_rules = _count(cfg, "routing.admin.rules")
+    count_budgets = _count(cfg, "routing.admin.budgets")
+    summary = f"{len(aliases)} model(s), {count_rules} rule(s), {count_budgets} budget(s)"
+    on = "on" if get_config_value(cfg, "routing.enabled", False) else "off"
+    classifier = str(get_config_value(cfg, "routing.classifier", "") or "vllm_sr")
+    cli_hint = "Change it with defenseclaw routing enable, disable and setup."
+    default_alias = (
+        _field(cfg, "Default Alias", "routing.default_alias", "choice", ("", *aliases), "Model used when nothing else is picked.")
+        if aliases
+        else ConfigField("Default Alias", "routing.default_alias", "header", "", "", hint="Add a model first: defenseclaw routing models add.")
+    )
     return ConfigSection(
         "Routing",
         (
-            _field(cfg, "Enabled", "routing.enabled", "bool", hint="Route model calls to the model that fits. Needs at least one model."),
-            _field(
-                cfg,
-                "Classifier",
-                "routing.classifier",
-                "choice",
-                ("rules", "systemone", "vllm_sr"),
-                "rules: built-in keyword rules; systemone: a decision model; vllm_sr: the vLLM router (Docker). Unset keeps vllm_sr.",
-            ),
-            _field(cfg, "Default Alias", "routing.default_alias", hint="Model alias used when nothing else is picked."),
+            ConfigField("Routing", "routing.enabled", "header", on, on, hint=cli_hint),
+            ConfigField("Classifier", "routing.classifier", "header", classifier, classifier, hint=cli_hint),
+            default_alias,
             _field(cfg, "Min Confidence", "routing.min_confidence", hint="0 to 1: a lower classifier confidence counts as no answer."),
             _field(
                 cfg,
@@ -9267,11 +9275,11 @@ def _routing_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             _header(".. Lists (read-only here) .."),
             ConfigField(
                 "Models, rules, budgets", "routing.summary", "header", summary, summary,
-                hint="Change them with defenseclaw routing models, rules and budgets (or the Routing panel).",
+                hint="Change them with defenseclaw routing models, rules and budgets.",
             ),
         ),
         "Model routing: which model answers which request.",
-        "Edit models, rules and budgets with defenseclaw routing; press M for the Routing panel.",
+        "Turn routing on or off, pick the classifier and edit the lists with defenseclaw routing; see defenseclaw routing status.",
     )
 
 

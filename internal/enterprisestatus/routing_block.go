@@ -126,7 +126,7 @@ func parseRouteOnlyReadiness(body []byte) map[string]bool {
 	var health struct {
 		Routing struct {
 			Details struct {
-				RouteOnly []struct {
+				RouteOnly *[]struct {
 					Connector string `json:"connector"`
 					Ready     bool   `json:"ready"`
 				} `json:"route_only"`
@@ -136,8 +136,11 @@ func parseRouteOnlyReadiness(body []byte) map[string]bool {
 	if json.Unmarshal(body, &health) != nil {
 		return nil
 	}
+	if health.Routing.Details.RouteOnly == nil {
+		return nil
+	}
 	out := map[string]bool{}
-	for _, row := range health.Routing.Details.RouteOnly {
+	for _, row := range *health.Routing.Details.RouteOnly {
 		if connectorIDPattern.MatchString(row.Connector) {
 			out[row.Connector] = row.Ready
 		}
