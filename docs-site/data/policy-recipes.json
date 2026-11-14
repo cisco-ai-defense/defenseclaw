@@ -6019,6 +6019,56 @@
       ]
     },
     {
+      "id": "RECIPE-SEC-BEARER-BARE",
+      "title": "Bearer credential",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-BEARER-BARE",
+        "pattern": "(?i)\\bbearer\\s+[A-Za-z0-9\\-_.~+/]{20,}=*",
+        "title": "Bearer credential",
+        "severity": "MEDIUM",
+        "confidence": 0.6,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-PASSWORD-ASSIGN",
+      "title": "Password assigned to a password-named key",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-PASSWORD-ASSIGN",
+        "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+        "title": "Password assigned to a password-named key",
+        "severity": "MEDIUM",
+        "confidence": 0.6,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
       "id": "RECIPE-SEC-SENDGRID",
       "title": "SendGrid API key",
       "kind": "rule:secret",

@@ -2842,6 +2842,26 @@
                   ]
                 },
                 {
+                  "id": "SEC-BEARER-BARE",
+                  "pattern": "(?i)\\bbearer\\s+[A-Za-z0-9\\-_.~+/]{20,}=*",
+                  "title": "Bearer credential",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
+                  "id": "SEC-PASSWORD-ASSIGN",
+                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+                  "title": "Password assigned to a password-named key",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
                   "id": "SEC-SENDGRID",
                   "pattern": "SG\\.[a-zA-Z0-9\\-_]{10,}\\.[a-zA-Z0-9\\-_]{10,}",
                   "title": "SendGrid API key",
@@ -6850,6 +6870,26 @@
                   ]
                 },
                 {
+                  "id": "SEC-BEARER-BARE",
+                  "pattern": "(?i)\\bbearer\\s+[A-Za-z0-9\\-_.~+/]{20,}=*",
+                  "title": "Bearer credential",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
+                  "id": "SEC-PASSWORD-ASSIGN",
+                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+                  "title": "Password assigned to a password-named key",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
                   "id": "SEC-SENDGRID",
                   "pattern": "SG\\.[a-zA-Z0-9\\-_]{10,}\\.[a-zA-Z0-9\\-_]{10,}",
                   "title": "SendGrid API key",
@@ -10579,6 +10619,26 @@
                   "title": "Bearer token in header",
                   "severity": "HIGH",
                   "confidence": 0.8,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
+                  "id": "SEC-BEARER-BARE",
+                  "pattern": "(?i)\\bbearer\\s+[A-Za-z0-9\\-_.~+/]{20,}=*",
+                  "title": "Bearer credential",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
+                  "id": "SEC-PASSWORD-ASSIGN",
+                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+                  "title": "Password assigned to a password-named key",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
                   "tags": [
                     "credential"
                   ]
