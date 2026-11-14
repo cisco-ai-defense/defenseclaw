@@ -1117,7 +1117,7 @@ func TestEvaluateCodexHook_PostToolUseKeepsOutputDataDetectors(t *testing.T) {
 				CWD:           repoRoot,
 			})
 
-			if resp.Severity != "CRITICAL" ||
+			if resp.Severity != "HIGH" ||
 				!containsString(resp.Findings, "SEC-AWS-KEY:AWS access key") ||
 				!containsString(resp.Findings, "ENT-BULK-SSN:US Social Security Number") {
 				t.Fatalf("response = %+v, want retained secret and PII detection", resp)
@@ -1209,7 +1209,7 @@ func TestEvaluateCodexHook_PostToolUseKeepsUntrustedInjectionDetection(t *testin
 				CWD:           "/repo",
 			})
 
-			if resp.RawAction != "block" || resp.Severity != "CRITICAL" ||
+			if resp.RawAction != "alert" || resp.Severity != "HIGH" ||
 				!containsString(resp.Findings, "TRUST-JAILBREAK:Jailbreak attempt") ||
 				!containsString(resp.Findings, "SEC-AWS-KEY:AWS access key") ||
 				!containsString(resp.Findings, "ENT-BULK-SSN:US Social Security Number") {

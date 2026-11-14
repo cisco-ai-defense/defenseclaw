@@ -14,7 +14,11 @@ import (
 // cache, thinking signatures, encrypted reasoning). It replaces only the
 // classifier step; policy, admin and deny still run on every call.
 const (
-	stickyTTL           = 30 * time.Minute // absolute, not sliding
+	stickyTTL = 30 * time.Minute // classifier answers: absolute, not sliding
+	// SensitiveMarkTTL is how long a sensitive conversation stays narrowed
+	// after its last narrowed turn (each one renews it, GAP-0576): long
+	// enough for a working day with breaks; marks are in memory only.
+	SensitiveMarkTTL    = 12 * time.Hour
 	stickyMaxEntries    = 4096
 	stickyMaxPerSubject = 256
 )
@@ -41,11 +45,20 @@ type StickyCache struct {
 	items      map[stickyKey]*list.Element
 	perSubject map[string]int
 	now        func() time.Time
+	ttl        time.Duration
 }
 
 // NewStickyCache returns an empty cache.
 func NewStickyCache() *StickyCache {
-	return &StickyCache{ll: list.New(), items: map[stickyKey]*list.Element{}, perSubject: map[string]int{}, now: time.Now}
+	return &StickyCache{ll: list.New(), items: map[stickyKey]*list.Element{}, perSubject: map[string]int{}, now: time.Now, ttl: stickyTTL}
+}
+
+// NewSensitiveMarkCache returns an empty cache of sensitive conversation
+// marks (SensitiveMarkTTL).
+func NewSensitiveMarkCache() *StickyCache {
+	c := NewStickyCache()
+	c.ttl = SensitiveMarkTTL
+	return c
 }
 
 func (c *StickyCache) get(k stickyKey) (ClassifyResult, bool) {
@@ -89,7 +102,7 @@ func (c *StickyCache) put(k stickyKey, r ClassifyResult) {
 	for c.ll.Len() >= stickyMaxEntries {
 		c.removeLocked(c.ll.Back())
 	}
-	el := c.ll.PushFront(&stickyEntry{key: k, result: r, expires: c.now().Add(stickyTTL)})
+	el := c.ll.PushFront(&stickyEntry{key: k, result: r, expires: c.now().Add(c.ttl)})
 	c.items[k] = el
 	c.perSubject[k.subject]++
 }

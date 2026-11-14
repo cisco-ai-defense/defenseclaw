@@ -5043,8 +5043,8 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     $help = Get-NativeOutput $gateway @("connector", "prepare-rollback", "--help")
     if ($BackTo -and $help -match '--to-version') { $prepare += @("--to-version", $BackTo) }
     if ((Invoke-Native $gateway $prepare) -ne 0) {
-        Write-Warn ("Could not rewrite the agent hook entries of DefenseClaw $From in the form $BackTo reads (see above). " +
-            "After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
+        Write-Warn ("Could not rewrite the agent hook entries, or put back the route-only model settings, of DefenseClaw $From for $BackTo (see above). " +
+            "A route-only agent then gets 401 until the DefenseClaw base URL and route header are removed from its settings. After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
             "the cmd.exe entries that run defenseclaw-hook.exe in %USERPROFILE%\.claude\settings.json; remove them by hand")
     }
 }
