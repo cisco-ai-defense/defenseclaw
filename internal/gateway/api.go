@@ -1506,6 +1506,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	inspectMux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
 	mux.Handle("/api/v1/inspect/", hookLimiter(a.guardrailProfileInspectMiddleware(inspectMux)))
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
+	mux.HandleFunc(openClawRuntimePath, a.handleOpenClawRuntime)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 	mux.HandleFunc("/api/v1/telemetry/canary", a.handleTelemetryCanary)
 	mux.HandleFunc("/api/v1/watchdog/recovery", a.handleWatchdogRecovery)
@@ -2391,6 +2392,11 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		intercept = false
 		surface = "agent_lifecycle_hooks"
 	}
+	// OpenClaw blocks tool calls (and prompts with the prompt gate) through
+	// its plugin hooks next to the proxy (rel-1-0-10 GAP-0063).
+	if name == "openclaw" && intercept {
+		surface = "llm_proxy_and_plugin_hooks"
+	}
 
 	// A host install registers only the connector's hooks: setup turns the
 	// native OTel exporters off (they run only in the OpenShell sandbox
@@ -2487,7 +2493,7 @@ func (a *APIServer) handleSkillDisable(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := a.client.DisableSkill(ctx, req.SkillKey); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2522,7 +2528,7 @@ func (a *APIServer) handleSkillEnable(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := a.client.EnableSkill(ctx, req.SkillKey); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2563,7 +2569,7 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
 		return a.client.DisablePlugin(callCtx, req.PluginName)
 	}); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2600,7 +2606,7 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
 		return a.client.EnablePlugin(callCtx, req.PluginName)
 	}); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2734,7 +2740,7 @@ func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := a.client.PatchConfig(ctx, req.Path, req.Value); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeOpenClawRPCError(w, err)
 		return
 	}
 
@@ -2923,6 +2929,30 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 // enableAllowedRuntime restores a disabled skill or plugin in OpenClaw. The
 // caller chooses the mutation order: Secure Client retains the legacy flow;
 // config-driven policy commits before this is called.
+// openClawRemediationSkipped reports a re-enable OpenClaw was not asked for
+// because DefenseClaw runs without operator.admin. The allow still counts and
+// the disable record is cleared; the operator re-enables it in OpenClaw if
+// OpenClaw had disabled it (rel-1-0-10 REVIEW-4 P2-2).
+func openClawRemediationSkipped(targetType, name string, err error) bool {
+	if !errors.Is(err, ErrOpenClawRemediationUnavailable) {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "[api] allow %s %s: OpenClaw not asked to re-enable it (no operator.admin); re-enable it in OpenClaw if it is still disabled there\n",
+		targetType, name)
+	return true
+}
+
+// writeOpenClawRPCError answers an OpenClaw RPC failure: 409 with code
+// openclaw_remediation_unavailable for the local operator_admin refusal, 502
+// for an OpenClaw failure.
+func (a *APIServer) writeOpenClawRPCError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrOpenClawRemediationUnavailable) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "code": openClawRemediationUnavailableAction})
+		return
+	}
+	a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+}
+
 func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementRequest, runtimeName, policyName, actionConnector string) (int, error) {
 	if a.store == nil {
 		return 0, nil
@@ -2943,13 +2973,13 @@ func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementReq
 	case "skill":
 		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
 			return a.client.EnableSkill(ctx, req.TargetName)
-		}); err != nil {
+		}); err != nil && !openClawRemediationSkipped(req.TargetType, req.TargetName, err) {
 			return http.StatusBadGateway, err
 		}
 	case "plugin":
 		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
 			return a.client.EnablePlugin(ctx, runtimeName)
-		}); err != nil {
+		}); err != nil && !openClawRemediationSkipped(req.TargetType, runtimeName, err) {
 			return http.StatusBadGateway, err
 		}
 		if runtimeName != policyName {
@@ -3497,6 +3527,9 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if a.refuseOpenClawPluginPath(w, r, req.Target) {
+		return
+	}
 	if a.rejectWindowsGatewayPath(w, "skill", req.Target, req.Target) {
 		return
 	}
@@ -3535,7 +3568,13 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), componentScanTimeout(cfg, "skill"))
 	defer cancel()
 
-	result, err := ss.Scan(ctx, req.Target)
+	scanTarget, release, ok := a.openClawScanPath(w, r, req.Target)
+	if !ok {
+		return
+	}
+	defer release()
+	result, err := ss.Scan(ctx, scanTarget)
+	rebaseOpenClawScanResult(result, scanTarget, req.Target)
 	if err == nil && !cfg.SecureClientIntegration() {
 		err = scanner.JudgeFailure(result)
 	}
@@ -3723,6 +3762,9 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if a.refuseOpenClawPluginPath(w, r, req.Target) {
+		return
+	}
 	if a.rejectWindowsGatewayPath(w, "plugin", req.Target, req.Target) {
 		return
 	}
@@ -3749,7 +3791,13 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
-	result, err := ps.Scan(ctx, req.Target)
+	scanTarget, release, ok := a.openClawScanPath(w, r, req.Target)
+	if !ok {
+		return
+	}
+	defer release()
+	result, err := ps.Scan(ctx, scanTarget)
+	rebaseOpenClawScanResult(result, scanTarget, req.Target)
 	if err != nil {
 		a.recordAPIScanErrorV8(r.Context(), "plugin-scanner", "plugin", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -4454,13 +4502,15 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			return
 		}
 		if isGatewayTokenListenerProofRequest(r) && (a.scannerCfg == nil || !a.scannerCfg.SecureClientIntegration()) {
-			// The per-user OpenClaw plugin proves this listener with the
-			// gateway token before it sends that token (GAP-0594).
+			// The per-user OpenClaw plugin proves this listener with its
+			// credential before it sends it (GAP-0594): the connector-scoped
+			// plugin token (DESIGN-REVIEW-1 P1-2), or the gateway token.
 			expected := ""
 			if a.scannerCfg != nil {
 				expected = a.scannerCfg.Gateway.Token
 			}
-			if !writeGatewayTokenListenerProof(w, r, expected, a.client.RefreshedToken()) {
+			if !writeGatewayTokenListenerProof(w, r, a.openClawPluginProofToken(), expected) &&
+				!writeOpenClawPluginAccountProof(w, r, a.openClawPluginProofToken(), a.openClawPluginAccount()) {
 				a.emitHTTPAuthFailure(r.Context(), r, connector.UserScopedListenerProofPath,
 					gatewaylog.ErrCodeAuthInvalidToken, userScopedListenerProofRefusedReason)
 				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -4657,12 +4707,24 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
+		// The OpenClaw plugin credential authenticates only the closed route
+		// table in openclaw_plugin_scope.go, on loopback; everything else
+		// falls through to the master gateway token check below.
+		if token != "" && !userScoped && connector.IsLoopback(r) && openClawPluginRoute(r.Method, r.URL.Path) &&
+			a.openClawConnectorRegistered() && a.hookAPITokenMatches(openClawPluginScope, token) {
+			r = r.WithContext(withAuthenticatedInspectConnector(
+				a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
+				openClawPluginScope,
+			))
+			next.ServeHTTP(w, r)
+			return
+		}
 		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
 			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		if !constantTimeStringMatch(token, expected) && !a.matchesRefreshedGatewayToken(token) {
+		if !constantTimeStringMatch(token, expected) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
 			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
@@ -4677,16 +4739,6 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})
-}
-
-// matchesRefreshedGatewayToken accepts the gateway token the OpenClaw
-// client adopted from openclaw.json after boot. Auth repair persists that
-// token to .env and hooks/.token, so the CLI (for example the graceful
-// shutdown during 'setup openclaw') presents it before this process
-// restarts (GAP-2259). The boot token stays valid until the restart.
-func (a *APIServer) matchesRefreshedGatewayToken(token string) bool {
-	refreshed := a.client.RefreshedToken()
-	return refreshed != "" && constantTimeStringMatch(token, refreshed)
 }
 
 // constantTimeStringMatch returns true iff a == b without leaking
@@ -5213,7 +5265,16 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	if a.codeScanner != nil {
 		codeScanner = a.codeScanner
 	}
-	result, err := codeScanner(r.Context(), req.Path, rulesDir)
+	if a.refuseOpenClawPluginPath(w, r, req.Path) {
+		return
+	}
+	scanPath, release, ok := a.openClawScanPath(w, r, req.Path)
+	if !ok {
+		return
+	}
+	defer release()
+	result, err := codeScanner(r.Context(), scanPath, rulesDir)
+	rebaseOpenClawScanResult(result, scanPath, req.Path)
 	if err != nil {
 		a.recordAPIScanErrorV8(r.Context(), "codeguard", "code", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

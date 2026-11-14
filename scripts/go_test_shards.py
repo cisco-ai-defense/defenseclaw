@@ -19,7 +19,10 @@ shard. A part whose regex would pass MAX_RUN_PATTERN_CHARS is printed as
 several lines of the same shard, one go test run each.
 
 --timings names a JSON file of recorded seconds (scripts/test-timings/,
-refreshed by scripts/update_test_timings.py). Tests stay together by file
+refreshed by scripts/update_test_timings.py). Test mode takes it more than
+once: the package's tests weigh the times of the first file that records
+that package, so the macOS gateway parts use go-darwin.json once a refresh
+has recorded them there and the Linux times until then. Tests stay together by file
 unless a file alone weighs more than half a shard or --split-tests is set.
 A test or package with no recorded time still runs and weighs the mean of the package's
 tests under two seconds ("*"), or the median recorded time. Without
@@ -76,13 +79,20 @@ def match_test_files(files: list[tuple[Path, tuple[str, ...]]], pattern: str) ->
     return [(path, names) for path, names in kept if names]
 
 
-def load_timings(path: Path | None) -> dict:
-    if path is None:
-        return {}
+def load_timings(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{path}: timings must be a JSON object")
     return data
+
+
+def package_test_seconds(timings: list[dict], key: str) -> dict[str, float] | None:
+    """The per-test times of package key from the first timings that record it."""
+    for data in timings:
+        recorded = data.get("tests", {}).get(key)
+        if recorded:
+            return recorded
+    return None
 
 
 def _median(values) -> float:
@@ -305,7 +315,13 @@ def main() -> int:
     parser.add_argument("--exclude", action="append", default=[], help="package mode: a listed package to leave out")
     parser.add_argument("--shard-count", type=int, required=True)
     parser.add_argument("--shard-index", type=int)
-    parser.add_argument("--timings", type=Path, help="recorded seconds (scripts/test-timings/*.json)")
+    parser.add_argument(
+        "--timings",
+        type=Path,
+        action="append",
+        default=[],
+        help="recorded seconds (scripts/test-timings/*.json); test mode: repeatable, first match wins",
+    )
     parser.add_argument("--check", action="store_true", help="print every shard and verify the exact cover")
     parser.add_argument("--match", help="test mode: keep only the tests this go test -run pattern selects")
     parser.add_argument("--split-tests", action="store_true", help="test mode: balance each test separately")
@@ -319,22 +335,24 @@ def main() -> int:
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
 
     try:
-        timings = load_timings(args.timings)
+        timings = [load_timings(path) for path in args.timings]
         if args.packages_file is not None:
+            if len(timings) > 1:
+                parser.error("package mode takes one --timings")
             if command:
                 parser.error("package mode does not run a command")
             if args.match is not None:
                 parser.error("--match is for test mode")
             if args.split_tests:
                 parser.error("--split-tests is for test mode")
-            shards, expected, problems = _package_mode(args, timings)
+            shards, expected, problems = _package_mode(args, timings[0] if timings else {})
         else:
             files = discover_test_files(args.package_dir)
             if args.match is not None:
                 files = match_test_files(files, args.match)
             package_dir = args.package_dir.resolve()
             key = package_dir.relative_to(ROOT).as_posix() if package_dir.is_relative_to(ROOT) else ""
-            shards = partition_test_files(files, args.shard_count, timings.get("tests", {}).get(key), args.split_tests)
+            shards = partition_test_files(files, args.shard_count, package_test_seconds(timings, key), args.split_tests)
             expected = sorted({name for _, names in files for name in names})
             problems = check_exact_cover(shards, expected)
     except ValueError as exc:

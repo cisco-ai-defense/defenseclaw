@@ -1006,6 +1006,8 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tok
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
 foreach ($name in @(
     'Get-DefenseClawRetiredInstallTreeAllowlist',
+    'Get-DefenseClawHookImageTreeItems',
+    'Test-DefenseClawHookImageFileName',
     'Test-DefenseClawLayoutBrokerEnabled',
     'Assert-DefenseClawNoReparsePath',
     'Remove-DefenseClawEmptyRetiredInstallDirectory',

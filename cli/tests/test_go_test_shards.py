@@ -16,6 +16,7 @@ from scripts.go_test_shards import (
     check_exact_cover,
     discover_test_files,
     match_test_files,
+    package_test_seconds,
     partition_packages,
     partition_test_files,
     regex_names,
@@ -464,6 +465,48 @@ def test_match_keeps_the_tests_a_run_pattern_selects_and_still_covers_them(tmp_p
     assert check_exact_cover(shards, ["TestHookOne", "TestModeThree", "TestSetupTwo"]) == []
     with pytest.raises(ValueError):
         match_test_files(files, "Hook/sub")
+
+
+def test_test_mode_weighs_the_first_timings_that_record_the_package(tmp_path: Path, monkeypatch, capsys) -> None:
+    # The macOS gateway parts pass go-darwin.json, then go-linux.json: the
+    # Linux times plan the parts until a refresh records the package's macOS
+    # times, which then win. A file without the package is skipped.
+    darwin_without = {"tests": {"pkg/other": {"TestA": 50.0}}}
+    darwin_with = {"tests": {"pkg/a": {"TestA": 1.0, "TestB": 90.0, "*": 0.1}}}
+    linux = {"tests": {"pkg/a": {"TestA": 80.0, "TestB": 1.0, "*": 0.1}}}
+    assert package_test_seconds([darwin_without, linux], "pkg/a") == linux["tests"]["pkg/a"]
+    assert package_test_seconds([darwin_with, linux], "pkg/a") == darwin_with["tests"]["pkg/a"]
+    assert package_test_seconds([darwin_without], "pkg/a") is None
+
+    package = tmp_path / "pkg" / "a"
+    package.mkdir(parents=True)
+    (package / "a_test.go").write_text(
+        "package sample\nfunc TestA(t *testing.T) {}\nfunc TestB(t *testing.T) {}\n", encoding="utf-8"
+    )
+    (package / "b_test.go").write_text("package sample\nfunc TestC(t *testing.T) {}\n", encoding="utf-8")
+    timings = tmp_path / "go-darwin.json"
+    other = tmp_path / "go-linux.json"
+    other.write_text(json.dumps(linux), encoding="utf-8")
+    monkeypatch.setattr(go_test_shards, "ROOT", tmp_path)
+    argv = ["go_test_shards.py", "--package-dir", str(package), "--shard-count", "2", "--shard-index", "0"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--timings", str(timings), "--timings", str(other)])
+    for darwin, heaviest in ((darwin_without, "TestA"), (darwin_with, "TestB")):
+        timings.write_text(json.dumps(darwin), encoding="utf-8")
+        assert go_test_shards.main() == 0
+        assert capsys.readouterr().out.strip() == shard_regex([heaviest])
+
+    listing = tmp_path / "packages.txt"
+    listing.write_text("example.com/a\nexample.com/b\n", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["go_test_shards.py", "--packages-file", str(listing), "--shard-count", "1", "--shard-index", "0"]
+        + ["--timings", str(timings), "--timings", str(other)],
+    )
+    with pytest.raises(SystemExit) as exc:
+        go_test_shards.main()
+    assert exc.value.code == 2
+    assert "package mode takes one --timings" in capsys.readouterr().err
 
 
 def test_windows_hookexec_matrix_covers_each_test_once_with_time_headroom() -> None:
