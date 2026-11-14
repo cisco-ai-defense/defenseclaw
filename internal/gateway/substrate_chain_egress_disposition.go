@@ -42,6 +42,16 @@ func SetSubstrateChainEgressAction(action string) error {
 	return nil
 }
 
+// SubstrateChainEgressAction is the chain egress action the gateway role
+// applies to verified actors' hook calls now: block or alert. It reads back
+// what SetSubstrateChainEgressAction stored.
+func SubstrateChainEgressAction() string {
+	if substrateChainEgressAlert.Load() {
+		return chainstate.EgressAlert
+	}
+	return chainstate.EgressBlock
+}
+
 // substrateChainEgressIntent is the hook intent of a chain result: block for
 // a verified Substrate actor whose result detects a chain the callout
 // refuses, unless the operator chose alert; intent otherwise. The hook

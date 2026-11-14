@@ -226,9 +226,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// same setting as the callout: config substrate.chain_egress_action,
 		// which the gateway and the leader read from the same ConfigMap
 		// (owner decision 2026-11-13; GAP-0250).
-		chainAction, chainSource := gatewayRoleChainEgressAction(cfg)
-		if err := gateway.SetSubstrateChainEgressAction(chainAction); err != nil {
-			return fmt.Errorf("serve: chain egress action (%s): %w", chainSource, err)
+		if err := applyGatewayChainEgress(cfg); err != nil {
+			return err
 		}
 		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
 		return runSidecar(cmd, args)
@@ -684,11 +683,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	asks.Serve(srv, askStore)
 	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
-	chainOpts := substrateChainRegistrations(store)
-	action, source := leaderChainEgressAction(cfg)
+	chainOpts, source := leaderChainOptions(cfg, store, serveFlags.storeDir, serveFlags.chainRetention)
 	fmt.Fprintf(os.Stderr, "[substrate] leader: chain egress action %s (%s): a request after a secret read is %s at the egress callout\n",
-		action, source, map[string]string{chainstate.EgressBlock: "refused", chainstate.EgressAlert: "allowed with an alert"}[action])
-	chainOpts.Dir, chainOpts.EgressAction, chainOpts.Retention = serveFlags.storeDir, action, serveFlags.chainRetention
+		chainOpts.EgressAction, source, map[string]string{chainstate.EgressBlock: "refused", chainstate.EgressAlert: "allowed with an alert"}[chainOpts.EgressAction])
 	chains, err := chainstate.New(chainOpts)
 	if err != nil {
 		return err
@@ -983,6 +980,31 @@ func substrateChainEgressAction(c *config.Config) (action, source string) {
 		return chainstate.EgressBlock, "default"
 	}
 	return c.Substrate.EffectiveChainEgressAction(), "config substrate.chain_egress_action"
+}
+
+// applyGatewayChainEgress is the gateway role's hand-off: it applies the
+// role's chain egress action to verified actors' hook calls
+// (gateway.SetSubstrateChainEgressAction). leaderChainOptions is the
+// leader's: the chainstate options the egress callout runs with. The serve
+// paths call exactly these, and TestSubstrateChainEgressActionGatewayAndLeaderAgree
+// reads what each role ends up with (gateway.SubstrateChainEgressAction and
+// Options.EgressAction), so a hard-coded value at either hand-off fails it
+// (GAP-0252).
+func applyGatewayChainEgress(cfg *config.Config) error {
+	action, source := gatewayRoleChainEgressAction(cfg)
+	if err := gateway.SetSubstrateChainEgressAction(action); err != nil {
+		return fmt.Errorf("serve: chain egress action (%s): %w", source, err)
+	}
+	return nil
+}
+
+// leaderChainOptions: see applyGatewayChainEgress. It returns the options
+// and where the action came from.
+func leaderChainOptions(cfg *config.Config, store registry.Store, dir string, retention time.Duration) (chainstate.Options, string) {
+	opts := substrateChainRegistrations(store)
+	action, source := leaderChainEgressAction(cfg)
+	opts.Dir, opts.EgressAction, opts.Retention = dir, action, retention
+	return opts, source
 }
 
 // gatewayRoleChainEgressAction is the chain egress action the gateway role
