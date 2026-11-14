@@ -194,6 +194,13 @@ type Verdict struct {
 	Enforced bool `json:"enforced,omitempty"`
 }
 
+// JudgedBlock reports a verdict that blocks or would have blocked: a block,
+// the raw block of a frame allowed in observe mode, or the block of a tool
+// call report the gateway allowed as an alert that would have blocked.
+func (v Verdict) JudgedBlock() bool {
+	return v.Action == "block" || v.RawAction == "block" || v.WouldBlock
+}
+
 type Evaluator interface {
 	Evaluate(context.Context, Evaluation) (Verdict, error)
 }
