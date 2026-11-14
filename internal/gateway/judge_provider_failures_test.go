@@ -237,11 +237,7 @@ func TestHookLaneJudgeProviderFailuresFollowTheHookFailMode(t *testing.T) {
 					if want := mode == "closed"; refused != want || (resp.RawAction == guardrailActionBlock) != want {
 						t.Fatalf("raw_action=%q findings=%v, want refusal=%v", resp.RawAction, resp.Findings, want)
 					}
-					if mode == "closed" {
-						if resp := escalationPreToolUse(t, a, "ls -la ./fixtures"); resp.RawAction == guardrailActionBlock {
-							t.Fatalf("a call without a finding was refused on a judge failure: %+v", resp)
-						}
-					}
+					// Counted before the second call below, which asks the judge too.
 					if n := hits.Load(); n > 1 {
 						t.Fatalf("provider saw %d requests, want 1", n)
 					} else if n == 0 {
@@ -250,6 +246,11 @@ func TestHookLaneJudgeProviderFailuresFollowTheHookFailMode(t *testing.T) {
 					if bound := testenv.Scale(2*time.Second, slow); elapsed > bound {
 						return fmt.Sprintf("hook answered after %s, want the %s judge timeout to bound it (window %s)",
 							elapsed, time.Duration(0.4*slow*float64(time.Second)), bound)
+					}
+					if mode == "closed" {
+						if resp := escalationPreToolUse(t, a, "ls -la ./fixtures"); resp.RawAction == guardrailActionBlock {
+							t.Fatalf("a call without a finding was refused on a judge failure: %+v", resp)
+						}
 					}
 					return ""
 				})
