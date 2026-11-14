@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
@@ -515,13 +516,14 @@ func powerShellHostBody(argv []string) (string, Dialect, bool) {
 		// analyzed against the wrong directory.
 		return "", DialectNone, false
 	}
+	// The call is rendered by the one PowerShell renderer (the launcher as a
+	// literal behind the call operator, then each word as an inert literal),
+	// never quoted by hand (rel-1-0-10:GAP-0607). It is only read by psparse.
 	var builder strings.Builder
-	builder.WriteString("& ")
-	for i, word := range argv {
-		if i > 0 {
-			builder.WriteByte(' ')
-		}
-		builder.WriteString(powerShellSingleQuote(word))
+	builder.WriteString(managed.WindowsCommandLine(argv[0]))
+	for _, word := range argv[1:] {
+		builder.WriteByte(' ')
+		builder.WriteString(managed.PowerShellLiteral(word))
 	}
 	script, _ := psparse.Parse(builder.String(), psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) != 0 {
@@ -566,10 +568,6 @@ func workingDirectoryWord(word string) bool {
 		name = name[:colon]
 	}
 	return name == "wd" || len(name) >= 2 && strings.HasPrefix("workingdirectory", name)
-}
-
-func powerShellSingleQuote(word string) string {
-	return "'" + strings.ReplaceAll(word, "'", "''") + "'"
 }
 
 // cmdHostBody resolves the line `cmd /c <words>` runs. A single word is the

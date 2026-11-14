@@ -97,7 +97,6 @@ var managedWindowsCallAllowed = map[string]string{
 	"internal/cli/windows_managed_hook_settings.go": "reads registered hook commands: strips the call operator before the ownership check",
 	"internal/gateway/agent_not_installed.go":       "reads a cmd.exe shim prefix, where & is cmd's command separator",
 	"internal/gateway/windows_command.go":           "quoteWindowsArg's set of characters that need quoting (&'\") re-renders a parsed argv for policy matching",
-	"internal/actionfacts/host_unwrap.go":           "the script reading re-renders a launcher argv as one PowerShell call for psparse to read; never executed (rel-1-0-10:GAP-0607)",
 }
 
 // managedWindowsQuoteAllowed lists the files that double or read a
@@ -111,7 +110,6 @@ var managedWindowsQuoteAllowed = map[string]string{
 	"internal/gateway/trusted_action_dispatch.go": "the gateway's command-line reader for trusted actions",
 	"internal/gateway/powershell_state_write.go":  "re-renders a ${provider:path} variable as a literal for the state-write matcher",
 	"internal/audit/compact.go":                   "a SQLite string literal for PRAGMA temp_store_directory (SQL doubles ' too); no PowerShell",
-	"internal/actionfacts/host_unwrap.go":         "the script reading quotes launcher argv words for psparse to read; never executed (rel-1-0-10:GAP-0607)",
 }
 
 var (
