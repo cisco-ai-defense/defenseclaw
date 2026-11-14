@@ -38,12 +38,22 @@ SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 USAGE_PATH = "/usage"
 # Provider names the gateway routes (mapProviderKey in internal/gateway/provider_bifrost.go,
 # matched case-insensitively there): the recognized LLM providers plus the aliases it accepts.
+ROUTING_PROVIDER_ALIASES = {
+    "amazon-bedrock": "bedrock",
+    "vertex": "vertex_ai",
+    "vertexai": "vertex_ai",
+    "fireworks": "fireworks_ai",
+    "fireworksai": "fireworks_ai",
+    "together": "together_ai",
+    "togetherai": "together_ai",
+    "lmstudio": "lm_studio",
+}
 ROUTING_PROVIDERS = frozenset(
     {
-        "openai", "openai-compatible", "custom-openai", "anthropic", "bedrock", "amazon-bedrock", "azure",
-        "gemini", "gemini-openai", "vertex", "vertex_ai", "vertexai", "openrouter", "groq", "mistral", "ollama",
-        "vllm", "cohere", "perplexity", "cerebras", "fireworks", "fireworks_ai", "fireworksai", "xai", "deepseek",
-        "together", "together_ai", "togetherai", "lm_studio", "lmstudio", "huggingface", "replicate", "local",
+        "openai", "openai-compatible", "custom-openai", "anthropic", "bedrock", "azure", "gemini", "gemini-openai",
+        "vertex_ai", "openrouter", "groq", "mistral", "ollama", "vllm", "cohere", "perplexity", "cerebras",
+        "fireworks_ai", "xai", "deepseek", "together_ai", "lm_studio", "huggingface", "replicate",
+        *ROUTING_PROVIDER_ALIASES,
     }
 )
 USAGE_BY = ("model", "connector", "route", "user", "group", "profile")
@@ -59,7 +69,7 @@ ROUTE_CATEGORIES: dict[str, tuple[int, list[str]]] = {
     ),
     "reasoning": (
         70,
-        ["prove", "theorem", "puzzle", "probability", "derive", "complexity", "big-o", "optimal",
+        ["prove that", "prove it", "theorem", "puzzle", "probability", "derive", "complexity", "big-o", "optimal",
          "trade-off", "tradeoff", "step by step", "design a system", "constraints", "riddle"],
     ),
     "summarize": (
@@ -199,12 +209,14 @@ def _check_provider(provider: str, *, option: str = "--provider") -> str:
     """The provider name, if the gateway knows it (the provider registry the
     judge and the decision model use). An unknown name was written and failed
     on the first call (GAP-0600)."""
-    name = provider.strip()
-    if name.lower() not in ROUTING_PROVIDERS:
+    name = provider.strip().lower()
+    if name not in ROUTING_PROVIDERS:
         raise click.UsageError(
             f"{option}: unknown provider {provider!r}. Use one of: " + ", ".join(sorted(ROUTING_PROVIDERS))
         )
-    return name
+    # The canonical spelling: the config reads the API families and the
+    # bedrock block by it (routing.models[].provider bedrock, not amazon-bedrock).
+    return ROUTING_PROVIDER_ALIASES.get(name, name)
 
 
 def _route_rules(routing: dict[str, Any], routes: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:

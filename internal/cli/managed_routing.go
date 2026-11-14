@@ -49,7 +49,7 @@ func managedRoutingRefusal(words []string) string {
 
 // newManagedRoutingCmd is `defenseclaw routing` on a managed computer, where
 // a standard account has no per-user (Python) CLI: the managed Windows
-// defenseclaw.exe and the Linux and macOS launcher run it. Its three reads
+// defenseclaw.exe and the Linux and macOS launcher run it. Its four reads
 // ask the managed gateway, which answers for the caller's own account only
 // and refuses when routing.admin.visibility.users_see is none. Every other
 // routing command changes the administrator's config and gets the managed
@@ -125,8 +125,8 @@ func newManagedRoutingCmd() *cobra.Command {
 
 // managedRoutingWriters are the routing commands that change the
 // administrator's config (the per-user CLI's writers): enable, disable and
-// setup, and the writers of each group. Reads (status, test, explain, usage,
-// the list and show of a group) are not here.
+// setup, and the writers of each group. Reads (status, explain, usage, the
+// list and show of a group) and the dry run (test) are not here.
 var managedRoutingWriters = map[string]map[string]bool{
 	"enable": nil, "disable": nil, "setup": nil,
 	"models":  {"add": true, "remove": true, "set-default": true},
@@ -155,10 +155,6 @@ func managedRoutingWriter(words []string) (string, bool) {
 	return "", false
 }
 
-// runManagedRoutingRules prints the routing rules the managed gateway shows
-// the caller: an administrator reads routing.admin.rules, a standard account
-// none (the rules are administrator policy; a user reads the outcome with
-// routing status and routing explain).
 // managedRoutingNamedRefusal reports whether args are a routing writer or the
 // dry run: the commands whose refusal names the config key that owns them.
 // Any other routing command the launcher does not offer keeps the generic
@@ -174,6 +170,10 @@ func managedRoutingNamedRefusal(args []string) bool {
 	return ok
 }
 
+// runManagedRoutingRules prints the routing rules the managed gateway shows
+// the caller: an administrator reads routing.admin.rules, a standard account
+// none (the rules are administrator policy; a user reads the outcome with
+// routing status and routing explain).
 func runManagedRoutingRules(cmd *cobra.Command) error {
 	status, body, err := managedRoutingRead(cmd.Context(), "/api/v1/routing/effective")
 	if err != nil {

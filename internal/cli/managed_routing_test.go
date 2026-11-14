@@ -234,3 +234,28 @@ func TestManagedRoutingTreeRefusalNamesTheKey(t *testing.T) {
 		}
 	}
 }
+
+// The launcher (Linux, macOS) names the key for the writers and the dry run
+// (exit 3); any other routing command it does not offer keeps the generic
+// refusal (exit 2), and a routing read is run, not refused.
+func TestLauncherRoutingExitCodes(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"routing", "enable"}, 3},
+		{[]string{"routing", "models", "add", "x"}, 3},
+		{[]string{"routing", "test", "hi"}, 3},
+		{[]string{"routing", "usage"}, 2},
+		{[]string{"routing", "models", "list"}, 2},
+		{[]string{"routing", "pricing", "show"}, 2},
+		{[]string{"routing", "enable", "--help"}, 2},
+	} {
+		root := &cobra.Command{Use: "defenseclaw"}
+		var stderr strings.Builder
+		root.SetErr(&stderr)
+		if got := executeLauncherInTest(t, root, tc.args); got != tc.code {
+			t.Errorf("%v: exit %d (%q), want %d", tc.args, got, stderr.String(), tc.code)
+		}
+	}
+}

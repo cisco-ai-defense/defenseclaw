@@ -307,3 +307,26 @@ def test_provider_names_follow_the_gateway_registry(home: Path, monkeypatch) -> 
     for provider in ("openai-compatible", "OpenAI", "amazon-bedrock", "vertex"):
         result = invoke(["models", "add", provider.replace("-", "").lower()[:10], "--provider", provider, "--model", "m"])
         assert result.exit_code == 0, (provider, result.output)
+
+
+def test_provider_aliases_are_written_in_their_canonical_form(home: Path, monkeypatch) -> None:
+    import yaml
+
+    (home / "config.yaml").write_text(CONFIGS["empty"])
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (None, "the gateway is not running"))
+    for name, given in (("a", "Amazon-Bedrock"), ("b", "vertex"), ("c", "OpenAI"), ("d", "openai-compatible")):
+        assert invoke(["models", "add", name, "--provider", given, "--model", "m"]).exit_code == 0, given
+    models = {m["name"]: m["provider"] for m in yaml.safe_load((home / "config.yaml").read_text())["routing"]["models"]}
+    assert models == {"a": "bedrock", "b": "vertex_ai", "c": "openai", "d": "openai-compatible"}
+    assert invoke(["models", "add", "e", "--provider", "local", "--model", "m"]).exit_code == 2
+
+
+def test_starting_keywords_do_not_match_inside_ordinary_words() -> None:
+    from defenseclaw.commands.cmd_routing import ROUTE_CATEGORIES
+
+    def hits(category: str, text: str) -> bool:
+        return any(word in text.lower() for word in ROUTE_CATEGORIES[category][1])
+
+    for text in ("improve this email", "approve the PR", "summarize the differences", "do you trust it", "a waterproof jacket"):
+        assert not hits("coding", text) and not hits("reasoning", text), text
+    assert hits("coding", "debug this stack trace") and hits("coding", "show the git diff") and hits("reasoning", "prove that it halts")
