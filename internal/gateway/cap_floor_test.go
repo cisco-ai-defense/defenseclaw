@@ -87,6 +87,7 @@ var capFloorFillers = []struct {
 func init() {
 	// GAP-0547: the analysis depth bound, under the shell nesting budget.
 	for _, n := range []int{30, 64, 128, 256, 512} {
+		capFloorDepthOnly[fmt.Sprintf("nest-paren/%d", n)] = true
 		capFloorFillers = append(capFloorFillers, struct {
 			name  string
 			build func(inner string) string
@@ -96,18 +97,27 @@ func init() {
 	}
 }
 
-// The analysis depth bound is a lane of the bound rule (rel-1-0-10:GAP-0547).
-// Its limit is the deepest subshell nest the action analysis still reads.
+// The analysis depth bound is a lane of the bound rule (rel-1-0-10:GAP-0547)
+// for a call that may name a protected target or the state: its plain input
+// lists the state folder inside the nest (a call that names none keeps the
+// verdict of the readers, TestCapFloorCapAloneKeepsItsVerdict). Its limit is
+// the deepest subshell nest the action analysis still reads.
 func init() {
+	fill := func(size int) string {
+		return strings.Repeat("(", size) + "ls ~/.defenseclaw" + strings.Repeat(")", size)
+	}
 	registerBoundedLane(boundedLaneCap{lane: "shell analysis depth", cap: bounded.Depth, limit: capFloorAnalysisDepthLimit(),
 		gen: func(size int, shape boundedShape) (boundedLaneCall, bool) {
-			if shape.nested {
+			if shape.nested || shape.multi {
 				return boundedLaneCall{}, false
 			}
-			return boundedShellLane(boundedNestedSubshells, boundedNestedAssignments)(size, shape)
+			return boundedShellLane(fill, fill)(size, shape)
 		},
 		seen: boundedShellSeenCall})
 }
+
+// capFloorDepthOnly are the fillers past the analysis depth bound only.
+var capFloorDepthOnly = map[string]bool{}
 
 // capFloorAnalysisDepthLimit is the largest n for which the action analysis
 // reads n nested subshells.
@@ -247,8 +257,13 @@ func TestCapFloorCapAloneKeepsItsVerdict(t *testing.T) {
 	for _, tier := range boundedTestTiers {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		for _, f := range capFloorFillers {
-			want := bounded.Unknown(tier.tier)
 			for _, id := range []string{f.name, f.name + "/listing"} {
+				want := bounded.Unknown(tier.tier)
+				if capFloorDepthOnly[f.name] && id == f.name {
+					// Past the analysis depth only, naming no protected
+					// target: the readers' verdict, as on rel (allow).
+					want = bounded.Allow
+				}
 				action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(commands[id]))
 				if got := boundedParse(action); got != want {
 					t.Errorf("%s %s: action=%s, want %s; findings=%v", tier.name, id, action, want, findings)

@@ -94,10 +94,14 @@ The action analysis has a bound of its own: a syntax tree deeper than 64
 levels or past its node bound (`actionfacts` `limit_exceeded`, issue
 `depth_limit` or `node_limit`) yields no path facts, which on rel let a state
 write inside 30 to 512 nested subshells through in every tier
-(rel-1-0-10:GAP-0547). Such a call is truncated in the sense of the bound
-rule: it gets the evaluation-limit finding with the reason
+(rel-1-0-10:GAP-0547). Such a call whose text may name a protected target or
+the state (`hookpaths.BoundCallMayNameProtected`) is truncated in the sense of
+the bound rule: it gets the evaluation-limit finding with the reason
 `bounded_truncated cap=depth` (or `nodes`), so at least the unknown tier of
-the pack, and its pieces are judged as above.
+the pack, and its pieces are judged as above. The bound is a tree depth, which
+30 terms of a pipe or `&&` list reach; benign scripts of that depth that name
+no protected target (the owner traces hold some) keep the verdict of the
+readers that read them.
 
 A call that names no protected target or state gets no piece and keeps the
 evaluation-limit verdict, so a cap alone is not a new block. Reads beside a

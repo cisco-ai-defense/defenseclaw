@@ -73,15 +73,22 @@ type capFloorState struct {
 // analyzed is the cap set of the action analysis of the call
 // (capFloorAnalysisCaps): it stopped at its syntax depth or node bound and
 // holds no path of the call (rel-1-0-10:GAP-0547: a state write inside 30
-// nested subshells was allowed in every tier, with no finding). Such a call is
-// truncated in the sense of the bound rule: it gets the evaluation-limit
-// finding naming the cap (withBoundedTruncation, at least the unknown tier of
-// the pack), and its pieces are judged as for every other cap.
+// nested subshells was allowed in every tier, with no finding). Such a call
+// whose text may name a protected target or the state
+// (hookpaths.BoundCallMayNameProtected) is truncated in the sense of the bound
+// rule: it gets the evaluation-limit finding naming the cap
+// (withBoundedTruncation, at least the unknown tier of the pack), and its
+// pieces are judged as for every other cap. The bound is a syntax-tree depth:
+// 30 terms of a pipe or && list reach it, and the owner traces hold benign
+// scripts of that depth that name no protected target; they keep the verdict
+// of the readers that did read them.
 func withCapFloor(parent context.Context, request trustedActionRequest, findings []RuleFinding, analyzed bounded.CapSet) []RuleFinding {
 	if request.capFloor == nil {
 		return findings
 	}
-	findings = withBoundedTruncation(findings, analyzed, request)
+	if analyzed.Any() && capFloorMayNameProtected(request) {
+		findings = withBoundedTruncation(findings, analyzed, request)
+	}
 	if request.capFloorDepth > capFloorMaxDepth ||
 		!trustedBashExecutionTool(request.Input.Tool) ||
 		request.Input.DialectHint != "" && request.Input.DialectHint != actionfacts.DialectPOSIX {
@@ -597,4 +604,17 @@ func capFloorAnalysisCaps(facts actionfacts.Facts) bounded.CapSet {
 		}
 	}
 	return set
+}
+
+// capFloorMayNameProtected reports a call whose command text may name a
+// protected target or the DefenseClaw state, however it is quoted
+// (hookpaths.BoundCallMayNameProtected).
+func capFloorMayNameProtected(request trustedActionRequest) bool {
+	command := request.Input.Command
+	if command == "" {
+		if field, present, valid := trustedTopLevelCommandField(request.Input.Args); valid && present {
+			command = field
+		}
+	}
+	return command != "" && hookpaths.BoundCallMayNameProtected(command, request.Input.CWD, request.Input.ActiveHome)
 }
