@@ -313,8 +313,10 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 // matches the executable setup sealed: Codex updated itself (or was
 // replaced) since setup. The gateway does not run an executable it did not
 // admit, so the next step is setup again, which admits the new version; the
-// error says so instead of only "run doctor" (GAP-1884).
-var ErrCodexExecutableChanged = errors.New("the Codex executable changed since setup (a Codex update does this); run: defenseclaw setup codex --yes")
+// error says so instead of only "run doctor" (GAP-1884). It is an
+// ErrAgentExecutableChanged refusal, so a gateway start stops only Codex
+// (GAP-0249).
+var ErrCodexExecutableChanged = newAgentExecutableChanged("codex", "Codex")
 
 func sameCodexExecutablePath(left, right string) bool {
 	left = filepath.Clean(strings.TrimSpace(left))

@@ -42,7 +42,7 @@ func validateAmpWindowsSetupAdmission(opts SetupOpts) error {
 	// changes without a binary change; the executable digest below still
 	// binds the exact build.
 	if stableAmpVersion(opts.AgentVersion) != stableAmpVersion(authority.rawVersion) {
-		return errors.New("Amp executable admission: selected raw version does not match protected evidence")
+		return fmt.Errorf("Amp executable admission: selected raw version does not match protected evidence (%w)", errAmpExecutableChanged)
 	}
 	if opts.HookContractID != "" && opts.HookContractID != authority.contractID {
 		return errors.New("Amp executable admission: selected hook contract does not match protected evidence")
@@ -141,7 +141,7 @@ func validateAmpExecutableEvidence(selected string, authority ampExecutableAutho
 		return agentInstallNotTrusted(fmt.Errorf("revalidate selected executable custody: %w", err))
 	}
 	if !strings.EqualFold(digest, authority.digest) {
-		return errors.New("selected executable digest does not match protected evidence")
+		return fmt.Errorf("selected executable digest does not match protected evidence (%w)", errAmpExecutableChanged)
 	}
 	return nil
 }
