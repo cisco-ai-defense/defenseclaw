@@ -25,6 +25,10 @@ var (
 	// tiered: alert in the default and permissive packs, block in strict and
 	// managed (an alert-only-by-design rule with its target proven).
 	gap0594Tiered = gap0594Tiers{"alert", "alert", "block", "block", "block"}
+	// base alert: the base (int/r110-b11d3 a35d0653ef) already alerts with
+	// ACTION-PARSE-FAILURE in every pack; the critical-scope helper adds
+	// nothing on top (a dynamic word in a double-quoted shell -c body).
+	gap0594BaseAlert = gap0594Tiers{"alert", "alert", "alert", "alert", "alert"}
 )
 
 func (t gap0594Tiers) of(pack string) string {
@@ -111,7 +115,7 @@ func gap0594Rows() []struct {
 		// The outer shell expands $HOME inside the double quotes, so the script
 		// has no static spelling: it stays at rel's verdict (GAP-0696, the
 		// variable forms are not proven by the helper).
-		{"g594-w03", `bash -c "rm -rf $HOME/*"`, gap0594Allow},
+		{"g594-w03", `bash -c "rm -rf $HOME/*"`, gap0594BaseAlert},
 		{"g594-w04", `bash -c "rm -rf ~/*"`, gap0594Block},
 		{"g594-w05", `sh -c "rm -rf /etc/*"`, gap0594Block},
 		{"g594-w06", `sudo bash -c "rm -rf /etc/*"`, gap0594Block},
@@ -127,7 +131,7 @@ func gap0594Rows() []struct {
 		{"g594-w22", `bash -c "ls ~/* /etc/*"`, gap0594Allow},
 		{"g594-w23", `ssh host "rm -rf ~/*"`, gap0594Allow},
 		{"g594-w24", `docker run --rm -v /etc:/e alpine rm -rf /e/*`, gap0594Allow},
-		{"g594-w25", `bash -c "rm -rf /etc/* $X"`, gap0594Allow},
+		{"g594-w25", `bash -c "rm -rf /etc/* $X"`, gap0594BaseAlert},
 		{"g594-w26", `bash -c "chmod -R 755 ~/proj"`, gap0594Allow},
 		// GAP-0695 (lead ruling): /usr/local, /usr/src and /usr/include are
 		// not payload folders and keep rel's verdict (chk-e01..e04).
