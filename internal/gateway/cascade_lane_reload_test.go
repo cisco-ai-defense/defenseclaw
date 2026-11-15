@@ -29,6 +29,13 @@ func TestCascadeLaneHotReloadEveryLane(t *testing.T) {
 		"effects":     {"off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null", "Off", "\" Shadow \""}, "shadow", "shadow"},
 		"secret_flow": {"off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null", "Off", "Shadow"}, "shadow", "shadow"},
 		"nonshell":    {"shadow", "shadow", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "on", "on"},
+		// The opt-in alignment check: off to alert by a reload, and none of
+		// the spellings of another value turns it on (GAP-0823).
+		"alignment": {"off", "off", []string{"on", "ON", "garbage", "\"\"", "\"Alert \"", "null", "true", "Block"}, "alert", "alert"},
+		// The tool judge's stages ship on; a reload turns one off.
+		"judge_read_skip":           {"on", "on", []string{"\"\"", "garbage", "true", "null", "ON", "alert"}, "off", "off"},
+		"judge_unmodeled_alert":     {"on", "on", []string{"\"\"", "garbage", "true", "null", "ON", "alert"}, "off", "off"},
+		"judge_tool_result_context": {"on", "on", []string{"\"\"", "garbage", "true", "null", "ON", "alert"}, "off", "off"},
 	}
 	for _, lane := range config.CascadeLaneNames() {
 		c, ok := cases[lane]
@@ -52,8 +59,11 @@ func TestCascadeLaneHotReloadEveryLane(t *testing.T) {
 					return l.EffectsMode()
 				case "secret_flow":
 					return l.SecretFlowMode()
+				case "nonshell":
+					return l.NonShellMode()
 				}
-				return l.NonShellMode()
+				// A scoped lane: what the gateway reads for a call.
+				return cfg.ResolveCascade("").LaneMode(lane)
 			}
 			write(c.start)
 			initial, err := config.LoadRuntimeV8File(path)
