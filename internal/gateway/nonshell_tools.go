@@ -460,6 +460,20 @@ func linksToDevNull(facts actionfacts.Facts, commandID int64) bool {
 // The names are the credential-file table's (an exact name or trailing path,
 // never a glob such as *.pem and never .env, which projects ship, and never a key known only by its extension: sync.key, server-key.pem), so a find of
 // ordinary names or inside a project is not one.
+// credentialSweepClass are the credential-file classes whose name search is a
+// harvest: SSH private keys, AWS and kubeconfig credentials, package registry
+// and developer tokens. A key known only by its extension, .env and the cloud
+// CLI and database client configs (.my.cnf, hosts.yml) are named by ordinary
+// administration as often (find / -name .my.cnf is a database task).
+func credentialSweepClass(class actionfacts.CredentialFileClass) bool {
+	switch class {
+	case actionfacts.CredentialFileSSHPrivateKey, actionfacts.CredentialFileAWS, actionfacts.CredentialFileKubeconfig,
+		actionfacts.CredentialFilePackageRegistry, actionfacts.CredentialFileDeveloperToken:
+		return true
+	}
+	return false
+}
+
 func credentialFileSweep(c actionfacts.CommandFact, activeHome string) bool {
 	if path.Base(c.Program) != "find" || !c.ArgvComplete {
 		return false
@@ -501,8 +515,7 @@ func credentialFileSweep(c actionfacts.CommandFact, activeHome string) bool {
 		if strings.ContainsAny(name, "*?[") {
 			continue
 		}
-		if shape, ok := actionfacts.MatchCredentialFileShape(name); ok && shape.Class != actionfacts.CredentialFileEnvironment &&
-			shape.Class != actionfacts.CredentialFilePrivateKey {
+		if shape, ok := actionfacts.MatchCredentialFileShape(name); ok && credentialSweepClass(shape.Class) {
 			return true
 		}
 	}

@@ -1091,12 +1091,12 @@ func TestAccountPowerAndHistoryCommandRules(t *testing.T) {
 }
 
 func TestAlertOnlyRules(t *testing.T) {
-	for _, id := range []string{"CMD-ACCOUNT-CREATE", "CMD-HOST-POWER"} {
+	for _, id := range []string{"CMD-ACCOUNT-CREATE", "CMD-HOST-POWER", "integrity.history_tamper"} {
 		if !AlertOnly(id) {
 			t.Errorf("%s is alert-only", id)
 		}
 	}
-	for _, id := range []string{"CMD-PRIV-SETUID", "integrity.history_tamper", "CMD-CRED-SWEEP"} {
+	for _, id := range []string{"CMD-PRIV-SETUID", "CMD-CRED-SWEEP"} {
 		if AlertOnly(id) {
 			t.Errorf("%s is not alert-only", id)
 		}
