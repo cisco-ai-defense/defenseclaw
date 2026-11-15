@@ -83,7 +83,9 @@ func (a *APIServer) boundedTier(ctx context.Context, connectorName string) bound
 // (enforcementCapable false) still alerts: a truncated input is never a
 // silent allow.
 func boundedTruncatedFinding(set bounded.CapSet, enforcementCapable bool) RuleFinding {
-	return unknownReasonFinding(boundedTruncatedTitle, set.Reason(), enforcementCapable)
+	finding := unknownReasonFinding(boundedTruncatedTitle, set.Reason(), enforcementCapable)
+	finding.boundedCaps = set
+	return finding
 }
 
 // unknownReasonFinding is the evaluation-limit finding of an input the
@@ -94,7 +96,6 @@ func unknownReasonFinding(title, reason string, enforcementCapable bool) RuleFin
 	finding := trustedActionLimitFindings(enforcementCapable)[0]
 	finding.Title = title + " (" + reason + ")"
 	finding.Evidence = reason
-	finding.boundedCaps = set
 	if !enforcementCapable {
 		finding.enforcement = findingEnforcementAlertOnly
 	}
@@ -158,7 +159,7 @@ func withUnknownFinding(findings []RuleFinding, bound RuleFinding) []RuleFinding
 	out := slices.Clone(findings)
 	existing := &out[index]
 	withBoundedReason(existing, bound.Evidence)
-	existing.boundedCaps = existing.boundedCaps.Union(set)
+	existing.boundedCaps = existing.boundedCaps.Union(bound.boundedCaps)
 	if !existing.contributesToEnforcement() && !existing.contributesToAlertOnly() {
 		// A detection-only limit finding would leave the call allowed.
 		existing.enforcement = bound.enforcement
