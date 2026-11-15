@@ -426,7 +426,7 @@
 {"id": "g596b-t09", "dialect": "", "command": "defenseclaw config set 'observability.destinations[0].enabled' false", "want": "config"}
 {"id": "g596b-t10", "dialect": "", "command": "defenseclaw config unset routing.enabled", "want": ""}
 {"id": "g596b-t11", "dialect": "", "command": "defenseclaw config set guardrail.block_at HIGH", "want": "config"}
-{"id": "g596b-t12", "dialect": "", "command": "defenseclaw config set $KEY false", "want": "unproven"}
+{"id": "g596b-t12", "dialect": "", "command": "defenseclaw config set $KEY false", "want": "config"}
 {"id": "g596b-t13", "dialect": "", "command": "defenseclaw config set 'asset_policy.skill.denied[0].name' x", "want": "config"}
 {"id": "g596b-t14", "dialect": "", "command": "defenseclaw plugin uninstall foo", "want": ""}
 {"id": "g596b-t15", "dialect": "", "command": "defenseclaw skill uninstall foo", "want": ""}
