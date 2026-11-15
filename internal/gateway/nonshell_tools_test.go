@@ -186,7 +186,7 @@ func TestNonShellToolFindingsBoundsAreNeverClean(t *testing.T) {
 }
 
 func TestNativeFileToolsRunTheSamePathRules(t *testing.T) {
-	for _, path := range []string{"/etc/k8s/admin.conf", "/home/u/.vault-token", "/etc/krb5.keytab", "/home/u/.config/gh/hosts.yml"} {
+	for _, path := range []string{"/etc/k8s/admin.conf", "/home/u/.vault-token", "/etc/krb5.keytab", "/home/u/.config/gh/hosts.yml", "/home/u/.git-credentials", "/home/u/.netrc", "/home/u/.pgpass"} {
 		args, _ := json.Marshal(map[string]string{"file_path": path})
 		native := shellToolFindings(context.Background(), nonShellReq("Read", string(args), false), nil)
 		margs, _ := json.Marshal(map[string]string{"path": path})

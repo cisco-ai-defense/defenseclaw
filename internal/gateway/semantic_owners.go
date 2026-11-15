@@ -651,6 +651,14 @@ func matchesContextualSSHPrivateKey(
 	if strings.HasPrefix(value, "~/.ssh/") || strings.HasPrefix(value, "/root/.ssh/") {
 		return true
 	}
+	// A key file directly in a .ssh folder is a key in whatever home holds it:
+	// a mounted or alternate home (/mnt/home/alice, /data/home/alice, an
+	// automounted /Volumes/x/Users/bob) is a home all the same, so the folder
+	// name, not the home root, is the shape (T-DETECT: a native Read of
+	// /mnt/home/alice/.ssh/id_rsa was a clean allow in every tier).
+	if strings.HasSuffix(path.Dir(value), "/.ssh") {
+		return true
+	}
 	for _, root := range []string{"/home/", "/users/"} {
 		if !strings.HasPrefix(value, root) {
 			continue
@@ -1519,7 +1527,10 @@ func activeHomeCredentialFile(
 	within string,
 ) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
-	if !ok || relative == "" {
+	if !ok {
+		return otherHomeCredentialFile(facts, candidate, class, within)
+	}
+	if relative == "" {
 		return false
 	}
 	shape, ok := actionfacts.MatchCredentialFileShape(relative)
@@ -1530,6 +1541,65 @@ func activeHomeCredentialFile(
 		return strings.HasPrefix(relative, within+"/")
 	}
 	return relative == shape.Relative
+}
+
+// otherHomeCredentialFile reports an absolute path outside the active home
+// that is a home-only credentials file of class (credentialFileShape.HomeFile)
+// by the shape of its trailing components, whatever the root of the home is
+// called: another user's home, a mounted or automounted one, an alternate
+// home volume (/mnt/home/alice, /srv/homes/carol, /Volumes/x/Users/bob). The
+// agent that reads such a file reads another account's credentials just as
+// it would its own, so the file is judged like the active home's, and no
+// home root is a word list. A fixture folder stays outside; so does a name
+// shipped in projects (.npmrc, .pypirc, .env) and a relative path, whose
+// folder is not known. within names the folder an entry must sit in (the
+// SSH keys are matched by matchesContextualSSHPrivateKey).
+func otherHomeCredentialFile(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+	class actionfacts.CredentialFileClass,
+	within string,
+) bool {
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	if within != "" || !isAbsoluteSemanticPath(value) || integrityPathHasFixtureSegment(value) {
+		return false
+	}
+	// A path below the folder the call runs in is a project path, never
+	// another account's home: a fixture tree named Users or home inside a
+	// repository, and a relative path resolved against the folder, stay as
+	// before.
+	if cwd := canonicalSemanticPath(facts.CWD); cwd != "" && cwd != "/" && pathWithin(value, cwd) {
+		return false
+	}
+	shape, ok := actionfacts.MatchCredentialFileShape(value)
+	if !ok || shape.Class != class || !shape.HomeFile || !strings.HasSuffix(value, "/"+shape.Relative) {
+		return false
+	}
+	return homeLikeDirectory(strings.TrimSuffix(value, "/"+shape.Relative))
+}
+
+// homeLikeDirectory reports a folder that is an account's home by where it
+// sits: /root, or one user folder below a root that is itself a home root, one
+// named home, homes or users (/home/bob, /mnt/home/alice, /srv/homes/carol,
+// /Volumes/data/Users/bob). A folder that sits anywhere else (/work/proj,
+// /repo/app) is a project, whatever it holds: a project's own .aws/credentials
+// fixture stays a fixture. The host account database is not read: the answer
+// must not depend on the host the gateway runs on.
+func homeLikeDirectory(dir string) bool {
+	dir = strings.TrimRight(dir, "/")
+	if dir == "/root" || dir == "" {
+		return dir == "/root"
+	}
+	root, user := path.Split(dir)
+	if user == "" || !isAbsoluteSemanticPath(dir) {
+		return false
+	}
+	switch path.Base(strings.TrimRight(root, "/")) {
+	case "home", "homes", "users":
+		return true
+	default:
+		return false
+	}
 }
 
 func matchesEnvironmentFile(value string) bool {
