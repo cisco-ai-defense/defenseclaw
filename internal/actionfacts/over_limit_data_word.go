@@ -329,9 +329,30 @@ func overLimitOperandIsData(argv []string, at int) bool {
 			return overLimitInterpreterOperandIsData(argv, start, at)
 		case overLimitCodeProgram(program):
 			return false
+		case overLimitRunsOperand(program, argv, start, at):
+			return false
 		default:
 			return true
 		}
+	}
+	return false
+}
+
+// overLimitRunsOperand reports a program that runs the over-limit operand
+// argv[at] as code in its own grammar, though no shell reads it: a sed script
+// (its e and w commands run a program and write a file), a make assignment or
+// target (the recipes read it), a tar option value (--checkpoint-action,
+// --to-command, -I), an rsync remote shell (-e, --rsh) and the value of a git
+// -c setting (an alias that starts with ! is a shell command). A word these
+// take that is past the string bound is no plain data, as the argument of a
+// program that passes it on (rel-1-0-10:GAP-0761); a commit message of git,
+// the destination of a copy and the like stay DATA.
+func overLimitRunsOperand(program string, argv []string, start, at int) bool {
+	switch program {
+	case "sed", "gsed", "make", "gmake", "gnumake", "tar", "gtar", "bsdtar", "rsync":
+		return true
+	case "git":
+		return at-1 > start && argv[at-1] == "-c"
 	}
 	return false
 }
