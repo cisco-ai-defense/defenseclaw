@@ -68,6 +68,34 @@ func awkCommandDynamic(facts actionfacts.Facts) bool {
 	return false
 }
 
+// awkDynamicBoundBySimpleCommands reports a call whose awk words are built
+// only from variables the call assigns as literals before it (out=report.txt;
+// awk "BEGIN {print 1 >> \"$out\"}"): the simple-command pass binds them and
+// judges each awk call on its bound text, so the call as written is not an
+// awk program built at run time. A call with a simple command the pass cannot
+// read, or with an awk call still built at run time after the binding, keeps
+// the unknown tier (rel-1-0-10:GAP-0729).
+func awkDynamicBoundBySimpleCommands(request trustedActionRequest, facts actionfacts.Facts) bool {
+	simples := request.simpleMemo.commands(request.Input, facts)
+	if len(simples) == 0 {
+		return false
+	}
+	for _, simple := range simples {
+		if simple.EvaluationFailure != "" || simple.Text == "" {
+			return false
+		}
+		input := request.Input
+		input.Command, input.Args, input.Argv = simple.Text, nil, nil
+		if simple.CWD != "" {
+			input.CWD = simple.CWD
+		}
+		if awkCommandDynamic(actionfacts.Analyze(input)) {
+			return false
+		}
+	}
+	return true
+}
+
 // withAwkDynamicCommand adds the unknown-tier finding of an awk command the
 // readers cannot read to the findings of what they did read, which keep
 // deciding on their own.

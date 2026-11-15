@@ -626,9 +626,11 @@ func dispatchTrustedAction(
 					withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
 						posixParseTruncation(request, facts), request)))
 		}
-		if awkCommandDynamic(facts) {
+		if awkCommandDynamic(facts) && !awkDynamicBoundBySimpleCommands(request, facts) {
 			// An awk command built at run time has no text to judge
-			// (GAP-0499): the call is unknown, never an allow.
+			// (GAP-0499): the call is unknown, never an allow. A word built
+			// only from a literal the call assigns before it is not: the
+			// simple-command pass judges the awk call on its bound text.
 			defer func() {
 				findings = withAwkDynamicCommand(findings, request.EnforcementCapable)
 			}()
