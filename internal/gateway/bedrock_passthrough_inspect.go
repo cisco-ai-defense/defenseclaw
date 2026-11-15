@@ -206,6 +206,10 @@ func (s *bedrockEventStreamText) Broken() bool { return s.broken }
 // Ambiguous is why a frame of the stream can be read two ways, if one can.
 func (s *bedrockEventStreamText) Ambiguous() string { return s.ambiguous }
 
+// Pending is the bytes of the message not yet complete: their text is not
+// read yet.
+func (s *bedrockEventStreamText) Pending() int { return len(s.buf) }
+
 // Model is the model the stream named (Anthropic message_start), if any.
 func (s *bedrockEventStreamText) Model() string { return s.model }
 

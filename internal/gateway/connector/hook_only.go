@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"gopkg.in/yaml.v3"
 )
 
@@ -4384,6 +4385,13 @@ func planHermesAllowlistApprovals(path string, approvals []interface{}, command 
 		_, requiredEvent := events[event]
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, recognized := recognizedCommands[entryCommand]
+		if owned && !recognized && hermesLaunchImageFamilyCommand(entryCommand) {
+			// DefenseClaw's own approval for another hook image of this
+			// install, one an earlier release or a rolled-back upgrade wrote
+			// (GAP-0601). An entry without the ownership marker keeps the
+			// earlier handling.
+			recognized = true
+		}
 		if owned && !recognized && hermesRelocatedHookCommand(entryCommand, command) {
 			// DefenseClaw's approval from before a true move of the home is
 			// replaced like any historical command (rel-1-0-2 GAP-0642).
@@ -4491,7 +4499,8 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup,
 	// ours is DefenseClaw's hook command for this home, or the same hook
 	// script of this install at the home the account had before a move.
 	ours := func(entryCommand string) bool {
-		return entryCommand == command || hermesRelocatedHookCommand(entryCommand, command)
+		return entryCommand == command || hermesRelocatedHookCommand(entryCommand, command) ||
+			hermesLaunchImageFamilyCommand(entryCommand)
 	}
 	approvals := document["approvals"].([]interface{})
 	kept := make([]interface{}, 0, len(approvals))
@@ -5189,6 +5198,9 @@ func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedComman
 	if _, recognized := recognizedCommands[command]; recognized {
 		return true
 	}
+	if hermesLaunchImageFamilyCommand(command) {
+		return true
+	}
 	if hermesCommandSpellsTheHookScript(command, hookScript) {
 		return true
 	}
@@ -5254,6 +5266,31 @@ scan:
 		}
 	}
 	return true
+}
+
+// hermesLaunchImageFamilyCommand reports the Windows Hermes hook command of
+// any hook image of this standalone install bin (the transition image or a
+// launch image bin\hooks\<16 hex>, GAP-0751), including one whose folder is
+// gone. nativeHookBinaryOwnershipCandidates lists only the launch folders on
+// disk, so the allowlist entry a rolled-back upgrade wrote for its own
+// launch image read as a tampered DefenseClaw command once that rollback
+// removed the folder, and the guardian failed the account on the next
+// upgrade (GAP-0601). The command must still be exactly the one DefenseClaw
+// renders for that path.
+func hermesLaunchImageFamilyCommand(command string) bool {
+	return hermesLaunchImageFamilyCommandFor(command, canonicalStandaloneWindowsHookBinary())
+}
+
+func hermesLaunchImageFamilyCommandFor(command, standalone string) bool {
+	if strings.TrimSpace(standalone) == "" || command == "" {
+		return false
+	}
+	for _, path := range winpath.EnterpriseHookImagePathsIn(strings.ReplaceAll(command, "/", `\`)) {
+		if winpath.SameEnterpriseHookImageFamily(path, standalone) && windowsHermesDirectHookCommand(path) == command {
+			return true
+		}
+	}
+	return false
 }
 
 func hermesRecognizedHookCommands(current string) map[string]struct{} {

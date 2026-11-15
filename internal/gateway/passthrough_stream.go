@@ -548,7 +548,9 @@ read:
 		p.emitLLMResponseEventV8(ctx, responseMeta, content, content, nil)
 
 		postCtx, postCancel := p.postCallContext(ctx)
-		postCtx = proxyGuardrailWithoutEnforcement(postCtx)
+		// PORT-GAP0212 TODO: rel 8f41735a55 removed proxyGuardrailWithoutEnforcement; the
+		// port makes this final check enforced in action mode (rel's tail hold) and
+		// withholds the held events on a block. Until then it only reports.
 		t0 := time.Now()
 		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
 		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)

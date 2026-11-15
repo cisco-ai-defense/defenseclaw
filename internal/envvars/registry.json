@@ -7829,6 +7829,30 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_STANDALONE_ENSURE_VERIFY_DEGRADED",
+      "category": "upgrade_internal",
+      "purpose": "Asks the standalone Windows installer's Verify, run by ensure to decide whether to repair, to accept a fresh, complete guardian reconcile whose only failures are user targets the guardian itself reported failed or pending (a signed-out account, a hook file DefenseClaw did not write). A repair cannot fix those, so ensure reports them and does not repair. The administrator's verify stays strict. It is not an installer parameter because the installer parameter set is the Secure Client command line. The installer reads it only for a Verify and clears it so no child process inherits it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/windows_enterprise_standalone.go",
+          "description": "Sets it in the strict installer environment only for the Verify an ensure runs before it plans a repair"
+        },
+        {
+          "location": "packaging/windows/install-enterprise.ps1",
+          "description": "Reads and clears it, and passes AcceptDegradedTargets to the lifecycle only for the Verify action"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DCLAW_FLEET_API_TOKEN",
       "category": "fleet",
       "purpose": "Opaque bearer token for the Fleet management API; the CLI generator uses URL-safe random text.",

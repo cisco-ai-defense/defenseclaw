@@ -42,11 +42,11 @@ func TestRouteOnlyReadinessCredentialClasses(t *testing.T) {
 	anthropic := config.RoutingUpstreamConfig{BaseURL: "https://api.anthropic.com", API: config.RoutingAPIMessages}
 	cfg := readinessConfig(anthropic)
 	var signers bedrockSigners
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers)); !r.Ready || r.Credential != routeCredentialAgent || r.Custody || r.Provider != "anthropic" || r.Upstream != "https://api.anthropic.com" {
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers, nil)); !r.Ready || r.Credential != routeCredentialAgent || r.Custody || r.Provider != "anthropic" || r.Upstream != "https://api.anthropic.com" {
 		t.Fatalf("OSS passthrough: %+v", r)
 	}
 	cfg.Routing.Enabled = false
-	if got := routeOnlyReadinessFor(cfg, "linux", &signers); got != nil {
+	if got := routeOnlyReadinessFor(cfg, "linux", &signers, nil); got != nil {
 		t.Fatalf("routing off reports nothing: %+v", got)
 	}
 
@@ -55,34 +55,34 @@ func TestRouteOnlyReadinessCredentialClasses(t *testing.T) {
 	cfg = readinessConfig(anthropic)
 	cfg.DeploymentMode, cfg.Enterprise.Profile = "managed_enterprise", "standalone"
 	useRoutingCredentials(t, map[string]string{"anthropic-key": "sk-ant-held", "openai-key": "sk-held"})
-	r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers))
+	r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers, nil))
 	if r.Ready || !r.Custody || r.Credential != routeCredentialMissing || r.Fix != "set routing.models[].credential for anthropic (base_url https://api.anthropic.com) in the policy bundle" {
 		t.Fatalf("custody without a gateway key: %+v", r)
 	}
 	cfg.Routing.Models = []config.RoutingModelBackend{{Name: "gpt", Provider: "openai", Model: "gpt-5", Credential: "openai-key"}}
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers)); r.Ready || r.Credential != routeCredentialMissing {
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers, nil)); r.Ready || r.Credential != routeCredentialMissing {
 		t.Fatalf("a key of another provider does not cover the upstream: %+v", r)
 	}
 	cfg.Routing.Models = append(cfg.Routing.Models, config.RoutingModelBackend{Name: "sonnet", Provider: "anthropic", Model: "claude-sonnet", Credential: "anthropic-key"})
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers)); !r.Ready || r.Credential != routeCredentialHeld {
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers, nil)); !r.Ready || r.Credential != routeCredentialHeld {
 		t.Fatalf("custody with a gateway key: %+v", r)
 	}
 	cfg.Routing.Models[1].Credential = "unreadable"
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "windows", &signers)); r.Ready || r.Credential != routeCredentialMissing ||
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "windows", &signers, nil)); r.Ready || r.Credential != routeCredentialMissing ||
 		!strings.Contains(r.Problem, "unreadable is named in the policy bundle but not stored") ||
 		r.Fix != "store it: defenseclaw-gateway enterprise secret set --name unreadable --from-stdin" {
 		t.Fatalf("a credential ref that does not resolve: %+v", r)
 	}
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers)); !r.Ready || r.Custody || r.Credential != routeCredentialAgent {
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, nil)); !r.Ready || r.Custody || r.Credential != routeCredentialAgent {
 		t.Fatalf("managed Linux passes the agent credential through: %+v", r)
 	}
 
 	delete(cfg.Routing.RouteOnly.Upstreams, "claudecode")
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers)); r.Ready || !strings.Contains(r.Fix, "policy bundle") {
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, nil)); r.Ready || !strings.Contains(r.Fix, "policy bundle") {
 		t.Fatalf("missing upstream on a managed host: %+v", r)
 	}
 	oss := readinessConfig(config.RoutingUpstreamConfig{})
-	if r := onlyReadiness(t, routeOnlyReadinessFor(oss, "linux", &signers)); r.Ready ||
+	if r := onlyReadiness(t, routeOnlyReadinessFor(oss, "linux", &signers, nil)); r.Ready ||
 		r.Fix != "set routing.route_only.upstreams.claudecode (base_url and api) in config.yaml" {
 		t.Fatalf("missing upstream on an OSS host: %+v", r)
 	}
@@ -101,7 +101,7 @@ func TestRouteOnlyReadinessBedrockSigning(t *testing.T) {
 			cfg.DeploymentMode, cfg.Enterprise.Profile = "managed_enterprise", "standalone"
 		}
 		var signers bedrockSigners
-		return onlyReadiness(t, routeOnlyReadinessFor(cfg, goos, &signers))
+		return onlyReadiness(t, routeOnlyReadinessFor(cfg, goos, &signers, nil))
 	}
 	r := check(iam, base, "linux")
 	if !r.Ready || r.Credential != routeCredentialSigning || r.Signing == nil || !r.Signing.Signer || !r.Signing.Credential || r.Signing.Region != "us-west-2" {

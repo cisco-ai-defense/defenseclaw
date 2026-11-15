@@ -308,8 +308,7 @@ func TestManagedIgnoredOptOutsAreReadThroughLookup(t *testing.T) {
 				for _, match := range direct.FindAllStringSubmatch(string(raw), -1) {
 					// These readers are restricted to per-user hooks or skip the
 					// value in managed mode, as checked by the hook policy test.
-					if match[2] == "DEFENSECLAW_HOOK_MAX_BODY" &&
-						(rel == "internal/cli/hook.go" || rel == "cmd/defenseclaw-hook-user/main.go") {
+					if match[2] == "DEFENSECLAW_HOOK_MAX_BODY" && rel == "internal/cli/hook.go" {
 						continue
 					}
 					t.Errorf("%s reads managed-ignored %s directly", path, match[2])
@@ -387,10 +386,22 @@ func TestGAP0674ManagedHookEnvironmentPoliciesMatchReaders(t *testing.T) {
 	if !strings.Contains(prologue, "unset DEFENSECLAW_HOOK_MAX_BODY ") {
 		t.Error("managed shell hook body-cap guard changed")
 	}
-	perUser := read("cmd/defenseclaw-hook-user/main.go")
-	if !strings.Contains(perUser, "if managedRuntimePresent() {") ||
-		strings.Count(perUser, `os.Getenv("DEFENSECLAW_HOOK_MAX_BODY")`) != 1 {
+	// The per-user native hook body moved to internal/hookuser in S8 B2: the
+	// hook-user binary and the hook-post guard leg both run hookuser.Run. Its
+	// managed-mode guard refuses a managed host before the body cap is read,
+	// and the cap is read once, through the shared managed-policy lookup.
+	perUser := read("internal/hookuser/hookuser.go")
+	guard := strings.Index(perUser, "if managedRuntimePresent() {")
+	capRead := strings.Index(perUser, `envvars.Getenv("DEFENSECLAW_HOOK_MAX_BODY")`)
+	if guard < 0 || capRead < guard ||
+		strings.Count(perUser, `envvars.Getenv("DEFENSECLAW_HOOK_MAX_BODY")`) != 1 ||
+		strings.Contains(perUser, `os.Getenv("DEFENSECLAW_HOOK_MAX_BODY")`) {
 		t.Error("per-user native hook managed-mode guard changed")
+	}
+	for _, rel := range []string{"cmd/defenseclaw-hook-user/main.go", "cmd/defenseclaw-hook-post/main.go"} {
+		if strings.Contains(read(rel), "DEFENSECLAW_HOOK_MAX_BODY") {
+			t.Errorf("%s reads the body cap outside the shared per-user hook", rel)
+		}
 	}
 }
 
