@@ -1566,10 +1566,10 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			if row.OK || row.Pending {
 				continue
 			}
-			issue := enterpriseHookGuardianFailureIssue(row)
+			issue := enterpriseHookGuardianFailureWording(row)
 			switch {
 			case excusedFailures == 0:
-				report.Errors = append(report.Errors, issue)
+				report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssue(row))
 			case enterpriseHookAwaitingSignInRow(row):
 				report.Warnings = append(report.Warnings, issue)
 			case enterpriseHookAccountLinkRow(row):
@@ -1776,9 +1776,26 @@ func enterpriseHookGuardianFailureIssues(state enterpriseHookGuardianState) []st
 	return issues
 }
 
-// enterpriseHookGuardianFailureIssue words one failed row of the last
-// reconcile for status.
+// enterpriseHookGuardianFailureIssue is the status error of one failed row
+// of the last reconcile. Every such line starts "last guardian reconcile
+// failed for <connector>@<account>: ", the one form a Setup before 1.0.10
+// (1.0.9 Test-DefenseClawGuardianReportErrorsAttributable) attributes to a
+// failed row. When an older Setup /upgrade fails, its rollback restores this
+// release and reads this status to accept a degraded reconcile; a signed-out
+// account worded any other way rejected it, and the rollback left every
+// DefenseClaw service stopped and disabled (rel-1-0-10 GAP-0794).
 func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
+	prefix := "last guardian reconcile failed for " + enterpriseHookTargetIssueLabel(row) + ": "
+	wording := enterpriseHookGuardianFailureWording(row)
+	if strings.HasPrefix(wording, prefix) {
+		return wording
+	}
+	return prefix + wording
+}
+
+// enterpriseHookGuardianFailureWording words one failed row of the last
+// reconcile for status; an excused row is a warning in these words.
+func enterpriseHookGuardianFailureWording(row enterpriseHookReconcileRow) string {
 	account := enterpriseHookSignedOutAccount(row)
 	if enterpriseHookAwaitingSignInRow(row) {
 		if account == "" {
