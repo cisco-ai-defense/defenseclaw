@@ -216,8 +216,11 @@ func TestFloorCheckRouteOnlyWithoutADeployedConfig(t *testing.T) {
 	if err := d.floorCheck("1.0.9"); err != nil || len(d.asked) != 0 || !d.rendered(t, "alice") {
 		t.Fatalf("no deployment: err=%v asked=%d", err, len(d.asked))
 	}
+	// A config that exists but cannot be read may still route: the guardian
+	// keeps the routing it loaded, so the downgrade is refused and no
+	// render is taken back (T-UPGRADE review F3).
 	d.cfgErr = errors.New("config_invalid")
-	if err := d.floorCheck("1.0.9"); err != nil || d.rendered(t, "alice") || d.rendered(t, "bob") {
-		t.Fatalf("unreadable config: err=%v, renders must be taken back", err)
+	if err := d.floorCheck("1.0.9"); err == nil || !strings.Contains(err.Error(), "route_only_downgrade_refused") || len(d.asked) != 0 || !d.rendered(t, "alice") {
+		t.Fatalf("unreadable config: err=%v asked=%d, want a refusal with the renders kept", err, len(d.asked))
 	}
 }

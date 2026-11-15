@@ -1342,7 +1342,9 @@ func rollbackTargetLacksRouteOnly(target string) bool {
 	}
 	nums := [3]int{}
 	for i := 0; i < 3; i++ {
-		n, err := strconv.Atoi(strings.SplitN(parts[i], "-", 2)[0])
+		// A pre-release or build suffix (1.0.10-rc.1, 1.0.11+abc,
+		// 1.0.11~rc1) does not change the release number.
+		n, err := strconv.Atoi(strings.FieldsFunc(parts[i]+"-", func(r rune) bool { return r == '-' || r == '+' || r == '~' })[0])
 		if err != nil {
 			return true
 		}

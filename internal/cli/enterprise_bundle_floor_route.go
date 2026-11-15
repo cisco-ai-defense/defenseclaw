@@ -72,20 +72,26 @@ func routeOnlyDowngradeRefusal(ctx context.Context, env *enterpriseunix.Env, ver
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	if err == nil {
-		if routed := managedRouteOnlyConnectors(installed); len(routed) > 0 {
-			list := strings.Join(routed, ", ")
-			return fmt.Errorf("route_only_downgrade_refused: route-only routing is on for %s, and DefenseClaw %s has no route-only listener: "+
-				"every enrolled account would keep the route settings of this release and its agent would get 401 or connection refused. "+
-				"Turn routing off first: remove %s from routing.route_only.connectors (or set routing.enabled: false) in the managed config "+
-				"or the signed bundle and apply it (%s ensure --config <file>, or enterprise bundle apply), then install the older package again; "+
-				"it takes the route settings of each account back before its files are installed",
-				list, version, list, filepath.Join(env.Layout.BinDir, "defenseclaw-gateway")+" enterprise "+floorCheckOSName(env.GOOS))
-		}
+	if err != nil {
+		// A config that exists but cannot be read may still route an agent,
+		// and the guardian keeps the routing it loaded: taking the route
+		// settings back now would race it writing them again (T-UPGRADE
+		// review F3). Refuse, naming the file.
+		return fmt.Errorf("route_only_downgrade_refused: the managed config of this deployment could not be read (%v), so DefenseClaw cannot tell whether route-only routing is on; "+
+			"DefenseClaw %s has no route-only listener. Fix or restore the managed config (%s ensure --config <file>), then install the older package again",
+			err, version, filepath.Join(env.Layout.BinDir, "defenseclaw-gateway")+" enterprise "+floorCheckOSName(env.GOOS))
 	}
-	// Routing is off (or the config cannot be read, so the guardian writes
-	// nothing new either): take back what is still rendered, as each
-	// account. A restore with nothing rendered changes no file.
+	if routed := managedRouteOnlyConnectors(installed); len(routed) > 0 {
+		list := strings.Join(routed, ", ")
+		return fmt.Errorf("route_only_downgrade_refused: route-only routing is on for %s, and DefenseClaw %s has no route-only listener: "+
+			"every enrolled account would keep the route settings of this release and its agent would get 401 or connection refused. "+
+			"Turn routing off first: remove %s from routing.route_only.connectors (or set routing.enabled: false) in the managed config "+
+			"or the signed bundle and apply it (%s ensure --config <file>, or enterprise bundle apply), then install the older package again; "+
+			"it takes the route settings of each account back before its files are installed",
+			list, version, list, filepath.Join(env.Layout.BinDir, "defenseclaw-gateway")+" enterprise "+floorCheckOSName(env.GOOS))
+	}
+	// Routing is off: take back what is still rendered, as each account.
+	// A restore with nothing rendered changes no file.
 	if ctx == nil {
 		ctx = context.Background()
 	}
