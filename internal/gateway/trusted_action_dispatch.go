@@ -4700,8 +4700,8 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 		return false
 	}
 	text, known := trustedBashCommandInput(request.Input)
-	if !known || !strings.Contains(text, "sed") && !strings.Contains(text, "perl") {
-		return false
+	if !known {
+		return false // no text test of the call: the readers below take the program from the parsed word (rel-1-0-10:GAP-0737)
 	}
 	facts, request = protectedHomePlacedReading(facts, request)
 	home := facts.EnforcementProjection().ActiveHome

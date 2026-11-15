@@ -426,9 +426,10 @@ func childStateOperands(command, cwd, home string) []stateOperand {
 // of command read in cwd with the known values of the action (user): an
 // entry, or a followed name for sed --follow-symlinks.
 func inPlaceStateOperands(command, cwd, home string, user KnownUser) []stateOperand {
-	if !strings.Contains(command, "sed") && !strings.Contains(command, "perl") {
-		return nil
-	}
+	// No text test of the command stands in front of the reader: the program
+	// is the word the parser makes (readInPlaceEdits), so s""ed, "gsed" and
+	// perl5.38.2 name an editor as sed and perl do (rel-1-0-10:GAP-0737, as
+	// GAP-0667 for the backup reader).
 	var operands []stateOperand
 	readInPlaceEdits(command, cwd, home, user, func(name string, followed bool) {
 		operands = append(operands, stateOperand{path: name, entry: !followed})
