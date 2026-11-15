@@ -55,34 +55,100 @@ type AwkTwin struct {
 // awkFileState is what the twin reading learns about program files.
 type awkFileState struct {
 	programFiles, unknown bool
-	// dirChanged is set once the walk meets a cd, pushd or popd: the call
-	// after it runs in a folder the reading does not track, so a program file
-	// named relative to the hook's folder may be another file
-	// (rel-1-0-10:GAP-0733). awkPath is set when the text names AWKPATH, which
-	// gawk searches for a bare -f name.
-	dirChanged, awkPath bool
+	// dirPrefix is the folder the calls after a cd, pushd or env -C run in,
+	// spelled relative to the folder the hook runs in (or absolute): a
+	// relative program file name is read below it, so the file read is the one
+	// the shell opens (rel-1-0-10:GAP-0733). dirUnknown is set once a cd names
+	// no folder the words give (cd -, cd with no operand, a ~ or a variable,
+	// popd): a relative name is then unread, the unknown tier. awkPath is set
+	// when the text names AWKPATH, which gawk searches for a bare -f name.
+	dirPrefix           string
+	dirUnknown, awkPath bool
 }
 
-// awkReaderFor is the program file reader of an awk call run in a folder the
-// reading may not know (wrapperDir: env -C, sudo -D set one it does not
-// resolve, or an earlier cd; or a bare name with AWKPATH set): a relative
-// name is then unread, so the call is the unknown tier, never the verdict of
-// a file at another place. An absolute name is the same file wherever the
-// call runs.
-func awkReaderFor(files awkprog.FileReader, state *awkFileState, run PrefixWrapperRun) awkprog.FileReader {
+// awkAbsoluteName reports a program file name that names the same file
+// wherever the call runs.
+func awkAbsoluteName(name string) bool {
+	return strings.HasPrefix(name, "/") || len(name) > 2 && name[1] == ':' && (name[2] == '\\' || name[2] == '/')
+}
+
+// awkJoinDir is dir (relative to the hook's folder, or absolute) with name
+// below it; the system resolves any "..", links included.
+func awkJoinDir(dir, name string) string {
+	switch {
+	case dir == "":
+		return name
+	case awkAbsoluteName(name):
+		return name
+	}
+	return strings.TrimRight(dir, "/") + "/" + name
+}
+
+// awkChangeDir records the folder a cd or pushd of the words moves to.
+func (state *awkFileState) awkChangeDir(words []string, static []bool, at int) {
+	target := ""
+	for i := at + 1; i < len(words); i++ {
+		if !static[i] {
+			state.dirUnknown = true
+			return
+		}
+		if strings.HasPrefix(words[i], "-") && words[i] != "-" && words[i] != "--" {
+			continue
+		}
+		if words[i] == "--" {
+			continue
+		}
+		target = words[i]
+		break
+	}
+	if target == "" || target == "-" || strings.HasPrefix(target, "~") || strings.HasPrefix(target, "+") {
+		state.dirUnknown = true
+		return
+	}
+	state.dirPrefix = awkJoinDir(state.dirPrefix, target)
+}
+
+// awkReaderFor is the program file reader of an awk call: a relative name is
+// read below the folder the walk tracked (an earlier cd, env -C, sudo -D), as
+// the shell opens it, and is unread, so the call is the unknown tier, when the
+// folder is not known (cd -, a computed folder) or a bare name is looked up
+// through AWKPATH with no static value. A static AWKPATH assignment on the
+// call itself names the folders gawk searches. An absolute name is the same
+// file wherever the call runs.
+func awkReaderFor(files awkprog.FileReader, state *awkFileState, run PrefixWrapperRun, awkPath string, awkPathSet bool) awkprog.FileReader {
 	if files == nil {
 		return nil
 	}
-	moved := state.dirChanged || run.Dir != "" || run.DirUnknown
-	if !moved && !state.awkPath {
+	prefix := state.dirPrefix
+	if run.Dir != "" {
+		prefix = awkJoinDir(prefix, run.Dir)
+	}
+	unknown := state.dirUnknown || run.DirUnknown
+	if prefix == "" && !unknown && !state.awkPath && !awkPathSet {
 		return files
 	}
 	return func(name string) (string, bool) {
-		absolute := strings.HasPrefix(name, "/") || len(name) > 2 && name[1] == ':' && (name[2] == '\\' || name[2] == '/')
-		if !absolute && (moved || !strings.ContainsAny(name, `/\`)) {
+		if awkAbsoluteName(name) || name == "-" {
+			return files(name)
+		}
+		if unknown {
 			return "", false
 		}
-		return files(name)
+		if !strings.ContainsAny(name, `/\`) && (state.awkPath || awkPathSet) {
+			if !awkPathSet {
+				return "", false
+			}
+			for _, dir := range strings.Split(awkPath, ":") {
+				if dir == "" {
+					dir = "."
+				}
+				if text, ok := files(awkJoinDir(awkJoinDir(prefix, dir), name)); ok {
+					return text, true
+				}
+			}
+			return "", false
+		}
+		return files(awkJoinDir(prefix, name))
 	}
 }
 
@@ -173,8 +239,18 @@ func awkCommandTwin(command string, depth int, trunc *bounded.Truncated, files a
 			return true
 		}
 		switch wrapperProgramName(words[index]) {
-		case "cd", "pushd", "popd", "chdir":
-			state.dirChanged = true
+		case "cd", "pushd":
+			state.awkChangeDir(words, static, index)
+		case "popd", "chdir":
+			state.dirUnknown = true
+		}
+		awkPath, awkPathSet := "", false
+		for _, assign := range call.Assigns {
+			if assign.Name != nil && assign.Name.Value == "AWKPATH" && assign.Value != nil {
+				if value := projectPOSIXWord(assign.Value); !value.Expands {
+					awkPath, awkPathSet = value.Value, true
+				}
+			}
 		}
 		// awkAt reads the awk call that is call.Args[first:last+1] and
 		// writes the commands it starts in its place. handed words (a find
@@ -190,7 +266,7 @@ func awkCommandTwin(command string, depth int, trunc *bounded.Truncated, files a
 					dynamic[i], prefix[i], hole[i] = true, "", awkprog.Hole
 				}
 			}
-			reading := awkprog.Call{Words: words[first : last+1], Dynamic: dynamic, Prefix: prefix, Holed: hole, Files: awkReaderFor(files, state, run)}.Read()
+			reading := awkprog.Call{Words: words[first : last+1], Dynamic: dynamic, Prefix: prefix, Holed: hole, Files: awkReaderFor(files, state, run, awkPath, awkPathSet)}.Read()
 			if reading.Files > 0 {
 				state.programFiles = true
 				state.unknown = state.unknown || reading.Unread || reading.Dynamic

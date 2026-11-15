@@ -144,6 +144,15 @@ func awkSpellings() []awkSpelling {
 		{id: "A-subshell-cd-awk-f", cmd: `(cd ordinary && awk -f prog.awk a.txt)`, files: file, want: "unknown"},
 		{id: "A-pushd-awk-f", cmd: `pushd ordinary >/dev/null; awk -f prog.awk a.txt`, files: file, want: "unknown"},
 		{id: "K09", cmd: `AWKPATH=ordinary gawk -f prog.awk a.txt`, files: file, want: "unknown"},
+		// The folder is tracked, so the file the shell opens is the one read:
+		// the benign file below the folder allows, a cd back out reads the
+		// file of the project, and AWKPATH names the folders searched.
+		{id: "J05D", cmd: `cd ordinary && awk -f prog2.awk a.txt`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "allow"},
+		{id: "J06D", cmd: `env -C ordinary awk -f prog2.awk a.txt`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "allow"},
+		{id: "A-cd-dotdot-awk-f", cmd: `cd ordinary && cd .. && awk -f prog2.awk`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "block"},
+
+		{id: "J05-dash", cmd: `cd - && awk -f prog.awk a.txt`, files: file, want: "unknown"},
+		{id: "J05-var", cmd: `cd "$D" && awk -f prog.awk a.txt`, files: file, want: "unknown"},
 		{id: "J05-abs", cmd: `cd ordinary && awk -f @PROJ@/prog.awk a.txt`, files: file, want: "block"},
 		{id: "J05-benign", cmd: `cd ordinary && awk '{print $1}' a.txt`, want: "allow"},
 		{id: "R30000", cmd: `awk -f big30.awk ordinary/a.txt`, files: map[string]string{"big30.awk": `{print $1}` + strings.Repeat(" ", 30000)}, want: "allow"},
