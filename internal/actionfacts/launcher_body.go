@@ -508,10 +508,20 @@ func launcherRedirectEnd(text string, i int) (int, bool) {
 // launcherStatementEnd is the index after the operator at text[i] (a run of
 // ; | & and line breaks): the start of the next statement.
 func launcherStatementEnd(text string, i int) int {
-	for i < len(text) && strings.IndexByte("\n\r;|& \t", text[i]) >= 0 {
+	for i < len(text) && launcherStatementByte(text[i]) {
 		i++
 	}
 	return i
+}
+
+// launcherStatementByte reports a byte of a statement operator run: a line
+// break, ; | & or a blank.
+func launcherStatementByte(c byte) bool {
+	switch c {
+	case '\n', '\r', ';', '|', '&', ' ', '\t':
+		return true
+	}
+	return false
 }
 
 // posixLauncherBody is the script word of a POSIX shell invoked with -c in

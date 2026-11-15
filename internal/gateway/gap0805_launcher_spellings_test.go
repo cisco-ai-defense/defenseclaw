@@ -202,7 +202,11 @@ func TestGAP0803LauncherArgumentsAndDepthAreBounded(t *testing.T) {
 // tier: the redirect of a launcher string is part of the script it runs, so
 // each nested twin reads it and the proven finding keeps its verdict
 // (rel-1-0-10:GAP-0806). Past the depth the call is TRUNCATED (above). The
-// same nesting of an ordinary command is allowed.
+// same nesting of an ordinary command is allowed, or, where the reading of
+// the call itself reaches the wrapper depth of the analysis (a Windows host
+// reads the string as PowerShell first, one level more), it is the unknown
+// tier of the pack with the limit finding: the one bound rule, never a block
+// in the default pack.
 func TestGAP0806NestedLaunchersKeepTheProvenBlock(t *testing.T) {
 	gap0589WindowsHost(t)
 	cwd := filepath.Join(t.TempDir(), "project")
@@ -211,12 +215,6 @@ func TestGAP0806NestedLaunchersKeepTheProvenBlock(t *testing.T) {
 	}
 	for _, tier := range boundedTestTiers {
 		api := gap0589TierAPI(t, "codex", tier.posture, tier.managed, tier.tier)
-		decide := func(command interface{}) string {
-			return api.evaluateCodexHook(t.Context(), codexHookRequest{
-				HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
-				ToolInput: map[string]interface{}{"command": command},
-			}).Action
-		}
 		for k := 1; k <= maxLauncherBodyDepth; k++ {
 			for _, row := range []struct {
 				id, body string
@@ -233,8 +231,15 @@ func TestGAP0806NestedLaunchersKeepTheProvenBlock(t *testing.T) {
 					"argv":   []interface{}{"cmd", "/c", inner},
 					"string": "cmd /c " + inner,
 				} {
-					if got := decide(command); boundedParse(got) != row.want {
-						t.Errorf("%s/depth %d/%s %s: action %s, want %s", tier.name, k, row.id, form, got, row.want)
+					resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
+						HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+						ToolInput: map[string]interface{}{"command": command},
+					})
+					got := boundedParse(resp.Action)
+					atCap := row.want == bounded.Allow && got == bounded.Unknown(tier.tier) &&
+						containsString(resp.RuleIDs, evaluationLimitRuleID) && len(resp.RuleIDs) == 1
+					if got != row.want && !atCap {
+						t.Errorf("%s/depth %d/%s %s: action %s rules %v, want %s", tier.name, k, row.id, form, resp.Action, resp.RuleIDs, row.want)
 					}
 				}
 			}
