@@ -354,8 +354,11 @@ func TestElectorFailover(t *testing.T) {
 	if a.IsLeader() || api.holder() != "pod-b" {
 		t.Fatal("old leader still leads")
 	}
-	if started.Load() != 2 {
-		t.Fatalf("started %d", started.Load())
+	// IsLeader turns true before the new leader's run callback has counted
+	// itself: wait for the count rather than read it once (GAP-0328).
+	waitFor(t, func() bool { return started.Load() == 2 })
+	if n := started.Load(); n != 2 {
+		t.Fatalf("started %d", n)
 	}
 }
 
