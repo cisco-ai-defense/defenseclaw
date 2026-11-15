@@ -90,7 +90,6 @@ func TestProximityOnlyChainsRemainVisibleButCannotEnforce(t *testing.T) {
 		ToolChainPermissionDeniedThenBypass,
 		ToolChainSecretManagerReadThenEgress,
 		ToolChainWorkloadIdentityThenLateralExec,
-		ToolChainSecretReadThenEgress,
 		ToolChainDownloadDecodeExecuteSameArtifact,
 	} {
 		t.Run(chainID, func(t *testing.T) {
@@ -1064,7 +1063,7 @@ func TestMatchToolChainsDownloadDecodeExecuteRequiresBothExactJoins(t *testing.T
 	}
 }
 
-func TestMatchToolChainsDetectionOnlyUsesEarliestDetectionPredecessor(t *testing.T) {
+func TestMatchToolChainsSecretReadUsesEarliestDetectionPredecessor(t *testing.T) {
 	definition, _ := ToolChainDefinitionByID(ToolChainSecretReadThenEgress)
 	index, _ := ToolChainIndexByID(definition.ID)
 	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1098,11 +1097,15 @@ func TestMatchToolChainsDetectionOnlyUsesEarliestDetectionPredecessor(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The chain can block (GAP-0595): the earliest detection predecessor is
+	// the detection one, and the exact joined predecessor makes it
+	// enforcement-safe. The gateway keeps those enforcement bits only in
+	// the strict tier (toolChainProjectionForNamedPosture).
 	if matches.DetectionPredecessors[index] != "detection" ||
-		matches.EnforcementPredecessors[index] != "" ||
-		matches.EnforcementSafeMask&definition.ResultBit != 0 {
-		t.Fatalf("predecessors=%q/%q", matches.DetectionPredecessors[index],
-			matches.EnforcementPredecessors[index])
+		matches.EnforcementPredecessors[index] != "enforcement" ||
+		matches.EnforcementSafeMask&definition.ResultBit == 0 {
+		t.Fatalf("predecessors=%q/%q safe=%b", matches.DetectionPredecessors[index],
+			matches.EnforcementPredecessors[index], matches.EnforcementSafeMask)
 	}
 }
 

@@ -1177,7 +1177,7 @@ rules:
     title: "Credential file uploaded to an external destination"
     severity: HIGH
     confidence: 0.99
-    tags: [credential, exfiltration, exact-file, detection-only]
+    tags: [credential, exfiltration, exact-file]
   - id: privilege.sudoers_unrestricted_nopasswd
     tool_call_only: true
     expression: >-

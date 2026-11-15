@@ -15,8 +15,9 @@ import (
 // Codex route-only rendering (DESIGN 7.2, 15.8, 18.1): one owned table
 // [model_providers.defenseclaw_route] at the end of config.toml and the
 // top-level model_provider pointing at it. The wrapped provider settings
-// (wire_api, env_key, requires_openai_auth) are copied so the agent keeps
-// its own login or key; the gateway forwards to routing.route_only
+// (codexWrappedFields: wire_api, env_key, requires_openai_auth, the auth
+// command table, a fixed bearer and the headers) are copied so the agent
+// keeps its own login or key; the gateway forwards to routing.route_only
 // .upstreams.codex. A custody render (managed macOS and Windows) drops the
 // credential settings and sends a placeholder bearer instead. Restore puts the original model_provider line back byte
 // for byte and deletes the owned table.
@@ -36,15 +37,21 @@ type codexWrappedProvider struct {
 
 // codexWrappedFields are the provider settings copied from the wrapped
 // provider (auth, transport and request shape); base_url and name are ours.
+// auth is the [model_providers.<id>.auth] command table that mints the
+// credential per call (the Bedrock short-term key setup) and
+// experimental_bearer_token a fixed bearer: without them Codex sends no
+// Authorization header and every routed call is 401 (rel-1-0-10 GAP-0575).
 var codexWrappedFields = []string{
 	"wire_api", "env_key", "env_key_instructions", "requires_openai_auth", "query_params",
 	"http_headers", "env_http_headers", "request_max_retries", "stream_max_retries", "stream_idle_timeout_ms",
+	"auth", "experimental_bearer_token",
 }
 
 // codexCustodyDroppedFields are the wrapped provider settings a custody
 // render leaves out: each makes Codex send a credential of its own.
 var codexCustodyDroppedFields = map[string]bool{
 	"env_key": true, "env_key_instructions": true, "requires_openai_auth": true, "env_http_headers": true,
+	"auth": true, "experimental_bearer_token": true,
 }
 
 // codexWrapped reads the provider Codex uses now (built-in openai when

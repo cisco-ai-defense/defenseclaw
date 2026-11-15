@@ -826,7 +826,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if shouldResetToolJudgeSession(req) {
 			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
 			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ResetToolJudgeSession(sessionKey)
+				judge.ResetToolJudgeSession(judgeSessionKeyFor(ctx, req.SessionID))
 			}
 			a.resetUserDownloadRequests(sessionKey)
 		}
@@ -3672,6 +3672,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			a.observeUserDownloadRequest(ctx, req.Content)
 		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
+		if isToolJudgeIntentEvent(req.HookEventName) {
+			a.forgetBlockedPrompt(ctx, req.Content, verdict)
+		}
 	case isResultLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a
@@ -3714,7 +3717,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	rawActionBeforeAssets := rawAction
 	caps := profile.Capabilities
 	effectiveMode := mode
-	if mode != "action" && a.provenHookActionMustEnforce(ctx, verdict) {
+	if mode != "action" && a.hookActionMustEnforce(ctx, verdict) {
 		effectiveMode = "action"
 	}
 	action, wouldBlock := mapHookActionForProfile(rawAction, effectiveMode, req.HookEventName, caps, profile, req.Payload)
@@ -4763,6 +4766,23 @@ func (a *APIServer) provenHookActionMustEnforce(ctx context.Context, verdict *To
 		}
 	}
 	return false
+}
+
+// hookActionMustEnforce is provenHookActionMustEnforce on a hook route, where
+// observe mode also enforces a call the evaluation failed on: the hook
+// recovery's failed-check answer was a block in every mode, and the
+// contained fault keeps that answer (rel-1-0-10:GAP-0486).
+//
+// The observe-mode asymmetry is deliberate (1.0.10 lead, 2026-11-14): a hook
+// route in observe mode BLOCKS a call the evaluation failed on, while
+// /api/v1/inspect/tool and ACP in observe mode answer would_block on a normal
+// 200 verdict. The hook routes already blocked such a call in every mode on
+// rel, and a fix is never weaker than rel; /inspect/tool and ACP crashed on
+// rel, so there is no block to keep and they follow observe mode like any
+// other block. Do not drop evaluationFaultMustEnforce here to make the routes
+// match: that makes the hook routes weaker than rel.
+func (a *APIServer) hookActionMustEnforce(ctx context.Context, verdict *ToolInspectVerdict) bool {
+	return a.provenHookActionMustEnforce(ctx, verdict) || a.evaluationFaultMustEnforce(ctx, verdict)
 }
 
 func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookCapability, profile connector.HookProfile, payload map[string]interface{}) (string, bool) {

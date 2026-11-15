@@ -239,6 +239,10 @@ type trustedActionRequest struct {
 	// DefenseClaw state: a LoginGuess reading of a simple command keeps only
 	// that proof (loginGuessProvedFinding), so no other rule needs to run.
 	stateProofOnly bool
+	// sendDestination marks the routing values of a message call, where its
+	// text is sent (ToolInspectRequest.sendDestination): the call is a send
+	// whatever the tool is named (trustedActionSendsMessage).
+	sendDestination bool
 	// overBudgetOmission, when set, is told that the authorized-keys proof
 	// found only an operand that the client's bounded map left out because
 	// it was full (hookpaths.BudgetKey, GAP-0146).
@@ -392,6 +396,10 @@ func dispatchTrustedAction(
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
+	defer recoverTrustedActionFault(request, &findings)
+	if trustedActionFaultHook != nil {
+		trustedActionFaultHook(request)
+	}
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
 	// Effect-model rule lane (S7). Compute once at the outermost dispatch.
@@ -422,6 +430,17 @@ func dispatchTrustedAction(
 			findings = append(findings, runSecretFlowShadow(fctx, freq)...)
 		}()
 	}
+	if _, ok := managedHookPeerFromContext(parent); ok {
+		request.ProtectedHomeHook = true
+	}
+	// A call the shell parser failed on (the hook client's evidence, or the
+	// same reading here) blocks in every pack, with its own reason, before
+	// any bound or reader decides (rel-1-0-10:GAP-0486). The readers still
+	// run: a finding of theirs stays on the verdict.
+	shellReason := trustedCallShellParseReason(request)
+	if shellReason == hookpaths.UnprovenParserFault {
+		defer func() { findings = withParserFaultFinding(findings, request.EnforcementCapable) }()
+	}
 	if ManagedEnterpriseActive() {
 		return nil
 	}
@@ -440,9 +459,6 @@ func dispatchTrustedAction(
 			findings = shareBodyUnreadFindings(parent, findings, request.EnforcementCapable, budget, linkBound)
 		}
 	}()
-	if _, ok := managedHookPeerFromContext(parent); ok {
-		request.ProtectedHomeHook = true
-	}
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
@@ -482,7 +498,7 @@ func dispatchTrustedAction(
 		// finding.
 		return trustedActionLimitFindings(request.EnforcementCapable)
 	}
-	if request.EnforcementCapable && trustedCallShellParseBound(request) {
+	if request.EnforcementCapable && shellReason == "shell-parse-bound" {
 		return trustedActionLimitFindings(true)
 	}
 	if bound == shellReadingNestedProof {
@@ -553,10 +569,18 @@ func dispatchTrustedAction(
 			}()
 		}
 		if cut := trustedReadingCut(request.Input, facts, launcherRead); cut.Any() {
-			// The reading of the call stopped at a cap of its own under the
-			// statement budget: the call is TRUNCATED (the one bound rule),
-			// never judged below the unknown tier of its pack, and what was
-			// read still decides (trustedReadingCut).
+			// A CMD or PowerShell reading stopped at its command cap under the
+			// statement budget is truncated (the one bound rule): the call is
+			// never judged below the unknown tier of its pack. A CMD reading
+			// capped at 127 to 257 statements had no limit finding and was
+			// allowed in strict (rel-1-0-10:GAP-0426), and so was a PowerShell
+			// one: one `$o = & git rev-parse HEAD` statement is two commands,
+			// so about 64 statements fill the cap, and a registry write beside
+			// 100 such lines was found but allowed in every pack
+			// (rel-1-0-10:GAP-0589). A POSIX reading is not truncated by its
+			// command cap: its per-statement split (SimpleCommands) reads every
+			// statement up to the statement budget (ShellStatementsOverBudget),
+			// and each is judged.
 			defer func() { findings = withBoundedTruncation(findings, cut, request) }()
 			if facts.Parse.Dialect == actionfacts.DialectPowerShell && !request.readingTwin {
 				// The statements of the call are also read in runs that fit
@@ -638,6 +662,17 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
+	// Credential material that reaches a sender whose destination is not read
+	// in full (interpreter code that names a credentials file and a network
+	// capability, a credential-named environment variable piped into an
+	// upload) is the unknown tier of the one bound rule: the profile decides,
+	// an alert in the default and permissive packs, a block in strict
+	// (GAP-0595).
+	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
+		defer func() {
+			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
+		}()
+	}
 	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
 	for _, twin := range windowsTwins {
 		defer func() {
@@ -1156,6 +1191,10 @@ func dispatchTrustedActionWith(
 				finding.enforcement = findingEnforcementDetectionOnly
 			}
 			if request.EnforcementCapable && candidate.owner.alertOnly {
+				finding.enforcement = findingEnforcementAlertOnly
+			}
+			if candidate.owner.strictEnforced && !request.StrictPolicy &&
+				finding.enforcement == findingEnforcementAllowed {
 				finding.enforcement = findingEnforcementAlertOnly
 			}
 			finding = finding.withTrustedActionProof(
@@ -7023,7 +7062,10 @@ func finalizeTrustedActionFindings(
 	findings []RuleFinding,
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(generation, facts, findings, request.CopilotSharedLocalFile && request.Input.Tool == "read_file")
+	findings = applyTrustedActionContextDisposition(generation, facts, findings, trustedActionDispositionScope{
+		protectedLocalFileRead: request.CopilotSharedLocalFile && request.Input.Tool == "read_file",
+		sendDestination:        request.sendDestination,
+	})
 	if !request.StrictPolicy {
 		findings = trustedActionOrdinaryCredentialCopyFindings(facts, findings)
 	}
@@ -9449,61 +9491,6 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 	return bashReadingRequest(request, command, rewritten), true
 }
 
-// trustedReadingCut is the cap at which the reading of a shell call stopped
-// under the statement budget, the one point every dialect's limit_exceeded
-// reaches (the one bound rule): such a call is TRUNCATED.
-//   - The input bound of a shell command line (actionfacts.MaxCommandBytes),
-//     in every dialect, cap=bytes (a native write or read tool past the
-//     bound keeps its own bounded readings, over_limit_write_targets.go):
-//     a Windows-hook command padded past 64 KiB
-//     was read in no dialect and was a clean allow in every pack, with no
-//     limit finding (rel-1-0-10:GAP-0611). Its bounded twin (comments and
-//     padding removed, overLimitCommandBoundedTwinRequest) still proves
-//     what the text holds.
-//   - The command cap of a CMD or PowerShell reading, cap=items: a CMD
-//     reading capped at 127 to 257 statements had no limit finding and was
-//     allowed in strict (rel-1-0-10:GAP-0426), and so was a PowerShell one:
-//     one `$o = & git rev-parse HEAD` statement is two commands, so about 64
-//     statements fill the cap, and a registry write beside 100 such lines was
-//     found but allowed in every pack (rel-1-0-10:GAP-0589). The statements
-//     of a capped PowerShell reading are read again in runs under the cap
-//     (actionfacts.PowerShellCappedRuns).
-//
-// A POSIX reading is not truncated by its command cap: its per-statement
-// split (SimpleCommands) reads every statement up to the statement budget
-// (ShellStatementsOverBudget), and each is judged.
-// trustedReadingCut's bodyRead is set for a call whose launcher script is read on
-// its own (launcherBodyTwinRequest): a word over the argv bounds is then not a
-// cut of the reading, and the script's own cuts are the ones that count.
-func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts, bodyRead bool) bounded.CapSet {
-	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
-		return bounded.CapSet{}
-	}
-	if !bodyRead {
-		if cut := trustedArgvReadingCut(input, facts); cut.Any() {
-			return cut
-		}
-	}
-	if command, known := trustedBashCommandInput(input); known && len(command) > actionfacts.MaxCommandBytes &&
-		trustedShellCommandTool(input.Tool) {
-		return bounded.Of(bounded.Bytes)
-	}
-	if facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell {
-		return bounded.Of(bounded.Items)
-	}
-	return bounded.CapSet{}
-}
-
-// trustedShellCommandTool reports a tool whose input is a shell command
-// line: a POSIX, PowerShell or CMD execution tool.
-func trustedShellCommandTool(tool string) bool {
-	switch strings.ToLower(strings.TrimSpace(tool)) {
-	case "cmd", "cmd.exe":
-		return true
-	}
-	return trustedBashExecutionTool(tool) || trustedPowerShellExecutionTool(tool)
-}
-
 // trustedStatementBudgetExceeded reports whether a shell call whose
 // analysis is limit-exceeded has more statements than one action evaluates.
 // A POSIX reading, and a call of no known dialect that a POSIX shell runs
@@ -9802,6 +9789,28 @@ func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bo
 	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
 }
 
+// withCredentialSenderFinding adds the unknown-tier verdict of a call that
+// hands credential material to a sender whose destination is not read in
+// full. It is the evaluation-limit finding the profile decides, with the
+// reason of the call as its evidence and its own title.
+func withCredentialSenderFinding(
+	findings []RuleFinding,
+	reason actionfacts.CredentialSenderReason,
+	enforcementCapable bool,
+) []RuleFinding {
+	for _, finding := range findings {
+		if finding.RuleID == "ACTION-COMPOUND-LIMIT" {
+			return findings
+		}
+	}
+	added := trustedActionLimitFindings(enforcementCapable)
+	for index := range added {
+		added[index].Title = "Credential material reaches a sender whose destination is not read"
+		added[index].Evidence = string(reason)
+	}
+	return append(findings, added...)
+}
+
 // withOmittedOperandLimitFinding adds the over-limit verdict for a named
 // write operand that the client map left out, and marks it: that finding
 // blocks in every profile, as the operand may be a link to a protected file.
@@ -9969,17 +9978,24 @@ func trustedActionCommandBound(input actionfacts.Input) shellReadingBound {
 	return shellReadingWithinBounds
 }
 
-// trustedCallShellParseBound reports a call whose reading ends at the
-// recovered-parse proof bound. The hook client evidence tells it; a call
-// without that evidence on a gateway that reads the home (per-user: no hook
-// client sends it) is read here with the client reader, so both take the
-// same evaluation-limit path (rel-1-0-6:GAP-0534).
-func trustedCallShellParseBound(request trustedActionRequest) bool {
+// trustedCallShellParseReason is the recovered-parse reading of a call:
+// "shell-parse-bound" (the proof bound, the evaluation-limit path),
+// hookpaths.UnprovenParserFault (the parser failed on the text), or "". The
+// hook client evidence tells it; a call without that evidence on a gateway
+// that reads the home (per-user: no hook client sends it) is read here with
+// the client reader, so both decide the same (rel-1-0-6:GAP-0534).
+func trustedCallShellParseReason(request trustedActionRequest) string {
 	if reason := request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]; reason != "" || request.ProtectedHomeHook {
-		return reason == "shell-parse-bound"
+		if reason == "shell-parse-bound" || reason == hookpaths.UnprovenParserFault {
+			return reason
+		}
+		return ""
 	}
 	command, ok := trustedBashCommandInput(request.Input)
-	return ok && hookpaths.ShellParseBound(request.Connector, request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome)
+	if !ok {
+		return ""
+	}
+	return hookpaths.ShellParseReason(request.Connector, request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome)
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {

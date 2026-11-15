@@ -61,6 +61,7 @@ const (
 	FamilyDB      Family = "db"
 	FamilyMail    Family = "mail"
 	FamilyChat    Family = "chat"
+	FamilyIssue   Family = "issue"
 	FamilyK8s     Family = "k8s"
 	FamilyCode    Family = "code"
 )
@@ -159,6 +160,12 @@ type table struct {
 	OperationKeys []string            `yaml:"operation_keys"`
 	ProxyArgKeys  []string            `yaml:"proxy_arg_keys"`
 	CallbackKeys  []string            `yaml:"callback_keys"`
+	TextTools     struct {
+		Families       []string `yaml:"families"`
+		Tokens         []string `yaml:"tokens"`
+		ExceptFamilies []string `yaml:"except_families"`
+		DataKeys       []string `yaml:"data_keys"`
+	} `yaml:"text_tools"`
 
 	verbOf        map[string]Kind
 	pathRead      map[string]bool
@@ -179,6 +186,11 @@ type table struct {
 	searchToken   map[string]bool
 	callbackKey   map[string]bool
 	inputKey      map[string]bool
+	proxyArgKey   map[string]bool
+	textFamily    map[string]bool
+	textToken     map[string]bool
+	textExcept    map[string]bool
+	textData      map[string]bool
 }
 
 type compiledSetting struct {
@@ -227,6 +239,10 @@ func load() (*table, error) {
 		t.contentKey, t.searchToken = set(t.ContentKeys), set(t.SearchTokens)
 		t.callbackKey = set(t.CallbackKeys)
 		t.inputKey = set(t.InputKeys)
+		t.proxyArgKey = set(t.ProxyArgKeys)
+		t.textFamily, t.textToken = set(t.TextTools.Families), set(t.TextTools.Tokens)
+		t.textExcept = set(t.TextTools.ExceptFamilies)
+		t.textData = set(t.TextTools.DataKeys)
 		for _, suf := range t.PathKeySuffix {
 			t.pathSuffix = append(t.pathSuffix, "_"+suf)
 		}
@@ -358,6 +374,7 @@ func Map(tool string, args json.RawMessage, server string) (Mapping, error) {
 		}
 	}
 	w := &walker{t: t, m: &m, dbTool: m.Family == FamilyDB, codeTool: m.Family == FamilyCode}
+	w.textTool = t.textToolOf(m.Family, toks)
 	for _, tok := range toks {
 		if t.codeToken[tok] {
 			w.codeTool = true
@@ -402,7 +419,7 @@ func (w *walker) proxyVerb(root any) {
 			w.proxy = true
 		}
 	}
-	if !w.proxy || w.m.Verb != "" {
+	if !w.proxy {
 		return
 	}
 	for _, k := range w.t.NameKeys {
@@ -410,8 +427,17 @@ func (w *walker) proxyVerb(root any) {
 		if !ok || name == "" || len(name) > 96 {
 			continue
 		}
+		toks := Tokens(name)
+		// The name the proxy calls decides what its text is: a proxied mail,
+		// chat or issue tool sends data too.
+		if w.t.textToolOf(w.nestedFamily(toks), toks) {
+			w.textTool = true
+		}
+		if w.m.Verb != "" {
+			continue
+		}
 		for _, kind := range []Kind{KindDelete, KindWrite, KindExec, KindNetSend, KindList, KindRead} {
-			for _, tok := range Tokens(name) {
+			for _, tok := range toks {
 				if w.t.verbOf[tok] == kind {
 					w.m.Verb = kind
 					return
@@ -419,6 +445,57 @@ func (w *walker) proxyVerb(root any) {
 			}
 		}
 	}
+}
+
+// nestedFamily is the family of a tool name a proxy carries (the table's
+// server and name tokens).
+func (w *walker) nestedFamily(toks []string) Family {
+	for _, tok := range toks {
+		if fam, ok := w.t.Servers[tok]; ok {
+			return Family(fam)
+		}
+	}
+	return FamilyUnknown
+}
+
+// textToolOf reports a tool that sends, posts or writes text for people or a
+// record (the table's text_tools): by its family, or by a token of its name
+// unless its family names places by its arguments.
+func (t *table) textToolOf(fam Family, toks []string) bool {
+	if t.textFamily[string(fam)] {
+		return true
+	}
+	if t.textExcept[string(fam)] {
+		return false
+	}
+	for _, tok := range toks {
+		if t.textToken[tok] {
+			return true
+		}
+	}
+	return false
+}
+
+// placeKey reports an argument name that carries a place to read, write or
+// fetch: a path, input or attachment key (also by suffix) or a URL key.
+func (t *table) placeKey(key string) bool {
+	return t.pathRead[key] || t.pathWrite[key] || t.inputKey[key] || t.pathKeySuffix(key) || t.urlKey[key]
+}
+
+// locationKey reports an argument name that names a place or a party: a path,
+// an input or attachment, a URL, a recipient or redirect, a callback, an SQL
+// statement or code, or the arguments of a proxy tool.
+func (t *table) locationKey(key string) bool {
+	return t.placeKey(key) || t.redirectKey[key] || t.recipientKey[key] || t.callbackKey[key] ||
+		t.sqlKey[key] || t.sqlGenericKey[key] || t.codeKey[key] || t.proxyArgKey[key]
+}
+
+// textDataKey reports an argument name that holds the free text of a text
+// tool (the table's text_tools.data_keys: message, html_body, description,
+// comment, ...). Only these keys are data in a text tool; a key that also names
+// a place or a party (locationKey) is never one.
+func (t *table) textDataKey(key string) bool {
+	return t.textData[key] && !t.locationKey(key)
 }
 
 // walker reads one call. It is used by pointer (the counters are bound to
@@ -434,6 +511,7 @@ type walker struct {
 	dbTool       bool
 	searchTool   bool
 	proxy        bool // the call has the shape of a proxy tool: a tool name beside its arguments
+	textTool     bool // the call sends, posts or writes text (table text_tools): its free text is data
 	nested       int
 	contentBytes int
 	dests        map[string]bool
@@ -525,6 +603,18 @@ func (w *walker) str(key, val string) {
 			return
 		}
 	}
+	// The free text of a tool that sends, posts or writes text (message,
+	// html_body, description, a comment's body: the table's text_tools
+	// data_keys) is data: it is not read as a JSON document, a file URI or a
+	// location. Every other key of such a tool is read as in any tool, down to
+	// the catch-all read of a value that is exactly an absolute path or a file
+	// URI (a Telegram document, a mail attach, a note's name or save_as).
+	if w.textTool && t.textDataKey(key) {
+		if len(val) <= 256 {
+			w.setting(key, strings.ReplaceAll(val, "-", "_"))
+		}
+		return
+	}
 	// A string that holds a JSON document ("arguments": "{...}") is read as
 	// that document, to a bounded nesting. A document the reader cannot parse
 	// is unread, not clean.
@@ -594,6 +684,32 @@ func (w *walker) str(key, val string) {
 		return
 	}
 
+	// A value under a path key that joins several paths in one string
+	// ("paths": "/a/x,/b/y", one per line) names each of them.
+	if t.pathWrite[key] || t.inputKey[key] || t.pathRead[key] || t.pathKeySuffix(key) {
+		var over bool
+		if parts := pathList(val, &over); parts != nil {
+			if over {
+				w.trunc.Hit(bounded.Items)
+			}
+			kind := w.pathKind()
+			switch {
+			case t.pathWrite[key]:
+				kind = KindWrite
+			case t.inputKey[key]:
+				kind = KindRead
+			}
+			for _, part := range parts {
+				w.path(kind, key, part)
+			}
+			// Which reading the server applies is not known: a path whose name
+			// holds the separator is still judged whole.
+			if looksPath(val) {
+				w.path(kind, key, val)
+			}
+			return
+		}
+	}
 	switch {
 	case t.pathWrite[key] && looksPath(val):
 		w.path(KindWrite, key, val)
@@ -606,6 +722,46 @@ func (w *walker) str(key, val string) {
 	case !t.urlKey[key] && !t.redirectKey[key] && !t.recipientKey[key] && absolutePath(val):
 		w.path(w.pathKind(), key, val)
 	}
+}
+
+// pathList splits a value that joins several paths in one string on the
+// separator the value uses: a line break, else a comma, else a semicolon. It
+// returns nil unless there are at least two parts and every part is itself
+// path-shaped, so a single path with a comma in a name ("/data/a,b.txt") and
+// text that is not a list stay one value. Past maxItems parts it stops and
+// sets over.
+func pathList(v string, over *bool) []string {
+	var sep string
+	switch {
+	case strings.ContainsAny(v, "\r\n"):
+		v, sep = strings.ReplaceAll(v, "\r\n", "\n"), "\n"
+		v = strings.ReplaceAll(v, "\r", "\n")
+	case strings.Contains(v, ","):
+		sep = ","
+	case strings.Contains(v, ";"):
+		sep = ";"
+	default:
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(v, sep) {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if !looksPath(part) {
+			return nil
+		}
+		if len(out) >= maxItems {
+			*over = true
+			break
+		}
+		out = append(out, part)
+	}
+	if len(out) < 2 {
+		return nil
+	}
+	return out
 }
 
 // addressList splits an address field on commas and semicolons (at most 64
@@ -654,12 +810,13 @@ func pythonLiteralToJSON(v string) string {
 
 // bodyIsData reports that a value under a content-style key is what the
 // call writes or sends: the verb of the tool (or of the tool a proxy names) is
-// a write or a send, or the tool is a mail or chat tool. What a call writes or
+// a write or a send, or the tool is a text tool (a mail, chat or issue tool, a
+// comment, a reply or a post: table text_tools). What a call writes or
 // sends is data, whatever its spelling (a JSON file body, a bug report, a
 // path in a message). A tool that neither writes nor sends reads the value
 // like any argument.
 func (w *walker) bodyIsData(string) bool {
-	return w.m.Verb == KindWrite || w.m.Verb == KindNetSend || w.m.Family == FamilyMail || w.m.Family == FamilyChat
+	return w.m.Verb == KindWrite || w.m.Verb == KindNetSend || w.m.Family == FamilyMail || w.m.Family == FamilyChat || w.textTool
 }
 
 var rePathToken = regexp.MustCompile("(?:[A-Za-z]:[\\\\/]|~[\\\\/]|/)[^\\s\"'`,;|&<>(){}\\[\\]]{2,}")
@@ -942,6 +1099,15 @@ func fileURIPath(s string) (string, int) {
 		return "", fileURINone
 	}
 	rest := s[5:]
+	// A percent-encoded slash right after the scheme (file:%2Fhome%2Fu) is the
+	// slash it encodes: decode the leading run before the shape is tested.
+	n := 0
+	for len(rest) >= 3*(n+1) && rest[3*n] == '%' && rest[3*n+1] == '2' && (rest[3*n+2] == 'f' || rest[3*n+2] == 'F') {
+		n++
+	}
+	if n > 0 {
+		rest = strings.Repeat("/", n) + rest[3*n:]
+	}
 	// Only the spellings of a file URI: file:/x, file://host/x, file:C:/x. A
 	// value that merely starts with "file:" (a search pattern, "file: notes")
 	// is text.
@@ -1047,9 +1213,12 @@ func DecodeExec(code string) bool {
 }
 
 // HasFileURIArg reports that a call carries a file: URI as the value of an
-// argument that is not a body (a content key). The gateway reads the
-// arguments of an agent's own tool with the MCP walk only then; a file:
-// substring in a body, or anywhere that is not a file URI, is text.
+// argument that names a place: a path, input or URL argument (the table's
+// path, input, attachment and URL keys; the arguments an agent's own file and
+// fetch tools take their target from). The gateway reads the arguments of an
+// agent's own tool with the MCP walk only then. A file: URI in a text argument
+// (an Edit's old_string or new_string, a Grep pattern, a prompt, a body) is
+// text, as is a file: substring anywhere that is not a file URI.
 func HasFileURIArg(args json.RawMessage) bool {
 	t, err := load()
 	if err != nil || len(args) == 0 {
@@ -1083,7 +1252,7 @@ func HasFileURIArg(args json.RawMessage) bool {
 				}
 			}
 		case string:
-			if !t.contentKey[key] {
+			if t.placeKey(key) {
 				if _, kind := fileURIPath(strings.TrimSpace(x)); kind != fileURINone {
 					return true
 				}

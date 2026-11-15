@@ -16,10 +16,6 @@
 
 package actionfacts
 
-// MaxCommandBytes is the longest command line an analysis reads
-// (maxCommandBytes); a longer one is limit_exceeded with input_limit.
-const MaxCommandBytes = maxCommandBytes
-
 const (
 	maxArgsJSONBytes          = 256 << 10
 	maxCommandBytes           = 64 << 10

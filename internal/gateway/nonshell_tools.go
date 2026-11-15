@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
@@ -37,12 +38,17 @@ const (
 	maxNonShellPathTwins = 64 // twin dispatches of one call (bounded.Paths); the table's path rules read every path
 )
 
-// nonShellShadow is the one switch of the whole non-shell lane (the MCP effects
-// and the table rules on shell and native file-tool calls). When it is true
-// the lane computes nothing and adds nothing: the live verdicts are those of
-// rel/1.0.10. It ships false (live); the S7 lead flips it to ship the lane
-// shadow-only.
-var nonShellShadow = false
+// nonShellLaneShadow is the one switch of the whole non-shell lane (the MCP
+// effects and the table rules on shell and native file-tool calls):
+// guardrail.cascade.lanes.nonshell, on, shadow or off (default on), read
+// through the cascade lane registry (config.CascadeLanes.NonShellMode). Only on
+// is live: in shadow and in off the lane computes nothing and adds nothing, so
+// the verdicts are those of rel/1.0.10. The configuration is the request's (its
+// pinned generation, or its profile's); with none the lane is on.
+func nonShellLaneShadow(ctx context.Context) bool {
+	cfg := requestPolicyConfig(ctx)
+	return cfg != nil && cfg.Guardrail.Cascade.Lanes.NonShellMode() != config.CascadeLaneOn
+}
 
 // nonShellToolFindings reads a non-shell tool call (an MCP or app tool) as
 // effects with internal/toolshape and judges them: a path the call names is
@@ -55,7 +61,7 @@ var nonShellShadow = false
 // table cannot place adds nothing: unknown is not clean, but it alerts only
 // where a sensitive target is plausible, and that is the path rules above.
 func nonShellToolFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding, mcpServer string) []RuleFinding {
-	if nonShellShadow || !request.EnforcementCapable || ManagedEnterpriseActive() || !nonShellToolApplies(request, mcpServer) {
+	if !request.EnforcementCapable || ManagedEnterpriseActive() || nonShellLaneShadow(ctx) || !nonShellToolApplies(request, mcpServer) {
 		return findings
 	}
 	mapping, err := toolshape.Map(request.Input.Tool, request.Input.Args, mcpServer)
@@ -176,10 +182,8 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 			if e.Role == toolshape.RoleRedirect && e.Host != "" &&
 				!toolshape.LocalHost(e.Host) && !toolshape.PrivateHost(e.Host) &&
 				!own[e.Host] {
-				// The account a call names for itself (from, sender) is the
-				// caller's claim, so it never excuses a copy; it only makes the
-				// finding certain (the call says whose mail it is and copies it
-				// elsewhere).
+				// The caller names its own account, so nothing the call says
+				// excuses a copy: the finding is uncertain, an alert in every tier.
 				add(mcpSendRedirectRuleID, "copy or output goes to "+e.Arg, true)
 			}
 			if e.Host != "" && nonShellCollectorHost(e.Host) {
@@ -307,7 +311,7 @@ func nonShellContentOf(raw json.RawMessage) string {
 // managed installs a finding is an alert. A call without a word any rule
 // needs is not parsed again.
 func shellToolFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
-	if nonShellShadow || !request.EnforcementCapable || ManagedEnterpriseActive() {
+	if !request.EnforcementCapable || ManagedEnterpriseActive() || nonShellLaneShadow(ctx) {
 		return findings
 	}
 	// A shell call is read by its command; a native file tool (Read, Write,

@@ -169,13 +169,51 @@ func trustedArgvReadingCut(input actionfacts.Input, facts actionfacts.Facts) bou
 	}
 	argv, ok := trustedArgvCommandInput(input)
 	if !ok {
-		if len(input.Args) > maxArgvDecodeBytes && trustedShellCommandTool(input.Tool) {
-			return bounded.Of(bounded.Bytes)
-		}
 		return bounded.CapSet{}
 	}
 	if len(argv) > actionfacts.MaxArgvItems {
 		return bounded.Of(bounded.Items)
 	}
 	return bounded.Of(bounded.Bytes)
+}
+
+// trustedReadingCut is the cap at which the reading of a shell call stopped
+// under the statement budget, the one shared point every dialect's
+// limit_exceeded reaches (the one bound rule): such a call is TRUNCATED.
+//   - The command cap of a CMD or PowerShell reading, cap=items
+//     (rel-1-0-10:GAP-0426, GAP-0589); the statements of a capped PowerShell
+//     reading are read again in runs under the cap
+//     (actionfacts.PowerShellCappedRuns).
+//   - An argv command that no launcher script covers (trustedArgvReadingCut):
+//     a word over 4 KiB, over 64 KiB in all, or more than 256 words
+//     (rel-1-0-10:GAP-0712). bodyRead is set when the script of the launcher
+//     is read on its own (launcherBodyTwinRequest): a word over the argv
+//     bounds is then not a cut of the reading, and the script's own cuts are
+//     the ones that count.
+//
+// A POSIX reading is not truncated by its command cap: its per-statement
+// split (SimpleCommands) reads every statement up to the statement budget.
+func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts, bodyRead bool) bounded.CapSet {
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
+		return bounded.CapSet{}
+	}
+	if !bodyRead {
+		if cut := trustedArgvReadingCut(input, facts); cut.Any() {
+			return cut
+		}
+	}
+	if facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell {
+		return bounded.Of(bounded.Items)
+	}
+	return bounded.CapSet{}
+}
+
+// trustedShellCommandTool reports a tool whose input is a shell command
+// line: a POSIX, PowerShell or CMD execution tool.
+func trustedShellCommandTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "cmd", "cmd.exe":
+		return true
+	}
+	return trustedBashExecutionTool(tool) || trustedPowerShellExecutionTool(tool)
 }
