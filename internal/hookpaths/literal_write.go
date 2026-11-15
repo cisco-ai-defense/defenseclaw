@@ -665,8 +665,8 @@ func readInPlaceEdits(command, cwd, home string, user KnownUser, edit func(name 
 		}
 		var files []string
 		followed := false
-		switch programBase(words[0]) {
-		case "sed", "gsed":
+		switch sedProgram(words[0]) {
+		case "sed":
 			files, followed = sedInPlaceFiles(words), sedFollowsInPlaceLinks(words)
 		case "perl":
 			files = perlInPlaceFiles(words)

@@ -554,6 +554,9 @@ func execTracked(argv []string) int {
 	if os.Getpid() != 1 {
 		return containExitNotContained
 	}
+	// This runs in init, on the main thread, which execs the scanner below:
+	// the scanner keeps the nicer value (lowerScannerPriority, GAP-0251).
+	lowerScannerPriority()
 	if err := guardTrackedInit(); err != nil {
 		return containExitNotContained
 	}

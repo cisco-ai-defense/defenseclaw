@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -31,39 +30,6 @@ import (
 // 1.0.5 left entries 1.0.5 could not remove, which outlived the Kiro
 // connector (rel-1-0-10:GAP-0275). 1.0.8 and later own both forms.
 
-// kiroRollbackTargetOwnsPreStartForm reports whether the rollback target
-// release owns preStartAnswerWindowsKiroHookCommand: 1.0.8 and later. An
-// unknown or unparsable target gets the form every 1.0.x release owns.
-func kiroRollbackTargetOwnsPreStartForm(target string) bool {
-	major, minor, patch, ok := parseKiroReleaseVersion(target)
-	if !ok {
-		return false
-	}
-	return major > 1 || (major == 1 && (minor > 0 || patch >= 8))
-}
-
-// parseKiroReleaseVersion reads a DefenseClaw release number such as
-// "1.0.5", "v1.0.8" or "1.0.6-rc.dm2".
-func parseKiroReleaseVersion(value string) (major, minor, patch int, ok bool) {
-	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
-	if cut := strings.IndexAny(value, "-+ "); cut >= 0 {
-		value = value[:cut]
-	}
-	parts := strings.Split(value, ".")
-	if len(parts) != 3 {
-		return 0, 0, 0, false
-	}
-	numbers := make([]int, 3)
-	for i, part := range parts {
-		n, err := strconv.Atoi(part)
-		if err != nil || n < 0 {
-			return 0, 0, 0, false
-		}
-		numbers[i] = n
-	}
-	return numbers[0], numbers[1], numbers[2], true
-}
-
 // kiroWindowsHookFormPairs are the per-user Kiro commands this release writes
 // for each launcher, paired with an earlier form. For a rollback (toEarlier)
 // that is the form the target release renders; for the restore of an aborted
@@ -82,7 +48,7 @@ func kiroWindowsHookFormPairs(launchers []string, target string, toEarlier bool)
 				if hasLegacy {
 					earlier = append(earlier, legacy)
 				}
-			case kiroRollbackTargetOwnsPreStartForm(target) || !hasLegacy:
+			case rollbackTargetOwns(target, releaseCurrentAwaitedFallback) || !hasLegacy:
 				earlier = append(earlier, preStart)
 			default:
 				earlier = append(earlier, legacy)

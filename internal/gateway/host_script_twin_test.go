@@ -54,7 +54,11 @@ func TestHostScriptTwinOnlyAddsFindings(t *testing.T) {
 		{name: "file launcher", tool: "PowerShell", command: `powershell -File C:\tmp\run.ps1`, opaque: true},
 		{name: "stop parsing tail", tool: "PowerShell", command: `powershell -Command --% Remove-Item C:\ -Recurse -Force`, opaque: true},
 		{name: "working directory", tool: "PowerShell", command: `pwsh -wd C:\work -c "Remove-Item C:\ -Recurse -Force"`, opaque: true},
-		{name: "arbitrary path launcher", tool: "PowerShell", command: `C:\tmp\pwsh.exe -c "Remove-Item C:\ -Recurse -Force"`, opaque: true},
+		// A launcher at any path is read by its file name, as the over-limit
+		// launcher screen names it (actionfacts.ShellLauncherCall,
+		// rel-1-0-10:GAP-0804): psparse leaves it opaque, the launcher body
+		// reading reads it, so its drive-root removal is enforced.
+		{name: "arbitrary path launcher", tool: "PowerShell", command: `C:\tmp\pwsh.exe -c "Remove-Item C:\ -Recurse -Force"`, strengthens: true},
 	}
 	run := func(c call, enabled bool, pack string) []RuleFinding {
 		args, err := json.Marshal(map[string]string{"command": c.command})

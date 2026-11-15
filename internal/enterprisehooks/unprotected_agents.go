@@ -125,6 +125,12 @@ const (
 	// UnprotectedCodeInstallScanIncomplete means an enrolled user's install
 	// locations could not be fully inspected within the scan bound.
 	UnprotectedCodeInstallScanIncomplete = "agent_install_scan_incomplete"
+	// UnprotectedCodeInstallScanPartial is the status warning (never a
+	// record code) for an agent_install_scan_incomplete scan gap of an
+	// account whose managed hook for that connector is verified: the
+	// account is covered, and the warning names the part of the scan that
+	// did not finish (InstallScanGapCovered, rel-1-0-10 GAP-0802).
+	UnprotectedCodeInstallScanPartial = "agent_install_scan_partial"
 	// UnprotectedCodeKiroCLIBelowHookFloor: old kiro-cli has a headless
 	// engine that never loads the hook, even when an earlier release left
 	// interactive hooks installed for the account.
@@ -164,6 +170,9 @@ func UnprotectedCodeLeavesCoverageIncomplete(code string) bool {
 // unprotectedReasonMaxRunes bounds the user-influenced reason text.
 const unprotectedReasonMaxRunes = 400
 
+// unprotectedFolderMaxRunes bounds the folder a scan gap names.
+const unprotectedFolderMaxRunes = 512
+
 // UnprotectedAgent is one installed agent or surface the enumerator found
 // that DefenseClaw cannot fully cover.
 type UnprotectedAgent struct {
@@ -186,6 +195,57 @@ type UnprotectedAgent struct {
 	Refusal string `json:"refusal,omitempty"`
 	Code    string `json:"code"`
 	Reason  string `json:"reason"`
+	// Skipped and Folder are set only on an agent_install_scan_incomplete
+	// entry of the bounded private-install scan: the PrivateInstallSkipped*
+	// code of the part that did not finish, and the first folder it could
+	// not list when it knows one. An entry without Skipped is not a scan gap
+	// (an account that could not be inspected at all, an older record).
+	Skipped string `json:"skipped,omitempty"`
+	Folder  string `json:"folder,omitempty"`
+}
+
+// InstallScanGapCovered reports whether agent is a gap of the bounded
+// private-install scan (an agent_install_scan_incomplete entry with a
+// scan-gap code) of an account whose managed hook for that connector
+// hookVerified reports verified. Such a gap is a warning
+// (UnprotectedCodeInstallScanPartial), not a coverage gap: managed hooks do
+// not depend on whether the home could be listed, and every copy the scan
+// did find that the hook contract does not cover is its own
+// hook_contract_unverified entry. A copy discovery named outside the scan
+// roots is a finding, not a gap, and stays not protected. With hookVerified
+// nil nothing is verified (rel-1-0-10 GAP-0802).
+func InstallScanGapCovered(agent UnprotectedAgent, hookVerified func(UnprotectedAgent) bool) bool {
+	return hookVerified != nil && agent.InstallScanGap() && hookVerified(agent)
+}
+
+// InstallScanGap reports whether a is a part of the bounded private-install
+// scan of one connector that did not finish (a scan-gap code), as opposed to
+// a copy the scan found, a copy discovery named outside the scan roots, or
+// an entry that is not a scan gap. It says nothing about the managed hook.
+func (a UnprotectedAgent) InstallScanGap() bool {
+	if a.Code != UnprotectedCodeInstallScanIncomplete || strings.TrimSpace(a.Connector) == "" {
+		return false
+	}
+	switch KnownPrivateInstallSkipped(a.Skipped) {
+	case "", PrivateInstallSkippedOutsideRoots:
+		return false
+	}
+	return true
+}
+
+// InstallScanPartialMessage is the agent_install_scan_partial warning for a
+// scan gap InstallScanGapCovered covers. It is built from the skipped code
+// and the folder, never from the record's reason text.
+func (a UnprotectedAgent) InstallScanPartialMessage() string {
+	name, who := a.label()
+	why := privateInstallSkippedText[a.Skipped]
+	if folder := strings.TrimSpace(a.Folder); folder != "" {
+		why += "; first folder not fully listed: " + folder
+	}
+	return fmt.Sprintf("%s for user %s is covered by its managed hook, which the hook guardian verified for this account; "+
+		"the bounded scan of this account's private agent installs was incomplete (%s), so a separate copy of %s in the part "+
+		"not scanned was not checked against the hook contract; use application control to exclude unapproved agent binaries",
+		name, who, why, strings.TrimSpace(a.Connector))
 }
 
 type unprotectedAgentsFile struct {
@@ -269,14 +329,27 @@ func UnprotectedCodeForReason(reason string) string {
 
 // Message is the operator-facing status line for one agent.
 func (a UnprotectedAgent) Message() string {
-	name := strings.TrimSpace(a.Connector)
+	name, who := a.label()
+	reason := strings.TrimSpace(a.Reason)
+	if folder := strings.TrimSpace(a.Folder); folder != "" {
+		reason += "; first folder not fully listed: " + folder
+	}
+	if name == "" {
+		return fmt.Sprintf("user %s is not enrolled: %s", who, reason)
+	}
+	return fmt.Sprintf("%s for user %s is not protected: %s", name, who, reason)
+}
+
+// label names the agent (connector, version, path, surface) and its account.
+func (a UnprotectedAgent) label() (name, who string) {
+	name = strings.TrimSpace(a.Connector)
 	if version := strings.TrimSpace(a.Version); version != "" {
 		name += " " + version
 	}
 	if path := strings.TrimSpace(a.InstallPath); path != "" {
 		name += " at " + path
 	}
-	who := strings.TrimSpace(a.User)
+	who = strings.TrimSpace(a.User)
 	if sid := strings.TrimSpace(a.SID); sid != "" {
 		if who == "" {
 			who = sid
@@ -294,10 +367,7 @@ func (a UnprotectedAgent) Message() string {
 		}
 		name += ")"
 	}
-	if name == "" {
-		return fmt.Sprintf("user %s is not enrolled: %s", who, strings.TrimSpace(a.Reason))
-	}
-	return fmt.Sprintf("%s for user %s is not protected: %s", name, who, strings.TrimSpace(a.Reason))
+	return name, who
 }
 
 // MarshalUnprotectedAgents serializes agents deterministically (sorted, one
@@ -418,6 +488,13 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 			agent.Code = UnprotectedCodeForReason(agent.Reason)
 		}
 		agent = classifyOpenCodeV1(agent)
+		if agent.Code != UnprotectedCodeInstallScanIncomplete {
+			agent.Skipped = ""
+		}
+		if agent.Skipped = KnownPrivateInstallSkipped(agent.Skipped); agent.Skipped == "" {
+			agent.Folder = ""
+		}
+		agent.Folder = boundedStatusText(agent.Folder, unprotectedFolderMaxRunes)
 		key := strings.ToLower(agent.SID) + "\x00" + agent.User + "\x00" + agent.Connector + "\x00" + agent.Surface + "\x00" + agent.Host + "\x00" + agent.InstallPath + "\x00" + agent.Version + "\x00" + agent.Code
 		if agent.Connector == "kiro" {
 			// One Kiro row can describe two installed products (kiro-cli and

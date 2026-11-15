@@ -161,6 +161,9 @@ type trustedActionRequest struct {
 	EnforcementCapable bool
 	// StrictPolicy grades an unverifiable extra argument as a block.
 	StrictPolicy bool
+	// sessionID is the connector's session of the call, for the checks that
+	// follow a session across calls (the page a browser tool has open).
+	sessionID string
 	// ManagedInstall is set for a call judged by a managed enterprise install:
 	// content the rules could not prove is judged as the strict tier judges it,
 	// because a managed device fails closed.
@@ -280,6 +283,11 @@ type trustedActionRequest struct {
 	// (rel-1-0-10:GAP-0013). The operand is empty when no one operand was
 	// at fault (a directory walk or a pattern the shell expands).
 	unprovenTarget *unprovenWrite
+	// nonWriteMention, when set, is told that the target scan held the call
+	// only on words of statements that read a protected file, in a per-user
+	// default or permissive install (ActionMentionsNoWriteRole): the finding
+	// alerts, it does not block (rel-1-0-10:GAP-0018).
+	nonWriteMention *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -310,6 +318,14 @@ type trustedActionRequest struct {
 	windowsPowerShellReading *windowsHintedReading
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
+	// posixReadingTwin is a Windows-dialect call of a shell tool that does
+	// not name its shell (agy run_command): it is also judged in the POSIX
+	// reading it had before the Windows dialect, and what that reading
+	// proves is kept (posixReadingTwinRequest, rel-1-0-10:GAP-0850).
+	posixReadingTwin bool
+	// launcherDepth is the number of shell launchers whose body this request
+	// reads (launcherBodyTwinRequest), bounded by maxLauncherBodyDepth.
+	launcherDepth int
 	// generation is the rule generation the call is judged with; nil: the
 	// request profile's (snapshotRulePackGenerationFor). A caller that
 	// combines several dispatches of one request judges each with each
@@ -330,6 +346,10 @@ type trustedActionRequest struct {
 	// same input and facts. dispatchTrustedAction makes it; a copy of the
 	// request shares it, and a child command with another input reads its own.
 	simpleMemo *trustedSimpleMemo
+	// inlineTierNested marks a request derived from one already dispatched:
+	// only the outermost call applies the inline hand-off tier
+	// (withInlineHandoffTier).
+	inlineTierNested bool
 }
 
 // trustedSimpleMemo holds the first simple-command split asked of it.
@@ -428,8 +448,25 @@ func dispatchTrustedAction(
 	defer hookpaths.HookCall()()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	defer recoverTrustedActionFault(request, &findings)
+	// A call whose shell the tool does not name is judged in the POSIX
+	// reading too, before any bound below decides the call: a credential
+	// operand the POSIX reading proves past the argv bound kept its block
+	// there, and the PowerShell reading left it at the unknown tier
+	// (rel-1-0-10:GAP-0850). The twins made below never repeat it.
+	if twin, ok := posixReadingTwinRequest(request); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	request.posixReadingTwin = false
 	if trustedActionFaultHook != nil {
 		trustedActionFaultHook(request)
+	}
+	// The hand-off tier is for the call's final findings only: a twin or a
+	// simple-command pass inside it is a proof the outer call reads as proven.
+	if !request.inlineTierNested {
+		request.inlineTierNested = true // every twin and pass below is a copy of this request
+		defer func() { findings = withInlineHandoffTier(parent, request, findings) }()
 	}
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
@@ -645,7 +682,32 @@ func dispatchTrustedAction(
 			// (GAP-0693).
 			defer func() { findings = withPowerShellCapPieces(parent, request, findings) }()
 		}
-		if cut := trustedReadingCut(request.Input, facts); cut.Any() {
+		launcher := launcherBodyTwinRequest(request, facts)
+		if launcher.read {
+			// The script of an argv shell launcher (powershell.exe -Command,
+			// cmd /c) is judged as the string command the same script is
+			// (rel-1-0-10:GAP-0711, GAP-0712): its findings count, the
+			// TRUNCATED floor of its own cap among them.
+			defer func() {
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcher.twin))
+			}()
+		}
+		if launcher.depthCut {
+			// A launcher nested past maxLauncherBodyDepth is not read: TRUNCATED
+			// at the depth cap (the one bound rule, rel-1-0-10:GAP-0806).
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Depth), request) }()
+		}
+		// A script past the input bound is not read in full, so the bound of the argv
+		// call still cuts it (rel-1-0-10:GAP-0712), and so do the words a POSIX -c
+		// script runs as its arguments and long wrapper words (rel-1-0-10:GAP-0803).
+		// An argv call the POSIX reading judges past its byte bound as the text of
+		// its words (posixParseTruncation: a word in code position truncated, a data
+		// word judged as its twin) keeps that reading, which is the finer floor: a
+		// plain operand past 4 KiB of echo or dcx stays data, as in the text form
+		// (rel-1-0-10:GAP-0689). The argv cut covers every other argv call.
+		argvRead := launcher.read && launcher.fully && len(launcher.twin.Input.Command) <= actionfacts.MaxCommandBytes ||
+			posixByteBoundCommand(request, facts) != ""
+		if cut := trustedReadingCut(request.Input, facts, argvRead); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
 			// statement budget: the call is TRUNCATED (the one bound rule),
 			// never judged below the unknown tier of its pack, and what was
@@ -769,6 +831,21 @@ func dispatchTrustedAction(
 		defer func() {
 			findings = withBoundedTruncation(findings, bounded.Of(bounded.Bytes), request)
 		}()
+	}
+	// The POSIX analysis reads a call as invalid syntax when it holds a Bash
+	// spelling it has no grammar for (an ANSI-C quote with an escaped quote
+	// before the launcher, rel-1-0-10:GAP-0740 lead-dollarsq), so it never
+	// stops at the input bound the Bash reading of the same text hits: a
+	// word past the string bound in a call that names a host launcher is
+	// truncated all the same, never a clean allow.
+	if facts.Parse.Status == actionfacts.StatusInvalid && slices.Contains(facts.Parse.Issues, actionfacts.IssueInvalidSyntax) {
+		if command, known := trustedBashCommandInput(request.Input); known &&
+			actionfacts.ShellInputPastByteBound(command, len(request.Input.Args)) &&
+			actionfacts.TruncatedHostCall(request.Input) {
+			defer func() {
+				findings = withBoundedTruncation(findings, bounded.Of(bounded.Bytes), request)
+			}()
+		}
 	}
 	// A download cradle psparse proves on the tree, in a call the tokenizer
 	// cannot prove it in, is judged at the unknown tier of the pack at least
@@ -1594,7 +1671,8 @@ func withActiveStateTargetMention(
 	if !hereStringMutates && !xargsMutates && !globbedStateMutation(facts) &&
 		(!placed || !globbedStateMutation(linkFacts)) && !throughLink(globbedStateMutationThroughLink) &&
 		!findGlobTwinStateMutation(facts, request) &&
-		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) &&
+		!archiveExtractsIntoState(facts, request) && !inlineHandoffStateWrite(facts, request) &&
+		!provenLinkedStateWrite(facts, request) &&
 		!provenFollowedInPlaceStateWrite(facts, request) && !fileToolWriteThroughLinkToState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known {
@@ -4712,8 +4790,8 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 		return false
 	}
 	text, known := trustedBashCommandInput(request.Input)
-	if !known || !strings.Contains(text, "sed") && !strings.Contains(text, "perl") {
-		return false
+	if !known {
+		return false // no text test of the call: the readers below take the program from the parsed word (rel-1-0-10:GAP-0737)
 	}
 	facts, request = protectedHomePlacedReading(facts, request)
 	home := facts.EnforcementProjection().ActiveHome
@@ -7393,6 +7471,7 @@ func finalizeTrustedActionFindings(
 		protectedLocalFileRead: request.CopilotSharedLocalFile && request.Input.Tool == "read_file",
 		sendDestination:        request.sendDestination,
 	})
+	findings = withProvenScopeFindings(generation, request, facts, findings)
 	if !request.StrictPolicy {
 		findings = trustedActionOrdinaryCredentialCopyFindings(facts, findings)
 	}
@@ -9843,17 +9922,30 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 //     found but allowed in every pack (rel-1-0-10:GAP-0589). The statements
 //     of a capped PowerShell reading are read again in runs under the cap
 //     (actionfacts.PowerShellCappedRuns).
+//   - An argv command that no launcher script covers (trustedArgvReadingCut):
+//     a word over 4 KiB, over 64 KiB in all, or more than 256 words
+//     (rel-1-0-10:GAP-0712). bodyRead is set when the script of the launcher
+//     is read on its own (launcherBodyTwinRequest), or when the POSIX reading
+//     judges the call past its byte bound as the text of its words
+//     (posixParseTruncation, rel-1-0-10:GAP-0689): a word over the argv
+//     bounds is then not a cut of the reading, and that reading's own cuts
+//     are the ones that count.
 //
 // A POSIX reading is not truncated by its command cap: its per-statement
 // split (SimpleCommands) reads every statement up to the statement budget
 // (ShellStatementsOverBudget), and each is judged.
-func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
+func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts, bodyRead bool) bounded.CapSet {
 	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 		return bounded.CapSet{}
 	}
 	if command, known := trustedBashCommandInput(input); known && len(command) > actionfacts.MaxCommandBytes &&
 		trustedShellCommandTool(input.Tool) {
 		return bounded.Of(bounded.Bytes)
+	}
+	if !bodyRead {
+		if cut := trustedArgvReadingCut(input, facts); cut.Any() {
+			return cut
+		}
 	}
 	if facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell {
 		return bounded.Of(bounded.Items)
@@ -12200,4 +12292,22 @@ func trustedSimpleCommandEvidenceCWDs(request trustedActionRequest, simples []ac
 		return nil
 	}
 	return cwds
+}
+
+// posixReadingTwinRequest is the POSIX reading of a call the Windows hook
+// placed in a Windows dialect when the tool does not name its shell
+// (posixReadingTwin): the reading the call had before the dialect, as the
+// proxy judges both readings (proxyPOSIXReading). It is a reading twin: it
+// records nothing, makes no further readings, and only its proven findings
+// are kept (withTwinProvenBlocks), so the call is never weaker than either
+// reading.
+func posixReadingTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if !request.posixReadingTwin || request.readingTwin || !request.windowsShellDialect ||
+		request.Input.DialectHint == actionfacts.DialectPOSIX {
+		return trustedActionRequest{}, false
+	}
+	twin := windowsReadingTwin(request)
+	twin.Input.DialectHint = ""
+	twin.windowsShellDialect, twin.windowsPowerShellReading, twin.posixReadingTwin = false, nil, false
+	return twin, true
 }

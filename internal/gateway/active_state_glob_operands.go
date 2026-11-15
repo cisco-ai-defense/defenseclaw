@@ -88,7 +88,7 @@ var stateWrapperValueOptions = map[string]map[string]bool{
 // words (`sudo -u root rm -rf a/*` -> rm, [-rf a/*]); the command itself
 // when it is no such wrapper or its program word is not static.
 func unwrapStateWrapper(command actionfacts.CommandFact, words []string) (actionfacts.CommandFact, []string) {
-	for depth := 0; depth < 4; depth++ {
+	for depth := 0; depth < actionfacts.MaxPrefixWrapperChain; depth++ {
 		program := path.Base(command.Program)
 		valueOptions, wrapper := stateWrapperValueOptions[program]
 		if !wrapper {

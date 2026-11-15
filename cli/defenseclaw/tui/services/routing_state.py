@@ -19,6 +19,11 @@ from typing import Any
 VIEW_ROUTING = "routing"
 VIEW_USAGE = "usage"
 USAGE_PERIODS = (("d", "day", "24h"), ("w", "week", "7d"), ("m", "month", "30d"))
+# routing.enabled is on in config.yaml but the gateway still reports routing
+# disabled: it has not reloaded yet. The panel reloads every APPLYING_POLL_SECONDS
+# for at most APPLYING_MAX_POLLS reads, then says the change did not apply.
+APPLYING_POLL_SECONDS = 2.0
+APPLYING_MAX_POLLS = 6
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,8 @@ class RoutingPanelModel:
     period: str = "week"
     error: str = ""
     loaded: bool = False
+    # Reads in a row that found routing on in config.yaml and off in the gateway.
+    applying_reads: int = 0
 
     # ------------------------------------------------------------ data in
 
@@ -89,6 +96,7 @@ class RoutingPanelModel:
             self.set_error("routing status did not answer with JSON; run defenseclaw routing status")
             return
         self.status, self.error, self.loaded = data, "", True
+        self.applying_reads = self.applying_reads + 1 if status_unapplied(data) else 0
         self.cursor = min(self.cursor, max(0, len(self.rows()) - 1))
 
     def apply_usage_json(self, stdout: str | bytes) -> None:
@@ -162,11 +170,25 @@ class RoutingPanelModel:
             scope = "everyone" if (self.usage or {}).get("scope") == "all" else "yours"
             return f"Usage for the last {self.period} ({scope})."
         state = "on" if self.enabled else "off"
-        health = str((self.status.get("health") or {}).get("state") or "unknown")
+        health = self.runtime_label()
         text = f"Routing {state} · classifier {self.status.get('classifier', '?')} · {health}"
         if self.managed:
             text += " · set by your administrator"
         return text
+
+    @property
+    def applying(self) -> bool:
+        """Routing is on in config.yaml and the gateway has not applied it yet
+        (within the bounded wait): the panel reloads itself meanwhile."""
+        return status_unapplied(self.status) and self.applying_reads <= APPLYING_MAX_POLLS
+
+    def runtime_label(self) -> str:
+        """What the gateway runs, never "on" together with "disabled"."""
+        if self.applying:
+            return "applying: the gateway is loading the change"
+        if status_unapplied(self.status):
+            return "not applied: restart the gateway (defenseclaw-gateway restart)"
+        return str((self.status.get("health") or {}).get("state") or "unknown")
 
     def warnings(self) -> list[str]:
         return [str(w) for w in self.status.get("warnings") or []]
@@ -267,13 +289,24 @@ def routing_keys_hint(model: RoutingPanelModel) -> str:
     return " · ".join(f"{k} {label}" for k, label in model.keys())
 
 
-def overview_tile(status: dict[str, Any]) -> str:
-    """The overview line: on/off, models, and a used-up budget if any."""
+def status_unapplied(status: dict[str, Any]) -> bool:
+    """routing.enabled is on in config.yaml but the gateway reports routing
+    disabled (it has not reloaded, or could not start it)."""
+    health = status.get("health") if isinstance(status, dict) else None
+    return bool(status.get("enabled")) and isinstance(health, dict) and health.get("state") == "disabled"
+
+
+def overview_tile(status: dict[str, Any], applying: bool = True) -> str:
+    """The overview line: on/off, models, and a used-up budget if any.
+    applying is the panel's own state: False once the bounded wait for the
+    gateway ended, so the tile says what the panel says."""
     if not status:
         return "Routing: unknown"
     if not status.get("enabled"):
         return "Routing: off"
     text = f"Routing: on · {len(status.get('models') or [])} model(s)"
+    if status_unapplied(status):
+        text += " · applying" if applying else " · not applied"
     budgets = (status.get("effective") or {}).get("budgets") or []
     used = [b for b in budgets if isinstance(b, dict) and b.get("exceeded")]
     if used:

@@ -303,11 +303,66 @@ func TestHookJudge_ToolResultRunsToolResultInjectionJudge(t *testing.T) {
 	if len(mock.captured) != 1 {
 		t.Fatalf("injection judge called %d time(s) on a tool result, want 1", len(mock.captured))
 	}
-	if sys := mock.captured[0].Messages[0].Content; sys != toolResultInjectionSystemPrompt {
+	// The tool-result prompt, then the note on the tool-result sections
+	// (rel-1-0-10:GAP-0847).
+	if sys := mock.captured[0].Messages[0].Content; !strings.HasPrefix(sys, toolResultInjectionSystemPrompt) || !strings.Contains(sys, "CONTEXT FROM DEFENSECLAW") {
 		t.Fatalf("tool result judged with another system prompt: %.80q", sys)
 	}
 	if v.Severity == "CRITICAL" || v.Action == guardrailActionBlock {
 		t.Fatalf("tool-result judge hit = %s %s; want HIGH at most and no block in the default posture", v.Severity, v.Action)
+	}
+}
+
+// A Claude Code PostToolUse hands the tool-result judge (the PII judge, which
+// reads a tool's output only for a tool the pack lists with judge_result,
+// GAP-0171) its tool and call (the hook inspects the output as "message"),
+// and the session's user request from UserPromptSubmit, outside the sample.
+func TestHookJudge_ClaudeCodeToolResultCarriesCallContext(t *testing.T) {
+	mock := injectionHitProvider()
+	a := newHookJudgeAPIServer(t,
+		config.JudgeConfig{Enabled: true, PII: true, PIICompletion: true, HookConnectors: []string{"claudecode"}},
+		"judge_first", mock)
+	a.scannerCfg.Guardrail.Connector = "claudecode"
+	home := t.TempDir()
+	ctx := ContextWithSessionID(t.Context(), "s-trctx")
+	judge := a.hookJudge.Load()
+	judge.rp = &guardrail.RulePack{SensitiveTools: &guardrail.SensitiveToolsConfig{Tools: []guardrail.SensitiveTool{
+		{Name: "mail_search", ResultInspection: true, JudgeResult: true},
+	}}}
+	judge.ObserveSessionPrompt(ctx, "update the parser fixtures")
+	a.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "PostToolUse", SessionID: "s-trctx", CWD: home, ToolName: "mail_search",
+		ToolInput:    map[string]interface{}{"query": "parser fixtures review"},
+		ToolResponse: map[string]interface{}{"content": "{\"case\": 1, \"text\": \"fixture row for the parser tests\"}"},
+	})
+	var system, user string
+	for _, req := range mock.captured {
+		if strings.Contains(req.Messages[0].Content, "CONTEXT FROM DEFENSECLAW") {
+			system, user = req.Messages[0].Content, req.Messages[1].Content
+		}
+	}
+	if system == "" {
+		t.Fatalf("no tool-result judge call with the context note (%d calls)", len(mock.captured))
+	}
+	// The sections are in the user message, before the sample, with the nonce
+	// the system message names; the session's text never reaches the system
+	// message (rel-1-0-10:GAP-0638, GAP-0847).
+	nonce := toolJudgeSampleNonce(user)
+	if nonce == "" || !strings.Contains(system, toolJudgeNonceLine(nonce)) {
+		t.Fatalf("system message does not name the sections' nonce %q:\n%s", nonce, system)
+	}
+	for _, want := range []string{`<SESSION_USER_INTENT nonce="` + nonce + `" untrusted="true">` + "\nupdate the parser fixtures\n", `<CURRENT_TOOL_CALL nonce="` + nonce + `" tool="mail_search">`, "parser fixtures review"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("user message lacks %q:\n%.600s", want, user)
+		}
+	}
+	if !strings.Contains(user, "\n\n<<<SAMPLE>>>\n") {
+		t.Errorf("the sections do not come before the sample: %.600q", user)
+	}
+	for _, leaked := range []string{"parser fixtures review", "update the parser fixtures"} {
+		if strings.Contains(system, leaked) {
+			t.Errorf("session text %q reached the system message", leaked)
+		}
 	}
 }
 

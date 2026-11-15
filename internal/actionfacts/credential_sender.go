@@ -523,7 +523,10 @@ func credentialProducerFeeds(facts Facts, id int64, hops int) CredentialSenderRe
 			if credentialPathOperand(word, facts.CWD, facts.ActiveHome) {
 				return CredentialSenderFile
 			}
-			if credentialMayHold(word, facts.CWD, facts.ActiveHome) {
+			// a producer names the folder it reads, not the whole home or the
+			// root a search walks or a character set it translates: only a
+			// credentials folder or a name glob counts
+			if credentialMayHoldIn(word, facts.CWD, facts.ActiveHome, false) {
 				reason = CredentialSenderDirectory
 			}
 		}
@@ -630,6 +633,14 @@ var credentialDirectoryNames = func() []string {
 // home or one of its parents, or a glob whose name pattern a credentials
 // file name matches (or that sits in a credentials folder).
 func credentialMayHold(word, cwd, home string) bool {
+	return credentialMayHoldIn(word, cwd, home, true)
+}
+
+// credentialMayHoldIn is credentialMayHold; roots false leaves out the
+// reading of the active home, its parents and the root as folders that hold a
+// credentials file (a direct operand of a sender is read so, the operand of a
+// producer stage that filters or searches is not).
+func credentialMayHoldIn(word, cwd, home string, roots bool) bool {
 	unrooted := !strings.HasPrefix(cwd, "/") && !strings.HasPrefix(word, "/") && !strings.HasPrefix(word, "~") &&
 		!strings.ContainsAny(word, "*?[") && !strings.Contains(word, ":")
 	canonical, ok := senderOperandPath(word, cwd, home)
@@ -694,6 +705,9 @@ func credentialMayHold(word, cwd, home string) bool {
 	}
 	if unrooted {
 		return false // a relative folder with no working directory is not rooted: it is not the root or the home
+	}
+	if !roots {
+		return false
 	}
 	if home = strings.ToLower(path.Clean(home)); strings.HasPrefix(home, "/") {
 		return canonical == home || canonical == "/" || strings.HasPrefix(home, canonical+"/")

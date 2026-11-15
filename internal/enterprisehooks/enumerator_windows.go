@@ -472,8 +472,9 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			judged[sid] = true
 			if windowsPrivateProfileBudget(ctx, 1) <= 0 {
 				for _, conn := range subject.Connectors {
-					opts.ReportUnprotected(UnprotectedAgent{User: user, SID: sid, Connector: conn, Code: UnprotectedCodeInstallScanIncomplete,
-						Reason: privateInstallIncompleteReason(PrivateInstallSkippedUnresolved)})
+					agent := privateInstallIncompleteAgent(conn, PrivateInstallSkippedUnresolved)
+					agent.User, agent.SID = user, sid
+					opts.ReportUnprotected(agent)
 				}
 				continue
 			}
@@ -585,9 +586,9 @@ func reportWindowsProfilesNotInspected(profiles []windowsUserProfile, connectors
 				*targets = append(*targets, row)
 			}
 			if opts.ReportUnprotected != nil {
-				opts.ReportUnprotected(UnprotectedAgent{User: user, SID: sid, Connector: conn,
-					Code:   UnprotectedCodeInstallScanIncomplete,
-					Reason: privateInstallIncompleteReason(PrivateInstallSkippedUnresolved)})
+				agent := privateInstallIncompleteAgent(conn, PrivateInstallSkippedUnresolved)
+				agent.User, agent.SID = user, sid
+				opts.ReportUnprotected(agent)
 			}
 		}
 		judged[sid] = true
@@ -1956,8 +1957,9 @@ func WindowsManifestScanIncomplete(subjects map[string]WindowsManifestSubject, e
 			if named[sid+"\x00"+conn] {
 				continue
 			}
-			out = append(out, UnprotectedAgent{User: user, SID: sid, Connector: conn, Code: UnprotectedCodeInstallScanIncomplete,
-				Reason: privateInstallIncompleteReason(skipped)})
+			agent := privateInstallIncompleteAgent(conn, skipped)
+			agent.User, agent.SID = user, sid
+			out = append(out, agent)
 		}
 	}
 	return out

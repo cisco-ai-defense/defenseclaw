@@ -422,6 +422,11 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		// ToolResponseInspectRequest carries no connector field, so the gate
 		// resolves the process connector via connectorName().
 		judgeCtx := r.Context()
+		if judgeLaneOn(a.decisionConfig(judgeCtx), a.connectorName(), config.CascadeLaneJudgeToolResultContext) {
+			judgeCtx = withToolResultCall(judgeCtx, req.Tool, nil)
+		} else {
+			judgeCtx = withoutToolResultCall(judgeCtx)
+		}
 		if cfg := a.decisionConfig(judgeCtx); cfg != nil && cfg.SecureClientIntegration() {
 			judgeCtx = context.WithoutCancel(judgeCtx)
 		}

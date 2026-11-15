@@ -42,7 +42,7 @@ func TestUnixPrivateInstallDeadlineAndDepthAreIncomplete(t *testing.T) {
 	for i := 0; i <= privateInstallWalkMaxDepth; i++ {
 		root = filepath.Dir(root)
 	}
-	_, complete := walkPrivateNPMPrefixes(context.Background(), root, privateInstallWalk{open: os.Open, unreachable: unixPrivateWalkUnreachable})
+	_, complete, _ := walkPrivateNPMPrefixes(context.Background(), root, privateInstallWalk{open: os.Open, unreachable: unixPrivateWalkUnreachable})
 	if complete {
 		t.Fatal("a directory beyond the depth cap was silently omitted")
 	}
@@ -58,7 +58,7 @@ func TestUnixPrivateWalkStopsDuringAProfileWithoutClaimingCompletion(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	opened := 0
-	_, complete := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{
+	_, complete, _ := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{
 		open: func(dir string) (*os.File, error) {
 			opened++
 			if opened == 2 {

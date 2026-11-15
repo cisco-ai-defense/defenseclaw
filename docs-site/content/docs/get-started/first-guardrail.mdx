@@ -45,7 +45,7 @@ Observe mode records policy findings without enforcing them. Hook fail mode and 
 
    The running gateway applies the change on its next reload. No restart is needed.
 
-3. Run a command a default rule blocks. `CMD-RM-RF` blocks a recursive force delete of `/` or a top-level directory such as `/etc` or `/proc`. Many models refuse to run `rm -rf /proc` themselves, so no tool call is made; if that happens, use the harmless test rule in [Block a destructive command](/docs/stories/observe-claude-code).
+3. Run a command a default rule blocks. `CMD-RM-RF` blocks a recursive force delete of `/`, of a top-level directory such as `/etc` or `/proc`, of your home, and of the contents of any of them (`/etc/*`, `~/*`). Many models refuse to run `rm -rf /proc` themselves, so no tool call is made; if that happens, use the harmless test rule in [Block a destructive command](/docs/stories/observe-claude-code).
 
 ## Check it worked
 

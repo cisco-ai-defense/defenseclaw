@@ -49,6 +49,47 @@ func TestGAP0744ReadStatementOverTheBudgetStillBlocks(t *testing.T) {
 	}
 }
 
+// A syntax-error remainder the run window or the cut-back tries of
+// shellparse.ReadSyntaxTail do not read is never a silent allow: the call
+// carries the detection-only ACTION-PARSE-FAILURE record in every pack, a
+// control read before the error still blocks, and a control inside the
+// unread part blocks in the strict packs through the raw text scan of the
+// unread remainder (lead ruling (a) on rel-1-0-10:GAP-0745). Rows P10, P11,
+// P31 and P38 of s7-syntchk: a control inside a body of more than
+// maxSyntaxTailRun pieces after a leading fi.
+func TestGAP0745UnreadRunWindowIsRecordedNeverSilent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fixtures are POSIX shell text")
+	}
+	pad := strings.Repeat(": ; ", 12)
+	shapes := map[string]func(string) string{
+		"P10": func(s string) string { return "fi\nfor i in 1; do " + s + "; " + pad + "; done" },
+		"P11": func(s string) string { return "fi\nif true; then " + s + "; " + pad + "; fi" },
+		"P31": func(s string) string { return "fi\nf() { " + s + "; " + pad + "; }; f" },
+		"P38": func(s string) string { return "fi\nwhile true; do " + s + "; " + pad + "; break; done" },
+	}
+	for _, p := range gap0437Packs {
+		t.Run(p.name, func(t *testing.T) {
+			hook := gap0437Server(t, p, "claudecode", "action")
+			cwd := t.TempDir()
+			for _, id := range gap0526SortedIDs(shapes) {
+				benign := gap0437Hook(t, hook, cwd, p.name+id+"benign", shapes[id]("ls"))
+				if !gap0526Names(benign, parseFailureRuleID) {
+					t.Errorf("%s %s benign: the unread remainder is not recorded: %v", p.name, id, benign)
+				}
+				if benign["action"] == "block" {
+					t.Errorf("%s %s benign: action block, the record alone never blocks: %v", p.name, id, benign["rule_ids"])
+				}
+				// A control read before the error blocks whatever follows.
+				before := gap0437Hook(t, hook, cwd, p.name+id+"before", gap0486Blocked["B3"]+"\n"+shapes[id]("ls"))
+				if before["action"] != "block" {
+					t.Errorf("%s %s control before the error: action %v, want block", p.name, id, before["action"])
+				}
+			}
+		})
+	}
+}
+
 // A here-document after the error is data: its body lines are not judged as
 // commands (GAP-0746), as rel does not judge them.
 func TestGAP0746HereDocumentAfterTheErrorIsData(t *testing.T) {

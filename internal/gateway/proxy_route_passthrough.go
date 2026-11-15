@@ -89,14 +89,17 @@ func (p *GuardrailProxy) routePassthrough(r *http.Request, in passthroughRouteIn
 	input := &ModelRouterInput{
 		Model: model, RequestModel: model, APIFamily: in.APIFamily, Connector: p.connectorName(),
 		Listener: engine.ListenerGuardrail, Severity: in.Severity, RequestedProvider: in.Provider,
-		ConversationID: routeConversationID(r), Text: in.Text, Caller: caller, Profiles: profiles,
+		ConversationID: routeConversationID(r), Text: passthroughRouterText(in.APIFamily, in.Body, in.Text), Caller: caller, Profiles: profiles,
+		Body: in.Body,
 	}
 	if hasTools {
 		input.Tools = []interface{}{true}
 	}
 	outcome = p.routeDetailed(r.Context(), input)
 	p.applyRouteGate(r.Context(), &outcome, in.Provider, model)
-	p.recordSemanticRoutingDecisionV8(r.Context(), outcome)
+	// Recorded when the function returns: by then the outcome says whether the
+	// call really went to the routed model.
+	defer func() { p.recordSemanticRoutingDecisionV8(r.Context(), routedMetricOutcome(outcome, ok)) }()
 	d := outcome.Decision
 	if outcome.Result != SemanticRouteApplied || d == nil {
 		return passthroughRoute{}, false, outcome

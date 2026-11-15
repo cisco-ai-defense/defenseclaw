@@ -25,7 +25,7 @@ func awkCommandShell(words []string, cwd string, readFiles bool) (shell []string
 	}
 	call := awkprog.Call{Words: words}
 	if readFiles {
-		call.Files = func(name string) (string, bool) { return readActionScript(name, cwd) }
+		call.Files = func(name string) (string, bool) { return ReadProgramFile(name, cwd) }
 	}
 	reading := call.Read()
 	if reading.Body == "" {

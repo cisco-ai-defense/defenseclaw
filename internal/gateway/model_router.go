@@ -160,7 +160,11 @@ type ModelRouterInput struct {
 	ConversationID    string
 	// Text overrides the classifier text taken from Messages (passthrough
 	// APIs that the proxy already reduced to human text).
-	Text      string
+	Text string
+	// Body is the raw request body of the passthrough and route-only
+	// listeners, read again only when routing.context is on (the chat
+	// route reads Messages instead).
+	Body      []byte
 	HasImages bool
 	ToolTurn  bool
 	Caller    engine.Caller

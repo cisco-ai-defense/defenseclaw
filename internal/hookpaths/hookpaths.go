@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
@@ -84,9 +85,13 @@ const TruncatedKey = "\x00truncated"
 const AwkFilesKey = "\x00awk-files"
 
 // ReadProgramFile reads the program file of an awk call as the hook client
-// does: the file the system opens for the name, as the user, up to the size
-// bound of a script body.
-func ReadProgramFile(name, cwd string) (string, bool) { return readActionScript(name, cwd) }
+// does: the file the system opens for the name, as the user. A file past the
+// awk program bound (awkprog.MaxProgramBytes) is read to that bound and one
+// byte more, so the reading judges what the start of the program holds and
+// reports the rest as truncated (rel-1-0-10:GAP-0734).
+func ReadProgramFile(name, cwd string) (string, bool) {
+	return readActionScriptWith(name, cwd, indirectRead{limit: awkprog.MaxProgramBytes, prefix: true})
+}
 
 // PatchCompleteKey is positive hook-side proof that every apply_patch (or
 // Hermes V4A patch) directive was parsed and each target was resolved in the
@@ -426,9 +431,10 @@ func childStateOperands(command, cwd, home string) []stateOperand {
 // of command read in cwd with the known values of the action (user): an
 // entry, or a followed name for sed --follow-symlinks.
 func inPlaceStateOperands(command, cwd, home string, user KnownUser) []stateOperand {
-	if !strings.Contains(command, "sed") && !strings.Contains(command, "perl") {
-		return nil
-	}
+	// No text test of the command stands in front of the reader: the program
+	// is the word the parser makes (readInPlaceEdits), so s""ed, "gsed" and
+	// perl5.38.2 name an editor as sed and perl do (rel-1-0-10:GAP-0737, as
+	// GAP-0667 for the backup reader).
 	var operands []stateOperand
 	readInPlaceEdits(command, cwd, home, user, func(name string, followed bool) {
 		operands = append(operands, stateOperand{path: name, entry: !followed})
@@ -2243,7 +2249,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					// that reading, and behind ProtectHome reads its targets
 					// only from this map (GAP-0499).
 					awkTwin := actionfacts.AwkCommandTwinFiles(command, func(name string) (string, bool) {
-						return readActionScript(name, cwd)
+						return ReadProgramFile(name, cwd)
 					})
 					// An awk call that is the whole command and starts one touch -h of
 					// a link itself is as safe as the plain call: the plain call lists
@@ -4492,6 +4498,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	// the command changes directory first.
 	changesDirectory := tactics.RunsProgram(command, cdPrograms...)
 	sequential := sequentialListCalls(file)
+	pipedCalls := pipedInputCalls(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
 		if !isCall || len(call.Args) == 0 {
@@ -4601,6 +4608,10 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			})
 		}
 		if opaqueProgram(program) {
+			if program == "new-item" && !powerShellNewItemMayMakeLink(words[1:], static[1:], pipedCalls[call]) {
+				// A file or a folder: New-Item makes no link (GAP-0801).
+				return true
+			}
 			links.unknown(true)
 			return true
 		}
@@ -4672,6 +4683,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				placedLinkCalls[call] = true
 			}
 		case slices.Contains(copyPrograms, program):
+			words, static := copyGlobOperandsAsNames(args, words, static)
 			_, topLevelPlaced := linkDirs[call]
 			_, nestedPlaced := nestedCopyDirs[call]
 			var globDestinations []string
@@ -7719,9 +7731,11 @@ func (l *shellLinks) record(source, name string, literal, symbolic bool, cwd str
 			text = relative
 		}
 	}
-	l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	if !linkPointsIntoItself(name, target) {
+		l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	}
 	if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
-		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
+		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name && !linkPointsIntoItself(resolved, target) {
 			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target, text: text})
 		}
 	}
@@ -8837,4 +8851,20 @@ func stepFollows(parts []string) bool {
 		}
 	}
 	return false
+}
+
+// pipedInputCalls are the calls that read the output of the pipeline stage
+// before them (every stage after the first): a PowerShell parameter can bind
+// from that input (rel-1-0-10:GAP-0849).
+func pipedInputCalls(file *syntax.File) map[*syntax.CallExpr]bool {
+	piped := make(map[*syntax.CallExpr]bool)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if pipe, ok := node.(*syntax.BinaryCmd); ok && (pipe.Op == syntax.Pipe || pipe.Op == syntax.PipeAll) && pipe.Y != nil {
+			if call, isCall := pipe.Y.Cmd.(*syntax.CallExpr); isCall {
+				piped[call] = true
+			}
+		}
+		return true
+	})
+	return piped
 }
