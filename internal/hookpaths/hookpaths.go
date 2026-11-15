@@ -4248,13 +4248,24 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	if !parsed {
 		// Resolve already marks a command that does not parse incomplete.
 		if opaqueLink.MatchString(command) {
+			if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
+				return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
+			}
 			links.unknown(true)
 		}
 		return links, false
 	}
-	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) && !links.addPythonLiteralLinks(file, command, cwd, home) {
-		links.unknown(true)
-		return links, false
+	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) {
+		// A PowerShell New-Item link and Move-Item with static operands are
+		// read as the ln and mv they are (rel-1-0-10:GAP-0749); every other
+		// link-making text keeps the opaque reading.
+		if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
+			return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
+		}
+		if !links.addPythonLiteralLinks(file, command, cwd, home) {
+			links.unknown(true)
+			return links, false
+		}
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, nestedCopyDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
