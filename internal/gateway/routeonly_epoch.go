@@ -212,7 +212,25 @@ func (s *routeEpochState) unpublished() string {
 	mine, load, dir := *s.epoch, s.load, strings.TrimSpace(s.dataDir())
 	mine.Generations = maps.Clone(s.epoch.Generations)
 	s.mu.Unlock()
-	return publishedEpochProblem(mine, load, dir)
+	problem := publishedEpochProblem(mine, load, dir)
+	if problem == "" {
+		return ""
+	}
+	// A rotation or an enrollment between the copy and the read-back makes the
+	// file newer than the copy: compare once more against the epoch the
+	// gateway accepts now, so it is not "not ready" for a whole recheck.
+	s.mu.Lock()
+	if s.epoch == nil || s.dirty {
+		s.mu.Unlock()
+		return problem
+	}
+	again := *s.epoch
+	again.Generations = maps.Clone(s.epoch.Generations)
+	s.mu.Unlock()
+	if again.Epoch == mine.Epoch && maps.Equal(again.Generations, mine.Generations) {
+		return problem
+	}
+	return publishedEpochProblem(again, load, dir)
 }
 
 // publishedEpochProblem reads the published epoch back, the way the

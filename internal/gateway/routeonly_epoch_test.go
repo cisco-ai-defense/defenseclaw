@@ -82,3 +82,29 @@ func TestRouteOnlyReadinessReadsThePublishedRouteEpochBack(t *testing.T) {
 		t.Fatalf("readiness: %+v", out[0])
 	}
 }
+
+// routrev round 1 P3: an epoch rotated between the copy and the read-back
+// must not leave the connector not ready until the next recheck.
+func TestPublishedRouteEpochRotationBetweenCopyAndReadBackIsNotAProblem(t *testing.T) {
+	var s *routeEpochState
+	var onDisk *connector.RouteEpoch
+	first := true
+	s = &routeEpochState{dataDir: func() string { return "fixture-dir" }, seen: map[string]bool{},
+		write: func(_ string, e connector.RouteEpoch) error { c := e; onDisk = &c; return nil }}
+	s.load = func(string) (*connector.RouteEpoch, error) {
+		if first {
+			first = false
+			// The gateway rotates (and publishes) right after the copy was taken.
+			if err := s.rotate(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return onDisk, nil
+	}
+	if err := s.rotate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.unpublished(); got != "" {
+		t.Fatalf("a rotation during the read-back reported %q", got)
+	}
+}

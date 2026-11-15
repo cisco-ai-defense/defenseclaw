@@ -13501,12 +13501,72 @@ def _check_routing_tokenomics(cfg, r: _DoctorResult) -> None:
     note = note_from_cfg(cfg)
     if note:
         _emit(
-            "warn" if "budgets" in note else "info",
+            "warn" if note.budgets else "info",
             "Routing tokenomics",
-            note.split(" Turn it on:")[0],
+            note.detail,
             remediation=ENABLE_COMMAND,
             r=r,
         )
+
+
+def _routing_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def routing_allowed_aliases_without_key(cfg) -> list[tuple[str, str]]:
+    """(rule id, alias) of routing.admin allow-list models a managed route-only
+    connector cannot call: no credential, no api_key_env, no bedrock block, no
+    loopback base_url, and a provider no route-only upstream shares. The gateway
+    /health says only that such a rule exists (it has no credential); this
+    names it for an administrator running doctor (GAP-0921, GAP-0666)."""
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
+        return []
+    routing = getattr(cfg, "routing", None)
+    if routing is None or not bool(getattr(routing, "enabled", False)):
+        return []
+    route_only = _routing_dict(getattr(routing, "route_only", None))
+    upstreams = _routing_dict(route_only.get("upstreams"))
+    if not route_only.get("connectors"):
+        return []
+    providers = set()
+    for name in route_only.get("connectors") or []:
+        api = str(_routing_dict(upstreams.get(name)).get("api") or "")
+        providers.add({"messages": "anthropic", "converse": "bedrock", "invoke": "bedrock"}.get(api, "openai"))
+    models = {str(m.get("name")): m for m in (getattr(routing, "models", None) or []) if isinstance(m, dict)}
+    rules = _routing_dict(getattr(routing, "admin", None)).get("rules") or []
+    out: list[tuple[str, str]] = []
+    for rule in rules:
+        if not isinstance(rule, dict) or str(rule.get("action") or "") == "deny":
+            continue
+        for alias in rule.get("allow") or []:
+            m = models.get(str(alias))
+            if m is None or m.get("credential") or m.get("api_key_env") or m.get("bedrock"):
+                continue
+            host = str(m.get("base_url") or "")
+            if any(h in host for h in ("://127.", "://localhost", "://[::1]")):
+                continue
+            if str(m.get("provider") or "").lower() in providers:
+                continue
+            out.append((str(rule.get("id") or "?"), str(alias)))
+    return out
+
+
+def _check_routing_allowed_alias_credential(cfg, r: _DoctorResult) -> None:
+    rows = routing_allowed_aliases_without_key(cfg)
+    if not rows:
+        return
+    named = ", ".join(f"{alias} (rule {rule})" for rule, alias in rows[:8])
+    _emit(
+        "warn",
+        "Routing allowed models",
+        f"{len(rows)} routing.admin allowed model(s) name no gateway credential, "
+        f"so calls that must use them are refused: {named}",
+        remediation=(
+            "name a protected credential in routing.models[].credential for each and store its key with "
+            "defenseclaw-gateway enterprise secret set --name <name> --from-stdin"
+        ),
+        r=r,
+    )
 
 
 def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
@@ -16909,6 +16969,7 @@ def doctor(
     _check_routing_policy(r)
     _check_routing_sensitive(cfg, r)
     _check_routing_tokenomics(cfg, r)
+    _check_routing_allowed_alias_credential(cfg, r)
     _check_route_only(cfg, r, live_health=sidecar_health)
     _check_routing_managed_key_env(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)

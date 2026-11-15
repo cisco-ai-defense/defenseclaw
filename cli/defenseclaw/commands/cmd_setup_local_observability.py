@@ -673,7 +673,7 @@ def _print_stack_summary(
 
     tokenomics_note = note_from_cfg(cfg)
     if tokenomics_note:
-        ux.warn(tokenomics_note)
+        ux.warn(tokenomics_note.text)
         click.echo()
     ux.section("Next steps")
     click.echo("    # DefenseClaw applies the destination itself (it restarts the gateway when needed).")

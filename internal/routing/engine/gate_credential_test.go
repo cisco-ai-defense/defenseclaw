@@ -29,7 +29,7 @@ func TestGateNamesTheMissingCredentialOfAnAllowedAlias(t *testing.T) {
 		t.Fatalf("decision = %+v", d)
 	}
 	deny := e.Gate(d, GateTarget{Provider: "openai", Model: "gpt-x"})
-	if deny == nil || deny.Code != "routing_admin_denied" || !strings.Contains(deny.Message, "fast") || !strings.Contains(deny.Message, "no gateway credential") || strings.Contains(deny.Message, "does not allow") {
+	if deny == nil || deny.Code != "routing_admin_denied" || !strings.Contains(deny.Message, "fast") || !strings.Contains(deny.Message, "no gateway credential") || !strings.Contains(deny.Message, "(rule r1)") || strings.Contains(deny.Message, "do not fit") || strings.Contains(deny.Message, "does not allow") {
 		t.Fatalf("deny = %+v", deny)
 	}
 
@@ -46,5 +46,17 @@ func TestGateNamesTheMissingCredentialOfAnAllowedAlias(t *testing.T) {
 	d.Outcome, d.NoCredential = OutcomeFallback, nil
 	if deny := other.Gate(d, GateTarget{Provider: "openai", Model: "gpt-x"}); deny == nil || !strings.Contains(deny.Message, "does not allow") {
 		t.Fatalf("plain deny rewritten: %+v", deny)
+	}
+}
+
+// Another allowed model that failed for a reason other than a credential is
+// said too: the credential is not the whole story.
+func TestGateSaysWhenAnotherAllowedModelDoesNotFit(t *testing.T) {
+	d := Decision{NoCredential: []string{"fast"}, OtherUnfit: true, verdict: AdminVerdict{RuleIDs: []string{"r1"}}}
+	admin := denyingGateAdmin{fakeAdmin{verdict: AdminVerdict{Bind: true}}}
+	e := mustEngine(t, testConfig(), Options{Managed: true, Admin: admin})
+	deny := e.Gate(d, GateTarget{Provider: "openai", Model: "gpt-x"})
+	if deny == nil || !strings.Contains(deny.Message, "Other models allowed for you do not fit") {
+		t.Fatalf("deny = %+v", deny)
 	}
 }

@@ -210,7 +210,7 @@ def _tokenomics_hint(doc: dict[str, Any], *, routing_on: bool = False, budgets_s
     (the dashboard panels and budgets need it; it stays off by default, GAP-0932)."""
     note = routing_tokenomics.note_from_doc(doc, routing_on=routing_on, budgets_set=budgets_set)
     if note:
-        ux.warn(note)
+        ux.warn(note.text)
 
 
 def _check_provider(provider: str, *, option: str = "--provider") -> str:

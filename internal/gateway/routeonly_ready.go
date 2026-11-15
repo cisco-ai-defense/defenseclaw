@@ -50,8 +50,11 @@ type routeOnlyReadiness struct {
 	EnrolledUsers *int   `json:"enrolled_users,omitempty"`
 	Ready         bool   `json:"ready"`
 	Cause         string `json:"cause,omitempty"` // route* cause constants; "" for any other problem
-	Problem       string `json:"problem,omitempty"`
-	Fix           string `json:"fix,omitempty"`
+	// Warning is a closed code for a state that leaves the connector ready
+	// but refuses some callers (a scoped routing.admin rule).
+	Warning string `json:"warning,omitempty"`
+	Problem string `json:"problem,omitempty"`
+	Fix     string `json:"fix,omitempty"`
 }
 
 // routeOnlySigningReadiness is the gateway Bedrock signing check.
@@ -126,12 +129,19 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 			r.Credential, r.Ready = routeCredentialAgent, true
 		}
 		if managedHost && r.Problem == "" {
-			if dead := routeOnlyDeadAllowRules(cfg, name, r.Provider); len(dead) > 0 {
-				// An allowed alias without a gateway key refuses every call
-				// of its rule as "not allowed" (rel-1-0-10 GAP-0921).
+			// An allowed alias without a gateway key refuses the calls of its
+			// rule as "not allowed" (rel-1-0-10 GAP-0921). Only a rule for every
+			// caller of the connector makes it not ready; a scoped rule is a
+			// warning. No rule id or model name here: /health has no credential
+			// (defenseclaw doctor, run by an administrator, names them).
+			blocking, scoped := routeOnlyAllowedWithoutKey(cfg, name, r.Provider)
+			switch {
+			case blocking:
 				r.Ready, r.Cause = false, routeCauseAliasNoCredential
-				r.Problem = "routing.admin rule " + dead[0].ID + " allows only " + strings.Join(dead[0].Aliases, ", ") + ", which has no gateway credential on this host: every " + name + " call it matches is refused"
-				r.Fix = "name a protected credential in routing.models[].credential for " + strings.Join(dead[0].Aliases, ", ") + " in the policy bundle and store its key: defenseclaw-gateway enterprise secret set --name <name> --from-stdin"
+				r.Problem = "a routing.admin rule that applies to every " + name + " caller allows only models with no gateway credential on this host: every call is refused"
+				r.Fix = "run defenseclaw doctor as an administrator to see which model, then store its credential: defenseclaw-gateway enterprise secret set --name <name> --from-stdin"
+			case scoped:
+				r.Warning = routeCauseAliasNoCredential
 			}
 		}
 		if managedHost && enrolled != nil {
