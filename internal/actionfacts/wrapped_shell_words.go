@@ -3,8 +3,6 @@
 
 package actionfacts
 
-import "strings"
-
 // A static wrapper (env, sudo, timeout, nice, ... staticPOSIXWrapperPrograms)
 // runs its program with the words the shell gave the call, so the program
 // it runs is read from those words, with their run-time expansion, as the
