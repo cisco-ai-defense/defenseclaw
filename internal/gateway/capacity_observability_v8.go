@@ -79,6 +79,9 @@ func (s *Sidecar) recordCapacityObservabilityV8(ctx context.Context, observedAt 
 		return
 	}
 	_, _ = runtimeOwner.RecordGeneratedMetricBatch(ctx, s.capacityMetricBatch(ctx, observedAt))
+	if items := s.budgetMetricBatch(ctx, observedAt); len(items) > 0 {
+		_, _ = runtimeOwner.RecordGeneratedMetricBatch(ctx, items)
+	}
 	if healthRuntime, ok := lifecycle.(exporterHealthMetricV8Runtime); ok {
 		// Fetch the destination-health snapshot once per tick and share it
 		// across both consumers, instead of each polling independently.

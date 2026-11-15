@@ -79,6 +79,11 @@ PROMETHEUS_RESOURCE_LABELS_BY_METRIC = {
     for name in ("refusals", "asks", "foreign_items", "provisional", "drift")
 }
 MODEL_USAGE_LABELS = {"connector", "provider", "model", "route_decision", "call_role", "profile"}
+ROUTING_DECISION_LABELS = {
+    "result", "error_code", "decision", "connector", "route_source", "route_category",
+    "filtered_by", "listener", "deny_reason", "budget_id",
+}
+BUDGET_LABELS = {"budget_id", "scope", "period"}
 PROMETHEUS_METRIC_LABELS = {
     "defenseclaw_approval_count_total": {"result", "auto", "dangerous"},
     "defenseclaw_approval_lifecycle_total": {"connector", "result", "surface"},
@@ -114,6 +119,20 @@ PROMETHEUS_METRIC_LABELS = {
     "defenseclaw_model_cost_USD_total": MODEL_USAGE_LABELS,
     "defenseclaw_model_tokens_total": MODEL_USAGE_LABELS | {"kind"},
     "defenseclaw_tokenomics_dropped_total": set(),
+    # Routing, savings and budgets (S10b): label_projections of
+    # metric.defenseclaw.model.cost.baseline / .compared, the budget gauges and
+    # the widened metric.defenseclaw.semantic_routing.decision. No user or
+    # group label by design; a budget is named by its administrator-chosen id.
+    "defenseclaw_model_cost_baseline_USD_total": MODEL_USAGE_LABELS,
+    "defenseclaw_model_cost_compared_USD_total": MODEL_USAGE_LABELS,
+    "defenseclaw_semantic_routing_decision_total": ROUTING_DECISION_LABELS,
+    "defenseclaw_semantic_routing_latency_milliseconds_bucket": {"le", "result", "error_code"},
+    "defenseclaw_budget_limit_USD": BUDGET_LABELS,
+    "defenseclaw_budget_spend_USD": BUDGET_LABELS,
+    "defenseclaw_budget_peak_subject_spend_USD": BUDGET_LABELS,
+    "defenseclaw_budget_subjects_exceeded": BUDGET_LABELS,
+    "defenseclaw_budget_store_healthy": set(),
+    "defenseclaw_budget_store_sync_age_seconds": set(),
     "defenseclaw_stream_bytes_sent_bucket": {"le", "outcome"},
     "defenseclaw_stream_duration_ms_milliseconds_bucket": {"le", "outcome"},
     "defenseclaw_stream_lifecycle_total": {"outcome", "transition"},

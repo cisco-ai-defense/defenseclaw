@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -133,6 +134,59 @@ func TestClientRefusesAPipeSquatter(t *testing.T) {
 			t.Fatalf("the squatter received %d request bytes", n)
 		}
 	case <-time.After(3 * time.Second):
+	}
+}
+
+// TestPublishedRecordIsNotReadableByOrdinaryAccounts: the record has no
+// allow entry for Users, Authenticated Users, Everyone or Interactive, so
+// no ordinary account learns the pipe name, not even the name of a stopped
+// guardian (rel-1-0-10:GAP-0106).
+func TestPublishedRecordIsNotReadableByOrdinaryAccounts(t *testing.T) {
+	names, err := NamesFor("DefenseClawCertGateway_00000000fc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeName, err := names.NewPipeName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := names.PublishedPath(testDataDir(t))
+	if err := publishPipeName(path, names, pipeName); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readPublishedPipeName(path, names); err != nil || got.Pipe != pipeName {
+		t.Fatalf("the publisher cannot read its record back: %+v %v", got, err)
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("the record has no access list: %v", err)
+	}
+	var broad []*windows.SID
+	for _, known := range []windows.WELL_KNOWN_SID_TYPE{windows.WinBuiltinUsersSid, windows.WinAuthenticatedUserSid, windows.WinWorldSid, windows.WinInteractiveSid} {
+		sid, err := windows.CreateWellKnownSid(known)
+		if err != nil {
+			t.Fatal(err)
+		}
+		broad = append(broad, sid)
+	}
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			t.Fatal(err)
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		for _, b := range broad {
+			if sid.Equals(b) {
+				t.Fatalf("the published record grants %s access (mask %#x)", sid, ace.Mask)
+			}
+		}
 	}
 }
 

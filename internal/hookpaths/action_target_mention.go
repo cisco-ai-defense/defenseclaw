@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"maps"
 	"math"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -315,6 +316,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			if !ok {
 				return true
 			}
+			if call, isCall := stmt.Cmd.(*syntax.CallExpr); isCall && !stateOnly && actionSSHCopyIDToThisHost(call, home) {
+				// ssh-copy-id to this host adds the key to an authorized_keys
+				// file of the machine the agent runs on, which the call never
+				// names (rel-1-0-10:GAP-0791).
+				found = true
+				return false
+			}
 			values["PWD"] = effectiveCWD
 			// The shell expands and opens a statement's redirects before the
 			// command runs, so what the command itself binds (printf -v and
@@ -488,6 +496,56 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	return false
 }
 
+// actionSSHCopyIDToThisHost reports an ssh-copy-id call whose destination is
+// this machine: a loopback name or address, or the machine's own host name,
+// with any user. The command appends the key to that account's
+// ~/.ssh/authorized_keys over a login, the same write as typing the path
+// (rel-1-0-10:GAP-0791). A destination that is a dynamic word is not read
+// here (the call is not proven local), so it keeps the rel verdict.
+func actionSSHCopyIDToThisHost(call *syntax.CallExpr, home string) bool {
+	if len(call.Args) < 2 {
+		return false
+	}
+	if program, known := staticProgramWord(call.Args[0], home); !known || programBase(program) != "ssh-copy-id" {
+		return false
+	}
+	valueOptions := map[string]bool{"-i": true, "-p": true, "-o": true, "-F": true, "-t": true, "-J": true}
+	var operands []string
+	for index := 1; index < len(call.Args); index++ {
+		word, known := StaticWord(call.Args[index], home)
+		if !known {
+			return false
+		}
+		switch {
+		case valueOptions[word]:
+			index++
+		case strings.HasPrefix(word, "-") && len(word) > 1:
+		default:
+			operands = append(operands, word)
+		}
+	}
+	if len(operands) != 1 {
+		return false
+	}
+	host := operands[0]
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		host = host[at+1:]
+	}
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	switch host {
+	case "localhost", "localhost.localdomain", "ip6-localhost", "::1", "0:0:0:0:0:0:0:1":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	if name, err := os.Hostname(); err == nil && name != "" {
+		name = strings.ToLower(name)
+		return host == name || host == strings.SplitN(name, ".", 2)[0]
+	}
+	return false
+}
+
 // actionPlainReadStatements are the statements whose words name files only
 // for a reader to read them (rel-1-0-10:GAP-0570): a known reader statement
 // (actionKnownReadOnlyShell: ls, cat, stat, grep ...) at the top of the call
@@ -505,6 +563,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 // fixed-text echo is verdict-neutral, actionFixedTextEchoes).
 func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]bool {
 	if file == nil {
+		return nil
+	}
+	if actionRebindsReaderNames(file, home) {
 		return nil
 	}
 	neutral := actionFixedTextEchoes(file)
@@ -582,6 +643,83 @@ func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]
 		visit(stmt)
 	}
 	return reads
+}
+
+// actionRebindsReaderNames reports a call that changes what a bare program
+// name runs, so a bare reader name in it is not the system reader
+// (rel-1-0-10:GAP-0790): a hash -p or an alias that binds a name to another
+// program, or a file the call writes (a redirect, tee, or the destination of
+// cp, mv, ln, install) under the name of a bare program the call runs, in any
+// folder (a copy named ls in ~/bin or /usr/local/bin).
+func actionRebindsReaderNames(file *syntax.File, home string) bool {
+	programs := map[string]bool{}
+	var written []string
+	rebound := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Redirect:
+			switch node.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll:
+				if node.Word != nil {
+					written = append(written, actionWordLiteralText(node.Word))
+				}
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				return true
+			}
+			program, known := staticProgramWord(node.Args[0], home)
+			if !known {
+				return true
+			}
+			base := programBase(program)
+			if !strings.Contains(program, "/") {
+				programs[base] = true
+			}
+			var operands []string
+			for _, arg := range node.Args[1:] {
+				operands = append(operands, actionWordLiteralText(arg))
+			}
+			switch base {
+			case "hash":
+				rebound = slices.Contains(operands, "-p")
+			case "alias":
+				for _, operand := range operands {
+					rebound = rebound || strings.Contains(operand, "=")
+				}
+			case "tee":
+				for _, operand := range operands {
+					if !strings.HasPrefix(operand, "-") {
+						written = append(written, operand)
+					}
+				}
+			case "cp", "mv", "ln", "install":
+				var names []string
+				for _, operand := range operands {
+					if !strings.HasPrefix(operand, "-") {
+						names = append(names, operand)
+					}
+				}
+				if len(names) > 0 {
+					written = append(written, names[len(names)-1])
+					if strings.HasSuffix(names[len(names)-1], "/") {
+						// Into a folder: each source keeps its name there.
+						written = append(written, names[:len(names)-1]...)
+					}
+				}
+			}
+		}
+		return !rebound
+	})
+	if rebound {
+		return true
+	}
+	for _, path := range written {
+		if name := filepath.Base(path); name != "." && name != "/" && programs[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // actionReadersAreSystemPrograms reports that every program a plain reader

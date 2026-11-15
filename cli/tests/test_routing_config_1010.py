@@ -85,3 +85,31 @@ def test_1_0_9_routing_block_is_unchanged(tmp_path: Path) -> None:
     persisted = _round_trip(tmp_path, routing)
     assert persisted["routing"] == routing
     assert "classifier" not in persisted["routing"]
+
+
+_CONTEXT = {
+    "recent_user_turns": 2,
+    "include_first_user_turn": True,
+    "max_bytes": 4096,
+    "per_turn_bytes": 1024,
+    "include_tool_names": True,
+}
+
+
+def test_routing_context_round_trips(tmp_path: Path) -> None:
+    routing = {"enabled": False, "models": copy.deepcopy(_MODELS), "classifier": "rules", "context": copy.deepcopy(_CONTEXT)}
+    persisted = _round_trip(tmp_path, routing)
+    assert persisted["routing"] == routing
+
+
+def test_routing_context_alone_keeps_the_routing_block(tmp_path: Path) -> None:
+    routing = {"enabled": False, "context": {"recent_user_turns": 1}}
+    persisted = _round_trip(tmp_path, routing)
+    assert persisted["routing"] == routing
+
+
+def test_routing_without_context_writes_no_context_key(tmp_path: Path) -> None:
+    # Absent key = off: a config that never set routing.context stays without it.
+    routing = {"enabled": False, "classifier": "rules"}
+    persisted = _round_trip(tmp_path, routing)
+    assert "context" not in persisted["routing"]

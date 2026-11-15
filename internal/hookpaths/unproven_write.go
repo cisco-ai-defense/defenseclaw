@@ -114,7 +114,7 @@ func powerShellNewItemMayMakeLink(args []string, static []bool) bool {
 			continue
 		}
 		name, value, inline := strings.Cut(word, ":")
-		if name != "-type" && !(len(name) >= 3 && strings.HasPrefix("-itemtype", name)) {
+		if name != "-type" && (len(name) < 3 || !strings.HasPrefix("-itemtype", name)) {
 			continue
 		}
 		if !inline {

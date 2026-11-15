@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
 const routeOnlyTextCap = 64 << 10
@@ -51,6 +52,9 @@ func routeOnlyHumanText(family string, body []byte) (text string, hasTools, tool
 type humanTextScan struct {
 	dec       *json.Decoder
 	responses bool
+	// ctx, when set (routing.context on), also receives every user text
+	// and, with include_tool_names, the tool names (routing_context.go).
+	ctx *engine.ContextCollector
 
 	text     string
 	hasTools bool
@@ -62,12 +66,14 @@ type humanTextScan struct {
 type humanTextMessage struct {
 	role       string
 	kind       string // Responses item type
+	name       string // Responses item name (*_call items), read for ctx only
 	parts      humanTextParts
 	images     bool
-	toolResult bool // a "tool_result" string anywhere in its content
+	toolResult bool            // a "tool_result" string anywhere in its content
+	filter     userBlockFilter // per-block router filter (routing_context.go)
 }
 
-func (m *humanTextMessage) text() string { return capText(stripReminders(m.parts.String())) }
+func (m *humanTextMessage) text() string { return routerUserText(m.parts.String()) }
 
 // humanTextParts joins text parts with newlines and keeps at most
 // routeOnlyRawTextLimit bytes, copied, so a large token is not retained.
@@ -152,6 +158,7 @@ func (s *humanTextScan) key() (string, bool) {
 func (s *humanTextScan) consider(m *humanTextMessage) {
 	if t := m.text(); t != "" {
 		s.text, s.images = t, m.images
+		s.ctx.Turn(t)
 		return
 	}
 	s.images = s.images || m.images
@@ -171,6 +178,7 @@ func (s *humanTextScan) tools() bool {
 // the newest user message with text wins; toolTurn is the shape of the last.
 func (s *humanTextScan) messages() bool {
 	s.text, s.toolTurn, s.images = "", false, false
+	s.ctx.Reset()
 	tok, err := s.dec.Token()
 	if err != nil {
 		return false
@@ -199,6 +207,9 @@ func (s *humanTextScan) messages() bool {
 		s.toolTurn = m.role == "tool" || m.toolResult
 		if m.role == "user" {
 			s.consider(&m)
+		}
+		if s.toolTurn {
+			s.ctx.Tool("")
 		}
 	}
 	_, err = s.dec.Token()
@@ -229,6 +240,8 @@ func (s *humanTextScan) message(m *humanTextMessage) bool {
 		case strings.EqualFold(key, "content"):
 			// Text is kept for user messages (and a role not seen yet).
 			ok = s.content(m, m.role == "" || m.role == "user")
+		case s.ctx.WantsTools() && (strings.EqualFold(key, "tool_calls") || strings.EqualFold(key, "function_call")):
+			ok = s.toolCalls()
 		default:
 			ok = skipJSONValue(s.dec, nil)
 		}
@@ -240,12 +253,89 @@ func (s *humanTextScan) message(m *humanTextMessage) bool {
 	return err == nil
 }
 
+// toolCalls reads Chat Completions tool_calls (a list of {function: {name}})
+// or a legacy function_call object, and records the names only.
+func (s *humanTextScan) toolCalls() bool {
+	tok, err := s.dec.Token()
+	if err != nil {
+		return false
+	}
+	if tok == jsonObjectOpen {
+		var name string
+		if !s.nameFields(&name, "name") {
+			return false
+		}
+		s.ctx.Tool(name)
+		return true
+	}
+	if tok != jsonArrayOpen {
+		return skipJSONRest(s.dec, tok, nil)
+	}
+	for s.dec.More() {
+		tok, err := s.dec.Token()
+		if err != nil {
+			return false
+		}
+		if tok != jsonObjectOpen {
+			if !skipJSONRest(s.dec, tok, nil) {
+				return false
+			}
+			continue
+		}
+		var name string
+		if !s.nameFields(&name, "function") {
+			return false
+		}
+		s.ctx.Tool(name)
+	}
+	_, err = s.dec.Token()
+	return err == nil
+}
+
+// nameFields reads the rest of an object after its opening brace. With key
+// "name" it keeps that string field; with another key it reads the name
+// field of the object under that key ({function: {name}}, {toolUse: {name}}).
+func (s *humanTextScan) nameFields(name *string, key string) bool {
+	var unused bool
+	for s.dec.More() {
+		k, ok := s.key()
+		if !ok {
+			return false
+		}
+		switch {
+		case !strings.EqualFold(k, key):
+			ok = skipJSONValue(s.dec, nil)
+		case key == "name":
+			ok = s.stringField(name, &unused)
+		default:
+			ok = s.nestedName(name)
+		}
+		if !ok {
+			return false
+		}
+	}
+	_, err := s.dec.Token()
+	return err == nil
+}
+
+// nestedName reads one value and keeps the name field when it is an object.
+func (s *humanTextScan) nestedName(name *string) bool {
+	tok, err := s.dec.Token()
+	if err != nil {
+		return false
+	}
+	if tok != jsonObjectOpen {
+		return skipJSONRest(s.dec, tok, nil)
+	}
+	return s.nameFields(name, "name")
+}
+
 // content reads a content field: a string, or a list of blocks whose text
 // blocks are joined; tool_result and other blocks give no text.
 func (s *humanTextScan) content(m *humanTextMessage, collect bool) bool {
 	m.parts.reset()
-	m.images, m.toolResult = false, false
-	if !collect {
+	m.images, m.toolResult, m.filter = false, false, userBlockFilter{}
+	if !collect && !s.ctx.WantsTools() {
 		// Another role: only a tool_result string in it matters.
 		return skipJSONValue(s.dec, &m.toolResult)
 	}
@@ -256,7 +346,11 @@ func (s *humanTextScan) content(m *humanTextMessage, collect bool) bool {
 	switch v := tok.(type) {
 	case string:
 		m.toolResult = v == "tool_result"
-		m.parts.add(v)
+		if collect {
+			if t, ok := m.filter.keep(v); ok {
+				m.parts.add(t)
+			}
+		}
 		return true
 	case json.Delim:
 		if v != jsonArrayOpen {
@@ -283,7 +377,8 @@ func (s *humanTextScan) block(m *humanTextMessage, collect bool) bool {
 	if tok != jsonObjectOpen {
 		return skipJSONRest(s.dec, tok, &m.toolResult)
 	}
-	var kind, text string
+	var kind, text, name string
+	toolUse := false
 	for s.dec.More() {
 		key, ok := s.key()
 		if !ok {
@@ -297,6 +392,14 @@ func (s *humanTextScan) block(m *humanTextMessage, collect bool) bool {
 			ok = s.stringField(&kind, &m.toolResult)
 		case collect && strings.EqualFold(key, "text"):
 			ok = s.stringField(&text, &m.toolResult)
+		case s.ctx.WantsTools() && strings.EqualFold(key, "name"):
+			ok = s.stringField(&name, &m.toolResult)
+		case s.ctx.WantsTools() && strings.EqualFold(key, "toolUse"):
+			// Bedrock Converse: {"toolUse": {"name": ...}}.
+			ok, toolUse = s.nestedName(&name), true
+		case s.ctx.WantsTools() && strings.EqualFold(key, "toolResult"):
+			s.ctx.Tool("")
+			ok = skipJSONValue(s.dec, &m.toolResult)
 		default:
 			// Nested content (a tool_result body) is skipped unbuilt.
 			ok = skipJSONValue(s.dec, &m.toolResult)
@@ -308,16 +411,25 @@ func (s *humanTextScan) block(m *humanTextMessage, collect bool) bool {
 	if _, err := s.dec.Token(); err != nil {
 		return false
 	}
+	if toolUse || kind == "tool_use" || kind == "server_tool_use" || kind == "mcp_tool_use" {
+		s.ctx.Tool(name)
+	}
+	// Agent-written blocks in a user message (command output, instruction
+	// files, environment context) are not text the user typed.
 	switch kind {
 	case "text", "input_text":
 		if collect {
-			m.parts.add(text)
+			if t, ok := m.filter.keep(text); ok {
+				m.parts.add(t)
+			}
 		}
 	case "image", "input_image", "image_url":
 		m.images = true
 	case "":
 		if collect && text != "" {
-			m.parts.add(text)
+			if t, ok := m.filter.keep(text); ok {
+				m.parts.add(t)
+			}
 		}
 	}
 	return true
@@ -345,6 +457,7 @@ func (s *humanTextScan) stringField(field *string, note *bool) bool {
 // *_output type (function_call_output and the like).
 func (s *humanTextScan) input() bool {
 	s.text, s.toolTurn, s.images = "", false, false
+	s.ctx.Reset()
 	tok, err := s.dec.Token()
 	if err != nil {
 		return false
@@ -353,7 +466,8 @@ func (s *humanTextScan) input() bool {
 	case string:
 		var p humanTextParts
 		p.add(v)
-		s.text = capText(stripReminders(p.String()))
+		s.text = routerUserText(p.String())
+		s.ctx.Turn(s.text)
 		return true
 	case json.Delim:
 		if v != jsonArrayOpen {
@@ -379,6 +493,17 @@ func (s *humanTextScan) input() bool {
 		if it.role == "user" && (it.kind == "" || it.kind == "message") {
 			s.consider(&it)
 		}
+		switch {
+		case s.toolTurn:
+			s.ctx.Tool("")
+		case strings.HasSuffix(it.kind, "_call"):
+			// function_call, custom_tool_call, mcp_call, local_shell_call...
+			if it.name != "" {
+				s.ctx.Tool(it.name)
+			} else {
+				s.ctx.Tool(it.kind)
+			}
+		}
 	}
 	_, err = s.dec.Token()
 	return err == nil
@@ -398,6 +523,8 @@ func (s *humanTextScan) item(it *humanTextMessage) bool {
 			ok = s.stringField(&it.kind, &unused)
 		case strings.EqualFold(key, "role"):
 			ok = s.stringField(&it.role, &unused)
+		case s.ctx.WantsTools() && strings.EqualFold(key, "name"):
+			ok = s.stringField(&it.name, &unused)
 		case strings.EqualFold(key, "content"):
 			ok = s.content(it, it.role == "" || it.role == "user")
 		default:
@@ -469,27 +596,44 @@ func skipJSONRest(dec *json.Decoder, first json.Token, note *bool) bool {
 	return true
 }
 
-// stripReminders removes <system-reminder> blocks in one pass. The input
-// is bounded first (four times the classifier cap), so a large paste costs
-// linear time on a bounded string.
+// stripReminders removes <system-reminder> blocks (any case) in one pass.
+// The input is bounded first (four times the classifier cap), so a large
+// paste costs linear time on a bounded string.
 func stripReminders(in string) string {
 	in = truncateUTF8(in, 4*routeOnlyTextCap)
 	const open, closeTag = "<system-reminder>", "</system-reminder>"
+	lower := asciiLowerString(in) // same length as in, so indexes carry over
 	var b strings.Builder
 	for {
-		i := strings.Index(in, open)
+		i := strings.Index(lower, open)
 		if i < 0 {
 			b.WriteString(in)
 			break
 		}
 		b.WriteString(in[:i])
-		j := strings.Index(in[i:], closeTag)
+		j := strings.Index(lower[i:], closeTag)
 		if j < 0 {
 			break
 		}
-		in = in[i+j+len(closeTag):]
+		in, lower = in[i+j+len(closeTag):], lower[i+j+len(closeTag):]
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// asciiLowerString lowercases ASCII letters only, so the result has the same byte
+// length as s; s itself when it has none.
+func asciiLowerString(s string) string {
+	i := strings.IndexFunc(s, func(r rune) bool { return r >= 0x41 && r <= 0x5a })
+	if i < 0 {
+		return s
+	}
+	b := []byte(s)
+	for k := i; k < len(b); k++ {
+		if c := b[k]; c >= 0x41 && c <= 0x5a {
+			b[k] = c + 0x20
+		}
+	}
+	return string(b)
 }
 
 func capText(s string) string { return truncateUTF8(s, routeOnlyTextCap) }
