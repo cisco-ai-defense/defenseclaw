@@ -100,8 +100,10 @@ func isSyntaxTailUnread(simple SimpleCommand) bool {
 // here-document body are statements only when its command runs its standard
 // input as shell code; another command's body is its data and stays unread
 // text, and a command that is not known is the unknown tier
-// (EvaluationFailureUnresolvedBody, rel-1-0-10:GAP-0876).
-func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
+// (EvaluationFailureUnresolvedBody, rel-1-0-10:GAP-0876). source is the text
+// the tail was read from: the consumer reading looks in it for a function,
+// alias, hash entry or PATH assignment that renames a data program (GAP-0902).
+func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, source string, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
 	result := make([]SimpleCommand, 0, len(tail.Statements)+2)
 	emitted := make(map[SimpleCommand]bool, len(tail.Statements))
 	capped := tail.Truncated.Any()
@@ -143,7 +145,7 @@ func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, inte
 	statements := slices.Clone(tail.Statements)
 	unknownBody := false
 	for _, doc := range tail.HereDocs {
-		switch syntaxTailHereDocConsumerIn(doc.Consumer, input.Command) {
+		switch syntaxTailHereDocConsumerIn(doc.Consumer, source) {
 		case hereDocRunsCode:
 			statements = append(statements, doc.Statements...)
 		case hereDocUnknown:
@@ -349,7 +351,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// for its tail, so a call that parses pays no second parse.
 	if facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) {
 		if tail, ok := shellparse.ReadSyntaxTail(source); ok {
-			return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess)
+			return syntaxTailCommands(input, tail, source, depth, interpreter, inherited, guess)
 		}
 	}
 	if !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&
