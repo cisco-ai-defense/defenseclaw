@@ -904,11 +904,10 @@ func TestStreamTailPartialLineBound(t *testing.T) {
 	}
 }
 
-// An upstream that stops inside a line or frame and stays open: the
-// unfinished line is held at most streamHoldMaxPartialAge after its last
-// byte, then the stream is TRUNCATED (bound rule, cap time): the default
-// pack alerts and sends what it held, the strict pack ends the stream.
-// Every passthrough format.
+// An upstream that stops inside a line or frame and stays open:
+// streamHoldMaxPartialAge after its last byte the stream is TRUNCATED (bound
+// rule, cap time): the strict pack ends the stream; the default pack alerts
+// and keeps the unfinished line held (GAP-0316). Every passthrough format.
 func TestStreamTailStalledPartialLine(t *testing.T) {
 	for _, f := range streamTailFormats {
 		for _, strict := range []bool{false, true} {
@@ -958,13 +957,33 @@ func TestStreamTailStalledPartialLine(t *testing.T) {
 						}
 					}
 				}()
+				if !strict {
+					// GAP-0316 (the tool-call hold outranks the tail timers):
+					// the default pack records the TRUNCATED alert and keeps
+					// the unfinished event held, since its unread bytes may
+					// start a tool call. The stream stays open.
+					log := captureStderr(t, func() { time.Sleep(streamHoldMaxPartialAge + 1500*time.Millisecond) })
+					select {
+					case out := <-got:
+						t.Fatalf("the default pack sent the unfinished line or ended the stream (%d bytes)", len(out))
+					default:
+					}
+					if !strings.Contains(log, "PASSTHROUGH-STREAM-TRUNCATED") {
+						t.Fatalf("no truncation log line: %s", log)
+					}
+					alerts, err := proxy.store.ListAlerts(50)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !strings.Contains(fmt.Sprintf("%+v", alerts), "bounded_truncated cap=time") {
+						t.Fatalf("no truncation alert row naming the cap: %+v", alerts)
+					}
+					return
+				}
 				select {
 				case out := <-got:
 					if strict && strings.Contains(out, partial) {
 						t.Fatal("the strict pack sent an unfinished line past the bound")
-					}
-					if !strict && !strings.Contains(out, partial) {
-						t.Fatal("the default pack ended the stream instead of alerting")
 					}
 				case <-time.After(streamHoldMaxPartialAge + 3*time.Second):
 					t.Fatalf("the unfinished line was held past %v", streamHoldMaxPartialAge)
