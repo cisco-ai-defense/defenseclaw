@@ -105,6 +105,8 @@ In `~/.defenseclaw`, `%USERPROFILE%\.defenseclaw` on Windows, or `DEFENSECLAW_HO
 
 `~/.defenseclaw/doctor_cache.json` is the latest non-dry-run Doctor snapshot. The TUI reads it for the Overview panel instead of repeating network probes on every redraw.
 
+`~/.defenseclaw/scanner_import_probe.json` (mode 0600) remembers that the MCP scanner SDK imported, so Doctor does not start a child Python that loads LiteLLM on every run. It is checked again after any reinstall, upgrade or repair of `cisco-ai-mcp-scanner` or `litellm`, after any change to the installed packages and after a day. Only a pass is remembered, so a failure is shown on every run. It is safe to delete.
+
 ```json
 {
   "schema_version": 2,
