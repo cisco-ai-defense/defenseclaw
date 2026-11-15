@@ -43,6 +43,7 @@ var benign = guardrail.ToolChainProjection{ParseStatus: "not_applicable"}
 // SMK J44 (stk push 14): a secret read, the actor stopped 40 minutes, an
 // upload. Each row is what one way of stopping it tells the leader.
 func TestGAP0292StoppedActorKeepsTheChainWindow(t *testing.T) {
+	t.Parallel()
 	for _, path := range []struct {
 		name          string
 		before, after []string // lifecycle events when it stops, when it is back
@@ -56,6 +57,7 @@ func TestGAP0292StoppedActorKeepsTheChainWindow(t *testing.T) {
 		{"node drain or eviction", nil, []string{LifecycleCrashed, LifecycleSuspended, LifecycleReverted, LifecycleResumed}},
 	} {
 		t.Run(path.name, func(t *testing.T) {
+			t.Parallel()
 			h := newHarness(t, t.TempDir(), Options{})
 			h.hook(actorA, "s1", secretRead(t))
 			h.advance(time.Second)
@@ -78,6 +80,7 @@ func TestGAP0292StoppedActorKeepsTheChainWindow(t *testing.T) {
 // actor returns to may hold what it read. The session window still takes
 // its barrier.
 func TestGAP0292RevertKeepsTheEgressChain(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, t.TempDir(), Options{})
 	h.hook(actorA, "s1", secretRead(t))
 	h.advance(time.Second)
@@ -94,6 +97,7 @@ func TestGAP0292RevertKeepsTheEgressChain(t *testing.T) {
 // A new leader on the same volume keeps the window and the clock: what it
 // did not save is running time it does not count, never time it adds.
 func TestGAP0292LeaderRestartKeepsTheChainWindow(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	h := newHarness(t, dir, Options{})
 	h.hook(actorA, "s1", secretRead(t))
@@ -113,6 +117,7 @@ func TestGAP0292LeaderRestartKeepsTheChainWindow(t *testing.T) {
 // The window still ends after 30 minutes of running time (not
 // over-tightened).
 func TestGAP0292TheWindowStillEndsOnRunningTime(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, t.TempDir(), Options{})
 	h.hook(actorA, "s1", secretRead(t))
 	h.work(actorA, 29*time.Minute)
@@ -126,6 +131,7 @@ func TestGAP0292TheWindowStillEndsOnRunningTime(t *testing.T) {
 // A long suspend or silence purges an actor's state, but not a window that
 // still holds a secret read: an empty state would answer allow.
 func TestGAP0292PurgeKeepsAWindowThatHoldsASecretRead(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, t.TempDir(), Options{PurgeAfter: time.Hour})
 	h.hook(actorA, "s1", secretRead(t))
 	h.hook(actorB, "s1", benign)
@@ -143,6 +149,7 @@ func TestGAP0292PurgeKeepsAWindowThatHoldsASecretRead(t *testing.T) {
 // The atespace cap evicts an actor whose window holds a secret read last,
 // even when it is the least recently used.
 func TestGAP0292TheAtespaceCapEvictsASecretReadLast(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, t.TempDir(), Options{MaxActors: 2})
 	h.hook(actorA, "s1", secretRead(t))
 	h.advance(time.Second)
