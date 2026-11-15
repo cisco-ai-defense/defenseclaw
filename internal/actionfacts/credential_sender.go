@@ -266,7 +266,7 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 		// read: a network role, an unproven role, a part the projection did
 		// not read.
 		exact := sender.Origin != SenderProjected && sender.Origin != SenderRemoteCopy
-		if sender.Origin == SenderRemoteCopy && remoteOperandCount(sender.Operands) >= 2 {
+		if remoteOperandCount(sender.Operands) >= 2 {
 			exact = true // scp -3: the file goes through the local host to a second remote
 		}
 		for _, operand := range sender.Operands {
