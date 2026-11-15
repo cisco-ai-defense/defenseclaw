@@ -168,63 +168,6 @@ func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, inte
 	return result
 }
 
-// hereDocConsumer is what the command of a quoted here-document does with
-// its body (syntaxTailHereDocConsumer).
-type hereDocConsumer uint8
-
-const (
-	// hereDocData: no command of the opener line runs its standard input as
-	// shell code; the body is data.
-	hereDocData hereDocConsumer = iota
-	// hereDocUnknown: the command is not known (no command text, a text that
-	// does not parse, or a word made at run time that could start a shell).
-	hereDocUnknown
-	// hereDocRunsCode: a command runs its standard input as shell code
-	// (posixStdinCodeTarget: a shell without -c, also behind env, command or
-	// a privilege wrapper or scheduler that does).
-	hereDocRunsCode
-)
-
-// syntaxTailHereDocConsumer reads the command of a quoted here-document
-// (shellparse.SyntaxTailHereDoc.Consumer). Each simple command of the text is
-// one that may get the body (cat <<'EOF' | sh pipes it on); a word made at run
-// time is read as sh, so a command that could start a shell through it is
-// not known.
-func syntaxTailHereDocConsumer(consumer string) hereDocConsumer {
-	if strings.TrimSpace(consumer) == "" {
-		return hereDocUnknown
-	}
-	file, ok := shellparse.Parse(consumer)
-	if !ok || file == nil {
-		return hereDocUnknown
-	}
-	verdict := hereDocData
-	syntax.Walk(file, func(node syntax.Node) bool {
-		call, isCall := node.(*syntax.CallExpr)
-		if !isCall || len(call.Args) == 0 {
-			return verdict != hereDocRunsCode
-		}
-		argv := make([]string, 0, len(call.Args))
-		dynamic := false
-		for _, arg := range call.Args {
-			word, known := simpleStaticWord(arg, nil)
-			if !known {
-				word, dynamic = "sh", true
-			}
-			argv = append(argv, word)
-		}
-		if posixStdinCodeTarget(argv) {
-			if !dynamic {
-				verdict = hereDocRunsCode
-			} else if verdict == hereDocData {
-				verdict = hereDocUnknown
-			}
-		}
-		return verdict != hereDocRunsCode
-	})
-	return verdict
-}
-
 // EvaluationFailureSyntaxCap follows EvaluationFailureSyntax when the reading
 // of a text with a syntax error stopped at a cap of shellparse.ReadSyntaxTail:
 // the gateway adds the evaluation-limit finding (the unknown tier of the
