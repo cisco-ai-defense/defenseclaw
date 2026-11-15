@@ -8,7 +8,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
-	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // rel-1-0-10:GAP-0663 (lane s7-tmin2): the caps of the inline hand-off and
@@ -17,6 +16,15 @@ import (
 // runners longer than actionfacts.InlineChainRounds rounds, and shell bodies
 // nested deeper than hookpaths.InlineMaxShellDepth, are TRUNCATED: at least
 // the unknown tier of the pack, never the silent allow they were.
+//
+// A call is cut at its first bound, and runner chains (xargs) and nested
+// shell bodies pass the shared sender reader first: one past
+// actionfacts.MaxSenderDepth the call is TRUNCATED (cap depth), whatever the
+// hand-off reader reads (rel-1-0-10:GAP-0827). So the xargs and shell-body
+// rows are registered at that bound, where the call is cut. The hand-off and
+// archive readers still read on to their own bounds, so a write they prove
+// deeper keeps its block (a proven finding decides). A wrapper chain (nohup)
+// is no nesting for the sender reader and stays at the hand-off bound.
 //
 // The generators build the chain in front of a benign call (an inline
 // python that prints, a project extraction), so the answer at the cap is an
@@ -49,29 +57,23 @@ func tminChainMulti(prefix, core string) func(int) string {
 
 func init() {
 	registerBoundedLane(
-		boundedLaneCap{lane: "s7/tamper-min xargs chain", cap: bounded.Depth, limit: actionfacts.InlineChainRounds,
+		boundedLaneCap{lane: "s7/tamper-min xargs chain", cap: bounded.Depth, limit: actionfacts.MaxSenderDepth,
 			gen:  boundedShellLane(tminChainFill("xargs ", tminChainBody), tminChainMulti("xargs ", tminChainBody)),
 			seen: boundedShellSeenCall},
 		boundedLaneCap{lane: "s7/tamper-min wrapper chain", cap: bounded.Depth, limit: actionfacts.InlineChainRounds * 8,
 			gen:  boundedShellLane(tminChainFill("nohup ", tminChainBody), tminChainMulti("nohup ", tminChainBody)),
 			seen: boundedShellSeenCall},
-		boundedLaneCap{lane: "s7/tamper-min shell bodies", cap: bounded.Depth, limit: hookpaths.InlineMaxShellDepth,
+		boundedLaneCap{lane: "s7/tamper-min shell bodies", cap: bounded.Depth, limit: actionfacts.MaxSenderDepth,
 			gen: boundedShellLane(func(size int) string { return tminNestedShells(tminChainBody, size) },
 				func(size int) string {
 					return tminNestedShells(tminChainBody, size) + "; " + boundedListOperands(actionfacts.MaxOperandsPerCall+size)
 				}),
-			seen: boundedShellSeenCall, open: tminNestedSeenOpen},
-		boundedLaneCap{lane: "s7/tamper-min archive shell bodies", cap: bounded.Depth, limit: hookpaths.InlineMaxShellDepth,
+			seen: boundedShellSeenCall},
+		boundedLaneCap{lane: "s7/tamper-min archive shell bodies", cap: bounded.Depth, limit: actionfacts.MaxSenderDepth,
 			gen: boundedShellLane(func(size int) string { return tminNestedShells(tminChainArchive, size) },
 				func(size int) string {
 					return tminNestedShells(tminChainArchive, size) + "; " + boundedListOperands(actionfacts.MaxOperandsPerCall+size)
 				}),
-			seen: boundedShellSeenCall, open: tminNestedSeenOpen},
+			seen: boundedShellSeenCall},
 	)
 }
-
-// tminNestedSeenOpen: a call nested past the shell parse bound answers with
-// the parse-limit finding before the seen element before it is judged: the
-// same open violation as the shell-parse nesting lane (lane s7/parselimits).
-var tminNestedSeenOpen = map[string]string{"default/seen": "rel-1-0-10:GAP-0312", "permissive/seen": "rel-1-0-10:GAP-0312",
-	"managed/seen": "rel-1-0-10:GAP-0312"}

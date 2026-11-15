@@ -180,7 +180,16 @@ func senderProgramName(word string) string {
 	return strings.TrimSuffix(strings.ToLower(path.Base(strings.ReplaceAll(word, `\`, "/"))), ".exe")
 }
 
+// maxSenderDepth bounds the nesting the sender reader opens: a shell body
+// (sh -c, bash -c), an xargs or find -exec program inside another. One past it
+// is TRUNCATED (bounded.Depth, the one bound rule), and the gateway reports it
+// for the whole call (ReadSenders(...).Bound). Every call that nests shell
+// bodies or runners passes this reader, so it is the depth such a call is cut
+// at; MaxSenderDepth exports it for the cross-lane bound test.
 const maxSenderDepth = 3
+
+// MaxSenderDepth is maxSenderDepth.
+const MaxSenderDepth = maxSenderDepth
 
 // ReadSenders is the shared sender reader (see the comment at the top of
 // this file).
