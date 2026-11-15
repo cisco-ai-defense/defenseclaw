@@ -89,7 +89,7 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	},
 	"PATH-AWS-CREDS": {
 		equivalentAliases: []string{"PATH-WIN-AWS-CREDS"},
-		prerequisite:      pathOwnerPrerequisite(matchesActiveAWSCredentials),
+		prerequisite:      pathOwnerPrerequisite(matchesAnyHomeAWSCredentials),
 		suppressFallback:  pathOwnerSafeNegative(matchesAWSCredentials, matchesActiveAWSCredentials),
 	},
 	"PATH-PASSWORD-CRACKER-POTFILE": {
@@ -100,12 +100,12 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	},
 	"PATH-KUBE": {
 		equivalentAliases: []string{"PATH-WIN-KUBE-CONFIG"},
-		prerequisite:      pathOwnerPrerequisite(matchesActiveKubeConfig),
+		prerequisite:      pathOwnerPrerequisite(matchesAnyHomeKubeConfig),
 		suppressFallback:  pathOwnerSafeNegative(matchesKubeConfig, matchesActiveKubeConfig),
 	},
 	"PATH-DOCKER": {
 		equivalentAliases: []string{"PATH-NPMRC", "PATH-PYPIRC"},
-		prerequisite:      pathOwnerPrerequisite(matchesActivePackageCredentialFile),
+		prerequisite:      pathOwnerPrerequisite(matchesAnyHomePackageCredentialFile),
 		suppressFallback:  pathOwnerSafeNegative(matchesPackageCredentialFile, matchesActivePackageCredentialFile),
 	},
 	"PATH-GIT-CREDS": {
@@ -114,7 +114,7 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 			"PATH-WIN-GIT-CREDS",
 			"PATH-WIN-NETRC",
 		},
-		prerequisite:     pathOwnerPrerequisite(matchesActiveGitCredentialFile),
+		prerequisite:     pathOwnerPrerequisite(matchesAnyHomeGitCredentialFile),
 		suppressFallback: pathOwnerSafeNegative(matchesGitCredentialFile, matchesActiveGitCredentialFile),
 	},
 	"PATH-PROC-ENVIRON": {
@@ -1501,10 +1501,10 @@ func matchesActiveSensitivePath(
 	value := semanticPathValue(candidate)
 	return matchesContextualEnvironmentFile(facts, candidate) ||
 		matchesActiveSSHPrivateKey(facts, candidate) ||
-		matchesActiveAWSCredentials(facts, candidate) ||
-		matchesActiveKubeConfig(facts, candidate) ||
-		matchesActivePackageCredentialFile(facts, candidate) ||
-		matchesActiveGitCredentialFile(facts, candidate) ||
+		matchesAnyHomeAWSCredentials(facts, candidate) ||
+		matchesAnyHomeKubeConfig(facts, candidate) ||
+		matchesAnyHomePackageCredentialFile(facts, candidate) ||
+		matchesAnyHomeGitCredentialFile(facts, candidate) ||
 		matchesProcEnviron(value) ||
 		matchesActiveCloudCredentialFile(facts, candidate) ||
 		matchesActiveBrowserSessionStore(facts, candidate) ||
@@ -1530,10 +1530,7 @@ func activeHomeCredentialFile(
 	within string,
 ) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
-	if !ok {
-		return otherHomeCredentialFile(facts, candidate, class, within)
-	}
-	if relative == "" {
+	if !ok || relative == "" {
 		return false
 	}
 	shape, ok := actionfacts.MatchCredentialFileShape(relative)
@@ -1702,6 +1699,34 @@ func matchesPasswordCrackerPotfile(
 	for _, segment := range strings.Split(candidate.Value, "/") {
 		if segment == ".." {
 			return false
+// The credential-file owners prove a read of the file in any home: the
+// active one (matchesActive...) or another account's (otherHomeCredentialFile).
+// Their safe negative (suppressFallback) keeps the ACTIVE home alone: a path
+// of another home that the typed reading does not prove keeps the regex
+// fallback that judged it on rel. With the other homes in the safe negative
+// too, a copy (cp, install) or an upload (curl -F f=@) of another account's
+// credentials file, which the read-only owner does not prove, lost the
+// fallback finding and was a clean allow (rel-1-0-10:GAP-0834, GAP-0835).
+func matchesAnyHomeAWSCredentials(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	return matchesActiveAWSCredentials(facts, candidate) ||
+		otherHomeCredentialFile(facts, candidate, actionfacts.CredentialFileAWS, "")
+}
+
+func matchesAnyHomeKubeConfig(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	return matchesActiveKubeConfig(facts, candidate) ||
+		otherHomeCredentialFile(facts, candidate, actionfacts.CredentialFileKubeconfig, "")
+}
+
+func matchesAnyHomePackageCredentialFile(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	return matchesActivePackageCredentialFile(facts, candidate) ||
+		otherHomeCredentialFile(facts, candidate, actionfacts.CredentialFilePackageRegistry, "")
+}
+
+func matchesAnyHomeGitCredentialFile(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	return matchesActiveGitCredentialFile(facts, candidate) ||
+		otherHomeCredentialFile(facts, candidate, actionfacts.CredentialFileDeveloperToken, "")
+}
+
 		}
 	}
 	resolved := strings.TrimSpace(candidate.Resolved)
