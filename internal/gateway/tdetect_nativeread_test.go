@@ -3,7 +3,10 @@
 
 package gateway
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // TestNativeReadOfCredentialFilesOutsideTheActiveHomeFiveTiers: a native Read
 // of a credentials file is judged by the shape of the file in any account home,
@@ -16,6 +19,9 @@ import "testing"
 // /home/other. A folder that only is called home, homes or users is a project
 // folder: its files keep the verdict they had on rel.
 func TestNativeReadOfCredentialFilesOutsideTheActiveHomeFiveTiers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX home spellings (/home, /Users, /root) are read by the host's own path rules on native Windows; the C:\\Users forms are pinned by TestAccountHomeByPosition and TestOtherHomeCredentialFileShapes")
+	}
 	files := []string{".git-credentials", ".netrc", ".ssh/id_rsa", ".ssh/id_ed25519", ".aws/credentials", ".kube/config", ".docker/config.json"}
 	alternates := []string{"/home/carol", "/Users/other", "/root"}
 	// Project folders that hold the same names stay allowed.

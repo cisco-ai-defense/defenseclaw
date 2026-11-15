@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -18,6 +19,9 @@ import (
 // five tiers, through the Claude Code hook route and the OpenClaw /inspect/tool
 // exec route. The strict pack blocks the SSH key in every spelling.
 func TestOtherHomeCredentialFileSpellingsFiveTiers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX home spellings (/home, /Users, /root) are read by the host's own path rules on native Windows; the C:\\Users forms are pinned by TestAccountHomeByPosition and TestOtherHomeCredentialFileShapes")
+	}
 	t.Setenv("HOME", "/home/alice")
 	// A working folder that exists on the host, and ../ up to the root from it.
 	realCwd := t.TempDir()
