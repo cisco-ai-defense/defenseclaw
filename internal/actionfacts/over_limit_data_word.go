@@ -73,10 +73,11 @@ func SplitOverLimitWords(command string) (OverLimitWordSplit, bool) {
 		return OverLimitWordSplit{Why: "does not parse"}, false
 	}
 	dataWords := map[*syntax.Word]bool{}
+	bodyWords := map[*syntax.Word]bool{}
 	bindings := literalBindings(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if call, isCall := node.(*syntax.CallExpr); isCall {
-			markDataWords(call, bindings, dataWords)
+			markDataWords(call, bindings, dataWords, bodyWords)
 		}
 		return true
 	})
@@ -96,6 +97,22 @@ func SplitOverLimitWords(command string) (OverLimitWordSplit, bool) {
 			return true
 		}
 		if !dataWords[word] {
+			// The script word of a shell -c is code to the local shell, but
+			// what the script does with an over-limit word of its own is
+			// decided by the grammar of the script: a body whose every
+			// over-limit word is data (ssh host '<script>' inside bash -lc)
+			// is read as its twin, the rest of the body kept
+			// (rel-1-0-10:GAP-0689, the argv form of the Codex shell tool).
+			if bodyWords[word] {
+				if text, nested, ok := nestedBodyTwin(word); ok {
+					start, end := int(word.Pos().Offset()), int(word.End().Offset())
+					if start >= 0 && end <= len(command) && start < end {
+						replacements = append(replacements, replacement{start, end, text})
+						split.Data += nested.Data
+						return false
+					}
+				}
+			}
 			split.Code++
 			return true
 		}
@@ -182,7 +199,7 @@ func shortenedWordPart(part syntax.WordPart) (string, bool) {
 
 // markDataWords records, in dataWords, each over-limit operand of call that
 // is in DATA position.
-func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords map[*syntax.Word]bool) {
+func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords, bodyWords map[*syntax.Word]bool) {
 	if len(call.Args) < 2 {
 		return
 	}
@@ -211,10 +228,79 @@ func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords 
 		return
 	}
 	for index, isBig := range big {
-		if isBig && overLimitOperandIsData(argv, index) {
+		switch {
+		case !isBig:
+		case overLimitOperandIsData(argv, index):
 			dataWords[call.Args[index]] = true
+		case overLimitShellBodyAt(argv, index):
+			bodyWords[call.Args[index]] = true
 		}
 	}
+}
+
+// nestedBodyTwin reads the script word of a shell -c as shell text: when its
+// over-limit words are all DATA the word becomes its twin, requoted, and the
+// nested split is returned. false for a word that is not one static literal
+// or a script with a code word, an unreadable text or no data word.
+func nestedBodyTwin(word *syntax.Word) (string, OverLimitWordSplit, bool) {
+	value := projectPOSIXWord(word)
+	if value.Expands || len(value.Value) <= maxScalarBytes {
+		return "", OverLimitWordSplit{}, false
+	}
+	nested, ok := SplitOverLimitWords(value.Value)
+	if !ok || nested.Code > 0 || nested.Data == 0 || len(nested.Twin) >= len(value.Value) {
+		return "", OverLimitWordSplit{}, false
+	}
+	return posixSingleQuoted(nested.Twin), nested, true
+}
+
+// overLimitShellBodyAt reports argv[at] as the script a POSIX shell takes
+// with -c, directly or behind transparent wrappers.
+func overLimitShellBodyAt(argv []string, at int) bool {
+	start := 0
+	for range maxWrapperDepth + 1 {
+		if at <= start || argv[start] == "" || argv[start] == "\x01" {
+			return false
+		}
+		program := overLimitProgram(argv[start])
+		switch {
+		case overLimitTransparentWrapper(program):
+			rest := transparentWrapperTarget(argv[start:])
+			next := len(argv) - len(rest)
+			if len(rest) == 0 || next <= start || at < next {
+				return false
+			}
+			start = next
+		case posixShellProgram(program):
+			index, ok := shellCommandBodyIndex(argv[start:])
+			return ok && start+index == at
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// shellCommandBodyIndex is the index of the script word of a POSIX shell
+// call (bash -c BODY, sh -lc BODY), skipping the options that take a value;
+// it reads the options only, not the whole invocation.
+func shellCommandBodyIndex(argv []string) (int, bool) {
+	for j := 1; j+1 < len(argv); j++ {
+		option := argv[j]
+		if !strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "+") {
+			return 0, false
+		}
+		switch option {
+		case "-o", "+o", "-O", "+O", "--rcfile", "--init-file":
+			j++
+			continue
+		}
+		if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
+			!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
+			return j + 1, true
+		}
+	}
+	return 0, false
 }
 
 // overLimitOperandIsData reports the over-limit word argv[at] as the plain

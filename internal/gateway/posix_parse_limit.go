@@ -4,7 +4,9 @@
 package gateway
 
 import (
+	"encoding/json"
 	"slices"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -59,10 +61,52 @@ func posixByteBoundCommand(request trustedActionRequest, facts actionfacts.Facts
 		return ""
 	}
 	command, known := trustedBashCommandInput(input)
+	if !known {
+		// A call whose command is an argv array (the Codex shell tool, an
+		// Input.Argv) is the shell text of its words: a word past the bound is
+		// in code or data position by the same grammar as in a text call, so
+		// the array form is never a clean allow where the text form is
+		// truncated (rel-1-0-10:GAP-0689).
+		command, known = trustedArgvCommandText(input)
+	}
 	if !known || !actionfacts.ShellInputPastByteBound(command, len(input.Args)) {
 		return ""
 	}
 	return command
+}
+
+// trustedArgvCommandText is the shell text of a call whose command is an
+// array of words: each word single-quoted, joined by blanks, so the words
+// keep their positions in the grammar. false when the call carries no such
+// array or a word is not a string.
+func trustedArgvCommandText(input actionfacts.Input) (string, bool) {
+	words := input.Argv
+	if len(words) == 0 {
+		var args struct {
+			Command []any `json:"command"`
+		}
+		if len(input.Args) == 0 || json.Unmarshal(input.Args, &args) != nil || len(args.Command) == 0 {
+			return "", false
+		}
+		for _, word := range args.Command {
+			text, ok := word.(string)
+			if !ok {
+				return "", false
+			}
+			words = append(words, text)
+		}
+	}
+	var text strings.Builder
+	for i, word := range words {
+		if strings.IndexByte(word, 0) >= 0 {
+			return "", false
+		}
+		if i > 0 {
+			text.WriteByte(' ')
+		}
+		text.WriteString("'" + strings.ReplaceAll(word, "'", `'\''`) + "'")
+	}
+	return text.String(), text.Len() > 0
 }
 
 // posixParseTruncation is the cap of the byte bound the POSIX analysis of a
