@@ -36,52 +36,50 @@ const unresolvedFolderTitle = "A file this command names sits in a folder the co
 // unresolvedFolderReason is the evidence code of the finding.
 const unresolvedFolderReason = "unresolved_folder"
 
-// unresolvedFolderHomeNames are the protected files of a known name directly
-// in a home (the shell profiles) or in its .ssh folder; unresolvedFolderHostNames
-// those of the host's /etc.
+// unresolvedFolderWriteNames are the files of a known name that are
+// protected against a write (a shell profile, authorized_keys, the account
+// and sudoers files): reading them is ordinary work (a profile audit).
+// unresolvedFolderReadNames are protected against a read as well: the
+// account database, a private key, a token file of a home.
 var (
-	unresolvedFolderHomeNames = []string{".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogin"}
-	unresolvedFolderSSHNames  = []string{"authorized_keys", "authorized_keys2"}
-	unresolvedFolderHostNames = []string{"shadow", "gshadow", "passwd", "sudoers", "master.passwd"}
-	// unresolvedFolderGenericNames are the names of credential files that
-	// every project also has (owner traces: 12 strict false blocks of
-	// `config` operands in agent-transcripts-sample, s7-td327fix tdfx-h).
-	unresolvedFolderGenericNames = []string{"config", "config.json", "token", "hosts.yml", "auth.toml"}
+	unresolvedFolderWriteNames = []string{
+		".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogin",
+		"authorized_keys", "authorized_keys2", "passwd", "sudoers",
+	}
+	unresolvedFolderReadNames = []string{
+		"shadow", "gshadow", "master.passwd", "credentials",
+		"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk",
+		".git-credentials", ".netrc", "_netrc", ".pgpass",
+	}
 )
 
 // unresolvedFolderNamesProtectedFile reports a relative operand that is a
-// named protected file in one of the folders an unresolved folder may be: the
-// active home, a folder of it, /etc, /root.
-func unresolvedFolderNamesProtectedFile(value, home string) bool {
+// named protected file in one of the folders an unresolved folder may be (the
+// active home, a folder of it, /etc, /root), for the access the command
+// makes. A name is matched whole, or as the path the operand spells when it
+// has a folder of its own (.aws/credentials, .kube/config, .ssh/id_rsa: the
+// credentials table, home files only). A bare config, config.json or token,
+// and a copy or a source file beside a credential (credentials.py), are files
+// of every project: owner traces had 12 strict false blocks of `config` and
+// one of `credentials.py` (s7-td327fix tdfx-h, tdfx-f).
+func unresolvedFolderNamesProtectedFile(value, home string, access actionfacts.PathAccess) bool {
 	value = path.Clean(strings.TrimPrefix(value, "./"))
 	if value == "." || value == ".." || strings.HasPrefix(value, "../") || strings.HasPrefix(value, "/") {
 		return false
 	}
 	base := path.Base(value)
-	if slices.Contains(unresolvedFolderHostNames, value) || slices.Contains(unresolvedFolderHomeNames, value) ||
-		slices.Contains(unresolvedFolderSSHNames, base) {
+	if slices.Contains(unresolvedFolderReadNames, base) {
 		return true
 	}
-	// The credentials-file table, read as if the operand ended a path in the
-	// home (`credentials` is ~/.aws/credentials, `.kube/config` itself):
-	// a shape that belongs in a home, or a private key. A name a project
-	// ships (.env, .npmrc, .pypirc) is not one.
-	for _, folder := range []string{"", ".ssh", ".aws", ".kube", ".docker", ".config/gh", ".config/gcloud"} {
-		if folder != "" && slices.Contains(unresolvedFolderGenericNames, value) {
-			// A bare config, config.json or token is a file of every
-			// project; only its folder (.kube/config) names a credential.
-			continue
-		}
-		candidate := path.Join(home, folder, value)
-		shape, ok := actionfacts.MatchCredentialFileShape(candidate)
-		if !ok || !strings.HasSuffix(candidate, "/"+shape.Relative) {
-			continue
-		}
-		if shape.HomeFile || shape.Class == actionfacts.CredentialFileSSHPrivateKey {
-			return true
-		}
+	if access != actionfacts.PathAccessRead && slices.Contains(unresolvedFolderWriteNames, base) {
+		return true
 	}
-	return false
+	if !strings.Contains(value, "/") {
+		return false
+	}
+	candidate := path.Join(home, value)
+	shape, ok := actionfacts.MatchCredentialFileShape(candidate)
+	return ok && shape.HomeFile && candidate == path.Join(home, shape.Relative)
 }
 
 // unresolvedFolderOperand reports a path fact the unknown tier reads: a
@@ -107,7 +105,7 @@ func unresolvedFolderMayNameProtectedFile(facts actionfacts.Facts, noFolder bool
 	}
 	for _, candidate := range facts.Paths {
 		if (noFolder || candidate.UnresolvedFolder()) && unresolvedFolderOperand(candidate) &&
-			unresolvedFolderNamesProtectedFile(candidate.Value, home) {
+			unresolvedFolderNamesProtectedFile(candidate.Value, home, candidate.Access) {
 			return true
 		}
 	}
