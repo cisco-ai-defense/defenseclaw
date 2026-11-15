@@ -1674,15 +1674,35 @@ func matchesActivePackageCredentialFile(
 	return activeHomeCredentialFile(facts, candidate, actionfacts.CredentialFilePackageRegistry, "")
 }
 
+// PATH-GIT-CREDS and its aliases (PATH-NETRC, PATH-WIN-GIT-CREDS,
+// PATH-WIN-NETRC) own the Git credentials and netrc files of the developer
+// token class, not every file of it: ~/.vault-token, ~/.pgpass or a Cargo,
+// Terraform or Hugging Face token is a credentials file (PATH-CRED-STORE-USER
+// and the secret-read chain still see it) but not a "Git credentials file".
+// Before this, an MCP file tool's read of ~/.vault-token got PATH-GIT-CREDS
+// that the native Read did not (TestNativeFileToolsRunTheSamePathRules).
+func gitOrNetrcCredentialName(value string) bool {
+	lower := strings.ToLower(strings.ReplaceAll(value, "\\", "/"))
+	switch path.Base(lower) {
+	case ".git-credentials", ".netrc", "_netrc":
+		return true
+	}
+	return strings.HasSuffix(lower, "/.config/git/credentials") || lower == ".config/git/credentials"
+}
+
 func matchesGitCredentialFile(value string) bool {
-	return credentialFileShapeIs(value, actionfacts.CredentialFileDeveloperToken)
+	return credentialFileShapeIs(value, actionfacts.CredentialFileDeveloperToken) && gitOrNetrcCredentialName(value)
 }
 
 func matchesActiveGitCredentialFile(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	return activeHomeCredentialFile(facts, candidate, actionfacts.CredentialFileDeveloperToken, "")
+	if !activeHomeCredentialFile(facts, candidate, actionfacts.CredentialFileDeveloperToken, "") {
+		return false
+	}
+	relative, ok := activeHomeRelative(facts, candidate)
+	return ok && gitOrNetrcCredentialName(relative)
 }
 
 func matchesProcEnviron(value string) bool {
