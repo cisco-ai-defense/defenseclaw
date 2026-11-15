@@ -485,7 +485,8 @@ func dispatchTrustedAction(
 		// is a possible write to it, which blocks in every mode and
 		// profile, as the readers' proof of a state write did before the
 		// budget refused to read the call (GAP-0254, GAP-0255, GAP-0281).
-		return withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable))
+		return withPowerShellCapPieces(parent, request,
+			withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable)))
 	}
 	if bound == shellReadingTooDeep || bound == shellReadingNestedBodies {
 		// Past the reading bounds: no reader below parses it, and the call
@@ -493,10 +494,10 @@ func dispatchTrustedAction(
 		// GAP-0677). It is decided before the recovered-parse reading
 		// below, which would read the same bodies again for the same
 		// finding.
-		return trustedActionLimitFindings(request.EnforcementCapable)
+		return withPowerShellCapPieces(parent, request, trustedActionLimitFindings(request.EnforcementCapable))
 	}
 	if request.EnforcementCapable && shellReason == "shell-parse-bound" {
-		return trustedActionLimitFindings(true)
+		return withPowerShellCapPieces(parent, request, trustedActionLimitFindings(true))
 	}
 	if bound == shellReadingNestedProof {
 		// The readers below read it, but past this weight they do not prove
@@ -550,11 +551,22 @@ func dispatchTrustedAction(
 			// observe mode allows the budget finding but hard-blocks a
 			// proven write to the active state, and that proof is formed
 			// only there (withOverBudgetStateMutation).
-			return withOverBudgetStateMutation(parent, request, facts, trustedActionLimitFindings(request.EnforcementCapable))
+			// The statements at the start and the end of a PowerShell call are
+			// also judged alone: a protected write beside the padding that
+			// put the call past the budget keeps its block (GAP-0693).
+			return withPowerShellCapPieces(parent, request,
+				withOverBudgetStateMutation(parent, request, facts, trustedActionLimitFindings(request.EnforcementCapable)))
 		}
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
+		if facts.Parse.Status == actionfacts.StatusLimitExceeded {
+			// A PowerShell call the reading stopped at a cap of its own (a
+			// nesting, word, statement or command cap, or the input bound)
+			// keeps the blocks its first and last statements prove alone
+			// (GAP-0693).
+			defer func() { findings = withPowerShellCapPieces(parent, request, findings) }()
+		}
 		if cut := trustedReadingCut(request.Input, facts); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
 			// statement budget: the call is TRUNCATED (the one bound rule),
