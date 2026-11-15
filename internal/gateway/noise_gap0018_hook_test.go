@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // Routine work that is no attack: a user copies their own SSH key inside
@@ -157,5 +159,45 @@ func keepTempDirOffDevice(t *testing.T) {
 	t.Helper()
 	if strings.HasPrefix(os.TempDir(), "/dev/") {
 		t.Setenv("TMPDIR", "/var/tmp")
+	}
+}
+
+// TestGAP0975RunTimeShellWriteBlocksInEveryTier: a shell named at run time
+// ("$SHELL" -c TEXT) runs TEXT as code, so a write of the keys file in TEXT is
+// no data of unknown role. Bare, behind the time keyword or an assignment
+// prefix, it blocks in every tier as rel does; a run-time program without -c
+// keeps the GAP-0018 reading: a per-user default or permissive install alerts,
+// strict and managed installs block (rel-1-0-10:GAP-0975).
+func TestGAP0975RunTimeShellWriteBlocksInEveryTier(t *testing.T) {
+	env := boundedLaneEnv(t)
+	write := "tee -a " + filepath.Join(env.home, ".ssh", "authorized_keys") + " < new.pub"
+	shell := `"$SHELL" -c '` + write + `'`
+	rows := []struct {
+		name, command string
+		perUserAlert  bool
+	}{
+		{"bare", shell, false},
+		{"time", "time " + shell, false},
+		{"time -p", "time -p " + shell, false},
+		{"assignment prefix", "FOO=$BAR " + shell, false},
+		{"login cluster", `$BASH -lc '` + write + `'`, false},
+		{"option with a value", `"$SHELL" -o pipefail -c '` + write + `'`, false},
+		{"plus option", `"$SHELL" +o posix -c '` + write + `'`, false},
+		{"run-time program without -c", `$T send '` + write + `'`, true},
+	}
+	for _, tier := range boundedTestTiers {
+		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+		for _, row := range rows {
+			t.Run(tier.name+"/"+row.name, func(t *testing.T) {
+				want := "block"
+				if row.perUserAlert && !tier.managed && tier.tier != bounded.TierStrict {
+					want = "alert"
+				}
+				action, findings := boundedDecideClaudeCode(t, api, env, boundedLaneCall{tool: "Bash", input: map[string]any{"command": row.command}})
+				if action != want {
+					t.Fatalf("action=%q findings=%v, want %q", action, findings, want)
+				}
+			})
+		}
 	}
 }
