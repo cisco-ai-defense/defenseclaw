@@ -105,7 +105,7 @@ func powerShellStaticOperand(word string) bool {
 		// The ln and mv twin is read with this host's path rules: a drive path
 		// or a backslash is not a path here, so the call keeps the opaque
 		// reading (a Windows spelling is read on a Windows host).
-		return !strings.Contains(word, `\`) && !(len(word) > 1 && word[1] == ':')
+		return !strings.Contains(word, `\`) && (len(word) < 2 || word[1] != ':')
 	}
 	return true
 }
