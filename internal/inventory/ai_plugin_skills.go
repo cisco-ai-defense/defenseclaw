@@ -46,7 +46,8 @@ type installedPlugin struct {
 func (s *ContinuousDiscoveryService) detectPluginSkills() []AISignal {
 	var out []AISignal
 	for _, home := range s.homesToScan() {
-		plugins := append(append(claudePlugins(home), codexPlugins(home)...), copilotPlugins(home)...)
+		plugins := append(append(claudePlugins(s.agentHome(home, "CLAUDE_CONFIG_DIR")), codexPlugins(s.agentHome(home, "CODEX_HOME"))...),
+			copilotPlugins(s.agentHome(home, "COPILOT_HOME"))...)
 		for _, plugin := range append(plugins, cursorPlugins(home)...) {
 			sig := s.signatureByID(plugin.signature)
 			if sig == nil {
@@ -101,9 +102,10 @@ func (s *ContinuousDiscoveryService) signatureByID(id string) *AISignature {
 	return nil
 }
 
-// claudePlugins reads plugins/installed_plugins.json and enabledPlugins.
-func claudePlugins(home string) []installedPlugin {
-	root := filepath.Join(home, ".claude", "plugins")
+// claudePlugins reads plugins/installed_plugins.json and enabledPlugins in
+// the Claude Code folder dir.
+func claudePlugins(dir string) []installedPlugin {
+	root := filepath.Join(dir, "plugins")
 	var registry struct {
 		Plugins map[string]json.RawMessage `json:"plugins"`
 	}
@@ -113,7 +115,7 @@ func claudePlugins(home string) []installedPlugin {
 	var settings struct {
 		EnabledPlugins map[string]bool `json:"enabledPlugins"`
 	}
-	readPluginJSON(filepath.Join(home, ".claude", "settings.json"), &settings)
+	readPluginJSON(filepath.Join(dir, "settings.json"), &settings)
 	var out []installedPlugin
 	seen := map[string]bool{}
 	for id, raw := range registry.Plugins {
@@ -147,8 +149,8 @@ func claudePlugins(home string) []installedPlugin {
 
 // codexPlugins reads [plugins."name@marketplace"] from config.toml; the
 // newest folder in plugins/cache/<marketplace>/<name> is the installed copy.
-func codexPlugins(home string) []installedPlugin {
-	data, err := safefile.ReadRegularFileBounded(filepath.Join(home, ".codex", "config.toml"), maxPluginRegistryBytes)
+func codexPlugins(codexHome string) []installedPlugin {
+	data, err := safefile.ReadRegularFileBounded(filepath.Join(codexHome, "config.toml"), maxPluginRegistryBytes)
 	var config struct {
 		Plugins map[string]struct {
 			Enabled *bool `toml:"enabled"`
@@ -163,7 +165,7 @@ func codexPlugins(home string) []installedPlugin {
 		if !validPluginID(id) {
 			continue
 		}
-		if dir := newestChildDir(filepath.Join(home, ".codex", "plugins", "cache", marketplace, name), ""); dir != "" {
+		if dir := newestChildDir(filepath.Join(codexHome, "plugins", "cache", marketplace, name), ""); dir != "" {
 			out = append(out, installedPlugin{signature: "codex", id: id, dir: dir, version: filepath.Base(dir), enabled: entry.Enabled})
 		}
 	}
@@ -171,8 +173,8 @@ func codexPlugins(home string) []installedPlugin {
 }
 
 // copilotPlugins lists installed-plugins/<marketplace>/<plugin>.
-func copilotPlugins(home string) []installedPlugin {
-	root := filepath.Join(home, ".copilot", "installed-plugins")
+func copilotPlugins(copilotHome string) []installedPlugin {
+	root := filepath.Join(copilotHome, "installed-plugins")
 	var out []installedPlugin
 	for _, marketplace := range realChildDirs(root) {
 		for _, dir := range realChildDirs(filepath.Join(root, marketplace)) {
