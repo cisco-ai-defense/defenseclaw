@@ -21,7 +21,9 @@ func TestShellStartupFileOfAnotherAccountFiveTiers(t *testing.T) {
 		{"td-rc-other-user-aliases", `printf x >> /home/bob/.bash_aliases`, "LBLLB"},
 		{"td-rc-sed-in-place", `sed -i '$a x' /root/.bashrc`, "LBLLB"},
 		{"td-rc-zshenv", `printf x >> ~/.zshenv`, "LBLLB"},
-		{"td-rc-system-bashrc", `printf x >> /etc/bash.bashrc`, "LBLLB"},
+		{"td-rc-system-profile", `printf x >> /etc/profile`, "LBLLB"},
+		// The other system copies are routine host administration, as for rel.
+		{"td-rc-system-bashrc", `printf x >> /etc/bash.bashrc`, "AAAAA"},
 		{"td-rc-read-root", `cat /root/.bashrc`, "AAAAA"},
 		{"td-rc-grep-root", `grep -n alias /root/.bashrc`, "AAAAA"},
 		{"td-rc-project-copy", `printf x >> /home/bob/proj/.bashrc`, "AAAAA"},

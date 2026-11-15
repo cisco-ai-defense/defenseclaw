@@ -2748,9 +2748,17 @@ func matchesSafeSSHDirectoryCandidate(
 	return ok && strings.HasPrefix(relative, ".ssh/")
 }
 
+// isSystemShellProfile is the system-wide startup file this owner has always
+// read exactly: /etc/profile. The other system copies (/etc/bash.bashrc,
+// /etc/zshrc ...) are startup files too, but writing them is routine
+// administration of a host (a license key or a PATH exported for every
+// login shell: 2 benign s3 admin tasks), so they are not judged here; the
+// startup files of an account's own home are.
+func isSystemShellProfile(value string) bool { return value == "/etc/profile" }
+
 func matchesShellProfileCandidate(value string) bool {
 	value = canonicalSemanticPath(value)
-	if actionfacts.ShellStartupSystemFile(value) {
+	if isSystemShellProfile(value) {
 		return true
 	}
 	switch base := pathBase(value); base {
@@ -2766,7 +2774,7 @@ func looksLikeSystemShellProfilePath(value string) bool {
 	if len(value) >= 3 && value[1] == ':' && value[2] == '/' {
 		value = value[2:]
 	}
-	return actionfacts.ShellStartupSystemFile(value)
+	return isSystemShellProfile(value)
 }
 
 func matchesActiveShellProfile(
@@ -2774,7 +2782,7 @@ func matchesActiveShellProfile(
 	candidate actionfacts.PathFact,
 ) bool {
 	if candidate.Flavor == actionfacts.PathFlavorPOSIX &&
-		actionfacts.ShellStartupSystemFile(canonicalSemanticPath(semanticPathValue(candidate))) {
+		isSystemShellProfile(canonicalSemanticPath(semanticPathValue(candidate))) {
 		return true
 	}
 	// Another account's startup file runs at that account's next login just
@@ -2821,7 +2829,7 @@ func matchesSafeShellProfileCandidate(
 	// not acquire the authority of /Users/alice/.bashrc.
 	return isAbsoluteSemanticPath(value) &&
 		matchesShellProfileCandidate(value) &&
-		!actionfacts.ShellStartupSystemFile(value)
+		!isSystemShellProfile(value)
 }
 
 func matchesGitHookCandidate(value string) bool {

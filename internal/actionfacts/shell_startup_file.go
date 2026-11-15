@@ -46,14 +46,3 @@ func ShellStartupHomeFile(name string) bool {
 	}
 	return false
 }
-
-// ShellStartupSystemFile reports whether value (a lower-case, forward-slash
-// absolute path) is one of the system-wide shell startup files, exactly.
-func ShellStartupSystemFile(value string) bool {
-	for _, known := range shellStartupSystemPaths {
-		if value == known {
-			return true
-		}
-	}
-	return false
-}

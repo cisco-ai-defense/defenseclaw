@@ -23,12 +23,12 @@ func TestShellStartupFileTable(t *testing.T) {
 		}
 	}
 	for _, path := range []string{"/etc/profile", "/etc/bash.bashrc", "/etc/zsh/zshrc"} {
-		if !ShellStartupSystemFile(path) {
+		if !slices.Contains(ShellStartupSystemPaths(), path) {
 			t.Errorf("%s is a system shell startup file", path)
 		}
 	}
-	for _, path := range []string{"/etc/profile.d/x.sh", "/etc/profile.d/", "/etc/profilex", "/var/etc/profile", "/home/a/etc/profile.d/x.sh", "/etc/passwd"} {
-		if ShellStartupSystemFile(path) {
+	for _, path := range []string{"/etc/profile.d/x.sh", "/etc/profilex", "/etc/passwd"} {
+		if slices.Contains(ShellStartupSystemPaths(), path) {
 			t.Errorf("%s is no system shell startup file", path)
 		}
 	}

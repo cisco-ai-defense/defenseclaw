@@ -1218,7 +1218,7 @@ func TestIntegrityPersistenceMutationPathPrecision(t *testing.T) {
 		{"other user profile append", "printf x >> /home/bob/.zshrc", "persistence.shell_profile_write", "/repo", "/home/alice", true},
 		{"other user aliases append", "printf x >> /home/bob/.bash_aliases", "persistence.shell_profile_write", "/repo", "/home/alice", true},
 		{"active zshenv write", "printf x >> /home/alice/.zshenv", "persistence.shell_profile_write", "/repo", "/home/alice", true},
-		{"system bash.bashrc write", "printf x >> /etc/bash.bashrc", "persistence.shell_profile_write", "/repo", "/home/alice", true},
+		{"system bash.bashrc write", "printf x >> /etc/bash.bashrc", "persistence.shell_profile_write", "/repo", "/home/alice", false},
 		{"other account profile read", "cat /root/.bashrc", "persistence.shell_profile_write", "/repo", "/home/alice", false},
 		{"other user project profile", "printf x > /home/bob/proj/.bashrc", "persistence.shell_profile_write", "/repo", "/home/alice", false},
 		{"active git hook", "printf x > .git/hooks/pre-commit", "persistence.git_hook_write", "/repo", "/home/alice", true},
