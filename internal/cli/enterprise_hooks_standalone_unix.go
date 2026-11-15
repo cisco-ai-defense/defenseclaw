@@ -218,8 +218,13 @@ func enterpriseHookUnixBindingsPath() string {
 }
 
 func loadEnterpriseHookUnixBindings() enterpriseHookUnixBindings {
+	return loadEnterpriseHookUnixBindingsFile(enterpriseHookUnixBindingsPath())
+}
+
+// loadEnterpriseHookUnixBindingsFile reads the bindings at path; a missing,
+// oversized or unreadable file is no bindings.
+func loadEnterpriseHookUnixBindingsFile(path string) enterpriseHookUnixBindings {
 	empty := enterpriseHookUnixBindings{Version: enterpriseHookUnixBindingsVersion, Bindings: map[string]enterpriseHookUnixBinding{}}
-	path := enterpriseHookUnixBindingsPath()
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > enterpriseHookUnixBindingsMaxBytes {
 		return empty

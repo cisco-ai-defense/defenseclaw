@@ -80,17 +80,3 @@ func WritePipeMessage(ctx context.Context, handle windows.Handle, message []byte
 func FlushPipeBounded(handle windows.Handle, timeout time.Duration) {
 	flushPipeBounded(handle, timeout)
 }
-
-// ServiceProcessID is the PID SCM reports for a starting or running
-// service. ErrUnavailable: SCM answered and the service has no process;
-// any other error: SCM did not answer.
-func ServiceProcessID(name string) (uint32, error) {
-	facts, err := queryService(name, false)
-	if err != nil {
-		return 0, err
-	}
-	if (facts.state != windows.SERVICE_RUNNING && facts.state != windows.SERVICE_START_PENDING) || facts.pid == 0 {
-		return 0, ErrUnavailable
-	}
-	return facts.pid, nil
-}

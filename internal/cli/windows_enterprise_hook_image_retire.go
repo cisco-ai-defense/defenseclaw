@@ -82,6 +82,9 @@ type windowsHookImageRetireSteps struct {
 	ReconcileCodex  func() error
 	RestartGuardian func() error
 	Scan            func() windowsHookImageConfigScan
+	// RouteOnlyRouted lists the agents the installed config routes with
+	// route-only (managedRouteOnlyConnectors); nil skips the check.
+	RouteOnlyRouted func() ([]string, error)
 	Now             func() time.Time
 	Sleep           func(time.Duration)
 	Wait, Poll      time.Duration
@@ -98,6 +101,26 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		report.Reason = reason
 		report.Error = fmt.Sprintf(format, args...)
 		return report
+	}
+	// A Setup before 1.0.10 has no route-only listener and does not take
+	// back the route settings the guardian wrote into each enrolled
+	// account, so their agents got 401 or connection refused after the
+	// rollback (rel-1-0-10 GAP-0647). Retire is the step before that Setup:
+	// it refuses while routing is on, before anything changes.
+	if steps.RouteOnlyRouted != nil {
+		routed, err := steps.RouteOnlyRouted()
+		switch {
+		case err != nil:
+			report.Notes = append(report.Notes, "route_only_unchecked: the installed config could not be read to check route-only routing ("+err.Error()+
+				"); before the older Setup, make sure routing.route_only.connectors is empty and no account reports route_config_drift in enterprise windows verify")
+		case len(routed) > 0:
+			list := strings.Join(routed, ", ")
+			return fail(windowsHookImageRetireRefused, "route-only routing is on for %s, and a Setup before 1.0.10 has no route-only listener and does not take back the route settings "+
+				"the guardian wrote for each enrolled account: their agents would get 401 or connection refused. Turn routing off first: remove %s from "+
+				"routing.route_only.connectors (or set routing.enabled: false) in the config or the signed bundle and apply it (`%s CONFIG=<config> JSON=1`), "+
+				"wait until `enterprise windows verify` reports no route_config_drift (the guardian takes the settings back as each account), then run retire again. "+
+				"Nothing was changed", list, list, managed.WindowsSetupCommand("/ensure"))
+		}
 	}
 	bin := strings.TrimRight(strings.TrimSpace(steps.Bin), `\`)
 	root := winpath.EnterpriseHookImagesRoot(bin)

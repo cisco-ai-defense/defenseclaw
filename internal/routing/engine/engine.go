@@ -28,6 +28,9 @@ type Options struct {
 	// SensitiveMarks keeps the sensitive mark of each conversation across
 	// generations (nil = a private one); used only with routing.sensitive.
 	SensitiveMarks *StickyCache
+	// SensitiveChecker answers routing.sensitive.check (decision model or
+	// judge); nil means regex-only narrowing.
+	SensitiveChecker SensitiveChecker
 }
 
 // Engine is built once per config generation and is safe for concurrent
@@ -50,6 +53,9 @@ type Engine struct {
 	credentialOK  func(Backend, Request) bool
 	sticky        *StickyCache
 	marks         *StickyCache
+	checker       SensitiveChecker
+	// context is routing.context (zero = the newest turn only).
+	context ContextOptions
 	// capabilityFilter is off for vllm_sr, whose 1.0.9 configs used
 	// free-form capabilities.
 	capabilityFilter bool
@@ -81,6 +87,7 @@ func New(cfg *config.Config, opts Options) (*Engine, error) {
 		admin:         opts.Admin,
 		managed:       opts.Managed,
 		credentialOK:  opts.CredentialOK,
+		context:       contextOptionsOf(r),
 	}
 	if r.Sensitive != nil && len(r.Sensitive.Aliases) > 0 {
 		// The sensitive mark of a conversation (GAP-0576): its own cache, so
@@ -89,6 +96,9 @@ func New(cfg *config.Config, opts Options) (*Engine, error) {
 		if e.marks == nil {
 			e.marks = NewSensitiveMarkCache()
 		}
+	}
+	if r.Sensitive != nil && r.Sensitive.CheckEnabled() && len(r.Sensitive.Aliases) > 0 {
+		e.checker = opts.SensitiveChecker
 	}
 	if r.EffectiveClassifier() == config.RoutingClassifierSystemOne {
 		e.sticky = opts.Sticky

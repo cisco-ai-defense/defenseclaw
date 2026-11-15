@@ -702,10 +702,10 @@ func noteCascade(logger *audit.Logger, g *Generation) {
 // severity mapping, the default pack's audit-only review finding, then the
 // judge's role (guardrail.cascade.judge), recorded for the cascade policy.
 func (a *APIServer) finishHookJudge(ctx context.Context, cfg *config.Config, connector, strategyDirection string,
-	judge *LLMJudge, ruleFloor bool, v *ScanVerdict,
+	judge *LLMJudge, ruleFloor, effectsModeled bool, v *ScanVerdict,
 ) *ScanVerdict {
 	decisionOnly := judge != nil && judge.decisionOnly
-	out := judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+	out := judgeReviewOnlyAudit(cfg, connector, ruleFloor, effectsModeled, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
 	out = applyCascadeJudgeRole(cfg, connector, decisionOnly, out)
 	if !decisionOnly {
 		recordCascadeJudge(ctx, out)

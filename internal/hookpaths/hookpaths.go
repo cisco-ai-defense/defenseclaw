@@ -4607,6 +4607,10 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			})
 		}
 		if opaqueProgram(program) {
+			if program == "new-item" && !powerShellNewItemMayMakeLink(words[1:], static[1:]) {
+				// A file or a folder: New-Item makes no link (GAP-0801).
+				return true
+			}
 			links.unknown(true)
 			return true
 		}

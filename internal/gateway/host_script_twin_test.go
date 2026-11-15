@@ -65,6 +65,9 @@ func TestHostScriptTwinOnlyAddsFindings(t *testing.T) {
 		return dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: input, LegacyText: string(args), Connector: "host-script-twin", EnforcementCapable: true,
 			hostScriptTwinOff: !enabled,
+			// Off also turns off the launcher body reading (launcherBodyTwinRequest),
+			// which reads the same scripts, so the run shows what the call as written raises.
+			launcherDepth: map[bool]int{true: 0, false: maxLauncherBodyDepth}[enabled],
 		})
 	}
 	for _, pack := range []string{"default", "strict"} {

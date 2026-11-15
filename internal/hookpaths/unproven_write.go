@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -46,7 +47,95 @@ var unprovenReasonTitles = map[string]string{
 // linkCallText is link-making code this package does not evaluate:
 // interpreter, PowerShell and Windows link calls, wider than opaqueLink
 // (Perl and Ruby symlink, a .NET or COM link call).
-var linkCallText = lazyregexp.New(`(?i)symlink|hardlink|junction|\bos\.link\b|\bFile\.link\b|\blink\s*\(|mklink|new-item|createsymboliclink|createhardlink`)
+var linkCallText = lazyregexp.New(`(?i)symlink|hardlink|junction|\bos\.link\b|\bFile\.link\b|\blink\s*\(|mklink|createsymboliclink|createhardlink`)
+
+// newItemText is a New-Item spelling, read by commandNewItemMayMakeLink.
+var newItemText = lazyregexp.New(`(?i)\bnew-item\b`)
+
+// commandNewItemMayMakeLink reports a command whose New-Item calls may make
+// a link: unless the text reads as PowerShell and every New-Item
+// spelling in it is a call whose item type is fixed as a file or a folder
+// (powerShellNewItemMayMakeLink). Any New-Item counted as a possible link
+// before, so on a Windows host a benign script that writes a file and then
+// creates one with New-Item -ItemType File kept its authorized-keys block
+// in the default tier (rel-1-0-10:GAP-0801).
+func commandNewItemMayMakeLink(command string) bool {
+	spellings := len(newItemText.FindAllStringIndex(command, -1))
+	if spellings == 0 {
+		return false
+	}
+	facts := actionfacts.Analyze(actionfacts.Input{Tool: "PowerShell", Command: command, DialectHint: actionfacts.DialectPowerShell})
+	// A partial parse (a dynamic value) still names each call it read; a
+	// New-Item spelling outside a read call (a string, a script block)
+	// leaves the counts unequal.
+	if facts.Parse.Dialect != actionfacts.DialectPowerShell {
+		return true
+	}
+	read := 0
+	for _, call := range facts.Commands {
+		if len(call.Argv) == 0 || !strings.EqualFold(call.Argv[0], "new-item") {
+			continue
+		}
+		// A word is static unless it expands at run time (a variable, a
+		// splat, a subexpression or script block, an escape).
+		static := make([]bool, len(call.Argv)-1)
+		for i, word := range call.Argv[1:] {
+			static[i] = call.ArgvComplete || !strings.ContainsAny(word, "$@(){}`")
+		}
+		if powerShellNewItemMayMakeLink(call.Argv[1:], static) {
+			return true
+		}
+		read++
+	}
+	return read != spellings
+}
+
+// powerShellNewItemMayMakeLink reports a New-Item call (the words after the
+// program, and which are static) that may create a link: an item type that
+// is a link or that this reading cannot fix (a dynamic or unknown item type,
+// a splat or a dynamic parameter name). No item type (a file), or a static File or
+// Directory, makes no link.
+func powerShellNewItemMayMakeLink(args []string, static []bool) bool {
+	itemType := ""
+	for i := 0; i < len(args); i++ {
+		// A splat can carry -ItemType; a dynamic word in a parameter's place
+		// can be one. Any other dynamic word is a value (a path or content).
+		if strings.HasPrefix(args[i], "@") {
+			return true
+		}
+		if i >= len(static) || !static[i] {
+			if strings.HasPrefix(args[i], "-") {
+				return true
+			}
+			continue
+		}
+		word := strings.ToLower(args[i])
+		if !strings.HasPrefix(word, "-") {
+			continue
+		}
+		name, value, inline := strings.Cut(word, ":")
+		if name != "-type" && (len(name) < 3 || !strings.HasPrefix("-itemtype", name)) {
+			continue
+		}
+		if !inline {
+			if i+1 >= len(args) || i+1 >= len(static) || !static[i+1] {
+				return true
+			}
+			i++
+			value = strings.ToLower(args[i])
+		}
+		value = strings.Trim(value, `'"`)
+		if itemType != "" && itemType != value {
+			return true
+		}
+		itemType = value
+	}
+	switch itemType {
+	case "", "file", "directory":
+		return false
+	}
+	return true
+}
 
 // CommandMayMakeLink reports a command that may create a link itself, with a
 // target the static reading cannot place: a link program (also behind a
@@ -63,7 +152,7 @@ func CommandMayMakeLink(command string) bool {
 	if strings.Contains(command, "$(") || strings.Contains(command, "`") || strings.Contains(command, "<(") || strings.Contains(command, ">(") {
 		return true
 	}
-	if opaqueLink.MatchString(command) || linkCallText.MatchString(command) {
+	if opaqueLink.MatchString(command) || linkCallText.MatchString(command) || commandNewItemMayMakeLink(command) {
 		return true
 	}
 	if tactics.RunsProgram(command, linkPrograms...) || tactics.RunsProgram(command, multicallPrograms...) {

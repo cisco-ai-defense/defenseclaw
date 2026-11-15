@@ -191,8 +191,8 @@ func TestCodexRollbackConvertsTheGuardedStartToTheEarlierBridgeAndBack(t *testin
 	got := cfg["hooks"].(map[string]interface{})
 	for _, event := range []string{"PreToolUse", "Stop"} {
 		h := got[event].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
-		if want := windowsNativePowerShellHookCommandForCodexEvent(event, contract, launcher); h["command"] != want || h["command_windows"] != want {
-			t.Fatalf("%s handler = %v; want the earlier bridge", event, h["command"])
+		if want := legacyCodexBridgeForTest(t, event, contract, launcher); h["command"] != want || h["command_windows"] != want {
+			t.Fatalf("%s handler = %v; want the bridge every release owns", event, h["command"])
 		}
 	}
 	preGroup := got["PreToolUse"].([]interface{})[0].(map[string]interface{})
@@ -261,8 +261,8 @@ func TestLauncherStartAnswerHookFormsAreOwnedAndConverted(t *testing.T) {
 				if !contains(windowsCodexPerUserHookCommands(event, contract.ContractID, launcher), command) {
 					continue
 				}
-				bridge, ok := codexWindowsHookFormReplacement(command, event, launcher, true)
-				if ok && bridge == windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, launcher) {
+				bridge, ok := codexWindowsHookFormReplacement(command, event, launcher, "", true)
+				if ok && bridge == legacyCodexBridgeForTest(t, event, contract.ContractID, launcher) {
 					found = true
 				}
 			}

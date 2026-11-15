@@ -31,7 +31,21 @@ func routingAPIConfig() *config.Config {
 	return cfg
 }
 
+// isolatedRoutingAdminRuntime gives the test its own routing admin runtime
+// (rules, budgets, spend ledger, decision ring) and puts the process one back
+// after it. The runtime is process-global, so two tests that charge the same
+// budget key added up their spend in whatever order go test ran them:
+// TestOwnStatusRoutingSummary saw 80% instead of 40% after this test
+// (rel-1-0-10 T-ROUTER follow-up). Not for parallel tests.
+func isolatedRoutingAdminRuntime(t *testing.T) {
+	t.Helper()
+	previous := routingAdminRuntime
+	routingAdminRuntime = routingadmin.NewRuntime()
+	t.Cleanup(func() { routingAdminRuntime = previous })
+}
+
 func TestRoutingBudgetViewsShowOwnOnly(t *testing.T) {
+	isolatedRoutingAdminRuntime(t)
 	cfg := routingAPIConfig()
 	if routingAdminRuntime.For(cfg) == nil {
 		t.Fatal("evaluator")
