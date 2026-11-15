@@ -135,6 +135,17 @@ func awkSpellings() []awkSpelling {
 		// 64 KiB awk bound is read, and a command at the start of a file past
 		// the awk bound is judged as the direct command (the rest is the unknown
 		// tier, never a refusal of the whole file).
+		// GAP-0733: a relative program file under a folder the reading does not
+		// track (env -C, cd, pushd, a subshell cd) or a bare name with AWKPATH
+		// set is not the file at the hook's folder: the unknown tier. The
+		// absolute name and a call that changes no folder keep their verdicts.
+		{id: "J06", cmd: `env -C ordinary awk -f prog.awk a.txt`, files: file, want: "unknown"},
+		{id: "J05", cmd: `cd ordinary && awk -f prog.awk a.txt`, files: file, want: "unknown"},
+		{id: "A-subshell-cd-awk-f", cmd: `(cd ordinary && awk -f prog.awk a.txt)`, files: file, want: "unknown"},
+		{id: "A-pushd-awk-f", cmd: `pushd ordinary >/dev/null; awk -f prog.awk a.txt`, files: file, want: "unknown"},
+		{id: "K09", cmd: `AWKPATH=ordinary gawk -f prog.awk a.txt`, files: file, want: "unknown"},
+		{id: "J05-abs", cmd: `cd ordinary && awk -f @PROJ@/prog.awk a.txt`, files: file, want: "block"},
+		{id: "J05-benign", cmd: `cd ordinary && awk '{print $1}' a.txt`, want: "allow"},
 		{id: "R30000", cmd: `awk -f big30.awk ordinary/a.txt`, files: map[string]string{"big30.awk": `{print $1}` + strings.Repeat(" ", 30000)}, want: "allow"},
 		{id: "R63000", cmd: `awk -f big63.awk ordinary/a.txt`, files: map[string]string{"big63.awk": `{print $1}` + strings.Repeat(" ", 63000)}, want: "allow"},
 		{id: "Q06", cmd: `awk -f big200.awk`, files: map[string]string{"big200.awk": awkTouchLink + strings.Repeat(" ", 200000)}, want: "block"},

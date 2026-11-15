@@ -53,7 +53,38 @@ type AwkTwin struct {
 }
 
 // awkFileState is what the twin reading learns about program files.
-type awkFileState struct{ programFiles, unknown bool }
+type awkFileState struct {
+	programFiles, unknown bool
+	// dirChanged is set once the walk meets a cd, pushd or popd: the call
+	// after it runs in a folder the reading does not track, so a program file
+	// named relative to the hook's folder may be another file
+	// (rel-1-0-10:GAP-0733). awkPath is set when the text names AWKPATH, which
+	// gawk searches for a bare -f name.
+	dirChanged, awkPath bool
+}
+
+// awkReaderFor is the program file reader of an awk call run in a folder the
+// reading may not know (wrapperDir: env -C, sudo -D set one it does not
+// resolve, or an earlier cd; or a bare name with AWKPATH set): a relative
+// name is then unread, so the call is the unknown tier, never the verdict of
+// a file at another place. An absolute name is the same file wherever the
+// call runs.
+func awkReaderFor(files awkprog.FileReader, state *awkFileState, run PrefixWrapperRun) awkprog.FileReader {
+	if files == nil {
+		return nil
+	}
+	moved := state.dirChanged || run.Dir != "" || run.DirUnknown
+	if !moved && !state.awkPath {
+		return files
+	}
+	return func(name string) (string, bool) {
+		absolute := strings.HasPrefix(name, "/") || len(name) > 2 && name[1] == ':' && (name[2] == '\\' || name[2] == '/')
+		if !absolute && (moved || !strings.ContainsAny(name, `/\`)) {
+			return "", false
+		}
+		return files(name)
+	}
+}
 
 // wholeCommand reports that call is the only statement of the command, with
 // no redirection, background or negation around it.
@@ -102,6 +133,9 @@ func awkCommandTwin(command string, depth int, trunc *bounded.Truncated, files a
 	if !strings.Contains(command, "awk") {
 		return "", nil
 	}
+	if strings.Contains(command, "AWKPATH") {
+		state.awkPath = true
+	}
 	file, parsed := shellparse.Parse(command)
 	if !parsed {
 		return "", nil
@@ -131,11 +165,16 @@ func awkCommandTwin(command string, depth int, trunc *bounded.Truncated, files a
 			words[i], static[i], prefixes[i], holed[i] = word.Value, !word.Expands, word.staticPrefix, word.holeText
 		}
 		index := 0
-		if run, wrapped := StaticPrefixWrapperChild(words, static); wrapped {
-			index = run.Index
+		var run PrefixWrapperRun
+		if wrapped, ok := StaticPrefixWrapperChild(words, static); ok {
+			run, index = wrapped, wrapped.Index
 		}
 		if index >= len(words) || !static[index] {
 			return true
+		}
+		switch wrapperProgramName(words[index]) {
+		case "cd", "pushd", "popd", "chdir":
+			state.dirChanged = true
 		}
 		// awkAt reads the awk call that is call.Args[first:last+1] and
 		// writes the commands it starts in its place. handed words (a find
@@ -151,7 +190,7 @@ func awkCommandTwin(command string, depth int, trunc *bounded.Truncated, files a
 					dynamic[i], prefix[i], hole[i] = true, "", awkprog.Hole
 				}
 			}
-			reading := awkprog.Call{Words: words[first : last+1], Dynamic: dynamic, Prefix: prefix, Holed: hole, Files: files}.Read()
+			reading := awkprog.Call{Words: words[first : last+1], Dynamic: dynamic, Prefix: prefix, Holed: hole, Files: awkReaderFor(files, state, run)}.Read()
 			if reading.Files > 0 {
 				state.programFiles = true
 				state.unknown = state.unknown || reading.Unread || reading.Dynamic
