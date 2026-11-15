@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -174,18 +175,32 @@ func TestWindowsPendingRecordKeepsEveryOtherVerifyFailure(t *testing.T) {
 		for _, w := range want.Warnings {
 			wantWarnings = append(wantWarnings, w.Code)
 		}
-		pending := 0
+		// The pending scan leaves coverage incomplete, so the one
+		// coverage_incomplete line (GAP-0812) names it beside every reason
+		// the fresh record already had; the line is compared by its reasons.
+		wantReasons := append(want.CoverageReasons(), enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+		slices.Sort(wantReasons)
+		wantReasons = slices.Compact(wantReasons)
+		gotReasons := got.CoverageReasons()
+		slices.Sort(gotReasons)
+		pending, coverageLines := 0, 0
 		for _, w := range got.Warnings {
 			if w.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete && strings.Contains(w.Message, "NOT COVERED (scan pending)") {
 				pending++
 				continue
 			}
+			if w.Code == enterprisestatus.CodeCoverageIncomplete {
+				coverageLines++
+				continue
+			}
 			gotWarnings = append(gotWarnings, w.Code)
 		}
-		if pending != 1 || got.OK != want.OK || got.ExitCode != want.ExitCode ||
+		wantWarnings = slices.DeleteFunc(wantWarnings, func(code string) bool { return code == enterprisestatus.CodeCoverageIncomplete })
+		if pending != 1 || coverageLines != 1 || got.CoverageComplete || fmt.Sprint(gotReasons) != fmt.Sprint(wantReasons) ||
+			got.OK != want.OK || got.ExitCode != want.ExitCode ||
 			fmt.Sprint(got.Errors) != fmt.Sprint(want.Errors) || fmt.Sprint(gotWarnings) != fmt.Sprint(wantWarnings) {
-			t.Fatalf("%s: verify exit %d errors %+v warnings %v (%d pending); want exit %d errors %+v warnings %v plus one pending row",
-				name, got.ExitCode, got.Errors, gotWarnings, pending, want.ExitCode, want.Errors, wantWarnings)
+			t.Fatalf("%s: verify exit %d errors %+v warnings %v (%d pending, %d coverage lines, reasons %v); want exit %d errors %+v warnings %v plus one pending row and one coverage line with reasons %v",
+				name, got.ExitCode, got.Errors, gotWarnings, pending, coverageLines, gotReasons, want.ExitCode, want.Errors, wantWarnings, wantReasons)
 		}
 	}
 	for _, lifecycleErrors := range [][]string{
