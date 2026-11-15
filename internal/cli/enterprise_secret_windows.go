@@ -1210,7 +1210,19 @@ func windowsSDDLOwnerAndDACL(sddl string) (*windows.SID, *windows.ACL, error) {
 	return owner, dacl, nil
 }
 
-const windowsSDDLApplied = windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION
+// windowsSDDLApplied is what applyWindowsSDDL and applyWindowsSDDLToHandle
+// set: the protected DACL always, and the owner only when the SDDL names one
+// (O:). Asking SetNamedSecurityInfo to set OWNER_SECURITY_INFORMATION with a
+// nil owner fails with ERROR_INVALID_PARAMETER ("The parameter is incorrect"):
+// every owner-less SDDL such as windowsInstallFileSDDL failed after the file
+// was written (rel-1-0-10:GAP-0840, the hook-image retire marker).
+func windowsSDDLApplied(owner *windows.SID) windows.SECURITY_INFORMATION {
+	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if owner != nil {
+		info |= windows.OWNER_SECURITY_INFORMATION
+	}
+	return info
+}
 
 func applyWindowsSDDL(path, sddl string) error {
 	owner, dacl, err := windowsSDDLOwnerAndDACL(sddl)
@@ -1221,7 +1233,7 @@ func applyWindowsSDDL(path, sddl string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windowsSDDLApplied, owner, nil, dacl, nil)
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windowsSDDLApplied(owner), owner, nil, dacl, nil)
 }
 
 // applyWindowsSDDLToHandle is applyWindowsSDDL for an open handle (opened
@@ -1231,7 +1243,7 @@ func applyWindowsSDDLToHandle(handle windows.Handle, sddl string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windowsSDDLApplied, owner, nil, dacl, nil)
+	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windowsSDDLApplied(owner), owner, nil, dacl, nil)
 }
 
 func windowsSecretStatus(dir string) ([]windowsSecretState, error) {

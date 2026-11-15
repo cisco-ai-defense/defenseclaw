@@ -161,13 +161,13 @@ C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 		{Path: `C:\Users\u\.cursor\hooks.json`, User: true, Home: `C:\Users\u`}, {Path: `C:\Users\u\.codex\hooks.json`, User: true, Home: `C:\Users\u`},
 	}, hookImageTestBin, read)
 	// A machine file that cannot be read voids the scan; an account file
-	// that cannot be read is skipped and voids nothing.
+	// that cannot be read is unverified and voids nothing.
 	if len(scan.Named["0123456789abcdef"]) != 2 || len(scan.Incomplete) != 1 || !strings.HasPrefix(scan.Incomplete[0], `C:\held.json: `) ||
-		len(scan.Skipped) != 1 || !strings.HasPrefix(scan.Skipped[0], `C:\Users\u\.codex\hooks.json: `) {
+		len(scan.Unverified) != 1 || !strings.HasPrefix(scan.Unverified[0].Line(), `C:\Users\u\.codex\hooks.json: `) {
 		t.Fatalf("scan = %+v", scan)
 	}
-	if !scan.UserFiles[`c:\users\u\.cursor\hooks.json`] || len(scan.NamedBySystem()["0123456789abcdef"]) != 1 {
-		t.Fatalf("account files %v, by system %v", scan.UserFiles, scan.NamedBySystem())
+	if !scan.UserFiles[`c:\users\u\.cursor\hooks.json`] || scan.UserFiles[`c:\a.json`] {
+		t.Fatalf("account files %v", scan.UserFiles)
 	}
 }
 
@@ -248,12 +248,12 @@ func TestHookImageScanExpandsAWatchedFolder(t *testing.T) {
 		t.Fatalf("files = %v, want %v", got, want)
 	}
 	// A link in a machine folder voids the scan; an account's link is
-	// skipped (never read).
+	// unverified (never read).
 	if len(incomplete) != 2 || !strings.Contains(incomplete[0], `planted.json`) || !strings.Contains(incomplete[1], `reparse.json`) {
 		t.Fatalf("incomplete = %v", incomplete)
 	}
-	if len(skipped) != 1 || !strings.Contains(skipped[0], `link.json`) {
-		t.Fatalf("skipped = %v", skipped)
+	if len(skipped) != 1 || !strings.Contains(skipped[0].Line(), `link.json`) {
+		t.Fatalf("unverified = %v", unverifiedLines(skipped))
 	}
 }
 
@@ -402,20 +402,6 @@ func TestHookImageStageKeepsTheMarkerWhenTheStartFails(t *testing.T) {
 	}
 }
 
-// An account file that still names a folder is the guardian's to rewrite at
-// that account's next pass; retire does not wait for it (the older Setup
-// reads only machine files) and reports it (review 2 P2-C).
-func TestHookImageRetireDoesNotWaitForAnAccountFile(t *testing.T) {
-	r := newRetireFixture(t)
-	folder, _ := winpath.EnterpriseHookImageDigest(r.recorded["hook"])
-	r.userFiles = map[string]bool{`c:\users\c\.kiro\hooks.json`: true}
-	r.named = []map[string][]string{{folder: {`C:\Users\c\.kiro\hooks.json`}}}
-	report := retireWindowsHookImages(r.steps())
-	if !report.OK || len(report.StillNamed) != 0 || !strings.Contains(strings.Join(report.Notes, "\n"), "still_named_by_account_file: "+`C:\Users\c\.kiro\hooks.json`) {
-		t.Fatalf("retire = %+v", report)
-	}
-}
-
 // A writer that failed is in the report's error, not only a note
 // (review 2 P3).
 func TestHookImageRetireReportsAWriterError(t *testing.T) {
@@ -519,10 +505,11 @@ func TestHookImageScanSkipsAnAccountFileBehindALink(t *testing.T) {
 	if len(incomplete) != 0 {
 		t.Fatalf("an account link made the scan incomplete: %v", incomplete)
 	}
-	joined := strings.Join(skipped, "\n")
-	if len(skipped) != 3 || !strings.Contains(skipped[0], `.codex\hooks.json: link_in_account_path: `) ||
-		!strings.Contains(skipped[1], `.claude\managed: link_in_account_path: `) || !strings.Contains(joined, "without an account home") {
-		t.Fatalf("skipped = %v", skipped)
+	lines := unverifiedLines(skipped)
+	joined := strings.Join(lines, "\n")
+	if len(lines) != 3 || !strings.Contains(lines[0], `.codex\hooks.json: link_in_account_path: `) ||
+		!strings.Contains(lines[1], `.claude\managed: link_in_account_path: `) || !strings.Contains(joined, "without an account home") {
+		t.Fatalf("unverified = %v", lines)
 	}
 	// The reader makes the same decision (the Windows reader opens the file
 	// from the home's handle, so a link swapped in after the expansion fails
@@ -538,7 +525,7 @@ func TestHookImageScanSkipsAnAccountFileBehindALink(t *testing.T) {
 		return body, nil
 	}
 	scan := scanWindowsHookImageConfigFiles(files, hookImageTestBin, read)
-	if len(scan.Incomplete) != 0 || len(scan.Skipped) != 1 || !strings.Contains(scan.Skipped[0], "link_in_account_path") {
+	if len(scan.Incomplete) != 0 || len(scan.Unverified) != 1 || !strings.Contains(scan.Unverified[0].Line(), "link_in_account_path") {
 		t.Fatalf("scan = %+v", scan)
 	}
 	if got := scan.Named["0123456789abcdef"]; len(got) != 1 || got[0] != `C:\Program Files\ClaudeCode\managed-settings.json` {
@@ -546,9 +533,10 @@ func TestHookImageScanSkipsAnAccountFileBehindALink(t *testing.T) {
 	}
 }
 
-// A skipped account file never blocks retire: the report notes it
-// (skipped_unsafe: ... link_in_account_path) and retire ends ok when no
-// machine file names a folder.
+// An account file behind a link is never read, so retire cannot tell
+// whether it names a launch folder: it is named in still_named (account,
+// unreadable, with its cause) and retire stays pending (rel-1-0-10
+// GAP-0882; before, it was only a skipped_unsafe note on an ok retire).
 func TestHookImageRetireReportsAnAccountFileBehindALink(t *testing.T) {
 	r := newRetireFixture(t)
 	r.named = []map[string][]string{{}}
@@ -556,13 +544,33 @@ func TestHookImageRetireReportsAnAccountFileBehindALink(t *testing.T) {
 	scan := steps.Scan
 	steps.Scan = func() windowsHookImageConfigScan {
 		got := scan()
-		got.Skipped = []string{`C:\Users\u\.codex\hooks.json: link_in_account_path: a link (reparse point) lies at or below the root: C:\Users\u\.codex; not read`}
+		got.Unverified = []windowsHookImageUnverifiedFile{{
+			File: windowsHookImageConfigFile{Path: `C:\Users\u\.codex\hooks.json`, User: true, Home: `C:\Users\u`},
+			Err:  `link_in_account_path: a link (reparse point) lies at or below the root: C:\Users\u\.codex; not read`,
+		}}
 		return got
 	}
 	report := retireWindowsHookImages(steps)
-	if !report.OK || !strings.Contains(strings.Join(report.Notes, "\n"), `skipped_unsafe: C:\Users\u\.codex\hooks.json: link_in_account_path: `) {
+	if report.OK || report.Reason != windowsHookImageRetirePending || len(report.StillNamed) != 1 {
 		t.Fatalf("retire = %+v", report)
 	}
+	named := report.StillNamed[0]
+	if named.File != `C:\Users\u\.codex\hooks.json` || !named.Account || !named.Unreadable || named.Folder != windowsHookImageUnknownFolder ||
+		!strings.Contains(named.Cause, "link_in_account_path") {
+		t.Fatalf("still_named = %+v", named)
+	}
+	if strings.Contains(strings.Join(report.Notes, "\n"), "skipped_unsafe") {
+		t.Fatalf("retire still notes the file as skipped: %v", report.Notes)
+	}
+}
+
+// unverifiedLines are the lines of files.
+func unverifiedLines(files []windowsHookImageUnverifiedFile) []string {
+	lines := make([]string, 0, len(files))
+	for _, file := range files {
+		lines = append(lines, file.Line())
+	}
+	return lines
 }
 
 // fakeVendorFS is a ProgramData vendor tree: each element (lower case) has
@@ -683,7 +691,7 @@ func TestHookImageVendorFilesInAUserOwnedFolderAreAccountFiles(t *testing.T) {
 		return nil, errors.New("Access is denied.")
 	}
 	scan := scanWindowsHookImageConfigFiles(files, hookImageTestBin, read)
-	if len(scan.Incomplete) != 0 || len(scan.Skipped) != 3 || !strings.Contains(scan.Skipped[0], `hooks.json (not_admin_owned: C:\ProgramData\Cursor): Access is denied.`) {
+	if len(scan.Incomplete) != 0 || len(scan.Unverified) != 3 || !strings.Contains(scan.Unverified[0].Line(), `hooks.json (not_admin_owned: C:\ProgramData\Cursor): Access is denied.`) {
 		t.Fatalf("scan = %+v", scan)
 	}
 	// An admin-owned vendor file that cannot be read still voids the scan.
@@ -714,8 +722,8 @@ func TestHookImageVendorFolderThatIsALink(t *testing.T) {
 		return nil, nil, fmt.Errorf("%w: %s", winpath.ErrLinkBelowRoot, path)
 	})
 	_, incomplete, skipped := expandWindowsHookImageConfigFiles(files, nil, nil, view)
-	if len(incomplete) != 0 || len(skipped) != 1 || !strings.Contains(skipped[0], windowsHookImageLinkInAccountPath) {
-		t.Fatalf("user link expanded: incomplete %v skipped %v", incomplete, skipped)
+	if len(incomplete) != 0 || len(skipped) != 1 || !strings.Contains(skipped[0].Line(), windowsHookImageLinkInAccountPath) {
+		t.Fatalf("user link expanded: incomplete %v unverified %v", incomplete, unverifiedLines(skipped))
 	}
 	admin := &fakeVendorFS{
 		modes: map[string]fs.FileMode{`c:\programdata\cursor`: fs.ModeDir | fs.ModeSymlink},

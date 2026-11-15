@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations"
@@ -78,9 +79,14 @@ const (
 // sidecarObservabilityV8BootstrapError is content-free. Config validation
 // remains the operator-facing source-location boundary; runtime assembly must
 // not return database paths, endpoints, secret references, or driver errors.
+// destination is the one exception: the administrator's destination name and
+// a fixed cause (destinations.Factory.LastPreparationFailure), without a path
+// or endpoint. Without it the gateway stopped with only runtime_unavailable
+// (GAP-0272).
 type sidecarObservabilityV8BootstrapError struct {
-	code  sidecarObservabilityV8BootstrapErrorCode
-	cause error
+	code        sidecarObservabilityV8BootstrapErrorCode
+	cause       error
+	destination string
 }
 
 func (err *sidecarObservabilityV8BootstrapError) Error() string {
@@ -94,6 +100,9 @@ func (err *sidecarObservabilityV8BootstrapError) Error() string {
 	var keyErr *redaction.KeyStoreError
 	if err.code == sidecarObservabilityV8BootstrapRedaction && errors.As(err.cause, &keyErr) {
 		message += ":" + string(keyErr.Code)
+	}
+	if err.destination != "" {
+		message += ": " + err.destination
 	}
 	return message
 }
@@ -338,7 +347,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		// Exporters check each destination, then connect through the
 		// standalone enterprise.network proxy when one is set, otherwise
 		// through HTTPS_PROXY (NO_PROXY and loopback connect directly).
-		Resolver: net.DefaultResolver, Dialer: telemetryEgressDialer{direct: &net.Dialer{}},
+		Resolver: s.observabilityV8ResolverOrDefault(), Dialer: telemetryEgressDialer{direct: &net.Dialer{}},
 		Warnings: push.WarningObserverFunc(func(warning push.Warning) {
 			s.observeObservabilityV8Warning(warning)
 		}),
@@ -386,12 +395,26 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		},
 	)
 	if err != nil {
-		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
+		failure := newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
+		var bootstrapErr *sidecarObservabilityV8BootstrapError
+		if errors.As(failure, &bootstrapErr) {
+			bootstrapErr.destination = destinationFactory.LastPreparationFailure()
+		}
+		return nil, failure
 	}
 	return &sidecarOwnedObservabilityV8Runtime{
 		runtime: runtime, redactionEngine: engine, dataDir: filepath.Clean(compiled.DataDir),
 		retainJudgeBodies: retainJudgeBodies,
 	}, nil
+}
+
+// observabilityV8ResolverOrDefault is the resolver destination exporters
+// check their endpoints with: the system resolver, or a test's.
+func (s *Sidecar) observabilityV8ResolverOrDefault() netguard.V8Resolver {
+	if s.observabilityV8Resolver != nil {
+		return s.observabilityV8Resolver
+	}
+	return net.DefaultResolver
 }
 
 // newObservabilityV8RedactionEngine builds the projection engine every

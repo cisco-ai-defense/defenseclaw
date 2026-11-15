@@ -1,4 +1,4 @@
-"""The Skills table keeps the Details column on screen at 80x24 (GAP-2642)."""
+"""The Skills table fits 80x24 and never cuts the Actions words (GAP-2642, GAP-0908)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,47 @@ sys.path.insert(0, str(Path(__file__).parent))
 from fixtures import screen_text, settle_panel, snapshot_app  # noqa: E402
 
 
-def test_skills_details_column_fits_inside_80_columns(monkeypatch) -> None:
+def _used(columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...]) -> int:
+    return sum(max(len(columns[i]), *(len(row[i]) for row in rows)) + 2 for i in range(len(columns)))
+
+
+def test_skills_table_fits_inside_80_columns_and_never_cuts_actions(monkeypatch) -> None:
+    # GAP-0908: at 80x24 the Actions, Details and Source cells ended in an
+    # ellipsis ("blocked, qu…", "quaran…", "…ude/skills"). The Actions words
+    # now stay whole and the Details column goes before they are cut.
+    monkeypatch.setenv("HOME", "/home/fcd-u3")
+    monkeypatch.setenv("USERPROFILE", "/home/fcd-u3")
+    body = 80 - 9  # app.py: the body less borders, padding and the scrollbar
+    for with_connector in (False, True):
+        panel = SkillsPanelModel()
+        panel.apply_loaded(
+            [
+                SkillRow(
+                    name="google-workspace-calendar-sync",
+                    status="quarantined",
+                    source="/home/fcd-u3/.claude/skills",
+                    actions="blocked, quarantined, disabled",
+                    connector="claudecode",
+                    reason="quarantined by the watcher",
+                ),
+                SkillRow(name="imagegen", status="active", source="/home/fcd-u3/.codex/skills/.system", connector="codex"),
+            ]
+        )
+        panel.show_connector_column = with_connector
+        panel.refresh()
+
+        columns = panel.data_table_columns(body)
+        rows = panel.data_table_rows(body)
+        assert len(columns) == len(rows[0])
+        assert _used(columns, rows) <= body, "every column fits the 80-column body"
+        actions = columns.index("Actions")
+        assert rows[0][actions] == "blocked, quarantined, disabled", "Actions is never cut"
+        assert "Details" not in columns, "Details goes before Actions is cut"
+        # The full text stays in the detail pane's data.
+        assert panel.selected().reason == "quarantined by the watcher"
+
+
+def test_skills_table_keeps_a_readable_details_column_when_there_is_room(monkeypatch) -> None:
     monkeypatch.setenv("HOME", "/home/fcd-u3")
     monkeypatch.setenv("USERPROFILE", "/home/fcd-u3")
     panel = SkillsPanelModel()
@@ -31,47 +71,41 @@ def test_skills_details_column_fits_inside_80_columns(monkeypatch) -> None:
     panel.show_connector_column = True
     panel.refresh()
 
-    columns = panel.data_table_columns()
-    body = 80 - 9  # app.py: the body less borders, padding and the scrollbar
-    rows = panel.data_table_rows(body)
-    used = sum(max(len(columns[i]), *(len(row[i]) for row in rows)) + 2 for i in range(len(columns)))
-    assert used <= body, "every column, Details included, fits the 80-column body"
-    details = columns.index("Details")
-    # The header and the start of each value stay readable, and a cut value ends in an ellipsis.
-    assert all(len(row[details]) >= len("Details") and row[details].endswith("…") for row in rows)
-    # The full description stays in the detail pane's data.
+    for body in (120 - 9, 80 - 9):
+        columns = panel.data_table_columns(body)
+        rows = panel.data_table_rows(body)
+        assert _used(columns, rows) <= body
+        if "Details" in columns:
+            details = columns.index("Details")
+            assert all(len(row[details]) >= 14 or not row[details].endswith("…") for row in rows)
+    assert "Details" in panel.data_table_columns(120 - 9)
     assert panel.selected().description.startswith("Generate or edit images")
 
 
-def test_skills_details_header_fits_with_a_long_actions_value(monkeypatch) -> None:
+def test_plugins_table_keeps_verdict_before_source_when_columns_are_dropped(monkeypatch) -> None:
+    from defenseclaw.tui.services.catalog_state import PluginRow, PluginsPanelModel
+
     monkeypatch.setenv("HOME", "/home/fcd-u3")
     monkeypatch.setenv("USERPROFILE", "/home/fcd-u3")
-    for with_connector in (False, True):
-        panel = SkillsPanelModel()
-        panel.apply_loaded(
-            [
-                SkillRow(
-                    name="t106-risky-sample-skill",
-                    status="disabled",
-                    source="enforcement",
-                    actions="blocked, quarantined, disabled",
-                    connector="claudecode",
-                    reason="quarantined by the watcher",
-                ),
-                SkillRow(name="clean-skill", status="removed", source="scan-history", connector="codex"),
-            ]
-        )
-        panel.show_connector_column = with_connector
-        panel.refresh()
-
-        columns = panel.data_table_columns()
-        body = 80 - 9
+    panel = PluginsPanelModel()
+    panel.apply_loaded(
+        [
+            PluginRow(
+                id="p1",
+                name="a-very-long-plugin-name-for-the-table",
+                verdict="clean",
+                origin="/home/fcd-u3/.claude/plugins/cache/some-marketplace/some-plugin",
+                description="A plugin with a rather long description that the table cuts",
+            )
+        ]
+    )
+    for body in (80 - 9, 200):
+        columns = panel.data_table_columns(body)
         rows = panel.data_table_rows(body)
-        used = sum(max(len(columns[i]), *(len(row[i]) for row in rows)) + 2 for i in range(len(columns)))
-        assert used <= body, "the Details header fits the body even when Actions is long"
-        actions = columns.index("Actions")
-        assert rows[0][actions].endswith("…")
-        assert panel.selected().actions == "blocked, quarantined, disabled"
+        assert len(columns) == len(rows[0])
+        if "Source" in columns:
+            assert columns.index("Verdict") < columns.index("Source")
+        assert rows[0][columns.index("Verdict")] == "clean"
 
 
 async def test_refresh_after_the_rows_change_fits_the_columns_again(tmp_path, monkeypatch) -> None:
@@ -105,6 +139,22 @@ async def test_refresh_after_the_rows_change_fits_the_columns_again(tmp_path, mo
 
         await show(blocked)
         assert await show(quarantined) <= body, "a refresh with a long Actions value fits the body"
-        assert "Details" in screen_text(app)
+        assert "blocked, quarantined, disabled" in screen_text(app)
         assert await show(blocked) <= body
-        assert "Details" in screen_text(app)
+        assert "Actions" in screen_text(app)
+
+
+async def test_setup_goal_header_is_not_cut_mid_word_at_80x24(tmp_path) -> None:
+    # GAP-0908: the Semantic routing form's header ended "Use the models in…".
+    from defenseclaw.tui.panels.setup import SetupWizard, wizard_goals
+
+    app = snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("setup")
+        await settle_panel(app, pilot)
+        goal = wizard_goals(SetupWizard.SEMANTIC_ROUTING, {})[0]
+        app.setup_model.open_wizard_form(SetupWizard.SEMANTIC_ROUTING, goal=goal)
+        app._render_chrome()  # noqa: SLF001
+        await pilot.pause()
+        header = next(line for line in screen_text(app).splitlines() if "Semantic routing" in line)
+        assert "Route by task with built-in rules." in header and "…" not in header

@@ -506,7 +506,7 @@ func TestHermesSetupRejectsUnavailableOrRelativeWindowsConfigBeforeInspectionOrM
 			if err := os.WriteFile(activeProfile, activeProfileBody, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			allowlist := filepath.Join(cwd, hermesAllowlistFileName)
+			allowlist := filepath.Join(cwd, HermesAllowlistFileName)
 			allowlistBody := []byte("{\"approvals\":[],\"operator\":\"unchanged\"}\n")
 			if err := os.WriteFile(allowlist, allowlistBody, 0o600); err != nil {
 				t.Fatal(err)
@@ -525,7 +525,7 @@ func TestHermesSetupRejectsUnavailableOrRelativeWindowsConfigBeforeInspectionOrM
 				if err := os.WriteFile(relativeConfig, relativeConfigBody, 0o600); err != nil {
 					t.Fatal(err)
 				}
-				relativeAllowlist := filepath.Join(relativeHome, hermesAllowlistFileName)
+				relativeAllowlist := filepath.Join(relativeHome, HermesAllowlistFileName)
 				relativeAllowlistBody := []byte("{\"approvals\":[],\"operator\":\"KEEP-ALLOWLIST-BYTES\"}\n")
 				if err := os.WriteFile(relativeAllowlist, relativeAllowlistBody, 0o600); err != nil {
 					t.Fatal(err)
@@ -608,7 +608,7 @@ func TestHermesTeardownAndAgentPathsRejectUnavailableOrRelativeWindowsConfigBefo
 			}
 			cwdConfig := filepath.Join(cwd, "config.yaml")
 			cwdConfigBody := []byte("operator_literal: KEEP-CWD-CONFIG-BYTES\n")
-			cwdAllowlist := filepath.Join(cwd, hermesAllowlistFileName)
+			cwdAllowlist := filepath.Join(cwd, HermesAllowlistFileName)
 			cwdAllowlistBody := []byte("{\"approvals\":[],\"operator\":\"KEEP-CWD-ALLOWLIST-BYTES\"}\n")
 			for path, body := range map[string][]byte{
 				cwdConfig:    cwdConfigBody,
@@ -630,7 +630,7 @@ func TestHermesTeardownAndAgentPathsRejectUnavailableOrRelativeWindowsConfigBefo
 				}
 				relativeConfig := filepath.Join(cwd, test.configPath)
 				relativeConfigBody := []byte("operator_literal: KEEP-RELATIVE-CONFIG-BYTES\n")
-				relativeAllowlist := filepath.Join(relativeHome, hermesAllowlistFileName)
+				relativeAllowlist := filepath.Join(relativeHome, HermesAllowlistFileName)
 				relativeAllowlistBody := []byte("{\"approvals\":[],\"operator\":\"KEEP-RELATIVE-ALLOWLIST-BYTES\"}\n")
 				for path, body := range map[string][]byte{
 					relativeConfig:    relativeConfigBody,
@@ -708,7 +708,7 @@ func TestSetupHermesFilesRejectsInvalidWindowsPathBeforeAllowlistDerivation(t *t
 	}
 	root := testenv.PrivateTempDir(t)
 	t.Chdir(root)
-	cwdAllowlist := filepath.Join(root, hermesAllowlistFileName)
+	cwdAllowlist := filepath.Join(root, HermesAllowlistFileName)
 	cwdAllowlistBody := []byte("{\"approvals\":[],\"operator\":\"unchanged\"}\n")
 	if err := os.WriteFile(cwdAllowlist, cwdAllowlistBody, 0o600); err != nil {
 		t.Fatal(err)
@@ -722,7 +722,7 @@ func TestSetupHermesFilesRejectsInvalidWindowsPathBeforeAllowlistDerivation(t *t
 	if err := os.WriteFile(relativeConfig, relativeConfigBody, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	relativeAllowlist := filepath.Join(relativeHome, hermesAllowlistFileName)
+	relativeAllowlist := filepath.Join(relativeHome, HermesAllowlistFileName)
 	relativeAllowlistBody := []byte("{\"approvals\":[],\"operator\":\"KEEP-ALLOWLIST-BYTES\"}\n")
 	if err := os.WriteFile(relativeAllowlist, relativeAllowlistBody, 0o600); err != nil {
 		t.Fatal(err)
@@ -1499,7 +1499,7 @@ func TestHermesSetup_WritesFullLifecycleAndScopedAllowlist(t *testing.T) {
 	if len(hooks) != 23 {
 		t.Errorf("Hermes hooks count = %d, want 23; got keys %v", len(hooks), mapKeys(hooks))
 	}
-	allowlistPath := filepath.Join(filepath.Dir(cfgPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(cfgPath), HermesAllowlistFileName)
 	allowlist, err := readHermesAllowlist(allowlistPath)
 	if err != nil {
 		t.Fatalf("read Hermes allowlist: %v", err)
@@ -1762,7 +1762,7 @@ func TestHermesSetupTamperedOwnedAllowlistRollsBackEveryFileExactly(t *testing.T
 	if err := os.WriteFile(configPath, configBody, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	allowlistBody := []byte("{\n  \"approvals\": [{\"event\": \"pre_tool_call\", \"command\": \"tampered --connector hermes\", \"defenseclaw_managed\": true}],\n  \"operator_literal\": \"KEEP-ALLOWLIST-BYTES\"\n}\n")
 	if err := os.WriteFile(allowlistPath, allowlistBody, 0o600); err != nil {
 		t.Fatal(err)
@@ -1789,7 +1789,7 @@ func TestHermesSetupTamperedOwnedAllowlistRollsBackEveryFileExactly(t *testing.T
 
 func TestHermesAllowlistRepairIsByteIdempotent(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
-	path := filepath.Join(root, hermesAllowlistFileName)
+	path := filepath.Join(root, HermesAllowlistFileName)
 	if err := os.WriteFile(path, []byte("{\n  \"approvals\": [],\n  \"operator_literal\": \"KEEP\"\n}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -2067,7 +2067,7 @@ func TestHermesAllowlistSurgicalCleanupPreservesForeignEntries(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("hooks_auto_accept: false\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	const pristineAllowlist = "{\n  \"approvals\": [{\"event\":\"pre_tool_call\",\"command\":\"operator-hook\"}],\n  \"operator\": \"keep\"\n}\n"
 	if err := os.WriteFile(allowlistPath, []byte(pristineAllowlist), 0o600); err != nil {
 		t.Fatal(err)
@@ -2178,7 +2178,7 @@ func TestHermesAllowlistTamperedOwnershipRefusesAmbiguousCleanup(t *testing.T) {
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	drifted, err := readHermesAllowlist(allowlistPath)
 	if err != nil {
 		t.Fatal(err)
@@ -2255,7 +2255,7 @@ func TestHermesSetupAdoptsConsentRecordedUnder08x(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	write := func(allowlist []byte) {
 		t.Helper()
 		if err := os.WriteFile(configPath, configBody, 0o600); err != nil {
@@ -2335,7 +2335,7 @@ func TestHermesAllowlistTamperedOwnedCommandRefusesNonExactCleanup(t *testing.T)
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	drifted, err := readHermesAllowlist(allowlistPath)
 	if err != nil {
 		t.Fatal(err)

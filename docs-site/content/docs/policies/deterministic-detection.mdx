@@ -97,7 +97,7 @@ do not have:
 | `TRUST-HIDDEN-TAGS` | Eight or more Unicode tag characters in a row (text no reader sees) | alert (HIGH) | block |
 | `TRUST-HIDDEN-INVISIBLE` | Sixteen or more zero-width or format characters in a row | alert (HIGH) | block |
 | `TRUST-HIDDEN-BIDI` | A bidirectional override or isolate control that is closed again | alert (MEDIUM) | block |
-| `TRUST-IGNORE-INSTEAD` | An override of the earlier instructions that names a replacement task ("ignore your previous <word> ... instead") | alert (HIGH) | block |
+| `TRUST-IGNORE-INSTEAD` | An override of the earlier instructions that names a replacement task ("ignore your previous `<word>` ... instead") | alert (HIGH) | block |
 | `TRUST-TODO-DATA-MOVE` | A message that opens with a task-list marker (`TODO:`, `FIXME:`) and tells the assistant to send, forward, share or transfer something | alert (HIGH) | block |
 | `TRUST-TODO-DIRECTIVE` | A message that opens with a task-list marker and tells the assistant to delete, change, visit, book or create something | alert (MEDIUM) | block |
 
@@ -111,7 +111,7 @@ does, so a directive with a zero-width character inside a word is still found.
 With `guardrail.detection_strategy: regex_judge` and an opted-in judge, a prompt
 that has only half of one of these shapes (a label directive such as `TODO:` as
 the first words, a signed message inside a tag envelope, "ignore your previous
-<word>", a message addressed to the assistant, or a deferral of the user's task)
+`<word>`", a message addressed to the assistant, or a deferral of the user's task)
 goes to the injection adjudicator. Without a judge these near misses do nothing,
 and a judge that fails never turns one into an alert.
 

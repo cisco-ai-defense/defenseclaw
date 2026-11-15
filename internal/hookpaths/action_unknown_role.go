@@ -22,12 +22,18 @@ import (
 
 // actionRoleKnownWriters are the programs, besides the lists of this package,
 // that write, remove, change or run what they are given.
+// chroot, nsenter, unbuffer, taskset, flock, chrt and caffeinate run the
+// program after their options (flock FILE -c STRING runs sh -c STRING): when
+// the shared reader (actionfacts.WrapperChildIndex) cannot name that program
+// (nsenter -a, flock -c), the call is a wrapper that runs code, not a program
+// of unknown role, so a protected write behind it keeps the rel block
+// (rel-1-0-10:GAP-0925).
 // xxd writes its second operand (xxd [-r] infile outfile), so a protected name
 // there keeps the rel block of the write (rel-1-0-10:GAP-0018 sshfp probe R04).
 var actionRoleKnownWriters = strings.Fields(`rm rmdir unlink shred mkdir mkfifo mknod touch tee dd truncate xxd
 	sed gsed awk gawk mawk nawk perl ruby node deno bun php lua tclsh expect python python3 pwsh powershell cmd
 	bash sh zsh dash ksh fish csh tcsh eval source exec env sudo doas su nohup timeout nice ionice setsid stdbuf command
-	xargs find gfind ssh scp sftp rsync git curl wget aria2c patch install chmod chown chgrp chattr setfacl
+	chroot nsenter unbuffer taskset flock chrt caffeinate xargs find gfind ssh scp sftp rsync git curl wget aria2c patch install chmod chown chgrp chattr setfacl
 	sort uniq tr gzip gunzip bzip2 xz zip unzip tar make cmake sqlite3 mysql psql openssl gpg ssh-keygen ssh-add
 	vi vim nano emacs ed ex code open xdg-open sendmail mail
 	set-content sc add-content ac out-file new-item ni copy-item cpi move-item mi remove-item ri rename-item rni clear-content clc
@@ -38,7 +44,7 @@ var actionRoleKnownWriters = strings.Fields(`rm rmdir unlink shred mkdir mkfifo 
 // lists or one of actionRoleKnownWriters.
 func actionRoleKnownProgram(base string) bool {
 	base = strings.ToLower(base)
-	return slices.Contains(actionCommandRunners, base) || slices.Contains(actionRoleKnownWriters, base) ||
+	return slices.Contains(actionRoleKnownWriters, base) ||
 		slices.Contains(linkPrograms, base) || slices.Contains(copyPrograms, base) ||
 		slices.Contains(renamePrograms, base) || slices.Contains(cdPrograms, base) ||
 		slices.Contains(multicallPrograms, base) || slices.Contains(archivePrograms, base) ||
@@ -46,14 +52,6 @@ func actionRoleKnownProgram(base string) bool {
 		slices.Contains(knownWordPrograms, base) || slices.Contains(readOnlyLinkWordPrograms, base) ||
 		slices.Contains(hiddenDirectoryPrograms, base) || slices.Contains(lateTextPrograms, base)
 }
-
-// actionCommandRunners are the wrappers that run a command of their own words
-// (flock FILE -c TEXT, nsenter -a -t PID PROGRAM, chroot, xargs ...). One the
-// scan cannot look through to a program (actionLiteralCommandWords) runs
-// something it does not read, never data of unknown role: its words keep
-// their reading, so a protected write behind it keeps its block
-// (rel-1-0-10:GAP-0925, GAP-0910).
-var actionCommandRunners = strings.Fields("flock nsenter chroot unbuffer taskset xargs chrt caffeinate setsid stdbuf ionice nice nohup timeout time env sudo doas command builtin exec runuser su")
 
 // actionScriptInterpreters run a script file; actionInterpreterCodeFlags are the
 // options after which the next word is program text (or a module), not a script.

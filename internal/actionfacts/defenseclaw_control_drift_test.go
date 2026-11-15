@@ -173,6 +173,16 @@ func TestDefenseClawStopVerbsFollowTheCLI(t *testing.T) {
 	for group := range defenseClawGuardGroups {
 		known[group] = true
 	}
+	// The Substrate commands, groups and verbs are classified by their own
+	// tables (judgeDefenseClawSubstrate).
+	for _, table := range []map[string]bool{
+		defenseClawSubstrateCommands, defenseClawSubstrateGroups, defenseClawSubstrateReadVerbs,
+		defenseClawSubstrateStopVerbs,
+	} {
+		for name := range table {
+			known[name] = true
+		}
+	}
 	known["disable"] = true
 	snapshot := filepath.Join("testdata", "defenseclaw_cli_commands.txt")
 	if os.Getenv("DEFENSECLAW_WRITE_CLI_SNAPSHOT") == "1" {

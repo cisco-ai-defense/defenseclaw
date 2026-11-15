@@ -100,6 +100,16 @@ func TestJudgeSessionStateIsPerVerifiedCaller(t *testing.T) {
 		!strings.Contains(stA.SessionUserIntent, "alice task") || len(stA.RecentToolCalls) != 1 {
 		t.Fatalf("account B wrote to or reset account A's session: %+v", stA)
 	}
+	// B's reset with its own verified key cleared B's session; the
+	// unprefixed state key (what a reset used before GAP-0460) names
+	// another session, so it would have left B's context in place.
+	if stB2 := historyCall(j, b, `{"command":"pwd"}`); strings.Contains(stB2.SessionHistory, "bob says") ||
+		stB2.SessionUserIntent != "" || len(stB2.RecentToolCalls) != 0 {
+		t.Fatalf("a reset with the verified caller's key kept the caller's session: %+v", stB2)
+	}
+	if sandboxSessionStateKey(b, "shared-session") == judgeSessionKeyFor(b, "shared-session") {
+		t.Fatal("a verified caller's judge key is not caller-prefixed")
+	}
 	if judgeSessionKeyFor(a, "shared-session") == judgeSessionKeyFor(b, "shared-session") {
 		t.Fatal("the two accounts share one key")
 	}

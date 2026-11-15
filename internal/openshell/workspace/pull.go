@@ -157,7 +157,7 @@ func captureScript(rec *CopyRecord, bundle bool) string {
 		remoteGitPrelude(rec),
 		"B=" + shellQuote(rec.Baseline),
 		"H=" + shellQuote(head),
-		`mkdir -p "$D"`,
+		rec.mkStateDirLine(),
 		`idx="$D/capture.index"; out="$D/result.bundle"`,
 		`rm -f "$idx" "$out"`,
 		`if [ -f "$G/index" ]; then cp "$G/index" "$idx"; fi`,
@@ -375,7 +375,7 @@ func fetchBundle(ctx context.Context, rec *CopyRecord, opts PullOptions, base gi
 	}
 	defer os.RemoveAll(dir)
 	local := filepath.Join(dir, "result.bundle")
-	got, err := receiveBundle(ctx, opts.Exec, rec.Name, local, maxBundle, timeout)
+	got, err := receiveBundle(ctx, opts.Exec, rec.Name, rec.stateDir(), local, maxBundle, timeout)
 	if err != nil {
 		return err
 	}
@@ -411,7 +411,7 @@ func fetchBundle(ctx context.Context, rec *CopyRecord, opts PullOptions, base gi
 // actually receives and stops the transfer past limit, and it never
 // unpacks an archive the agent made. The in-sandbox check only makes the
 // common refusals quick and clear.
-func receiveBundle(ctx context.Context, ex Execer, name, local string, limit int64, timeout time.Duration) (int64, error) {
+func receiveBundle(ctx context.Context, ex Execer, name, stateDir, local string, limit int64, timeout time.Duration) (int64, error) {
 	f, err := os.OpenFile(local, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
 	if err != nil {
 		return 0, err
@@ -420,7 +420,7 @@ func receiveBundle(ctx context.Context, ex Execer, name, local string, limit int
 	sink := &base64Sink{w: f, limit: limit}
 	script := strings.Join([]string{
 		"set -eu",
-		"f=" + shellQuote(remoteStateDir+"/result.bundle"),
+		"f=" + shellQuote(stateDir+"/result.bundle"),
 		`if [ -h "$f" ] || [ ! -f "$f" ]; then echo "the result bundle is not a regular file" >&2; exit 3; fi`,
 		`n=$(wc -c < "$f" | tr -d ' ')`,
 		`if [ "$n" -gt ` + strconv.FormatInt(limit, 10) + ` ]; then echo "the result bundle has $n bytes" >&2; exit 4; fi`,

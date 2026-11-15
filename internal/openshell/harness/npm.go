@@ -134,3 +134,18 @@ func (p npmPin) installRun(root, version, command, uninstallBase string) (string
 	b.WriteString(`ln -sfn "$root/bin/` + command + `" /usr/local/bin/` + command)
 	return b.String(), nil
 }
+
+// npmPins are the reviewed releases of one npm harness. The first is the
+// OpenShell default; the others are releases the Agent Substrate actor kit
+// installs (kit.HarnessReleases). installRun picks the pin of the requested
+// version, so a version nobody reviewed is refused as before.
+type npmPins []npmPin
+
+func (ps npmPins) installRun(root, version, command, uninstallBase string) (string, error) {
+	for _, p := range ps {
+		if p.Version == version {
+			return p.installRun(root, version, command, uninstallBase)
+		}
+	}
+	return ps[0].installRun(root, version, command, uninstallBase)
+}

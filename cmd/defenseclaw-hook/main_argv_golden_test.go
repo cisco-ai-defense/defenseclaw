@@ -173,6 +173,15 @@ func runArgvCase(t *testing.T, binary string, tc argvCase) argvResult {
 	}
 	var cmd *exec.Cmd
 	env := argvEnv(dir)
+	// A binary built with coverage (CI runs go test -coverprofile, and the
+	// helper below is this test binary) warns on stderr when GOCOVERDIR is
+	// unset, so the child always gets a coverage folder and the golden still
+	// compares the hook's own output exactly.
+	coverDir := os.Getenv("GOCOVERDIR")
+	if coverDir == "" {
+		coverDir = t.TempDir()
+	}
+	env = append(env, "GOCOVERDIR="+coverDir)
 	if binary == "" {
 		self, err := os.Executable()
 		if err != nil {

@@ -260,6 +260,12 @@ func TestAuthenticatedHookProjectCredentialReadThenEgressGAP0210(t *testing.T) {
 			if slices.Contains(home.RuleIDs, guardrail.ToolChainSecretReadThenEgress) != wantChain {
 				t.Fatalf("home control: chain on egress want %t: %+v", wantChain, home)
 			}
+			// A host hook (not a Substrate actor) keeps the pack disposition:
+			// the chain alerts, it does not refuse the egress (owner decision
+			// 2026-11-13; Substrate actors: substrate_chain_egress_disposition_test.go).
+			if wantChain && home.Action != guardrailActionAlert {
+				t.Fatalf("host hook: egress after a secret read = %q, want alert", home.Action)
+			}
 			for _, read := range []string{
 				"cat /work/f5proj/.aws/credentials",
 				"cat .aws/credentials",
