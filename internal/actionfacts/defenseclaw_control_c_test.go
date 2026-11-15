@@ -6,7 +6,6 @@
 package actionfacts
 
 import (
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -21,11 +20,7 @@ import (
 func TestDefenseClawConfigOptionsAreClassified(t *testing.T) {
 	root := filepath.Join("..", "..")
 	skipWithoutRepo(t, root)
-	data, err := os.ReadFile(filepath.Join(root, "cli", "defenseclaw", "commands", "cmd_config.py"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	source := string(data)
+	source := readRepoSource(t, filepath.Join(root, "cli", "defenseclaw", "commands", "cmd_config.py"))
 	seen := map[string]bool{}
 	for _, verb := range []string{"set", "unset"} {
 		start := strings.Index(source, "@config_cmd.command(\""+verb+"\")")

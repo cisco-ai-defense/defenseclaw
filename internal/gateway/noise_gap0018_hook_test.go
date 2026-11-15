@@ -30,6 +30,13 @@ func TestGAP0018RoutineWorkIsNotBlocked(t *testing.T) {
 					// (rel-1-0-10:GAP-0710).
 					t.Skip("no permission bits on Windows")
 				}
+				if runtime.GOOS == "windows" && strings.HasPrefix(tc.command, "find / ") {
+					// In Git Bash / is the Git install folder, not a folder above
+					// a C:/Users home, so find / reaches no DefenseClaw state there
+					// and rel allows it too. A find from the home's drive root is
+					// not judged on rel or here either (rel-1-0-10:GAP-0945).
+					t.Skip("find / is not above the home in Git Bash")
+				}
 				api := activeClaudeCodeTestAPI()
 				api.scannerCfg.Guardrail.Mode = mode
 				resp := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
@@ -51,8 +58,17 @@ func TestGAP0018RoutineWorkIsNotBlocked(t *testing.T) {
 func gap0018RoutineHome(t *testing.T) (home, cwd string) {
 	t.Helper()
 	keepTempDirOffDevice(t)
-	home, cwd = r104ReviewHome(t)
-	for _, name := range []string{"id_ed25519", "id_rsa"} {
+	// The home is made here, not by r104ReviewHome: its alias symlink is in no
+	// row, and a Windows standard user may not make a symlink.
+	home = t.TempDir()
+	cwd = filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), cwd} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	for _, name := range []string{"authorized_keys", "id_ed25519", "id_rsa"} {
 		if err := os.WriteFile(filepath.Join(home, ".ssh", name), []byte("marker\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
