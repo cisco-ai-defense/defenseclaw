@@ -13432,6 +13432,67 @@ def _check_routing_policy(r: _DoctorResult) -> None:
         _emit(status, "Routing policy", detail, remediation=remediation, r=r)
 
 
+def routing_sensitive_row(cfg) -> tuple[str, str, str] | None:
+    """The routing.sensitive row (GAP-0003): what keeps sensitive prompts
+    local, and how to add the decision-model check. None when routing or
+    routing.sensitive is off."""
+    routing = getattr(cfg, "routing", None)
+    if routing is None or not bool(getattr(routing, "enabled", False)):
+        return None
+    sens = getattr(routing, "sensitive", None) or {}
+    if not isinstance(sens, dict) or not sens.get("aliases"):
+        return None
+    floor = []
+    if sens.get("severity_at_least"):
+        floor.append(f"guardrail severity {str(sens['severity_at_least']).upper()}+")
+    if sens.get("signals"):
+        floor.append(f"{len(sens['signals'])} signal(s)")
+    floor_text = " and ".join(floor) or "no regex floor"
+    check = str(sens.get("check") or "off").strip().lower()
+    if check == "off":
+        return (
+            "info",
+            f"{floor_text}; decision-model check off (regex and keywords miss personal data written in prose)",
+            "to also ask the decision model: defenseclaw config set routing.sensitive.check auto "
+            "(needs decision_model or a judge; adds about 0.4 s per routed request)",
+        )
+    dm = getattr(cfg, "decision_model", None)
+    has_dm = bool(getattr(dm, "enabled", False)) and bool(str(getattr(dm, "base_url", "") or "").strip())
+    s1 = getattr(routing, "systemone", None) or {}
+    if str(getattr(routing, "classifier", "") or "").strip().lower() == "systemone" and isinstance(s1, dict):
+        has_dm = has_dm or bool(str(s1.get("base_url") or "").strip())
+    judge = getattr(getattr(cfg, "guardrail", None), "judge", None)
+    has_judge = bool(getattr(judge, "enabled", False))
+    if check == "auto":
+        source = "the decision model" if has_dm else ("the guardrail judge" if has_judge else "")
+    else:
+        source = {
+            "decision_model": "the decision model" if has_dm else "",
+            "judge": "the guardrail judge" if has_judge else "",
+        }.get(check, "")
+    if not source:
+        return (
+            "warn",
+            f"{floor_text}; routing.sensitive.check is {check} but no model answers it: regex-only",
+            "set up the decision model (defenseclaw setup decision-model) or the guardrail judge, "
+            "or set routing.sensitive.check off",
+        )
+    unavailable = str(sens.get("on_unavailable") or "local").strip().lower()
+    return (
+        "pass",
+        f"{floor_text}; sensitive-data check by {source} (the newest turns go to it on every routed request), "
+        f"unavailable -> {unavailable}",
+        "",
+    )
+
+
+def _check_routing_sensitive(cfg, r: _DoctorResult) -> None:
+    row = routing_sensitive_row(cfg)
+    if row is not None:
+        status, detail, remediation = row
+        _emit(status, "Routing sensitive data", detail, remediation=remediation, r=r)
+
+
 def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
     """Warn about routed models a managed host keys by api_key_env.
 
@@ -13481,6 +13542,12 @@ def _systemone_endpoint(routing, cfg) -> str:
     return str(getattr(getattr(cfg, "decision_model", None), "base_url", "") or "").strip()
 
 
+def _systemone_categories(routing) -> dict:
+    """routing.categories (category -> alias), {} when unset or malformed."""
+    categories = getattr(routing, "categories", None)
+    return categories if isinstance(categories, dict) else {}
+
+
 def _endpoint_origin(url: str) -> str:
     """scheme://host[:port] of url: no path, query or credentials in a row."""
     from urllib.parse import urlsplit
@@ -13495,6 +13562,22 @@ def _check_systemone_reachable(routing, cfg, r: _DoctorResult) -> None:
     """One real request to the System One endpoint (any HTTP answer means it
     is up; the classifier has its own breaker, so a healthy gateway can still
     be routing on the rules fallback: GAP-0591)."""
+    if not _systemone_categories(routing):
+        # System One picks one of routing.categories; without them the gateway
+        # never asks it, so every request falls back with reason
+        # configuration_failure whether or not the endpoint is up (GAP-0591).
+        _emit(
+            "fail",
+            "System One classifier",
+            "routing.categories is empty, so System One has nothing to choose from: every request takes "
+            "on_classifier_error (reason configuration_failure)",
+            remediation=(
+                "add categories with defenseclaw routing setup --classifier systemone --route coding=<alias> "
+                "(or set routing.categories), or use defenseclaw routing setup --classifier rules"
+            ),
+            r=r,
+        )
+        return
     endpoint = _systemone_endpoint(routing, cfg)
     if not endpoint:
         _emit(
@@ -16805,6 +16888,7 @@ def doctor(
     _check_signature_packs(cfg, r)
     _check_semantic_routing(cfg, r, live_health=sidecar_health)
     _check_routing_policy(r)
+    _check_routing_sensitive(cfg, r)
     _check_route_only(cfg, r, live_health=sidecar_health)
     _check_routing_managed_key_env(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)

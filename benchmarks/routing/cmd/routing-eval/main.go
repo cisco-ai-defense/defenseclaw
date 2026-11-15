@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/benchmarks/routing/routingeval"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
 )
 
@@ -35,6 +37,9 @@ type options struct {
 	emitSRConfig                           string
 	limit                                  int
 	narrowPrefixes                         string
+	sensitiveCheck                         bool
+	sensitiveTimeoutMs, sensitiveMaxBytes  int
+	sensitiveUSDPerMTok                    float64
 }
 
 func main() {
@@ -57,6 +62,10 @@ func main() {
 	flag.StringVar(&o.emitSRConfig, "emit-sr-config", "", "write the vLLM SR config for routing-reference.yaml (internal/routing.Translate) to this directory and exit")
 	flag.StringVar(&o.narrowPrefixes, "narrow-prefixes", strings.Join(routingeval.DefaultNarrowPrefixes, ","), "guardrail rule-ID prefixes whose findings narrow a route to local aliases")
 	flag.IntVar(&o.limit, "limit", 0, "use only the first N eval items (smoke runs)")
+	flag.BoolVar(&o.sensitiveCheck, "sensitive-check", false, "GAP-0003: also run routing.sensitive.check (the gateway decision-model checker) against -systemone-endpoint and report leaks per profile, false-local, latency and cost")
+	flag.IntVar(&o.sensitiveTimeoutMs, "sensitive-timeout-ms", 1000, "routing.sensitive.timeout_ms for the check")
+	flag.IntVar(&o.sensitiveMaxBytes, "sensitive-max-bytes", 8192, "routing.sensitive.max_bytes for the check")
+	flag.Float64Var(&o.sensitiveUSDPerMTok, "sensitive-usd-per-mtok", 0, "input price of the check model in USD per million tokens for the cost line (0: no cost line)")
 	flag.Parse()
 	if err := run(o); err != nil {
 		fmt.Fprintln(os.Stderr, "routing-eval:", err)
@@ -275,6 +284,13 @@ func run(o options) error {
 		return err
 	}
 	md := routingeval.Markdown(rep, names)
+	if o.sensitiveCheck {
+		extra, err := sensitiveSection(ctx, o, eval, signal, preds, profs)
+		if err != nil {
+			return err
+		}
+		md += "\n" + extra
+	}
 	if err := os.WriteFile(filepath.Join(o.out, "results.md"), []byte(md), 0o644); err != nil {
 		return err
 	}
@@ -397,4 +413,34 @@ func systemOneLabel(label string, s1 *routingeval.SystemOne) string {
 		return "unlabelled endpoint"
 	}
 	return label
+}
+
+// sensitiveSection runs the GAP-0003 measurement: the gateway checker of a
+// config whose decision model is -systemone-endpoint, on the eval set.
+func sensitiveSection(ctx context.Context, o options, eval []routingeval.Item, floor map[string]bool, preds map[string]map[string]routingeval.Prediction, profs routingeval.Profiles) (string, error) {
+	cfg := &config.Config{}
+	cfg.DecisionModel.Enabled = true
+	cfg.DecisionModel.BaseURL, cfg.DecisionModel.Model = o.s1Endpoint, o.s1Model
+	if o.s1KeyEnv != "" {
+		cfg.DecisionModel.APIKeyEnv = o.s1KeyEnv
+	}
+	cfg.Routing.Enabled = true
+	cfg.Routing.Sensitive = &config.RoutingSensitiveConfig{Check: config.RoutingSensitiveCheckDecisionModel, Aliases: profs.LocalAliases,
+		TimeoutMs: o.sensitiveTimeoutMs, MaxBytes: o.sensitiveMaxBytes}
+	checker := gateway.NewSensitiveEvalChecker(cfg, "")
+	if checker == nil {
+		return "", fmt.Errorf("-sensitive-check: no decision-model checker for %s (model %q)", o.s1Endpoint, o.s1Model)
+	}
+	start := time.Now()
+	checks := routingeval.CheckAll(ctx, checker, eval, o.concurrency)
+	fmt.Fprintf(os.Stderr, "sensitive check: %d items in %s\n", len(eval), time.Since(start).Round(time.Millisecond))
+	kp := preds["keyword"]
+	if kp == nil {
+		return "", fmt.Errorf("-sensitive-check needs -classifiers keyword (the route before narrowing)")
+	}
+	if err := writeJSON(filepath.Join(o.out, "sensitive-checks.json"), checks); err != nil {
+		return "", err
+	}
+	label := checker.Name() + " via " + systemOneLabel(o.s1Label, nil)
+	return routingeval.SensitiveReport(eval, floor, checks, kp, profs, label, o.sensitiveUSDPerMTok), nil
 }

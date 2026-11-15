@@ -271,6 +271,7 @@ def _doctor_systemone(monkeypatch, code: int, **routing):
     from defenseclaw.commands import cmd_doctor
 
     monkeypatch.setattr(cmd_doctor, "_http_probe", lambda url, **kw: (code, ""))
+    routing.setdefault("categories", {"coding": "fast"})
     result = cmd_doctor._DoctorResult()
     cfg = SimpleNamespace(
         routing=SimpleNamespace(enabled=True, remote={}, port=0, models=[{"name": "fast"}], classifier="systemone",
@@ -291,6 +292,22 @@ def test_doctor_checks_the_systemone_endpoint_for_real(monkeypatch) -> None:
     assert row["status"] == "fail" and "not reachable" in row["detail"] and "setup decision-model --ping" in row["remediation"]
     none = _doctor_systemone(monkeypatch, 405, systemone={"use_decision_model": False})
     assert none["System One classifier"]["status"] == "warn" and "no endpoint" in none["System One classifier"]["detail"]
+
+
+def test_doctor_and_routing_test_name_missing_systemone_categories(home: Path, monkeypatch) -> None:
+    # rel-1-0-10:GAP-0591 residual: without routing.categories System One is never
+    # asked, so the reason is configuration_failure even with the endpoint up or down.
+    for code in (405, 0):
+        row = _doctor_systemone(monkeypatch, code, systemone={}, categories={})["System One classifier"]
+        assert row["status"] == "fail" and "routing.categories is empty" in row["detail"], row
+        assert "--route coding=" in row["remediation"] and "--classifier rules" in row["remediation"]
+    (home / "config.yaml").write_text(CONFIGS["routing_off"])
+    answer = {"outcome": "fallback", "failure": "configuration_failure", "source": "systemone", "warnings": []}
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (answer, ""))
+    result = invoke(["test", "write a python function"])
+    assert result.exit_code == 0 and "routing.categories is empty" in result.output, result.output
+    answer["failure"] = "upstream_status"
+    assert "routing.categories" not in invoke(["test", "hi"]).output
 
 
 def test_usage_rows_with_null_numbers_print(home: Path, monkeypatch) -> None:

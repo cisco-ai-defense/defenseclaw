@@ -8,7 +8,7 @@ keywords:
   - dashboard catalog
 ---
 
-DefenseClaw provisions 19 Grafana dashboards into a **DefenseClaw** folder, or 20 from a source checkout (editable install), which also seeds the optional Fleet dashboard. The IoT Fleet board is the 20th: it is not in the installed package and is added with the separate Fleet assets ([Fleet dashboard](/docs/edge-connector/api-reference#prometheus-metrics)). Start the stack with [Run Grafana locally](/docs/observability/local-observability); the links on this page assume `localhost:3000`.
+DefenseClaw provisions 20 Grafana dashboards into a **DefenseClaw** folder, or 21 from a source checkout (editable install), which also seeds the optional Fleet dashboard. The IoT Fleet board is the 21st: it is not in the installed package and is added with the separate Fleet assets ([Fleet dashboard](/docs/edge-connector/api-reference#prometheus-metrics)). Start the stack with [Run Grafana locally](/docs/observability/local-observability); the links on this page assume `localhost:3000`.
 
 ## Complete inventory
 
@@ -32,7 +32,28 @@ DefenseClaw provisions 19 Grafana dashboards into a **DefenseClaw** folder, or 2
 | **DefenseClaw — Proxy & LLM Guard** (`defenseclaw-traffic`) | What happens on proxy and router deployments? Empty unless proxy mode is active. | Prometheus, Loki, Tempo |
 | **DefenseClaw — Sandboxes** (`defenseclaw-sandboxes`) | What are OpenShell sandboxes doing, reaching and being refused? See [Sandboxes board](#sandboxes-board). | Prometheus, Loki |
 | **DefenseClaw — Tokenomics** (`defenseclaw-tokenomics`) | What do model calls cost, by model, provider, route, connector and profile, how many calls have no known cost, and were any usage records dropped? Per-user cost reads `model.usage` logs and is an administrator view; a person sees their own usage from `GET /usage`. | Prometheus, Loki |
+| **DefenseClaw — Routing, Savings & Budgets** (`defenseclaw-routing`) | What is the semantic router deciding, how often does it fall back or refuse, what did routing save against sending every call to the model the client asked for, and how close is each budget to its limit? See [Routing, savings and budgets board](#routing-savings-and-budgets-board). | Prometheus, Loki |
 | **DefenseClaw — Runtime & Reliability** (`defenseclaw-runtime`) | Is the process, database, exporter or destination delivery unhealthy? | Prometheus, Loki |
+
+## Routing, savings and budgets board
+
+**DefenseClaw — Routing, Savings & Budgets** shows what [semantic routing](/docs/guardrail/semantic-routing) and [routing budgets](/docs/enterprise/routing-budgets) are doing. It reads the `defenseclaw.semantic_routing.decision` counter, the cost counters of [Tokenomics](/docs/observability/tokenomics), the `defenseclaw.budget.*` gauges, and the `model.usage` logs.
+
+| Row | Panels | Answers |
+| --- | --- | --- |
+| Routing decisions | Decisions, routed share, fallbacks, refusals, sensitive narrowing, routing latency p95 | How much traffic does the router decide, and how often does it not route? |
+| Decisions over time | By result, by reason (route source), by listener, top routed categories, calls by routed model, calls by route decision | Which rule or classifier picked the route (`rules`, `systemone`, `force`, `default`), which listener (`route_only` or `guardrail`), and where did the calls go? |
+| Fallbacks, refusals and fail-closed | Fallbacks by cause (at decision time and per call), refusals by reason, sensitive requests kept local, sent to the original model, or refused | Why a request kept its original model, what a managed policy refused, and whether sensitive requests stayed local. |
+| Savings | Spent, the same calls on the requested model, saved (USD and share), saved per interval and by model, calls with no comparison | What routing saved, and for which calls there is no honest comparison. |
+| Budgets | Used share per budget, limit and spend table, spend and limit over time, budget stops, subjects over the limit, fleet budget store state | How close each budget is, and what a budget stopped. |
+| Per user and per group | Spend per user (logs), users over their limit, group budgets | Who spent what in the range, and which pooled budgets are close. |
+| Managed fleet | Decisions, spend and savings by host | Which hosts route, fall back and save. |
+
+The variables are **Connector**, **Host**, **Budget**, **Group budget** and **User regex**. Host is the reporting gateway, so on a managed fleet it separates the machines. The User box narrows the log panels only: metrics carry no user, by design. A group is named by its budget id, because directory group names never leave the endpoint.
+
+**How the saving is computed.** For each agent call the gateway prices the call's own tokens on the model the client asked for, from your `observability.pricing` table, next to what the call really cost. A call counts on both sides only when both prices are known (a free side adds nothing to its counter), so **Spent** and **The same calls on the requested model** always cover the same calls. The saving is the difference. It is negative when routing sent a call to a more expensive model, and the panel shows it in red. The same token counts are used for both models; a different tokenizer would count slightly differently. A call whose requested model has no price is not counted and appears in **Calls with no comparison** and the table of models to add. A missing price is never shown as a saving of zero.
+
+**Budgets.** The budget gauges are reported every 15 seconds for each budget in `routing.admin.budgets`, named by its id. A budget whose spend is still loading, or that the fleet store answers with "over the limit" only, shows a limit and no spend. **Budget stops** and **Refusals by reason** count requests a managed gateway refused; an open source gateway reports an exceeded `deny` budget and keeps routing, so those panels stay at 0 there. **Fleet budget store** reads `not enabled` until `routing.admin.budget_store` is set.
 
 ## Kernel controls and your Tetragon policies
 

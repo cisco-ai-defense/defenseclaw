@@ -160,6 +160,119 @@ def test_enable_needs_a_model(home: Path) -> None:
     assert result.exit_code != 0 and "needs at least one model" in result.output
 
 
+def test_enable_names_the_default_classifier_and_warns_when_docker_is_down(home: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cmd_routing, "_docker_problem", lambda: "Docker daemon is not reachable. Start Docker Desktop and retry")
+    result = run("enable")
+    assert result.exit_code == 0, result.output
+    assert written(home)["routing"]["enabled"] is True and "classifier" not in written(home)["routing"]
+    assert "Classifier: vllm_sr (the default" in result.output
+    assert "Docker" in result.output and "defenseclaw routing setup --classifier rules" in result.output
+
+
+def test_enable_does_not_check_docker_for_rules_or_a_remote_router(home: Path, monkeypatch) -> None:
+    def no_docker():
+        raise AssertionError("Docker must not be checked")
+
+    monkeypatch.setattr(cmd_routing, "_docker_problem", no_docker)
+    (home / "config.yaml").write_text(BODY + "  classifier: rules\n")
+    result = run("enable")
+    assert result.exit_code == 0, result.output
+    assert "Classifier: rules" in result.output and "Docker" not in result.output
+    (home / "config.yaml").write_text(BODY + "  remote:\n    endpoint: http://router.example:8080\n")
+    assert run("enable").exit_code == 0
+
+
+def test_enable_with_docker_up_has_no_warning(home: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cmd_routing, "_docker_problem", lambda: "")
+    result = run("enable")
+    assert result.exit_code == 0, result.output
+    assert "Classifier: vllm_sr" in result.output and "needs Docker" not in result.output
+
+
+def test_routing_test_names_the_gateway_startup_cause(home: Path, monkeypatch) -> None:
+    off = "routing is off for the configuration the gateway runs"
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (None, off))
+    monkeypatch.setattr(
+        cmd_routing,
+        "_health_routing",
+        lambda app: {"state": "error", "last_error": "routing: Docker is required but not running"},
+    )
+    result = run("test", "hi")
+    assert result.exit_code == 1
+    assert off in result.output and "Docker is required but not running" in result.output
+    assert "defenseclaw routing setup --classifier rules" in result.output
+    # No reported cause: the plain error stays as it was.
+    monkeypatch.setattr(cmd_routing, "_health_routing", lambda app: {"state": "running"})
+    plain = run("test", "hi")
+    assert plain.exit_code == 1 and "The gateway reports" not in plain.output
+
+
+def _setup_clock(monkeypatch) -> list[float]:
+    slept: list[float] = []
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr("time.monotonic", lambda: now[0])
+    monkeypatch.setattr("time.sleep", sleep)
+    return slept
+
+
+def test_setup_waits_for_the_gateway_to_apply_the_change_then_tests(home: Path, monkeypatch) -> None:
+    """GAP-0756: the test ran before the gateway reloaded and said routing is off."""
+    slept = _setup_clock(monkeypatch)
+    answers = iter(
+        [(None, "routing is off for the configuration the gateway runs")] * 3
+        + [({"selected_alias": "fast"}, "")]
+    )
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: next(answers))
+    result = run("setup", "--yes", "--classifier", "rules", "--model", "fast=openai/gpt-4.1-mini")
+    assert result.exit_code == 0, result.output
+    assert "Test: a coding prompt goes to fast." in result.output and "Test skipped" not in result.output
+    assert len(slept) == 3
+
+
+def test_setup_wait_is_bounded_and_says_the_gateway_has_not_applied_it(home: Path, monkeypatch) -> None:
+    slept = _setup_clock(monkeypatch)
+    off = "routing is off for the configuration the gateway runs"
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (None, off))
+    result = run("setup", "--yes", "--classifier", "rules", "--model", "fast=openai/gpt-4.1-mini")
+    assert result.exit_code == 0, result.output
+    assert "Test skipped: the gateway has not applied the change yet" in result.output
+    assert "defenseclaw-gateway restart" in result.output
+    assert sum(slept) <= cmd_routing.SETUP_TEST_WAIT_SECONDS + 1
+
+
+def test_setup_does_not_wait_for_a_stopped_gateway_or_a_reported_cause(home: Path, monkeypatch) -> None:
+    slept = _setup_clock(monkeypatch)
+    # The default fixture gateway is down: one try, no wait.
+    result = run("setup", "--yes", "--classifier", "rules", "--model", "fast=openai/gpt-4.1-mini")
+    assert "Test skipped: the gateway is not running" in result.output and slept == []
+    # The gateway says why routing cannot start: no wait, the cause is named.
+    off = "routing is off for the configuration the gateway runs"
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (None, off))
+    monkeypatch.setattr(
+        cmd_routing, "_health_routing",
+        lambda app: {"state": "error", "last_error": "routing: Docker is required but not running"},
+    )
+    result = run("setup", "--yes", "--classifier", "vllm_sr", "--model", "fast=openai/gpt-4.1-mini")
+    assert slept == []
+    assert "Docker is required but not running" in result.output and "routing setup --classifier rules" in result.output
+
+
+def test_status_warns_with_the_gateway_startup_cause(home: Path, monkeypatch) -> None:
+    (home / "config.yaml").write_text(BODY.replace("enabled: false", "enabled: true"))
+    monkeypatch.setattr(
+        cmd_routing,
+        "_health_routing",
+        lambda app: {"state": "error", "last_error": "routing: Docker is required but not running"},
+    )
+    data = json.loads(run("status", "--json").output)
+    assert any("could not start it: routing: Docker is required" in w for w in data["warnings"])
+
+
 def test_doctor_rows(home: Path) -> None:
     assert cmd_routing.doctor_rows() == []
     (home / "config.yaml").write_text(BODY + "  admin:\n    rules:\n      - {id: c, match: {groups: [g]}, action: deny}\n")

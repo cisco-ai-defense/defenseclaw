@@ -664,7 +664,7 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		// re-rendered on the next pass.
 		ForeignHookGuardBinary: standaloneForeignHookGuardBinary(enterpriseHookConnector),
 		ManagedHookBinary:      standaloneManagedHookBinary(),
-		RouteOnly:              enterpriseHookWindowsRouteOnly(enterpriseHookConnector, enterpriseHookUser, target.sid, apiAddr),
+		RouteOnly:              enterpriseHookWindowsRouteOnly(enterpriseHookConnector, enterpriseHookUser, target.sid, apiAddr, true),
 	}
 	// A single-target install renders the shared machine policy from the
 	// same deployment contract the guardian uses, so the next reconcile does
@@ -2778,7 +2778,7 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 				// Standalone Amp and OpenCode only; empty on Secure Client.
 				ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 				ManagedHookBinary:      standaloneManagedHookBinary(),
-				RouteOnly:              enterpriseHookWindowsRouteOnly(target.Connector, target.User, resolved.sid, apiAddr),
+				RouteOnly:              enterpriseHookWindowsRouteOnly(target.Connector, target.User, resolved.sid, apiAddr, false),
 			}
 			opts.MachinePolicyContractID = enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract)
 			var result enterprisehooks.InstallResult
@@ -3397,7 +3397,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				MachinePolicyContractID:     enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
 				OpenCodeServicePort:         openCodePorts[strings.ToUpper(resolved.sid)],
 				OpenCodeServicePortRequired: runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && strings.EqualFold(target.Connector, "opencode"),
-				RouteOnly:                   enterpriseHookWindowsRouteOnly(target.Connector, target.User, resolved.sid, apiAddr),
+				RouteOnly:                   enterpriseHookWindowsRouteOnly(target.Connector, target.User, resolved.sid, apiAddr, true),
 			}
 			// Repair the user's objects as root before anything validates them.
 			err = repairEnterpriseHookUserTargetPlatform(target, opts)

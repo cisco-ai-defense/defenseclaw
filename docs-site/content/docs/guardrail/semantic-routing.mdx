@@ -107,6 +107,27 @@ This is the 1.0.9 flow: DefenseClaw runs a pinned vLLM Semantic Router container
 
    To use a router you run yourself, set `routing.remote.endpoint` (HTTPS for non-loopback endpoints) instead of starting the container.
 
+## Route on the conversation
+
+By default the router reads only the newest message the user typed. In an agent loop most requests end with a tool result, so the router sees the last thing the user said and nothing of the loop. `routing.context` lets the `rules` and `systemone` classifiers read a little more. It is off by default.
+
+```yaml title="~/.defenseclaw/config.yaml"
+routing:
+  classifier: rules
+  context:
+    recent_user_turns: 2          # older user messages, 0 to 8
+    include_first_user_turn: true # the message that started the conversation
+    max_bytes: 8192               # older messages together, at most 65536
+    per_turn_bytes: 2048          # one older message, at most max_bytes
+    include_tool_names: true      # names of the tools the loop called
+```
+
+- Read: user messages. Left out: tool results, assistant replies, system prompts, and user-role text that starts with a marker agents write: `<system-reminder>`, `<environment_context>`, `<user_instructions>`, command, hook and IDE tags (`<bash-stdout>`, `<local-command-stdout>`, `<command-name>`, `<user-prompt-submit-hook>`, `<ide_selection>` and similar), `# AGENTS.md instructions`, `# CLAUDE.md`, `Contents of `, compaction summaries (Claude Code and Codex), skill loads, `<user_shell_command>`, the OpenClaw context message, its `Sender (untrusted metadata):` envelope and its heartbeat and session-startup prompts. Each content block is checked on its own, so a typed prompt in the same message as agent blocks is still read. For a custom slash command the router reads what you typed after the command name (`<command-args>`) and skips the next block of that message, the expanded command file. Text an agent writes without such a marker can still be read. Tool names are read without their arguments or results; MCP tool names are chosen by the tool server.
+- The newest message keeps its 8 KiB limit; `per_turn_bytes` and `max_bytes` bound the older messages.
+- Keyword signals match the newest message and the context, newest first, one message per paragraph, with no recency weighting: an older message can match a higher-priority rule than the newest one. With `include_tool_names` they also see a line such as `tools: Bash,Read`, and the request condition `tool_loop` matches when the conversation called a tool. `routing.sensitive.signals` match the context too.
+- `systemone` gets the same context, at most 8 KiB. `vllm_sr` reads the newest message only, so validation refuses `routing.context` with it.
+- When a limit cuts the context, the decision carries the warning `context_truncated:bytes` (`items` past 32 tool names), shown by `defenseclaw routing explain`. The newest message is never dropped, and a cut never removes a signal the newest message matched.
+
 ## Verify the running state
 
 ```bash
@@ -121,7 +142,7 @@ X-Semantic-Router: routed
 X-Semantic-Router-Reason: decision=… model=… confidence=…
 ```
 
-Each routed request also records one `defenseclaw.semantic_routing.decision` count and a `defenseclaw.semantic_routing.latency` measurement. The labels are a closed set: `result` (`applied`, `fallback` or `denied`), `error.code` (`none`, `timeout`, `upstream_status`, `decode_failure`, `unknown_alias`, `credential_failure` or `configuration_failure`) and `decision` (`override` or `default`). Prompt text, credentials, endpoints and the header reason string are never labels.
+Each routed request also records one `defenseclaw.semantic_routing.decision` count and a `defenseclaw.semantic_routing.latency` measurement. The labels are a closed set: `result` (`applied`, `fallback` or `denied`), `error.code` (`none`, `timeout`, `upstream_status`, `decode_failure`, `unknown_alias`, `credential_failure`, `configuration_failure`, `filtered`, `breaker_open`, `low_confidence` or `no_candidate`) and `decision` (`override` or `default`), plus `connector`, `route_source`, `route_category`, `filtered_by`, `listener`, `deny_reason` and `budget_id` (see [Tokenomics](/docs/observability/tokenomics#routing-and-budget-metrics)). Both listeners record the count. Prompt text, credentials, endpoints and the header reason string are never labels.
 
 ## Sensitive requests stay local
 
@@ -131,10 +152,15 @@ With `routing.sensitive` set (`aliases` plus `severity_at_least` and/or `signals
 - **When no local model can take it** (its key is missing, it does not speak the request API, an administrator rule does not allow it, it is unreachable on the route-only listener, or the request is a signed Bedrock body or an API DefenseClaw does not re-route, such as `count_tokens`), DefenseClaw refuses the request with `routing_sensitive_local_unavailable` and a message that names the cause, writes an audit row (target `routing.sensitive`), and `defenseclaw routing explain <id>` shows `denied`.
 - **Size bounds.** With `routing.sensitive` set, the route-only listener refuses a body over 64 MiB (HTTP 413) and answers HTTP 503 with `Retry-After` while its shared request buffer is full, instead of sending the request unchecked.
 - **Keyless local models.** A model with its own loopback `base_url` and no `api_key_env` or `credential` (Ollama, vLLM on this host) is called with no credential, also when the agent signs in with a login or a Bedrock bearer key. A sensitive request tries its local models this way at any address.
+- **When the local model refuses the request.** A local model that does not accept a request the agent sends (for example Ollama and the `additional_tools` input item Codex sends when its model catalog entry uses `use_responses_lite`) is not replaced by the cloud model: the agent gets HTTP 400 with a DefenseClaw message that names `routing.sensitive`, the local alias and the model's own reason. Use a local model that accepts the request, or a Codex catalog entry without `use_responses_lite` for the model.
 
 ## Going back to a release before 1.0.10
 
 A release before 1.0.10 has no route-only listener, so the Claude Code and Codex model settings route-only changed go back first. `defenseclaw rollback` (and `defenseclaw upgrade --version` on Windows) does it in the installer, after its prompt, with the gateway stopped. On Linux and macOS, `defenseclaw upgrade --version 1.0.9` asks first (or takes `--yes`), stops the gateway and puts them back; if they cannot be put back, or the older installer fails, the gateway of this release starts again and writes them again. Restart the agent afterwards. When you run an older release's installer yourself (`install.sh --version 1.0.9`), run `defenseclaw routing disable --connector <name>` for each route-only connector first.
+
+### Ask the decision model too
+
+The regex floor finds structured data (card and ID numbers, keys, tokens) but misses personal data written in prose: diagnoses, HR cases, unreleased numbers. Set `routing.sensitive.check: auto` (or `decision_model` or `judge`) to also ask the decision model one yes/no question per request; a positive from either keeps the request local. On the 555-prompt router evaluation set, the regex floor alone kept 45% of the sensitive prompts local; the floor plus a check by a Nova Lite-class model kept 99% (1 of 80 leaked on the default profile), and sent 0.4 to 0.6% of the other prompts local. The check adds about 0.4 s (p50) and 0.5 s (p95) to every routed request, because the route waits for it. A check that fails or times out prefers the local models (`on_unavailable: local`) and never blocks: when no local model can take the request, it keeps its normal route. **Privacy:** the check sends the request text (on the route-only and passthrough listeners the newest user turn, on the chat listener the newest turns up to `max_bytes`, never system prompts) to the decision model or, with `judge` or `auto` and no decision model, to the guardrail judge on every routed request; choose a local or in-tenant endpoint for it. The numbers above were measured with the decision-model check; the judge check is not measured. A profile whose `allowed_aliases` are local models only leaks nothing in any mode: use that for regulated groups. On a managed host the administrator sets and locks `routing.sensitive` in the bundle.
 
 ## Disable routing
 

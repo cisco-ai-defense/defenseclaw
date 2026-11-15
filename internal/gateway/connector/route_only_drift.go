@@ -33,6 +33,9 @@ func RouteOnlyDrift(conn Connector, opts SetupOpts, route *RouteOnlySetup) error
 // managed Windows guardian verifies as LocalSystem and passes its account
 // file reader (bounded, links only to files the account owns).
 func RouteOnlyDriftWithReader(conn Connector, opts SetupOpts, route *RouteOnlySetup, read RouteOnlyFileReader) error {
+	if route != nil && route.Unavailable != "" {
+		return fmt.Errorf("%w: %s route-only is expected for this account but not rendered: %s", ErrRouteConfigDrift, conn.Name(), route.Unavailable)
+	}
 	if read == nil {
 		read = readRouteOnlyFile
 	}

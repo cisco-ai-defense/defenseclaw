@@ -3,6 +3,160 @@
 
 package engine
 
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+)
+
+// sensitiveRun is the state of one request sensitive narrowing: the floor
+// source (set when the guardrail severity, a keyword signal or an earlier
+// positive of the conversation already says sensitive) or the pending
+// decision-model check, started before the classifier so the two overlap.
+type sensitiveRun struct {
+	floor   string
+	ch      chan sensitiveCheckResult
+	timeout time.Duration
+	started time.Time
+	cancel  context.CancelFunc
+	// clear keys a clear answer for this conversation and text; cached is
+	// set when that answer was reused.
+	clear   stickyKey
+	clearOK bool
+	cached  bool
+}
+
+type sensitiveCheckResult struct {
+	sensitive bool
+	err       error
+}
+
+// beginSensitive evaluates the floor and, when it did not fire, starts the
+// check. The floor never weakens: the check only adds positives.
+func (e *Engine) beginSensitive(ctx context.Context, req Request, signals map[string]bool) *sensitiveRun {
+	s := e.sensitive
+	if s == nil || len(s.Aliases) == 0 {
+		return nil
+	}
+	run := &sensitiveRun{floor: e.sensitiveFloor(req, signals)}
+	if run.floor == "" && e.sensitiveSticky(req) {
+		run.floor = SensitiveSourceSticky
+	}
+	if run.floor != "" {
+		// Every narrowed turn renews the mark of the conversation.
+		e.markSensitiveSticky(req)
+		return run
+	}
+	if e.checker == nil || strings.TrimSpace(req.SensitiveText) == "" {
+		return run
+	}
+	// A tool turn of an agent loop carries the same newest user text as the
+	// turn before: a text already answered clear for this conversation is
+	// not asked again.
+	run.clear, run.clearOK = sensitiveClearKey(req)
+	if run.clearOK && e.marks != nil {
+		if _, hit := e.marks.get(run.clear); hit {
+			run.cached = true
+			return run
+		}
+	}
+	run.timeout = time.Duration(s.EffectiveCheckTimeoutMs()) * time.Millisecond
+	run.started = time.Now()
+	run.ch = make(chan sensitiveCheckResult, 1)
+	// Decide cancels the check when it returns before reading it (a
+	// managed admin deny): it stops the wait; the request may already
+	// have been sent.
+	cctx, stop := context.WithCancel(ctx)
+	run.cancel = stop
+	in := SensitiveInput{Text: req.SensitiveText, Truncated: req.SensitiveTruncated, Definition: s.Definition, Connector: req.Connector}
+	go func(ch chan<- sensitiveCheckResult, c SensitiveChecker, timeout time.Duration) {
+		defer func() {
+			if recover() != nil {
+				ch <- sensitiveCheckResult{err: &ClassifierError{Code: FailureConfig, Err: errors.New("sensitivity checker panicked")}}
+			}
+		}()
+		tctx, cancel := context.WithTimeout(cctx, timeout)
+		defer cancel()
+		ok, err := c.Check(tctx, in)
+		ch <- sensitiveCheckResult{sensitive: ok, err: err}
+	}(run.ch, e.checker, run.timeout)
+	return run
+}
+
+// applySensitive narrows pol and records the outcome on d.
+func (e *Engine) applySensitive(pol *Policy, d *Decision, run *sensitiveRun, req Request) {
+	if run == nil {
+		return
+	}
+	s := e.sensitive
+	src, reason := run.floor, ""
+	if src != "" {
+		reason = "positive"
+	}
+	if run.cached {
+		reason = "clear_cached"
+	}
+	if run.ch != nil {
+		d.Sensitive.Checked = true
+		var r sensitiveCheckResult
+		timer := time.NewTimer(run.timeout + 250*time.Millisecond)
+		select {
+		case r = <-run.ch:
+			timer.Stop()
+		case <-timer.C:
+			r.err = &ClassifierError{Code: FailureTimeout, Err: errors.New("sensitivity check timed out")}
+		}
+		d.Sensitive.CheckLatency = time.Since(run.started)
+		name := e.checker.Name()
+		hasLocal := len(intersectAliases(pol.AllowedAliases, s.Aliases)) > 0
+		switch {
+		case r.err != nil:
+			code := FailureConfig
+			var ce *ClassifierError
+			if errors.As(r.err, &ce) && ce.Code != "" {
+				code = ce.Code
+			}
+			d.Sensitive.CheckFailure = code
+			reason = "unavailable:" + code
+			if s.EffectiveOnUnavailable() == config.RoutingSensitiveUnavailableLocal && hasLocal {
+				// Soft: local is tried first, never a block (design 3).
+				src, d.Sensitive.Soft = name, true
+			} else if hasLocal {
+				reason += ":ignored"
+			} else {
+				reason += ":no_local_route"
+			}
+		case r.sensitive:
+			src, reason = name, "positive"
+			e.markSensitiveSticky(req)
+		case req.SensitiveTruncated:
+			// ONE BOUND RULE: a truncated input is judged at least at the
+			// unknown tier of the pack: strict routes local, default and
+			// permissive record it and keep the route.
+			reason = "truncated"
+			d.Warnings = append(d.Warnings, "sensitive_check_truncated")
+			if req.StrictTier && hasLocal {
+				src, d.Sensitive.Soft = name, true
+			}
+		default:
+			reason = "clear"
+			if run.clearOK && e.marks != nil {
+				e.marks.put(run.clear, ClassifyResult{Category: "clear", Confidence: 1})
+			}
+		}
+	}
+	d.Sensitive.Source, d.Sensitive.Reason = src, reason
+	if src != "" && !d.Sensitive.Soft {
+		pol.AllowedAliases = intersectAliases(pol.AllowedAliases, s.Aliases)
+		d.FilteredBy = "sensitive"
+	}
+}
+
 // sensitiveFloor is the floor source of req: the guardrail severity at or
 // above routing.sensitive.severity_at_least, else a routing.sensitive
 // signal; "" when neither fires.
@@ -53,6 +207,18 @@ func sensitiveStickyKey(req Request) (stickyKey, bool) {
 		return stickyKey{}, false
 	}
 	return stickyKey{subject: req.Caller.Key, connector: req.Connector, conversation: req.ConversationID, requested: "\x00sensitive"}, true
+}
+
+// sensitiveClearKey keys a clear check answer by conversation and a hash of
+// the checked text (no text is kept).
+func sensitiveClearKey(req Request) (stickyKey, bool) {
+	k, ok := sensitiveStickyKey(req)
+	if !ok {
+		return stickyKey{}, false
+	}
+	sum := sha256.Sum256([]byte(req.SensitiveText))
+	k.requested = "\x00clear:" + hex.EncodeToString(sum[:12])
+	return k, true
 }
 
 func (e *Engine) markSensitiveSticky(req Request) {

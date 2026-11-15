@@ -10,9 +10,11 @@ previews (destructive ones through the consequence modal).
 
 from __future__ import annotations
 
+from defenseclaw.tui.command_line import ParsedCommand
 from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.screens.field_editor import FieldEditorScreen
 from defenseclaw.tui.services.routing_state import (
+    APPLYING_POLL_SECONDS,
     VIEW_USAGE,
     RoutingPanelAction,
     RoutingPanelModel,
@@ -79,10 +81,15 @@ class RoutingPanelMixin:
             self._routing_load_running = False
         overview = getattr(self, "overview_model", None)
         if overview is not None and hasattr(overview, "set_routing_tile"):
-            overview.set_routing_tile(overview_tile(model.status) if model.enabled else "")
+            overview.set_routing_tile(overview_tile(model.status, model.applying) if model.enabled else "")
         if self._routing_load_pending:
             self._routing_load_pending = False
             self._schedule_routing_load()
+        elif model.applying and not getattr(self, "_app_shutting_down", False):
+            # Routing is on in config.yaml and the gateway has not reloaded
+            # yet: read again shortly (bounded by the model) instead of
+            # leaving "on" and "disabled" side by side.
+            self.set_timer(APPLYING_POLL_SECONDS, self._schedule_routing_load)  # type: ignore[attr-defined]
         if getattr(self, "active_panel", "") == "routing":
             self._update_body_only()  # type: ignore[attr-defined]
 
@@ -113,7 +120,17 @@ class RoutingPanelMixin:
             self._update_body_only()  # type: ignore[attr-defined]
             return True
         if kind == "intent" and action.intent is not None:
-            self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)  # type: ignore[attr-defined]
+            intent = action.intent
+            if intent.risk == "read-only":
+                # A read-only command runs at once, as from the action bar and
+                # the palette: no confirm modal (rel-1-0-10:GAP-0809).
+                parsed = ParsedCommand(
+                    binary=intent.binary, args=tuple(intent.args), display_name=intent.label,
+                    category=intent.category, risk="read-only", needs_preview=False,
+                )
+                self.run_worker(self._run_and_report(parsed), exclusive=False, thread=False)  # type: ignore[attr-defined]
+                return True
+            self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)  # type: ignore[attr-defined]
             return True
         if kind == "prompt":
             self._open_routing_prompt(action.prompt)

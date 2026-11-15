@@ -398,6 +398,39 @@ def _live(health: dict | None) -> dict[str, dict[str, Any]] | None:
     return out
 
 
+RENDER_DONE, RENDER_FAILED, RENDER_PENDING = "rendered", "failed", "pending"
+
+
+def render_outcome(cfg: Any, connector: str, upstream: dict[str, Any], health: dict | None) -> tuple[str, str, str]:
+    """(state, cause, fix): whether the gateway has rendered the agent config
+    of a route-only connector, after ``routing enable --connector``.
+
+    health is the /health of the running gateway (None: not reachable).
+    RENDER_DONE: the agent file points at the route. RENDER_FAILED: the
+    gateway reports why it cannot render (cause and fix are its words).
+    RENDER_PENDING: not rendered yet and no reason reported (the gateway is
+    down, or has not reloaded).
+    """
+    row = agent_config_row(cfg, connector, upstream)
+    if row.tag == "pass":
+        return RENDER_DONE, "", ""
+    if health is None:
+        return (
+            RENDER_PENDING,
+            "the gateway is not running, so it has not rendered the agent settings",
+            "start it with defenseclaw-gateway start; it renders them from config.yaml when it starts",
+        )
+    state = (_live(health) or {}).get(connector)
+    if state is not None and not state.get("ready"):
+        parts = [str(state.get("problem") or "not ready")]
+        signing = state.get("signing")
+        failing = [r for r in signing_rows(connector, upstream, signing) if r.tag == "fail"] if signing else []
+        if failing:
+            parts.append(failing[0].detail)
+        return RENDER_FAILED, ": ".join(parts), str(state.get("fix") or (failing[0].fix if failing else ""))
+    return RENDER_PENDING, row.detail, row.fix
+
+
 def _no_live_row(name: str, label: str, *, gateway: str, managed: bool, holder: str, holder_fix: str) -> Row:
     """The state row of a connector without the live readiness of this
     account verified gateway, by why it is missing."""
