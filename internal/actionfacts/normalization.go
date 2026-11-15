@@ -117,6 +117,10 @@ func normalizePathFactsForCommandsInShell(
 			activeHome,
 			context,
 		)
+		if factCWD != cwd {
+			hookNormalized, hookAbsolute, hookResolved := derivePathWithContext(facts[i], cwd, activeHome, context)
+			facts[i].atHook = &pathAtHook{normalized: hookNormalized, absolute: hookAbsolute, resolved: hookResolved}
+		}
 		facts[i].Normalized = normalized
 		facts[i].Absolute = absolute
 		facts[i].Resolved = resolved

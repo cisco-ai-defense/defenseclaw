@@ -1241,11 +1241,53 @@ type PathFact struct {
 	// call already names, never a further operand, so a proof that counts
 	// the operands of a call counts it with OperandPaths (GAP-0819).
 	Linked bool
+	// atHook is the reading of the operand in the hook's own folder, kept when
+	// a cd moved the folder of its command (working_folder.go). The link and
+	// authorized-keys symlink proofs read it (Facts.AtHookFolder): they place
+	// links by the hook's folder and keep their verdicts of before the folder
+	// tracking, so a link operation they cannot place never turns a write
+	// after a cd into an unproven link write.
+	atHook *pathAtHook
 	// LinkedFrom is, for a Linked fact, the resolved spelling of the operand
 	// whose link reaches this file. A proof that reads the text one write
 	// puts into a file judges it only against the files that write reaches,
 	// never against the file another operand of the same call reaches.
 	LinkedFrom string
+}
+
+// pathAtHook is the Normalized, Absolute and Resolved reading of a path fact
+// against the hook's folder.
+type pathAtHook struct {
+	normalized string
+	absolute   bool
+	resolved   string
+}
+
+// AtHookFolder returns the facts with every path read against the hook's own
+// folder, as before the call's cd chain was tracked (working_folder.go). It is
+// for the proofs that place links by the hook's folder; every other rule reads
+// the path the command reaches.
+func (f Facts) AtHookFolder() Facts {
+	moved := false
+	for _, path := range f.Paths {
+		if path.atHook != nil {
+			moved = true
+			break
+		}
+	}
+	if !moved {
+		return f
+	}
+	paths := make([]PathFact, len(f.Paths))
+	copy(paths, f.Paths)
+	for index := range paths {
+		if reading := paths[index].atHook; reading != nil {
+			paths[index].Normalized, paths[index].Absolute, paths[index].Resolved = reading.normalized, reading.absolute, reading.resolved
+			paths[index].atHook = nil
+		}
+	}
+	f.Paths = paths
+	return f
 }
 
 // OperandPaths returns the path facts that are operands of the call: every

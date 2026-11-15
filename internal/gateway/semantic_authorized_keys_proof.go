@@ -1022,6 +1022,11 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 }
 
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
+	// The link proof places the links of the call by the hook's folder (its own
+	// walk of the command); a write after a cd is judged by the other readers
+	// at the folder it reaches (actionfacts working_folder.go), so a link
+	// operation this walk cannot place never makes it an unproven link write.
+	facts = facts.AtHookFolder()
 	if command, ok := trustedBashCommandInput(request.Input); ok &&
 		trustedNoDereferenceTouchSafe(command, request.Input.CWD, facts.ActiveHome,
 			request.ResolvedWriteTargets, request.ProtectedHomeHook) {
