@@ -209,6 +209,7 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 	// that does has sandboxes off; one that has them on but could not list
 	// them may still be running its manager, so nothing local is touched.
 	p.offline = true
+	elsewhere := false
 	if api, err := a.api(); err == nil {
 		if list, err := api.List(ctx); err == nil {
 			p.daemon = true
@@ -227,6 +228,10 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 			p.offline = false
 		} else if st, err := api.Status(ctx); err == nil && st.Enabled {
 			p.offline = false
+		} else if err == nil {
+			// Sandboxes are off for this account because another
+			// account runs this machine's one OpenShell gateway.
+			elsewhere = st.GatewayElsewhere != ""
 		}
 	}
 	// The gateway directly: sandboxes and providers the daemon does not
@@ -265,7 +270,12 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 		p.profiles = a.unusedProfiles(ctx, c, p.providers, p.ownIngress)
 	}
 	sort.Strings(p.sandboxes)
-	p.sandboxesUnknown = !p.daemon && !p.listed && owner != ""
+	// Another account's gateway cannot be asked for this account's sandboxes,
+	// but an account whose daemon keeps no sandbox record has none of its own
+	// to lose: its list is empty, not unknown (GAP-0917). What the other
+	// account runs is never this data dir's to list, stop or delete.
+	ownNone := elsewhere && len(manager.RecordedSandboxes(a.dataDir())) == 0
+	p.sandboxesUnknown = !p.daemon && !p.listed && owner != "" && !ownNone
 	p.attached = map[string]int{}
 	for _, name := range p.sandboxes {
 		// A count that cannot be made is made again under the gate, which

@@ -14170,6 +14170,18 @@ def _check_guardrail_cascade(cfg, r: _DoctorResult) -> None:
     _emit("pass", "Guardrail cascade", summary, r=r)
 
 
+def _active_route_only_connectors(cfg) -> list[str]:
+    """Set-up connectors that route their model traffic through the gateway (route-only)."""
+
+    if not getattr(getattr(cfg, "routing", None), "enabled", False):
+        return []
+    from defenseclaw import routing_route_only
+
+    connectors, _upstreams = routing_route_only._route_only(cfg)
+    active = set(_doctor_active_connectors(cfg))
+    return [c for c in connectors if c in active]
+
+
 def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     """One-shot ``llm.ping`` against the guardrail's resolved LLM.
 
@@ -14191,13 +14203,20 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     judge = getattr(gc, "judge", None)
     if _guardrail_proxy_intentionally_closed(cfg) and not bool(getattr(judge, "enabled", False)):
         # As for the LLM API key: hook/policy connectors send no model traffic
-        # through DefenseClaw, and with the judge off nothing calls this LLM.
-        _emit(
-            "skip",
-            "LLM reachable",
-            "not used: the LLM judge is disabled and no connector routes through the proxy",
-            r=r,
-        )
+        # through the guardrail proxy, and with the judge off nothing calls this
+        # LLM. A route-only connector does send its model traffic through the
+        # gateway, so the row says so and points at the Route-only rows that
+        # check that path (GAP-0915).
+        routed = _active_route_only_connectors(cfg)
+        if routed:
+            detail = (
+                "not used: the LLM judge is disabled; "
+                f"{', '.join(routed)} reach their model through route-only routing "
+                "(the Route-only rows check it)"
+            )
+        else:
+            detail = "not used: the LLM judge is disabled and no connector routes through the proxy"
+        _emit("skip", "LLM reachable", detail, r=r)
         return
     llm = cfg.resolve_llm("guardrail")
     prefix = ""

@@ -5372,10 +5372,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
         if self.active_panel in self.catalog_models:
             model = self.catalog_models[self.active_panel]
             self._sync_catalog_connector_filters()
-            self._table_columns = model.data_table_columns()
             # The table spans the body less its borders, padding and the
             # vertical scrollbar a long list shows (9 columns, GAP-2624).
             width = int(getattr(self.size, "width", 0) or 0)
+            self._table_columns = model.data_table_columns(max(0, width - 9))
             self._table_rows = model.data_table_rows(max(0, width - 9))
             detail = catalog_detail_text(model.selected()) if model.detail_open else ""
             message = model.message or model.empty_state()
@@ -12966,6 +12966,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
                 # set them.") misdescribed a picked goal such as "Remove a
                 # stored credential" (GAP-1395).
                 description = f"{goal.label}. {goal.summary}" if goal.summary else f"{goal.label}."
+                # The line is one row: a goal whose summary does not fit shows
+                # its label whole, not cut mid-word (GAP-0908). The goal list
+                # shows every summary.
+                if len(f"— {description}") > max(20, self._setup_width() - (9 + len(label))):
+                    description = f"{goal.label}."
             focused = model.focused_row_metadata()
             head = (
                 f"[bold #22D3EE]{rich_escape(label)}[/] "
