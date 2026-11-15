@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
@@ -32,14 +33,40 @@ func routeContext(eng *engine.Engine, in *ModelRouterInput, req *engine.Request)
 // reminders stripped, bounded, and "" when the agent wrote it
 // (engine.InjectedUserText: instruction files, command output, compaction
 // summaries, IDE and environment context).
-// The OpenClaw "Sender (untrusted metadata):" envelope is removed and its
-// heartbeat and session-startup probes give "" (the guardrail detectors).
+// The OpenClaw "Sender (untrusted metadata):" envelope is removed, and a
+// heartbeat or session-startup probe turn gives "" (routerProbeTurnText).
 func routerUserText(s string) string {
 	t := capText(strings.TrimSpace(stripOpenClawUntrustedEnvelope(stripReminders(s))))
-	if engine.InjectedUserText(t) || isHeartbeatMessage(t, nil) || isSessionStartupMessage(t) {
+	if engine.InjectedUserText(t) {
 		return ""
 	}
+	if rest, ok := stripCanonicalProbes(t); ok {
+		t = routerProbeTurnText(rest)
+		if engine.InjectedUserText(t) {
+			return ""
+		}
+	}
 	return t
+}
+
+// routerProbeNoiseRe is one line a messaging bridge or OpenClaw puts around a
+// probe: a "System:" transport banner or the "Current time:" footer.
+var routerProbeNoiseRe = lazyregexp.New(`^(?:System:\s.{0,240}|Current time:\s.{0,240})$`)
+
+// routerProbeTurnText is the router text of a user turn that held an OpenClaw
+// probe, the canonical sentences already left out (stripCanonicalProbes):
+// "" when only banners, time footers or whitespace remain, so system noise
+// never picks a model, else the remaining typed text without that noise.
+// Only the router reads a probe turn this way; the guardrail inspects every
+// part of it but the canonical sentences (GAP-0248).
+func routerProbeTurnText(rest string) string {
+	var kept []string
+	for _, line := range strings.Split(rest, "\n") {
+		if l := strings.TrimSpace(line); l != "" && !routerProbeNoiseRe.MatchString(l) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 // injectedBlock reports whether one content block was written by the agent.
