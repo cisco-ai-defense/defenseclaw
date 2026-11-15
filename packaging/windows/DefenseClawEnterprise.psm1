@@ -42772,6 +42772,88 @@ function Get-DefenseClawVerifyFailedTargetKeys {
     return , $keys.ToArray()
 }
 
+function Get-DefenseClawRouteEpochIdentity {
+    <#
+        The SHA-256 of the route epoch a standalone Windows gateway publishes
+        each time it owns its API port (<runtime>\hooks\route-epoch.json), or
+        '' when none is published, it cannot be read, or the profile is not
+        standalone (only the standalone gateway publishes one). Compared
+        before and after Setup starts the gateway
+        (Sync-DefenseClawGuardianRouteEpochRender).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $runtime = [string]$Layout['RuntimeDirectory']
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        [string]::IsNullOrWhiteSpace($runtime)) {
+        return ''
+    }
+    $path = [IO.Path]::Combine($runtime, 'hooks', 'route-epoch.json')
+    try {
+        if (-not [IO.File]::Exists($path)) {
+            return ''
+        }
+        $bytes = [IO.File]::ReadAllBytes($path)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha.Dispose()
+        }
+    }
+    catch {
+        return ''
+    }
+}
+
+function Sync-DefenseClawGuardianRouteEpochRender {
+    <#
+        rel-1-0-10:GAP-0937. The guardian publishes the activation reconcile
+        while the gateway is still disabled, so it renders the route-only
+        targets (claudecode, codex) from the route epoch published before.
+        When the gateway Setup then starts publishes a new one (the first
+        epoch of the host, or a rotation after its API port was held), every
+        route-only target was rendered without it, and the live verify of the
+        readiness gate ended the run 1603 with route_config_drift although
+        the guardian re-rendered at its next reconcile. This waits, bounded,
+        for the positive signal (a published epoch); when it differs from the
+        one the guardian rendered from, it has the guardian publish one fresh
+        reconcile from it. An epoch that never appears, or a render that still
+        does not match it, is left to the live verify, which fails as before.
+        Standalone only: Secure Client renders no route-only target.
+        Returns whether a fresh reconcile ran.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$PriorEpochIdentity,
+        [string]$ExpectedManifestSHA256,
+        [int]$TimeoutSeconds = 30,
+        [switch]$AllowFailedTargets
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $current = Get-DefenseClawRouteEpochIdentity -Layout $Layout
+    while ([string]::IsNullOrEmpty($current) -and [DateTime]::UtcNow -lt $deadline) {
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+        $current = Get-DefenseClawRouteEpochIdentity -Layout $Layout
+    }
+    if ([string]::IsNullOrEmpty($current) -or $current -ceq $PriorEpochIdentity) {
+        return $false
+    }
+    Write-DefenseClawLifecyclePhase -Stage 'guardian reconcile with the published route epoch'
+    [void](Wait-DefenseClawFreshGuardianReconcile `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
+        -AllowFailedTargets:$AllowFailedTargets)
+    return $true
+}
+
 function Wait-DefenseClawFreshGuardianReconcile {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -51871,6 +51953,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GatewayServiceName `
                 -StartMode 3
+            # The route epoch the guardian rendered from (GAP-0937).
+            $routeEpochBeforeGateway = Get-DefenseClawRouteEpochIdentity -Layout $Layout
             Start-DefenseClawService -Name $GatewayServiceName -FailureLogPath $Layout.GatewayLogPath
             # The enumerator
             # must be demand-started + RUNNING before the pending-state
@@ -51894,6 +51978,16 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
                 -AllowFailedTargets
+            # A route epoch the gateway published at this start was not in
+            # the activation reconcile: re-render from it before the live
+            # verify below (GAP-0937).
+            [void](Sync-DefenseClawGuardianRouteEpochRender `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -PriorEpochIdentity $routeEpochBeforeGateway `
+                -ExpectedManifestSHA256 $expectedGuardianManifestSHA256 `
+                -AllowFailedTargets)
             # Canonicalize dynamic logs/authorization after the service-created
             # files exist, then verify exact effective rights.
             Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
