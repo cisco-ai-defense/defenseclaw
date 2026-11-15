@@ -53,6 +53,11 @@ func enterpriseHookRouteOnlyFor(connectorName, account, identity, apiAddr string
 	token, err := enterpriseHookRouteToken(cfg.DataDir, name, canonical, mint)
 	if err != nil {
 		fmt.Fprintf(enterpriseHookRouteOnlyLog, "[hook-guardian] route-only for %s not rendered: %v\n", name, err)
+		if !mint {
+			// Verify: the route is expected, so its absence is drift with
+			// the cause, never "no route expected" (rel-1-0-10:GAP-0800).
+			return &connector.RouteOnlySetup{Unavailable: truncateRouteOnlyCause(err.Error())}
+		}
 		return nil
 	}
 	return gateway.ManagedRouteOnlySetup(cfg, name, apiAddr, token)
@@ -124,4 +129,13 @@ func enterpriseHookRouteOnlyExempt(entries []string, account, identity string) b
 		}
 	}
 	return false
+}
+
+// truncateRouteOnlyCause bounds the cause a verify drift row carries.
+func truncateRouteOnlyCause(cause string) string {
+	const limit = 240
+	if len(cause) <= limit {
+		return cause
+	}
+	return cause[:limit]
 }

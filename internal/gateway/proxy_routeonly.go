@@ -401,6 +401,15 @@ func (s *routeOnlyServer) enrolledRouteUsers(connector string) (int, bool) {
 	return s.api.userScopedCredentials.routeEnrolledCount(connector)
 }
 
+// routeEpochUnpublished is the managed Windows route epoch problem ("" when
+// published, and off Windows managed hosts).
+func (s *routeOnlyServer) routeEpochUnpublished() string {
+	if s == nil || s.api == nil || s.api.userScopedCredentials == nil {
+		return ""
+	}
+	return s.api.userScopedCredentials.routeEpoch.unpublished()
+}
+
 func (s *routeOnlyServer) acquire(subject string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
