@@ -2459,6 +2459,62 @@ attributes:
     id: identity-v1
     notes: From Claude Code enabledPlugins or Codex config.toml; absent when the agent records no state
   introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.manifest
+  type: string
+  brief: Text of the skill's SKILL.md, or one part of it
+  examples: ["---\nname: pdf\ndescription: Fill PDF forms\n---\nUse the form tool.\n"]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 262144}
+    notes: Sent only when ai_discovery.include_skill_manifests is on, once per manifest_hash until every part was published. A file over 256 KiB, the most the redaction detectors scan in one field, is split into ordered parts that end at a line and keep a PEM block whole, one part per publish; a file that cannot be split that way, or needs more than 128 parts, sends only manifest_hash. Subject to destination redaction
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.manifest_hash
+  type: string
+  brief: SHA-256 of the skill's SKILL.md file on the endpoint
+  examples: ['sha256:9f2c1e9a4b7d2c6e8f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 71
+      pattern: '^sha256:[0-9a-f]{64}$'
+    notes: Hash of the file bytes before destination redaction; the same file gives the same hash on every device, so records with the same value share one manifest. Absent when content_status is not ok or the folder has no SKILL.md
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.manifest_part
+  type: int64
+  brief: Which part of the SKILL.md text this record carries, from 1
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 1, max: 128}
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.manifest_parts
+  type: int64
+  brief: How many parts the SKILL.md text is split into
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 1, max: 128}
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.connector.identifiers
   type: array
   brief: Ordered identifier-class section of one complete connector inventory snapshot
@@ -9275,6 +9331,14 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.inventory.skill.plugin_enabled
     requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.manifest
+    requirement_level: optional
+  - ref: defenseclaw.inventory.skill.manifest_hash
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.manifest_part
+    requirement_level: optional
+  - ref: defenseclaw.inventory.skill.manifest_parts
+    requirement_level: optional
   - ref: defenseclaw.ai.model.provenance.publisher
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.country_code

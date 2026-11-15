@@ -5099,6 +5099,9 @@ class AIDiscoveryConfig:
     # session's Kerberos principal identify a person. When on they ride every
     # identity-carrying record, not only inventory. Mirrors IncludeUserPrincipal.
     include_user_principal: bool = False
+    # Opt-in: sends each skill's SKILL.md text with the managed skill
+    # inventory. Mirrors internal/config.AIDiscoveryConfig.IncludeSkillManifests.
+    include_skill_manifests: bool = False
     # Child domains of the joined AD realm whose SSSD accounts are verified;
     # empty trusts the joined domain only. Mirrors TrustedADChildDomains.
     trusted_ad_child_domains: list[str] = field(default_factory=list)
@@ -9611,6 +9614,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_network_domains=bool(raw.get("include_network_domains", True)),
         include_user_email=_coerce_bool(raw.get("include_user_email", False)),
         include_user_principal=_coerce_bool(raw.get("include_user_principal", False)),
+        include_skill_manifests=_coerce_bool(raw.get("include_skill_manifests", False)),
         trusted_ad_child_domains=[str(v) for v in (raw.get("trusted_ad_child_domains", []) or [])],
         ide_inventory=_normalize_ide_inventory(raw.get("ide_inventory")),
         lookup_model_provenance_online=_coerce_bool(raw.get("lookup_model_provenance_online", False)),
