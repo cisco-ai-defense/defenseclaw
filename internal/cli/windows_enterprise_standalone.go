@@ -1998,8 +1998,17 @@ func applyWindowsEnterpriseInstallerReport(
 	if report.CursorTargetEnabled {
 		result.MachinePolicy["cursor"] = windowsEnterpriseMachinePolicy(report.GuardianReady)
 	}
-	result.CoverageComplete = report.Installed && report.GuardianReady && !report.TransactionPending
+	// Every input that leaves coverage incomplete names itself (GAP-0812).
+	result.ResetCompleteness()
 	result.SecurityComplete = report.SecurityComplete
+	if !report.Installed {
+		result.MarkCoverageIncomplete("DefenseClaw is not installed")
+	} else if !report.GuardianReady {
+		result.MarkCoverageIncomplete("the hook guardian is not ready")
+	}
+	if report.TransactionPending {
+		result.MarkCoverageIncomplete("a lifecycle transaction is pending")
+	}
 	if report.Installed && result.Action == "status" {
 		result.Destinations = readWindowsEnterpriseStandaloneDestinations()
 	}
@@ -2010,7 +2019,7 @@ func applyWindowsEnterpriseInstallerReport(
 			if enrollment.Failed > 0 {
 				// A degraded activation (GAP-0601) leaves the guardian ready;
 				// the failed targets still mean not every target is covered.
-				result.MarkCoverageIncomplete("enrollment_failed")
+				result.MarkCoverageIncomplete(fmt.Sprintf("%d per-user enrollment(s) failed (each account's line in enrollment.accounts says why)", enrollment.Failed))
 			}
 			if result.Action == "status" || result.Action == "verify" || result.Action == "ensure" {
 				appendWindowsClaudeUserSettingsWarnings(result, enrollment.Accounts)
@@ -2979,7 +2988,7 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 		}
 		result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age,
 			"Restart-Service DefenseClawHookEnumerator (from an elevated prompt)"))
-		result.CoverageComplete, result.SecurityComplete = false, false
+		result.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 		// Only the pending scan is a warning. A stale record still names the agents its last scan found; they
 		// are reported below, so verify keeps failing on a known gap.
 		err = nil
@@ -2994,7 +3003,7 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 		} else {
 			result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
-		result.CoverageComplete, result.SecurityComplete = false, false
+		result.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 		return
 	}
 	// One machine-wide OpenCode V1 copy is one warning with the user count
@@ -3015,7 +3024,7 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 			// The deployment does not cover it: no contract, an incomplete
 			// install scan, a CLI path or IDE without hooks (GAP-0151), or
 			// OpenCode V1 (rel-1-0-6 GAP-0037).
-			result.CoverageComplete = false
+			result.MarkCoverageIncomplete(agent.Code)
 		}
 		// unverified_versions: refuse that nothing enforces fails verify.
 		if result.Action == "verify" && (agent.Refusal == enterprisehooks.RefusalMissing ||
@@ -3688,7 +3697,7 @@ func applyWindowsEnterpriseVendorFolders(result *enterprisestatus.Result) {
 		} else {
 			result.AddWarning(code, message)
 		}
-		result.CoverageComplete, result.SecurityComplete = false, false
+		result.MarkCoverageIncomplete(code)
 	}
 }
 

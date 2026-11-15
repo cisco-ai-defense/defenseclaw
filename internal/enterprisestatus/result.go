@@ -301,6 +301,44 @@ type Result struct {
 // that turns a field false says which check did (GAP-1861, GAP-1863).
 const CodeSecurityIncomplete = "security_incomplete"
 
+// CodeCoverageIncomplete is the Windows warning that names why
+// coverage_complete is false (rel-1-0-10 GAP-0812). Linux and macOS name the
+// same reasons in the security_incomplete warning.
+const CodeCoverageIncomplete = "coverage_incomplete"
+
+// CoverageReasons are the reasons MarkCoverageIncomplete recorded since the
+// last ResetCompleteness. coverage_complete false must always have one.
+func (r *Result) CoverageReasons() []string {
+	return append([]string(nil), r.coverageBy...)
+}
+
+// nameCoverageReasons replaces the coverage_incomplete warning with one that
+// lists why coverage_complete is false. Windows keeps its own
+// security_incomplete summary (enterprise_status_incomplete.go), so before
+// this a false coverage_complete there named nothing (GAP-0812). A result
+// that is not installed says why with installed:false; one read back from
+// another process keeps the warning it carried.
+func (r *Result) nameCoverageReasons() {
+	if r.CoverageComplete {
+		r.coverageBy = nil
+	}
+	if len(r.coverageBy) == 0 {
+		return
+	}
+	warnings := make([]Message, 0, len(r.Warnings)+1)
+	for _, warning := range r.Warnings {
+		if warning.Code != CodeCoverageIncomplete {
+			warnings = append(warnings, warning)
+		}
+	}
+	r.Warnings = warnings
+	if !r.Installed {
+		return
+	}
+	r.Warnings = append(r.Warnings, Message{Code: CodeCoverageIncomplete,
+		Message: "coverage_complete is false because of: " + strings.Join(r.coverageBy, ", ") + "; each warning above says what to do"})
+}
+
 // MarkSecurityIncomplete sets security_complete false for reason: the code of
 // the warning or error that says why, or a short phrase when no warning does.
 func (r *Result) MarkSecurityIncomplete(reason string) {
@@ -593,6 +631,8 @@ func (r *Result) Finish(goos string, failureCode int) int {
 	}
 	if goos != "windows" {
 		r.nameIncompleteFields()
+	} else {
+		r.nameCoverageReasons()
 	}
 	switch {
 	case r.OK && r.PendingApply:
