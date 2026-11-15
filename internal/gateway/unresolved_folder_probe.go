@@ -57,8 +57,8 @@ var (
 // named protected file in one of the folders an unresolved folder may be (the
 // active home, a folder of it, /etc, /root), for the access the command
 // makes. A name is matched whole, or as the path the operand spells when it
-// has a folder of its own (.aws/credentials, .kube/config, .ssh/id_rsa: the
-// credentials table, home files only). A bare config, config.json or token,
+// has a folder of its own: .ssh/<key> and .ssh/authorized_keys, or the
+// credentials table, home files only (.aws/credentials, .kube/config). A bare config, config.json or token,
 // and a copy or a source file beside a credential (credentials.py), are files
 // of every project: owner traces had 12 strict false blocks of `config` and
 // one of `credentials.py` (s7-td327fix tdfx-h, tdfx-f).
@@ -68,14 +68,19 @@ func unresolvedFolderNamesProtectedFile(value, home string, access actionfacts.P
 		return false
 	}
 	base := path.Base(value)
-	if slices.Contains(unresolvedFolderReadNames, base) {
-		return true
-	}
-	if access != actionfacts.PathAccessRead && slices.Contains(unresolvedFolderWriteNames, base) {
-		return true
+	named := func(name string) bool {
+		return slices.Contains(unresolvedFolderReadNames, name) ||
+			access != actionfacts.PathAccessRead && slices.Contains(unresolvedFolderWriteNames, name)
 	}
 	if !strings.Contains(value, "/") {
-		return false
+		return named(value)
+	}
+	// A name below a folder of its own is the protected file only in the
+	// folder that holds it in a home: .ssh/id_rsa and .ssh/authorized_keys,
+	// not src/credentials or internal/openshell/credentials (owner traces: 3
+	// strict false blocks of project folders named credentials, tdfx-z).
+	if value == ".ssh/"+base && named(base) {
+		return true
 	}
 	candidate := path.Join(home, value)
 	shape, ok := actionfacts.MatchCredentialFileShape(candidate)
