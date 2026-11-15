@@ -417,6 +417,10 @@ var credentialDirectoryNames = func() []string {
 // home or one of its parents, or a glob whose name pattern a credentials
 // file name matches (or that sits in a credentials folder).
 func credentialMayHold(word, cwd, home string) bool {
+	if !strings.HasPrefix(cwd, "/") && !strings.HasPrefix(word, "/") && !strings.HasPrefix(word, "~") &&
+		!strings.ContainsAny(word, "*?[") && !strings.Contains(word, ":") {
+		return false // a relative folder with no working directory is not rooted: it is not the root or the home
+	}
 	canonical, ok := senderOperandPath(word, cwd, home)
 	if !ok {
 		return false
