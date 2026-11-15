@@ -127,26 +127,33 @@ func actionCallRoleUnknown(call *syntax.CallExpr, home string) bool {
 
 // actionRunTimeProgramRunsText reports a program named at run time that is
 // given a shell -c option before its first operand ("$SHELL" -c TEXT,
-// $BASH -lc TEXT): a shell started through a variable runs TEXT as code, so
-// TEXT is no data of unknown role and a protected write in it keeps the rel
-// block in every pack. A run-time program without -c ($T send TEXT) stays
-// unknown (rel-1-0-10:GAP-0018, GAP-0975).
+// $BASH -lc TEXT, "$SHELL" -o pipefail -c TEXT): a shell started through a
+// variable runs TEXT as code, so TEXT is no data of unknown role and a
+// protected write in it keeps the rel block in every pack. The options before
+// -c follow the shell's grammar: - and + clusters, -o/+o/-O/+O NAME (also
+// inside a cluster, -eo NAME) and --rcfile/--init-file FILE take a value word.
+// A run-time program without -c ($T send TEXT) stays unknown
+// (rel-1-0-10:GAP-0018, GAP-0975, GAP-0979).
 func actionRunTimeProgramRunsText(words []*syntax.Word, home string) bool {
-	for _, word := range words[1:] {
-		value, known := StaticWord(word, home)
-		if !known || value == "--" || len(value) < 2 || value[0] != '-' {
+	for i := 1; i < len(words); i++ {
+		value, known := StaticWord(words[i], home)
+		if !known || value == "--" || len(value) < 2 || (value[0] != '-' && value[0] != '+') {
 			return false
 		}
-		if value[1] == '-' {
+		if strings.HasPrefix(value, "--") {
+			if value == "--rcfile" || value == "--init-file" {
+				i++
+			}
 			continue
 		}
 		cluster := value[1:]
 		if strings.Trim(cluster, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
 			return false
 		}
-		if strings.Contains(cluster, "c") {
+		if value[0] == '-' && strings.Contains(cluster, "c") {
 			return true
 		}
+		i += strings.Count(cluster, "o") + strings.Count(cluster, "O")
 	}
 	return false
 }

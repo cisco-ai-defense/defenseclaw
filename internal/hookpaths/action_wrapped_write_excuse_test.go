@@ -40,7 +40,11 @@ func TestWrappedProtectedWriteIsNotExcused(t *testing.T) {
 		"sudo flock /tmp/l -c '%s'", "taskset 0x1 flock -n /tmp/l -c '%s'",
 		// A shell named at run time runs its -c text as code (rel-1-0-10:GAP-0975).
 		"\"$SHELL\" -c '%s'", "time \"$SHELL\" -c '%s'", "time -p \"$SHELL\" -c '%s'",
-		"FOO=$BAR \"$SHELL\" -c '%s'", "$BASH -lc '%s'", "\"$SHELL\" --norc -ec '%s'"}
+		"FOO=$BAR \"$SHELL\" -c '%s'", "$BASH -lc '%s'", "\"$SHELL\" --norc -ec '%s'",
+		// Its options before -c follow the shell's grammar (rel-1-0-10:GAP-0979).
+		"\"$SHELL\" -o pipefail -c '%s'", "\"$SHELL\" +o posix -c '%s'", "\"$SHELL\" -O extglob -c '%s'",
+		"\"$SHELL\" --rcfile f -c '%s'", "\"$SHELL\" --init-file f -c '%s'", "\"$SHELL\" -o errexit -ec '%s'",
+		"\"$SHELL\" +e -c '%s'", "\"$SHELL\" -e +x -c '%s'", "\"$SHELL\" -eo pipefail -c '%s'"}
 	for _, write := range writes {
 		commands := make([]string, 0, len(prefixes)+len(shellForms))
 		for _, prefix := range prefixes {
@@ -60,7 +64,7 @@ func TestWrappedProtectedWriteIsNotExcused(t *testing.T) {
 		// A program named at run time without a -c option hands the text to
 		// something the scan cannot know: its operands stay data of unknown
 		// role (rel-1-0-10:GAP-0018), also when an option cluster has no c.
-		for _, form := range []string{"$T send '%s'", "\"$TOOL\" -v '%s'", "\"$TOOL\" -- -c '%s'"} {
+		for _, form := range []string{"$T send '%s'", "\"$TOOL\" -v '%s'", "\"$TOOL\" -- -c '%s'", "\"$TOOL\" -o out -v '%s'"} {
 			command := strings.Replace(form, "%s", write, 1)
 			if !ActionMentionsNoWriteRole(command, cwd, home, actionfacts.DialectPOSIX, nil) {
 				t.Errorf("%q: a run-time program without -c is no longer data of unknown role", command)
