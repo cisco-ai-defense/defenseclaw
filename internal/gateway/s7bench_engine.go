@@ -473,7 +473,7 @@ func (e *S7Engine) InspectStream(ctx context.Context, text string) S7StreamResul
 		res.UncheckedTail = acc.Len() - lastScan
 	}
 	if acc.Len() > 0 {
-		fv := e.insp.Inspect(proxyGuardrailWithoutEnforcement(ctx), "completion", text, []ChatMessage{{Role: "assistant", Content: text}}, "s7bench", "action")
+		fv := e.insp.Inspect(ctx, "completion", text, []ChatMessage{{Role: "assistant", Content: text}}, "s7bench", "action")
 		if fv != nil {
 			res.FinalAction, res.FinalSeverity, res.FinalFindings = fv.Action, fv.Severity, fv.Findings
 		}
