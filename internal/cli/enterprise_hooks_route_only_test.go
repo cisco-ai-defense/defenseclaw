@@ -6,6 +6,10 @@ package cli
 import (
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -24,7 +28,7 @@ func TestEnterpriseHookRouteOnlyRendersEnrolledUsersOnly(t *testing.T) {
 	cfg.Routing.Enabled = true
 	cfg.Routing.RouteOnly = config.RoutingRouteOnlyConfig{Connectors: []string{"codex"}, Upstreams: map[string]config.RoutingUpstreamConfig{"codex": {BaseURL: "https://api.openai.com/v1", API: "responses"}}}
 	tokenErr := error(nil)
-	enterpriseHookRouteToken = func(_, connectorName, identity string) (string, error) {
+	enterpriseHookRouteToken = func(_, connectorName, identity string, _ bool) (string, error) {
 		return "route-" + connectorName + "-" + identity, tokenErr
 	}
 	route := enterpriseHookRouteOnly("codex", "alice", "1001", "127.0.0.1:18970")
@@ -71,28 +75,83 @@ func TestEnterpriseHookWindowsRouteOnlyRendersPerSID(t *testing.T) {
 		"claudecode": {BaseURL: "https://api.anthropic.com", API: "messages"},
 		"codex":      {BaseURL: "https://api.openai.com/v1", API: "responses"},
 	}}
-	enterpriseHookRouteToken = func(_, connectorName, identity string) (string, error) {
+	enterpriseHookRouteToken = func(_, connectorName, identity string, _ bool) (string, error) {
 		return "route-" + connectorName + "-" + identity, nil
 	}
 	enterpriseHookRouteOnlyGOOS = "linux"
-	if r := enterpriseHookWindowsRouteOnly("codex", "CORP\\alice", alice, "127.0.0.1:18970"); r != nil {
+	if r := enterpriseHookWindowsRouteOnly("codex", "CORP\\alice", alice, "127.0.0.1:18970", true); r != nil {
 		t.Fatalf("a non-Windows guardian path rendered %+v", r)
 	}
 	enterpriseHookRouteOnlyGOOS = "windows"
 	for _, name := range []string{"claudecode", "codex"} {
-		r := enterpriseHookWindowsRouteOnly(name, "CORP\\alice", alice, "127.0.0.1:18970")
+		r := enterpriseHookWindowsRouteOnly(name, "CORP\\alice", alice, "127.0.0.1:18970", true)
 		if r == nil || r.Token != "route-"+name+"-"+alice || r.BaseURL != "http://127.0.0.1:18970/r/"+name {
 			t.Fatalf("%s render for an enrolled SID = %+v", name, r)
 		}
 	}
 	for label, got := range map[string]*connector.RouteOnlySetup{
-		"exempt by DOMAIN\\name (any case)": enterpriseHookWindowsRouteOnly("codex", "corp\\CAROL", carol, "127.0.0.1:18970"),
-		"exempt by SID":                     enterpriseHookWindowsRouteOnly("codex", "CORP\\dave", "s-1-5-21-100-200-300-1004", "127.0.0.1:18970"),
-		"not routed":                        enterpriseHookWindowsRouteOnly("cursor", "CORP\\alice", alice, "127.0.0.1:18970"),
-		"exempt by bare name":               enterpriseHookWindowsRouteOnly("codex", "carol@corp.example", carol, "127.0.0.1:18970"),
+		"exempt by DOMAIN\\name (any case)": enterpriseHookWindowsRouteOnly("codex", "corp\\CAROL", carol, "127.0.0.1:18970", true),
+		"exempt by SID":                     enterpriseHookWindowsRouteOnly("codex", "CORP\\dave", "s-1-5-21-100-200-300-1004", "127.0.0.1:18970", true),
+		"not routed":                        enterpriseHookWindowsRouteOnly("cursor", "CORP\\alice", alice, "127.0.0.1:18970", true),
+		"exempt by bare name":               enterpriseHookWindowsRouteOnly("codex", "carol@corp.example", carol, "127.0.0.1:18970", true),
 	} {
 		if got != nil {
 			t.Fatalf("%s must not render: %+v", label, got)
 		}
+	}
+}
+
+// A managed Linux or macOS host whose only routed connectors are claudecode
+// and codex has no hook-native target that mints the per-user credential
+// key, so the route render must mint it; verify only loads it
+// (rel-1-0-10:GAP-0763).
+func TestEnterpriseHookRouteOnlyRenderMintsTheMissingKeyAndVerifyDoesNot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows key custody needs the gateway service account")
+	}
+	prevCfg, prevLog := cfg, enterpriseHookRouteOnlyLog
+	t.Cleanup(func() { cfg, enterpriseHookRouteOnlyLog = prevCfg, prevLog })
+	var log strings.Builder
+	enterpriseHookRouteOnlyLog = &log
+	dataDir := filepath.Join(t.TempDir(), "data")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg = &config.Config{DataDir: dataDir, DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.Routing.Enabled = true
+	cfg.Routing.RouteOnly = config.RoutingRouteOnlyConfig{Connectors: []string{"claudecode", "codex"}, Upstreams: map[string]config.RoutingUpstreamConfig{
+		"claudecode": {BaseURL: "https://api.anthropic.com", API: "messages"},
+		"codex":      {BaseURL: "https://api.openai.com/v1", API: "responses"},
+	}}
+
+	if r := enterpriseHookVerifyRouteOnly("codex", "alice", "1001", "127.0.0.1:18970"); r != nil {
+		t.Fatalf("verify without a key rendered %+v", r)
+	}
+	if !strings.Contains(log.String(), "per-user credential key is missing") {
+		t.Fatalf("verify without a key logged %q", log.String())
+	}
+	if key, err := connector.LoadUserScopedTokenKey(dataDir); err != nil || key != "" {
+		t.Fatalf("verify minted a key: %q %v", key, err)
+	}
+
+	rendered := enterpriseHookRouteOnly("codex", "alice", "1001", "127.0.0.1:18970")
+	if rendered == nil || rendered.Token == "" || rendered.BaseURL != "http://127.0.0.1:18970/r/codex" {
+		t.Fatalf("render on a host without a key = %+v (log %q)", rendered, log.String())
+	}
+	key, err := connector.LoadUserScopedTokenKey(dataDir)
+	if err != nil || key == "" {
+		t.Fatalf("render did not mint the key: %v", err)
+	}
+	want, err := connector.ManagedRouteToken(key, nil, "codex", "1001")
+	if err != nil || rendered.Token != want {
+		t.Fatalf("rendered route credential is not the one the gateway derives: %v", err)
+	}
+	verified := enterpriseHookVerifyRouteOnly("codex", "alice", "1001", "127.0.0.1:18970")
+	if verified == nil || verified.Token != rendered.Token {
+		t.Fatal("verify after the render does not expect the rendered credential")
+	}
+	if claude := enterpriseHookRouteOnly("claudecode", "alice", "1001", "127.0.0.1:18970"); claude == nil || claude.Token == rendered.Token {
+		t.Fatalf("claudecode render = %+v", claude)
 	}
 }

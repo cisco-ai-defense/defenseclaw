@@ -23,7 +23,25 @@ import (
 // they keep direct model access (the gateway refuses them on /r/). nil
 // when the connector is not routed, and on any error (the target then
 // keeps or gets direct model access; its hooks are unaffected).
+//
+// The install and reconcile paths render: they mint the per-user credential
+// key on first use, the same as the per-user hook credentials do. A host
+// whose only routed connectors are claudecode and codex has no hook-native
+// target that would mint it otherwise, so a render that only loaded the key
+// never succeeded there (rel-1-0-10:GAP-0763). Verify never mints
+// (enterpriseHookVerifyRouteOnly): a missing key there is drift that the
+// next reconcile repairs.
 func enterpriseHookRouteOnly(connectorName, account, identity, apiAddr string) *connector.RouteOnlySetup {
+	return enterpriseHookRouteOnlyFor(connectorName, account, identity, apiAddr, true)
+}
+
+// enterpriseHookVerifyRouteOnly is enterpriseHookRouteOnly for the verify
+// paths: the expected render, from the existing key only.
+func enterpriseHookVerifyRouteOnly(connectorName, account, identity, apiAddr string) *connector.RouteOnlySetup {
+	return enterpriseHookRouteOnlyFor(connectorName, account, identity, apiAddr, false)
+}
+
+func enterpriseHookRouteOnlyFor(connectorName, account, identity, apiAddr string, mint bool) *connector.RouteOnlySetup {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	if cfg == nil || !cfg.StandaloneEnterprise() || !gateway.RouteOnlyRouted(cfg, name) {
 		return nil
@@ -32,7 +50,7 @@ func enterpriseHookRouteOnly(connectorName, account, identity, apiAddr string) *
 	if !ok || canonical == "0" || enterpriseHookRouteOnlyExempt(cfg.Enterprise.Enrollment.ExemptUsers, account, canonical) {
 		return nil
 	}
-	token, err := enterpriseHookRouteToken(cfg.DataDir, name, canonical)
+	token, err := enterpriseHookRouteToken(cfg.DataDir, name, canonical, mint)
 	if err != nil {
 		fmt.Fprintf(enterpriseHookRouteOnlyLog, "[hook-guardian] route-only for %s not rendered: %v\n", name, err)
 		return nil
@@ -43,12 +61,13 @@ func enterpriseHookRouteOnly(connectorName, account, identity, apiAddr string) *
 // enterpriseHookWindowsRouteOnly is enterpriseHookRouteOnly for the
 // Windows guardian paths (install, verify, reconcile), which Linux and
 // macOS share with the Secure Client profile; the standalone Unix guardian
-// sets RouteOnly in its own worker paths. nil off Windows.
-func enterpriseHookWindowsRouteOnly(connectorName, account, sid, apiAddr string) *connector.RouteOnlySetup {
+// sets RouteOnly in its own worker paths. nil off Windows. mint is false
+// on the verify path only.
+func enterpriseHookWindowsRouteOnly(connectorName, account, sid, apiAddr string, mint bool) *connector.RouteOnlySetup {
 	if enterpriseHookRouteOnlyGOOS != "windows" {
 		return nil
 	}
-	return enterpriseHookRouteOnly(connectorName, account, sid, apiAddr)
+	return enterpriseHookRouteOnlyFor(connectorName, account, sid, apiAddr, mint)
 }
 
 // enterpriseHookRouteOnlyGOOS selects the Windows guardian paths;
@@ -61,9 +80,10 @@ var enterpriseHookRouteOnlyLog io.Writer = os.Stderr
 // enterpriseHookRouteToken derives the route credential the gateway
 // accepts for identity: from the per-user key on Linux and macOS, and from
 // the gateway route epoch on Windows (none before the gateway published
-// one: it has not owned its API port yet).
-var enterpriseHookRouteToken = func(dataDir, connectorName, identity string) (string, error) {
-	key, err := enterpriseHookUserScopedKey(dataDir, false)
+// one: it has not owned its API port yet). mint creates the per-user key
+// when it is missing (render paths only).
+var enterpriseHookRouteToken = func(dataDir, connectorName, identity string, mint bool) (string, error) {
+	key, err := enterpriseHookUserScopedKey(dataDir, mint)
 	if err != nil {
 		return "", err
 	}
