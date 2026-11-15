@@ -153,13 +153,15 @@ func cdFirstFixture(t *testing.T) (home, project string) {
 
 var cdFirstRank = map[string]int{"A": 0, "L": 1, "B": 2}
 
-// cdFirstNamedFileTargets are the targets that are files of a known name in
-// their folder (credentials, keys, the shell profile, the account files),
+// cdFirstNamedFileTargets are the targets that are files of a distinctive
+// name in their folder (credentials, keys, the shell profile, the account files),
 // which an unresolved folder may hold; in the other targets' folders every
 // file is protected, and an unresolved folder is not read as one of them.
 var cdFirstNamedFileTargets = map[string]bool{
 	"shell profile": true, "authorized_keys": true, "ssh key read": true, "aws credentials read": true,
-	"aws credentials copy": true, "kube config read": true, "sudoers": true, "shadow read": true,
+	"aws credentials copy": true, "sudoers": true, "shadow read": true,
+	// kube config read (`cat config`) is not one: a bare config is a file of
+	// every project, only .kube/config names the credential.
 }
 
 // cdFirstVerdict is the verdict letter (A allow, L alert, B block) of a Bash

@@ -43,6 +43,10 @@ var (
 	unresolvedFolderHomeNames = []string{".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogin"}
 	unresolvedFolderSSHNames  = []string{"authorized_keys", "authorized_keys2"}
 	unresolvedFolderHostNames = []string{"shadow", "gshadow", "passwd", "sudoers", "master.passwd"}
+	// unresolvedFolderGenericNames are the names of credential files that
+	// every project also has (owner traces: 12 strict false blocks of
+	// `config` operands in agent-transcripts-sample, s7-td327fix tdfx-h).
+	unresolvedFolderGenericNames = []string{"config", "config.json", "token", "hosts.yml", "auth.toml"}
 )
 
 // unresolvedFolderNamesProtectedFile reports a relative operand that is a
@@ -63,6 +67,11 @@ func unresolvedFolderNamesProtectedFile(value, home string) bool {
 	// a shape that belongs in a home, or a private key. A name a project
 	// ships (.env, .npmrc, .pypirc) is not one.
 	for _, folder := range []string{"", ".ssh", ".aws", ".kube", ".docker", ".config/gh", ".config/gcloud"} {
+		if folder != "" && slices.Contains(unresolvedFolderGenericNames, value) {
+			// A bare config, config.json or token is a file of every
+			// project; only its folder (.kube/config) names a credential.
+			continue
+		}
 		candidate := path.Join(home, folder, value)
 		shape, ok := actionfacts.MatchCredentialFileShape(candidate)
 		if !ok || !strings.HasSuffix(candidate, "/"+shape.Relative) {
@@ -117,6 +126,10 @@ func withUnresolvedFolderTier(findings []RuleFinding, request trustedActionReque
 	}
 	noFolder := !path.IsAbs(request.Input.CWD)
 	if noFolder && path.IsAbs(request.ResolvedWriteTargets[hookpaths.CWDKey]) {
+		return findings
+	}
+	if slices.ContainsFunc(findings, RuleFinding.contributesToEnforcement) {
+		// A proven finding decides on its own; the unknown tier adds nothing.
 		return findings
 	}
 	if !unresolvedFolderMayNameProtectedFile(facts, noFolder || statement) {
