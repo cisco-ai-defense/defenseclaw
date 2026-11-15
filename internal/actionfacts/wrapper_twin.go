@@ -449,7 +449,7 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 			return PrefixWrapperRun{}, false
 		}
 		name := wrapperProgramName(word)
-		if dynamicOperandPrograms[name] || name == "rsync" || wrappedShellPrograms[name] {
+		if dynamicOperandPrograms[name] || name == "rsync" || wrappedShellPrograms[name] || wrappedDeletePrograms[name] {
 			run.Index = index
 			return run, true
 		}
@@ -461,6 +461,13 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 	}
 	return PrefixWrapperRun{}, false
 }
+
+// wrappedDeletePrograms are the programs that remove or empty what their
+// operands name. A wrapper runs them with the argv the caller shell expanded,
+// so nice rm -rf ~/ deletes what rm -rf ~/ deletes; the twin writes the plain
+// call, as for the file writers above (rel-1-0-10:GAP-0762: the delete behind
+// nice, setsid, ionice, stdbuf, taskset or chrt was a clean allow).
+var wrappedDeletePrograms = map[string]bool{"rm": true, "rmdir": true, "unlink": true, "shred": true, "truncate": true}
 
 // wrappedShellPrograms are the shells whose wrapped call is read as the
 // plain call, so the plain reading of a -c STRING applies.
@@ -745,6 +752,13 @@ func wrapperChildIndex(name string, value func(int) (string, bool), count, index
 			[]string{"--timeout=", "--wait=", "--conflict-exit-code="}, false) && positional(false)
 	case "caffeinate":
 		known = options([]string{"-d", "-i", "-m", "-s", "-u"}, []string{"-t", "-w"}, nil, false)
+	case "xargs":
+		// xargs runs the program with its own words, then the names it read;
+		// the plain call keeps the words the call names (-I, which places the
+		// names inside the words, is not read).
+		known = options([]string{"-0", "-r", "-t", "-p", "-x", "--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty"},
+			[]string{"-n", "-P", "-s", "-L", "-l", "-d", "-E", "-a", "--max-args", "--max-procs", "--max-chars", "--max-lines", "--delimiter", "--eof", "--arg-file"},
+			[]string{"-n", "-P", "-s", "-L", "-l", "-d", "-E", "-a", "--max-args=", "--max-procs=", "--max-chars=", "--max-lines=", "--delimiter=", "--eof=", "--arg-file="}, false)
 	}
 	if !known || next >= count {
 		return 0, false

@@ -788,7 +788,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "cmd", "cmd.exe",
 		"echo", "printf", "pwd", "cd", "true", "false", "sleep", "date",
-		"whoami", "id", "uname", "test", "[", "expr", "read", "export",
+		"whoami", "id", "uname", "test", "[", "expr", "read", "export", "yes",
 		"setenv", "which", "command", "builtin", "exec", "eval",
 		"write-output", "write-host":
 		// Known command grammar; the parser or wrapper analysis owns any nested

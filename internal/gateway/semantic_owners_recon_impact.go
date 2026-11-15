@@ -450,7 +450,7 @@ func recursiveDeletePrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) ||
 			!hasOperation(command, actionfacts.OperationDelete) ||
-			!recursiveForceDeleteFlags(command) {
+			!recursiveForceDeleteFlags(facts, command) {
 			continue
 		}
 		if commandOwnsPath(
@@ -467,11 +467,11 @@ func recursiveDeletePrerequisite(facts actionfacts.Facts) bool {
 	return false
 }
 
-func recursiveForceDeleteFlags(command actionfacts.CommandFact) bool {
+func recursiveForceDeleteFlags(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
 	switch {
 	case command.Dialect != actionfacts.DialectPowerShell &&
 		oneOfFold(command.Program, "rm"):
-		return posixRecursiveForceFlags(command.Argv)
+		return posixUnattendedRecursiveDelete(command.Argv, answersYesTo(facts, command))
 	case command.Dialect == actionfacts.DialectPowerShell &&
 		oneOfFold(
 			command.Program,
@@ -486,9 +486,23 @@ func recursiveForceDeleteFlags(command actionfacts.CommandFact) bool {
 	}
 }
 
+// posixRecursiveForceFlags reports a recursive rm that nothing in its own
+// words makes ask first (see posixUnattendedRecursiveDelete).
 func posixRecursiveForceFlags(argv []string) bool {
+	return posixUnattendedRecursiveDelete(argv, false)
+}
+
+// posixUnattendedRecursiveDelete reports an rm with a recursive flag that
+// runs without asking: -f, or no prompt option in effect. An agent's shell has
+// no terminal, so rm -r never asks about write-protected files; only -i and -I
+// (--interactive=always|once) do, and the last of -f, -i, -I and
+// --interactive=WHEN wins as in GNU rm (--interactive=never is -f). Answers
+// fed on stdin (answered, a pipeline from yes) turn a prompt into a yes, so a
+// prompting rm in such a pipeline runs unattended too (rel-1-0-10:GAP-0743:
+// rm -r --interactive=never and yes | rm -ri were allowed, rm -r alone too).
+func posixUnattendedRecursiveDelete(argv []string, answered bool) bool {
 	recursive := false
-	force := false
+	prompts := false
 	options := true
 	for _, argument := range argvOperands(argv) {
 		if options && argument == "--" {
@@ -498,22 +512,51 @@ func posixRecursiveForceFlags(argv []string) bool {
 		if !options || argument == "-" || !strings.HasPrefix(argument, "-") {
 			continue
 		}
-		switch argument {
-		case "--recursive":
+		switch {
+		case argument == "--recursive":
 			recursive = true
-		case "--force":
-			force = true
-		default:
-			if strings.HasPrefix(argument, "--") {
-				continue
+		case argument == "--force":
+			prompts = false
+		case argument == "--interactive":
+			prompts = true
+		case strings.HasPrefix(argument, "--interactive="):
+			switch strings.TrimPrefix(argument, "--interactive=") {
+			case "never", "no", "none":
+				prompts = false
+			default:
+				prompts = true
 			}
+		case strings.HasPrefix(argument, "--"):
+			continue
+		default:
 			for _, flag := range argument[1:] {
-				recursive = recursive || flag == 'r' || flag == 'R'
-				force = force || flag == 'f'
+				switch flag {
+				case 'r', 'R':
+					recursive = true
+				case 'f':
+					prompts = false
+				case 'i', 'I':
+					prompts = true
+				}
 			}
 		}
 	}
-	return recursive && force
+	return recursive && (!prompts || answered)
+}
+
+// answersYesTo reports a command whose standard input is fed by a yes in the
+// same pipeline: every question it asks is answered.
+func answersYesTo(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	if command.PipelineID == 0 {
+		return false
+	}
+	for _, other := range facts.Commands {
+		if other.ID != command.ID && other.PipelineID == command.PipelineID &&
+			oneOfFold(other.Program, "yes") {
+			return true
+		}
+	}
+	return false
 }
 
 func powerShellRecursiveForceFlags(argv []string) bool {
