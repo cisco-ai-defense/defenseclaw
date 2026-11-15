@@ -583,8 +583,11 @@ type semanticPathCandidate func(string) bool
 func pathOwnerPrerequisite(matches semanticPathMatcher) semanticOwnerPrerequisite {
 	return func(facts actionfacts.Facts) bool {
 		for _, command := range facts.Commands {
+			// A copy reads its source as a cat does: the credential file that
+			// `cp` moves to a staging folder was read, whatever the program.
 			if command.Effect != actionfacts.EffectExecute ||
-				!hasOperation(command, actionfacts.OperationRead) {
+				!hasOperation(command, actionfacts.OperationRead) &&
+					!hasOperation(command, actionfacts.OperationCopy) {
 				continue
 			}
 			for _, path := range facts.Paths {
