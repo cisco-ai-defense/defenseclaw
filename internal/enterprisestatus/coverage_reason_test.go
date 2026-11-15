@@ -111,3 +111,39 @@ func TestCoverageCompleteIsSetFalseOnlyWithAReason(t *testing.T) {
 		t.Fatalf("coverage_complete set outside MarkCoverageIncomplete/ResetCompleteness, so a false names no reason:\n%s", strings.Join(offenders, "\n"))
 	}
 }
+
+// rel-1-0-10 GAP-0841: a Windows run that refused the submitted config
+// labels each advisory as the running deployment, and the
+// coverage_incomplete line Finish adds afterwards describes that deployment
+// too. (Linux and macOS keep security_incomplete unlabelled: detect.sh reads
+// its reasons from the start of the message.)
+func TestFinishLabelsCompletenessLinesOfARefusedConfig(t *testing.T) {
+	for goos, code := range map[string]string{"windows": CodeCoverageIncomplete} {
+		r := New("ensure", "standalone", goos, "1.0.10")
+		r.Installed = true
+		r.ResetCompleteness()
+		r.AddWarning("guardian_repair_pending", "an account waits for its session")
+		r.MarkCoverageIncomplete("guardian_repair_pending")
+		r.LabelRunningDeployment(0)
+		r.Finish(goos, 0)
+		found := false
+		for _, warning := range r.Warnings {
+			if !strings.HasPrefix(warning.Message, RunningDeploymentPrefix) {
+				t.Fatalf("%s: warning %s is not labelled as the running deployment: %q", goos, warning.Code, warning.Message)
+			}
+			if strings.Count(warning.Message, RunningDeploymentPrefix) != 1 {
+				t.Fatalf("%s: warning %s labelled twice: %q", goos, warning.Code, warning.Message)
+			}
+			found = found || warning.Code == code
+		}
+		if !found {
+			t.Fatalf("%s: no %s line in %+v", goos, code, r.Warnings)
+		}
+		r.Finish(goos, 0)
+		for _, warning := range r.Warnings {
+			if strings.Count(warning.Message, RunningDeploymentPrefix) != 1 {
+				t.Fatalf("%s: a second Finish relabelled %s: %q", goos, warning.Code, warning.Message)
+			}
+		}
+	}
+}

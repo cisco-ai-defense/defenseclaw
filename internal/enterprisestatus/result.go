@@ -318,6 +318,9 @@ func (r *Result) CoverageReasons() []string {
 // this a false coverage_complete there named nothing (GAP-0812). A result
 // that is not installed says why with installed:false; one read back from
 // another process keeps the warning it carried.
+// On a run that refused the submitted config (ConfigRefused) the line is
+// labelled as the running deployment, as LabelRunningDeployment labels the
+// advisories before it.
 func (r *Result) nameCoverageReasons() {
 	if r.CoverageComplete {
 		r.coverageBy = nil
@@ -335,8 +338,14 @@ func (r *Result) nameCoverageReasons() {
 	if !r.Installed {
 		return
 	}
-	r.Warnings = append(r.Warnings, Message{Code: CodeCoverageIncomplete,
-		Message: "coverage_complete is false because of: " + strings.Join(r.coverageBy, ", ") + "; each warning above says what to do"})
+	message := "coverage_complete is false because of: " + strings.Join(r.coverageBy, ", ") + "; each warning above says what to do"
+	if r.ConfigRefused {
+		// The refused config changed nothing: like every other advisory of
+		// the run (LabelRunningDeployment), the line is the running
+		// deployment's (rel-1-0-10 GAP-0841).
+		message = RunningDeploymentPrefix + message
+	}
+	r.Warnings = append(r.Warnings, Message{Code: CodeCoverageIncomplete, Message: message})
 }
 
 // MarkSecurityIncomplete sets security_complete false for reason: the code of
