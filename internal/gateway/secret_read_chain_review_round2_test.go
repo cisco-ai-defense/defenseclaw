@@ -117,9 +117,21 @@ func srd2Round2Run(t *testing.T, label, cwd string, flows []srd2Round2Flow, tier
 // srd2Round2StrictBlock are the round 2 probes whose chain blocks in the
 // strict tiers (GAP-0595): an exact read of .env and a complete upload of the
 // same file (F6b by its absolute path, F6c by the relative one in a proven
-// call). Every other chain of the round 2 and round 3 tables joins a read or
-// an upload that names no one file, and alerts in every tier.
-var srd2Round2StrictBlock = map[string]bool{"F6b": true, "F6c": true}
+// call); an upload whose operand names the credential file itself, which the
+// strict pack blocks by itself (exfil.credential_file_external_upload: C1-C11,
+// C13-C16, C18, C21, C23, C26-C29, UC4), even where the read before it stays
+// unnamed (C3, C4, C6, C26, C27: a function, eval, a sourced script, a trap,
+// an alias); and an upload the sender reader cannot finish, the unknown tier
+// by the ONE BOUND rule (ACTION-COMPOUND-LIMIT: UC3, UC7, UC26, UC29). Their
+// default cells stay alert (S7 ruling for push 18b). Every other chain of the
+// round 2 and round 3 tables alerts in every tier.
+var srd2Round2StrictBlock = map[string]bool{
+	"F6b": true, "F6c": true,
+	"C1": true, "C2": true, "C3": true, "C4": true, "C5": true, "C6": true, "C7": true, "C8": true, "C9": true,
+	"C10": true, "C11": true, "C13": true, "C14": true, "C15": true, "C16": true, "C18": true, "C21": true,
+	"C23": true, "C26": true, "C27": true, "C28": true, "C29": true,
+	"UC3": true, "UC4": true, "UC7": true, "UC26": true, "UC29": true,
+}
 
 // Review round 2 probe table (s7-srd2rev2, cases by id), hook path with a
 // reported cwd that does not exist on the host, default and strict.

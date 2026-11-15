@@ -111,6 +111,15 @@ var srd2ReviewProbeChain = map[string]bool{
 
 // srd2ReviewProbeStrictBlock are the probes whose chain blocks in the strict
 // tiers (GAP-0595): an exact read of .env joined to an upload the sender
-// reader cannot read in full (GAP-0672). Every other chain of the table
-// joins a read or an upload that names no one file, and alerts in every tier.
-var srd2ReviewProbeStrictBlock = map[string]bool{"X1": true, "X2": true}
+// reader cannot read in full (X1, X2; GAP-0672); an upload that names the
+// credential file itself, which the strict pack blocks by itself
+// (exfil.credential_file_external_upload: D1, D1w, D2, D3, D4, D6, D7, T2);
+// and an upload after a directory change the sender reader cannot finish,
+// the unknown tier by the ONE BOUND rule (ACTION-COMPOUND-LIMIT: U1-U4).
+// Every other chain of the table alerts in every tier, and every chain alerts
+// in the default tier (S7 ruling for push 18b).
+var srd2ReviewProbeStrictBlock = map[string]bool{
+	"X1": true, "X2": true,
+	"D1": true, "D1w": true, "D2": true, "D3": true, "D4": true, "D6": true, "D7": true, "T2": true,
+	"U1": true, "U2": true, "U3": true, "U4": true,
+}
