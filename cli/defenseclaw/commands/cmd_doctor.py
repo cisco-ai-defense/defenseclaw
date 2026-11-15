@@ -5187,7 +5187,7 @@ def _scanner_version_note(dist: str, expected: str) -> tuple[str, str]:
     return "pass", f"{dist} {installed}"
 
 
-def _mcp_scanner_import_note(status: str, note: str, dist: str) -> tuple[str, str, str]:
+def _mcp_scanner_import_note(status: str, note: str, dist: str, data_dir: str = "") -> tuple[str, str, str]:
     """``(status, note, remediation)`` once the MCP scanner SDK imports.
 
     The installed metadata said cisco-ai-mcp-scanner was there while the SDK
@@ -5196,11 +5196,21 @@ def _mcp_scanner_import_note(status: str, note: str, dist: str) -> tuple[str, st
     in a child interpreter, as `defenseclaw mcp scan` would, so a damaged
     package cannot break this run; a failure names the files that differ from
     their wheels and the repair, which rebuilds the environment.
+
+    The import takes seconds (it loads LiteLLM), so the result is remembered in
+    *data_dir* while the environment is unchanged (GAP-0938,
+    :func:`venv_integrity.cached_import_error`).
     """
     try:
         # The first import after an install compiles and scans LiteLLM.
-        error = venv_integrity.import_error(
-            "from mcpscanner import Config, Scanner", env=trusted_system_subprocess_env()
+        from defenseclaw import __version__ as defenseclaw_version
+        from defenseclaw.scanner import settings as scanner_settings
+
+        error = venv_integrity.cached_import_error(
+            "from mcpscanner import Config, Scanner",
+            os.path.join(data_dir, venv_integrity.PROBE_CACHE_NAME) if data_dir else "",
+            venv_integrity.probe_key("mcpscanner", (dist, scanner_settings.LITELLM_DIST), defenseclaw_version),
+            env=trusted_system_subprocess_env(),
         )
     except OSError as exc:
         return "warn", f"{note}; could not start {sys.executable} to import it: {exc}", ""
@@ -5255,7 +5265,9 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
     status, note = _scanner_version_note(scanner_settings.MCP_SCANNER_DIST, scanner_settings.MCP_SCANNER_VERSION)
     remediation = ""
     if status != "fail":
-        status, note, remediation = _mcp_scanner_import_note(status, note, scanner_settings.MCP_SCANNER_DIST)
+        status, note, remediation = _mcp_scanner_import_note(
+            status, note, scanner_settings.MCP_SCANNER_DIST, str(getattr(cfg, "data_dir", "") or "")
+        )
     _emit(status, "Scanner: mcp-scanner", note, r=r, remediation=remediation)
     status, note = _litellm_version_note()
     _emit(status, "Scanner: litellm", note, r=r)
