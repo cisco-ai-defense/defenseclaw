@@ -75,3 +75,34 @@ func TestGAP0902UnknownConsumerIsNeverData(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-0913. The reviewer's gateway rows (s7-d4tailrev,
+// TestD4trGatewayProbe idx 1-6) and more: a cat writer after a statement of
+// the same script that binds PATH or renames cat (in any spelling the
+// parser reads, or one it cannot follow) is at least the unknown tier in
+// every pack, never the data allow. The plain cat writer stays data
+// (TestGAP0876QuotedHereDocBodyIsItsCommandsInput).
+func TestGAP0913RenamedConsumerIsNeverData(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fixtures are POSIX shell text")
+	}
+	consumers := []string{
+		"export PATH=/tmp/x; cat > notes.txt", "export PA\"\"TH=/tmp/x; cat > notes.txt",
+		"read PATH < /tmp/p; cat > notes.txt", "printf -v PATH /tmp/x; cat > notes.txt",
+		"eval \"c\"\"at() { bash; }\"; cat > notes.txt", "source /tmp/defs.sh; cat > notes.txt",
+		"for PATH in /tmp/x; do :; done; cat > notes.txt", "hash -p /bin/sh cat; cat > notes.txt",
+		"enable -f /tmp/x.so cat; cat > notes.txt", "alias cat=sh; cat > notes.txt",
+	}
+	for _, p := range gap0437Packs {
+		hook := gap0437Server(t, p, "claudecode", "action")
+		cwd := t.TempDir()
+		for _, id := range []string{"B1", "B3"} {
+			for _, consumer := range consumers {
+				out := gap0437Hook(t, hook, cwd, p.name+consumer+id, gap0876Script(consumer, gap0486Blocked[id]))
+				if out["action"] == "allow" || (out["action"] != "block" && !gap0526Names(out, unresolvedBodyTitle)) {
+					t.Errorf("%s %s %q: action %v, want at least the unknown tier: %v", p.name, id, consumer, out["action"], out)
+				}
+			}
+		}
+	}
+}

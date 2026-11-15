@@ -57,6 +57,15 @@ type SyntaxTailHereDoc struct {
 	// and the rest of the line after the delimiter word (a pipe into another
 	// program stays in it). It is empty when the start was not found.
 	Consumer string
+	// Script is the text that runs before Consumer in the same script, as
+	// the shell that runs it reads it: for an opener inside a quoted
+	// argument (a script passed as one argument), the value of that
+	// argument up to the command; for an opener outside quotes, empty.
+	// ScriptKnown is false when the value cannot be read (an expansion in
+	// it, a quote the split cannot follow): the caller cannot tell what the
+	// script binds before the consumer (rel-1-0-10:GAP-0913).
+	Script      string
+	ScriptKnown bool
 	// Statements are the runs of the body that parse on their own, in order.
 	Statements []string
 }
@@ -219,7 +228,8 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	}
 	for index, runs := range docRuns {
 		if len(runs) > 0 {
-			tail.HereDocs = append(tail.HereDocs, SyntaxTailHereDoc{Consumer: docs[index].consumer, Statements: runs})
+			tail.HereDocs = append(tail.HereDocs, SyntaxTailHereDoc{Consumer: docs[index].consumer,
+				Script: docs[index].script, ScriptKnown: docs[index].scriptKnown, Statements: runs})
 		}
 	}
 	tail.Truncated = trunc.Set(&budget, &statements)
@@ -231,6 +241,9 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 type quotedHereDoc struct {
 	from, to int
 	consumer string
+	// script and scriptKnown are SyntaxTailHereDoc.Script and ScriptKnown.
+	script      string
+	scriptKnown bool
 }
 
 // quotedHereDocs finds the here-documents with a quoted delimiter word
@@ -249,8 +262,11 @@ type quotedHereDoc struct {
 // body. An opener spelled in a string that closes on its own line (echo
 // "a <<'X'") is text, and the lines after it stay statements
 // (rel-1-0-10:GAP-0890).
+// unreadQuote marks an offset tokenScan did not read (quotedHereDocs).
+const unreadQuote byte = 0xff
+
 func quotedHereDocs(command string, from int) []quotedHereDoc {
-	const unread = 0xff
+	const unread = unreadQuote
 	quotes := make([]byte, len(command)-from)
 	for index := range quotes {
 		quotes[index] = unread
@@ -286,8 +302,9 @@ func quotedHereDocs(command string, from int) []quotedHereDoc {
 			at++
 			continue
 		}
+		script, scriptKnown := hereDocScript(command, from, hereDocConsumerStart(command, at), quoteAt)
 		docs = append(docs, quotedHereDoc{from: bodyFrom, to: bodyTo,
-			consumer: hereDocConsumer(command, at, afterWord, lineEnd)})
+			consumer: hereDocConsumer(command, at, afterWord, lineEnd), script: script, scriptKnown: scriptKnown})
 		at++
 	}
 	return docs
@@ -350,15 +367,105 @@ func quotedHereDocClose(command string, from int, word string, dash bool) (int, 
 // the rest of the opener line after the delimiter word (afterWord to
 // lineEnd). It is empty when no command text is found before the opener.
 func hereDocConsumer(command string, at, afterWord, lineEnd int) string {
-	start := at
-	for start > 0 && strings.IndexByte("\n;&|(){}`'\"", command[start-1]) < 0 {
-		start--
-	}
+	start := hereDocConsumerStart(command, at)
 	before := strings.TrimSpace(command[start:at])
 	if before == "" {
 		return ""
 	}
 	return strings.TrimSpace(before + " " + strings.TrimSpace(command[afterWord:lineEnd]))
+}
+
+// hereDocConsumerStart is the offset where the command of a here-document
+// opened at offset at starts (hereDocConsumer).
+func hereDocConsumerStart(command string, at int) int {
+	start := at
+	for start > 0 && strings.IndexByte("\n;&|(){}`'\"", command[start-1]) < 0 {
+		start--
+	}
+	return start
+}
+
+// hereDocScript is the text of the script before the command that starts at
+// offset start (SyntaxTailHereDoc.Script). quoteAt is the quote the split is
+// in at an offset at or after from (unreadQuote where it did not read). The
+// argument that holds the script starts after the last blank or operator
+// outside quotes; its raw text up to start, closed with the quote it is in,
+// is parsed as one word and unquoted. An opener outside quotes has no
+// script of its own.
+func hereDocScript(command string, from, start int, quoteAt func(int) byte) (string, bool) {
+	if start <= from || start >= len(command) {
+		return "", true
+	}
+	quote := quoteAt(start)
+	if quote == 0 {
+		return "", true
+	}
+	if quote != '\'' && quote != '"' {
+		return "", false
+	}
+	word := from
+	for at := start - 1; at >= from; at-- {
+		state := quoteAt(at)
+		if state == unreadQuote {
+			return "", false
+		}
+		if state == 0 && strings.IndexByte(" \t\n;&|()<>", command[at]) >= 0 {
+			word = at + 1
+			break
+		}
+	}
+	file, ok := Parse("x " + command[word:start] + string(quote))
+	if !ok || len(file.Stmts) != 1 {
+		return "", false
+	}
+	call, isCall := file.Stmts[0].Cmd.(*syntax.CallExpr)
+	if !isCall || len(call.Args) != 2 {
+		return "", false
+	}
+	return literalWordValue(call.Args[1])
+}
+
+// literalWordValue is the value of a word with no expansion: literal text
+// (a backslash escapes the next character), single-quoted text and
+// double-quoted literal text. ok is false for any other part.
+func literalWordValue(word *syntax.Word) (string, bool) {
+	var value strings.Builder
+	unescape := func(text string, double bool) {
+		for index := 0; index < len(text); index++ {
+			if text[index] == '\\' && index+1 < len(text) && (!double || strings.IndexByte("$`\"\\\n", text[index+1]) >= 0) {
+				index++
+				if text[index] == '\n' {
+					continue
+				}
+			}
+			value.WriteByte(text[index])
+		}
+	}
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.Lit:
+			unescape(typed.Value, false)
+		case *syntax.SglQuoted:
+			if typed.Dollar {
+				return "", false
+			}
+			value.WriteString(typed.Value)
+		case *syntax.DblQuoted:
+			if typed.Dollar {
+				return "", false
+			}
+			for _, inner := range typed.Parts {
+				lit, isLit := inner.(*syntax.Lit)
+				if !isLit {
+					return "", false
+				}
+				unescape(lit.Value, true)
+			}
+		default:
+			return "", false
+		}
+	}
+	return value.String(), true
 }
 
 // hereDocAt is the index of the body of docs that holds offset at, or -1.
