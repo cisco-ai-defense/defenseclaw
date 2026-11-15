@@ -77,6 +77,76 @@ and in observe mode a hook route still blocks it, as the hook routes did
 before the fault was contained, while `/api/v1/inspect/tool` and ACP report
 it as `would_block` (rel-1-0-10:GAP-0486).
 
+## A block proven beside a cap (the cap floor)
+
+The unknown tier is a floor, not the verdict. A call past any reading cap of
+the trusted-action path (nesting, this budget, the statement budget, the
+nested-body bound: every call that carries `ACTION-COMPOUND-LIMIT`) is also cut
+into pieces in `internal/gateway/cap_floor.go` (`withCapFloor`, one place, run
+after every dispatch path). The cut reads the text once and never parses: it
+splits at `;`, `&`, `|`, `&&`, `||`, `(`, `)`, `$(`, a backquote, a line end
+and the `{` and `}` words (a pipeline is a piece of its own as well as its
+stages, so what needs its stages together is judged), never inside a quoted string, a comment or a
+here-document body. The static script of a shell (`bash -c` with a
+single-quoted script, a here-document fed to a shell on standard input) is a
+piece of its own. A piece whose text may name a protected target or the
+DefenseClaw state (`hookpaths.BoundCallMayNameProtected`) is judged by every
+reader as the call it is, and a finding a reader proves there (an
+authoritative proof that is not itself an evaluation limit or a parse failure)
+counts for the whole call, rule id included. So a write that blocks alone
+still blocks before, after or inside the padding that hit the cap, in every
+tier, and a state write still blocks in observe (rel-1-0-10:GAP-0312,
+GAP-0360, GAP-0435, GAP-0381).
+
+The action analysis has bounds of its own: a syntax tree deeper than 64
+levels or past its node bound, more than four nested wrappers, or more facts
+than it keeps (`actionfacts` `limit_exceeded`, issue `depth_limit`,
+`node_limit`, `wrapper_limit` or `fact_limit`, on a shell tool) yields no, or
+not all, path facts, which on rel let a state write, the delete of the home
+folder, a download run by a shell or a credential sent out inside 30 to 512
+nested subshells through in every tier (rel-1-0-10:GAP-0547, GAP-0688,
+GAP-0689). Every such call is truncated in the sense of the bound rule,
+whatever it names: it gets the evaluation-limit finding with the reason
+`bounded_truncated cap=depth` (or `nodes`, `items`), so at least the unknown
+tier of the pack (an alert in the default and permissive packs, managed
+included; a block in strict), and its pieces are judged as above, so a
+destructive or protected statement the readers prove on its own keeps its
+block (for such a call every piece that names a path, a home spelling or a
+variable is judged, not only those that name a protected target). The bound
+is a tree depth, which 30 terms of a pipe or `&&` list reach:
+a long benign script alerts in the default pack like any call the readers did
+not finish. The input bound (one script over its size) is not here: the shell
+reading budget grades it by target (GAP-0677).
+
+A call that names no protected target or state gets no piece, and a cap alone
+adds no block. Reads beside a cap stay reads: a piece is judged by the same
+rules as the call it is.
+
+A here-document is a shell's script when the COMMAND word of its statement is
+a shell (behind sudo, env, nohup, exec, nice, command, time or timeout
+wrappers), whether or not a cap is hit; its body is judged as a piece of every
+such call (GAP-0532: a state write in it was allowed at any size). Data given
+to grep, which, echo, cat or an interpreter, or the shell with a script file,
+is not a script (GAP-0691); a program the statement does not let the readers
+name is taken for a shell.
+
+A call past the nested-body bound is decided at once (the owner rule of
+GAP-0677): the floor judges only its statements of at most 4 KiB there, never
+a shell body, so a protected write beside the bodies still keeps its block
+(GAP-0381) and the decision stays inside the hook window.
+
+The floor has bounds of its own, and each of them is a cap of the call, never
+a silent allow (GAP-0690): 16 pieces per hook call (half from the start of the
+call, half from its end, bodies included), a statement of at most 4 KiB, a
+shell body of at most 256 KiB, a body cut again at most twice, and of a call
+over 96 KiB only the first 64 KiB and the last 32 KiB are cut. A call whose
+text may name a target and that reaches one of them (a here-document nested
+four deep, the 9th to 12th of 20 here-documents, a piece too big to judge) is
+truncated: `bounded_truncated cap=depth`, `items` or `bytes`, the unknown tier
+of the pack, and the block of every piece it did judge. The pieces that name a
+target are found by halving, so a call of thousands of statements costs a pass
+over its text per level of the halving.
+
 ## Cost curve
 
 Hook decision, default tier, median of three, on the gate box. The caps are
@@ -211,5 +281,63 @@ gap.
   connectors, per user and managed, default and strict tiers, observe and
   action modes; the state-write proof at and past every bound; bounded
   allocation and time. Inputs come from the generators of `budget_gen_test.go`.
+- `internal/gateway/cap_floor_test.go`: the cut (`TestCapFloorPieces`); a
+  write proven alone (fixtures by case id) keeps its block and rule id beside
+  every cap family in all five tiers, the state write in observe, and a cap
+  alone or a script that writes nothing keeps its rel verdict.
 - `internal/actionfacts/pipeline_scope_test.go`: the statement split of a
   pipeline is linear.
+
+## The byte bounds of the analysis are caps of the bound rule
+
+The analysis of a call (`actionfacts.Analyze`) has its own byte bounds, below
+the reading budget's 1 MiB: one literal word over 4 KiB, the command text over
+64 KiB, the arguments over 256 KiB. Past one of them the analysis ends with
+`limit_exceeded` / `input_limit` and no command, so the readers have nothing to
+judge. Such a POSIX shell call is TRUNCATED in the sense of the bound rule
+(`internal/guardrail/bounded`, cap `bytes`, `gateway/posix_parse_limit.go`): an
+alert in the default and permissive packs (a managed install's included), a
+block in the strict pack, never below what the text read before the bound
+proves (rel-1-0-10:GAP-0382; before it the call was allowed with no finding in
+every pack). A count bound (a statement of more argv words than the analysis
+keeps) stays with the operand bound, and a Windows host call keeps its own rule
+(GAP-0345, GAP-0318). The property test of the bound rule pins the cap
+(`shell-parse input bytes`).
+
+### A word the local shell only passes on is data, not truncated
+
+A word over 4 KiB is split by its position in the call
+(`actionfacts.SplitOverLimitWords`), not by the name of the program:
+
+- CODE position stays truncated: the command name; an operand of a shell,
+  `eval`, `source` or `.`, or of a wrapper that starts the next word as a
+  command; the code operand of an interpreter (read from the inline
+  interpreter table, every operand for an interpreter the table lacks); a word
+  before the destination of `ssh`; and any word that is not the plain operand
+  of a simple command (a redirect target, a here-string, a loop or case word).
+  A call text over 64 KiB, or arguments over 256 KiB, is truncated too: no word
+  is to blame.
+- DATA position: the plain operand of any other program, which includes the
+  script handed to `dcx`, `ssh` (after the destination), `docker exec` or a
+  deployment tool. The local shell does not run it, and its hook never sees
+  what runs where it is sent. The call is judged as its twin, the same call
+  with each such word shortened to a stand-in of the same quoting, so every
+  other statement is read in full and a proven write still blocks; the word
+  itself leaves a detection-only `ACTION-COMPOUND-LIMIT` record (reason
+  `bounded_truncated cap=bytes; operand`) that raises no action.
+
+A command named through a variable is read by the program the text shows it to
+be: `$K/dcx` is `dcx` wherever `$K` points, and a bare `$D` (also `"$D"`)
+that the text sets once, at the top level, to a literal (`D=/opt/tools/dcx;
+$D ...`) is that program. A name the text does not show (`$CMD`), one it sets
+twice or rebinds (`read`, `getopts`, `mapfile`, `eval`, `source`, `printf -v`, a
+loop variable, an assigning expansion), is unknown and its words stay in code
+position. A call text over 64 KiB, or arguments over 256 KiB, stays truncated
+even when the only long word is data: the twin of that reading is not built.
+
+`ssh` has no remote-exec reading of the command text (the analysis reads its
+options and destination only), so the words after the destination are data,
+and a limit of this reading: what the remote host runs is not judged here. A
+call with one word in code position and another in data position is truncated.
+Nothing names a program as data: a program is data unless the analysis or one
+of its readers already reads its operands as code.

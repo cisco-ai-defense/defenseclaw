@@ -107,7 +107,10 @@ func TestToolCallJudge_OptInRunsJudge(t *testing.T) {
 	if !judgeTaggedFinding(verdict.Findings) {
 		t.Fatalf("no llm-judge: tagged finding in %v", verdict.Findings)
 	}
-	if got := mock.captured[0].Messages[0].Content; !strings.Contains(got, "tool call security") || !strings.Contains(got, "fetch_url") {
+	// The tool name is the tool attribute of the call section in the user message;
+	// the system message does not carry text the session chose (GAP-0317, P3-1).
+	if got := mock.captured[0].Messages[0].Content; !strings.Contains(got, "tool call security") ||
+		!strings.Contains(mock.captured[0].Messages[len(mock.captured[0].Messages)-1].Content, `tool="fetch_url"`) {
 		t.Fatalf("tool-call lane used the wrong judge prompt: %q", got)
 	}
 }

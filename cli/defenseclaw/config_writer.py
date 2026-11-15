@@ -997,6 +997,11 @@ def _plain_error_text(exc: BaseException, *, value: Any = None, directory: str =
             # A pack folder deleted while the config still selects it blocks every other change too (GAP-0261).
             message += " To stop using the deleted pack: defenseclaw guardrail use-pack default."
         return message
+    lane = _CASCADE_LANE_KEY.match(name)
+    if lane and code in ("enum", "pattern"):
+        # The schema refuses a lane value by its enum (exact values); say why as
+        # the gateway does (GAP-0546).
+        return _cascade_lane_refusal(name, lane.group(1), value)
     if code == "pattern":
         if name == "openshell.trusted_ca_bundle":
             return f"{name} must be an absolute path or start with ~/ (for example, ~/proxy-root-ca.pem)."
@@ -1006,9 +1011,6 @@ def _plain_error_text(exc: BaseException, *, value: Any = None, directory: str =
                 f"{name} must be an https:// URL (for example, https://mirror.example.com/defenseclaw), "
                 "or empty for the official releases."
             )
-        lane = _CASCADE_LANE_KEY.match(name)
-        if lane:
-            return _cascade_lane_refusal(name, lane.group(1), value)
         hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
         # A pattern of plain words (block_at) names them in the corrective action.
         allowed = text if text.startswith("use one of ") else ""

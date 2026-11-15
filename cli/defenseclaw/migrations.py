@@ -4069,7 +4069,7 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
     """
 
     from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply, plain_error
-    from defenseclaw.upgrade_shim import NEWER_CONFIG_KEYS, SET_ASIDE_FILE
+    from defenseclaw.upgrade_shim import SET_ASIDE_FILE, is_newer_config_key
 
     path = os.path.join(data_dir, SET_ASIDE_FILE)
     try:
@@ -4084,11 +4084,10 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
     if not isinstance(keys, dict):
         ux.warn(f"{path} lists no keys; remove it")
         return
-    known = {key for key, _since in NEWER_CONFIG_KEYS}
     current = yaml.safe_load(_read_config_text(config_path) or "") or {}
     put: dict[str, object] = {}
     for key, value in keys.items():
-        if key not in known:
+        if not is_newer_config_key(key):
             continue
         node: object = current
         for part in key.split("."):
@@ -4108,7 +4107,7 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
             ux.warn(f"Could not put back {', '.join(put)} ({plain_error(exc)}); set it again with: {commands}")
             return
         ux.ok(f"Put back {', '.join(put)}, set aside by the downgrade", indent="    ")
-    later = {key: value for key, value in keys.items() if key not in known}
+    later = {key: value for key, value in keys.items() if not is_newer_config_key(key)}
     try:
         if later:
             from defenseclaw.upgrade_shim import _write_private_json

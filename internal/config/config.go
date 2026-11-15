@@ -1852,8 +1852,11 @@ type GuardrailConfig struct {
 	DetectionStrategyPrompt     string `mapstructure:"detection_strategy_prompt"     yaml:"detection_strategy_prompt,omitempty"`
 	DetectionStrategyCompletion string `mapstructure:"detection_strategy_completion" yaml:"detection_strategy_completion,omitempty"`
 	DetectionStrategyToolCall   string `mapstructure:"detection_strategy_tool_call"  yaml:"detection_strategy_tool_call,omitempty"`
-	// Cascade holds the per-lane live/shadow switches (cascade.lanes.effects,
-	// cascade.lanes.secret_flow, cascade.lanes.nonshell), see cascade_lanes.go.
+	// Cascade is guardrail.cascade (cascade.go): what each layer of the
+	// cascade does with its outcome, the unknown tier, lane switches
+	// (cascade.lanes.effects, cascade.lanes.secret_flow, cascade_lanes.go), the
+	// Rego final-decision policy and the administrator's locks. Read through
+	// Config.ResolveCascade.
 	Cascade CascadeConfig `mapstructure:"cascade" yaml:"cascade,omitempty"`
 	// EffectsRulesTier selects how far the effect lane may block: "restricted"
 	// (a listed command on an exact canonical known protected target) or
@@ -2019,6 +2022,10 @@ type GuardrailConfig struct {
 	// derived configuration ("" when it inherits). ProfileModeForConnector
 	// reads it. Unexported like profileConnectors.
 	profileMode string
+	// profileCascade and profileName are the profile's own cascade scope and
+	// its name on a derived configuration (ResolveCascade).
+	profileCascade *CascadeScope
+	profileName    string
 	// customPackBase is the directory of the config file that declares
 	// custom_packs: the base of a relative custom_packs path. customRulePackChecks
 	// is each custom_packs entry as the loader checked it, once. Both are
@@ -2070,6 +2077,11 @@ type PerConnectorGuardrailConfig struct {
 	// (mode/hilt/rule_pack_dir) are retained so re-enable restores it
 	// with no re-prompt.
 	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+
+	// Cascade is this scope's guardrail.cascade (cascade.go); nil inherits.
+	// Not supported in the application_protection overlays this struct also
+	// types (ValidateCascade).
+	Cascade *CascadeScope `mapstructure:"cascade" yaml:"cascade,omitempty" json:"Cascade,omitempty"`
 }
 
 // normalizeConnectorKey canonicalizes a connector name for
@@ -2380,9 +2392,8 @@ func (g *GuardrailConfig) Validate() error {
 	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
 		return err
 	}
-	if err := g.Cascade.Validate(); err != nil {
-		return err
-	}
+	// guardrail.cascade (lanes included) is validated by Config.ValidateCascade
+	// at load (an invalid cascade falls back, writers refuse it).
 	if err := g.SecretFlow.Validate(); err != nil {
 		return err
 	}
@@ -2474,6 +2485,43 @@ func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
 	return "regex_judge"
 }
 
+// Values of guardrail.judge.intent_scope.
+const (
+	IntentScopeAlert  = "alert"
+	IntentScopeShadow = "shadow"
+	IntentScopeOff    = "off"
+)
+
+// IntentScopeMode is the normalized guardrail.judge.intent_scope: the lane of
+// the task-scope floor (INTENT-SCOPE-SEND). The lane is shadow-only in 1.0.10:
+// the built-in default, and the value of any key the loader accepts, is shadow
+// (record the finding, leave the verdict alone) or off. "alert" exists for the
+// tests and the benchmark harness, which set it on the struct; the loader
+// refuses it (ValidateIntentScope). Promotion is the day the default below
+// becomes alert. It moves under guardrail.cascade.lanes with the lane registry
+// of s7/cascade-config.
+func (j JudgeConfig) IntentScopeMode() string {
+	switch strings.ToLower(strings.TrimSpace(j.IntentScope)) {
+	case IntentScopeAlert:
+		return IntentScopeAlert
+	case IntentScopeOff:
+		return IntentScopeOff
+	}
+	return IntentScopeShadow
+}
+
+// ValidateIntentScope refuses a guardrail.judge.intent_scope value the shadow-only
+// lane does not accept.
+func (j JudgeConfig) ValidateIntentScope() error {
+	switch strings.ToLower(strings.TrimSpace(j.IntentScope)) {
+	case "", IntentScopeShadow, IntentScopeOff:
+		return nil
+	case IntentScopeAlert:
+		return fmt.Errorf("config: guardrail.judge.intent_scope: %q is not available in 1.0.10: the task-scope lane is shadow-only (rel-1-0-10:GAP-0341, GAP-0372, GAP-0363); use shadow or off", j.IntentScope)
+	}
+	return fmt.Errorf("config: guardrail.judge.intent_scope: unknown value %q (shadow or off)", j.IntentScope)
+}
+
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
 // an LLM to detect prompt injection and PII exfiltration.
 type JudgeConfig struct {
@@ -2512,6 +2560,12 @@ type JudgeConfig struct {
 	// scripts abandon the gateway call at curl --max-time 10; the
 	// gateway applies a 5s default when unset.
 	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
+
+	// IntentScope is what DefenseClaw does with a tool call that sends data to a
+	// destination the user's task does not name (INTENT-SCOPE-SEND): "shadow"
+	// records the finding in a judge event and a log line and leaves the verdict
+	// alone, "off" does not look. Empty is the built-in default (shadow).
+	IntentScope string `mapstructure:"intent_scope" yaml:"intent_scope,omitempty"`
 
 	// MaxParallel bounds how many judge calls the gateway sends to the
 	// judge model at once; an explicit 0 sets no bound. When omitted,
@@ -3226,6 +3280,9 @@ func loadConfigSourceCheckedWithLayout(
 		}
 	}
 	cfg.Guardrail.Judge.MaxParallelExplicit = viper.InConfig("guardrail.judge.max_parallel")
+	if err := cfg.Guardrail.Judge.ValidateIntentScope(); err != nil {
+		return nil, err
+	}
 	foldV8ScannerKeys(&cfg)
 	cleanCustomPackPaths(&cfg)
 	if err := restoreRuntimeV8GuardrailConnectors(&cfg, configFile, sourceBytes); err != nil {
@@ -3366,6 +3423,14 @@ func loadConfigSourceCheckedWithLayout(
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	// An invalid guardrail.cascade does not refuse the configuration: the
+	// cascade falls back to the last-known-good one, else the pack defaults,
+	// and doctor, status and the audit log say so. Writers refuse it first
+	// (ValidateCandidate).
+	cfg.loadCascade()
+	if cfg.Guardrail.Cascade.invalid != nil && ReportConfigLoadError != nil {
+		ReportConfigLoadError(context.Background(), "guardrail_cascade_invalid")
 	}
 	if err := cfg.ValidateIdentityChainSettings(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -4189,8 +4254,8 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
 	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
-	viper.SetDefault("guardrail.cascade.lanes.effects", "shadow")
-	viper.SetDefault("guardrail.cascade.lanes.secret_flow", "shadow")
+	// guardrail.cascade.lanes: an unset lane keeps its registered default
+	// (RegisterCascadeLane), so an empty cascade stays empty.
 	viper.SetDefault("guardrail.effects_rules_tier", "restricted")
 	viper.SetDefault("guardrail.secret_flow.label_sets.credentials", true)
 	viper.SetDefault("guardrail.secret_flow.reencodings", true)

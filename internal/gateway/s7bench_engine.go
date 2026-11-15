@@ -37,20 +37,21 @@ import (
 
 // S7Engine is one booted gateway generation and its hook handler.
 type S7Engine struct {
-	sc        *Sidecar
-	api       *APIServer
-	hook      http.HandlerFunc
-	hooks     map[string]http.HandlerFunc
-	connector string
-	profile   string
-	judgeRec  *s7RecordingProvider
-	store     *audit.Store
-	stopGuard context.CancelFunc
-	guardDone chan struct{}
-	passes    atomic.Int64
-	peakWAL   atomic.Int64
-	inspOnce  sync.Once
-	insp      *GuardrailInspector
+	sc          *Sidecar
+	api         *APIServer
+	hook        http.HandlerFunc
+	hooks       map[string]http.HandlerFunc
+	connector   string
+	profile     string
+	judgeRec    *s7RecordingProvider
+	store       *audit.Store
+	stopGuard   context.CancelFunc
+	guardDone   chan struct{}
+	passes      atomic.Int64
+	peakWAL     atomic.Int64
+	inspOnce    sync.Once
+	insp        *GuardrailInspector
+	scopeShadow *s7ScopeShadow
 }
 
 // S7NewEngine boots the sidecar generation for cfg and returns the

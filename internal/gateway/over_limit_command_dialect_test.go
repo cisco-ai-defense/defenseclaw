@@ -73,7 +73,7 @@ func TestOverLimitWindowsCommandTwinKeepsTheHooksDialect(t *testing.T) {
 // TestOverLimitWindowsCommandKeepsItsBlockOnTheKiroHook: on a Windows hook a
 // protected redirect keeps its block however the command is padded past the
 // string limit, in every pack, as the unpadded call, and an ordinary padded
-// command stays allowed (rel-1-0-10:GAP-0611).
+// command is TRUNCATED at the unknown tier of the pack (rel-1-0-10:GAP-0611).
 func TestOverLimitWindowsCommandKeepsItsBlockOnTheKiroHook(t *testing.T) {
 	previous := windowsHookHost
 	windowsHookHost = func() bool { return true }
@@ -91,9 +91,14 @@ func TestOverLimitWindowsCommandKeepsItsBlockOnTheKiroHook(t *testing.T) {
 					t.Errorf("%s/%s/%s: the padded redirect is %s %v, want the block of the unpadded call", pack, tool, name, got, rules)
 				}
 			}
+			// An ordinary command padded past the limit is TRUNCATED
+			// (rel-1-0-10:GAP-0611, the one bound rule): never allowed, and
+			// never a block outside strict. The five tiers on the Claude
+			// Code and Codex hooks: TestGAP0611OverInputBoundFiveTiers.
 			for name, padded := range overLimitWindowsPaddings(ordinary) {
-				if got, rules := env.kiroHook(t, tool, map[string]any{"command": padded}, true); acpBlocked(got) {
-					t.Errorf("%s/%s/%s: an ordinary padded command is %s %v", pack, tool, name, got, rules)
+				got, rules := env.kiroHook(t, tool, map[string]any{"command": padded}, true)
+				if normalizeCodexAction(got) == "allow" || pack != "strict" && acpBlocked(got) {
+					t.Errorf("%s/%s/%s: an ordinary padded command is %s %v, want TRUNCATED at the unknown tier", pack, tool, name, got, rules)
 				}
 			}
 		}

@@ -462,9 +462,12 @@ def status(app: AppContext, as_json: bool) -> None:
             for label, val in (
                 ("Total scans", counts.total_scans),
                 ("Active alerts", counts.alerts),
+                ("Unread calls", counts.unread_calls),
             ):
                 if val is None:
                     val = ux.dim("not counted (too many audit events to count quickly; list them: defenseclaw alerts)")
+                elif label == "Unread calls" and val:
+                    val = f"{val} " + ux.dim("(ACTION-PARSE-FAILURE: tool calls read only in part)")
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
@@ -2568,6 +2571,7 @@ def _status_payload(app) -> dict:
             payload["activity"] = {
                 "total_scans": counts.total_scans,
                 "active_alerts": counts.alerts,
+                "unread_calls": counts.unread_calls,
             }
     else:
         payload["enforcement"] = None

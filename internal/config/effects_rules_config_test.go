@@ -23,24 +23,31 @@ func TestCascadeLanesDefaultIsShadow(t *testing.T) {
 	if got := cfg.Guardrail.Cascade.Lanes.SecretFlowMode(); got != "shadow" {
 		t.Fatalf("default secret_flow lane = %q, want shadow", got)
 	}
-	var empty CascadeLanes
+	var empty CascadeLaneValues
 	if empty.EffectsMode() != "shadow" || empty.SecretFlowMode() != "shadow" {
 		t.Fatalf("an unset lane must read as its shipped default, got %q / %q", empty.EffectsMode(), empty.SecretFlowMode())
 	}
 }
 
-// TestCascadeLanesSchemaEnum accepts the values each lane takes in 1.0.10 (a
-// shadow-only lane: off, shadow; nonshell: off, shadow, on), in any case and
-// trimmed, refuses "on" for a shadow-only lane, and refuses any other value,
-// so a typo cannot silently disable or enable a lane.
+// TestCascadeLanesSchemaEnum accepts the exact values each lane takes in 1.0.10
+// (a shadow-only lane: off, shadow; nonshell: off, shadow, on), refuses another
+// case or a padded value, refuses "on" for a shadow-only lane, and refuses any
+// other value, so a typo cannot silently disable or enable a lane.
 func TestCascadeLanesSchemaEnum(t *testing.T) {
-	for _, lane := range CascadeLaneNames() {
+	// The shipped lanes (cascade_test.go registers test lanes the schema does not name).
+	for _, lane := range []string{CascadeLaneEffects, CascadeLaneSecretFlow, CascadeLaneNonShell} {
 		allowed := CascadeLaneAllowed(lane)
 		for _, value := range allowed {
-			for _, spelling := range []string{value, strings.ToUpper(value), "' " + value + " '"} {
+			raw := []byte("config_version: 9\nguardrail:\n  cascade:\n    lanes:\n      " + lane + ": " + value + "\n")
+			if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err != nil {
+				t.Fatalf("cascade.lanes.%s %s: ValidateCandidate() error = %v, want accept", lane, value, err)
+			}
+			// Exact values: another case or a padded value is refused, never read
+			// as the value (cascade.go).
+			for _, spelling := range []string{strings.ToUpper(value), "' " + value + " '"} {
 				raw := []byte("config_version: 9\nguardrail:\n  cascade:\n    lanes:\n      " + lane + ": " + spelling + "\n")
-				if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err != nil {
-					t.Fatalf("cascade.lanes.%s %s: ValidateCandidate() error = %v, want accept", lane, spelling, err)
+				if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err == nil || !strings.Contains(err.Error(), lane) {
+					t.Fatalf("cascade.lanes.%s %s: ValidateCandidate() error = %v, want a refusal naming the lane", lane, spelling, err)
 				}
 			}
 		}
@@ -61,20 +68,28 @@ func TestCascadeLanesSchemaEnum(t *testing.T) {
 // TestCascadeLaneOnIsNotAvailable: a shadow-only lane refuses "on" with the
 // message that names the release and the open gaps (decision D4).
 func TestCascadeLaneOnIsNotAvailable(t *testing.T) {
-	for _, c := range []CascadeConfig{
-		{Lanes: CascadeLanes{Effects: "on"}},
-		{Lanes: CascadeLanes{SecretFlow: "on"}},
-	} {
-		err := c.Validate()
+	validate := func(lanes CascadeLaneValues) error {
+		cfg := &Config{}
+		cfg.Guardrail.Cascade.Lanes = lanes
+		return cfg.ValidateCascade(false)
+	}
+	for _, lanes := range []CascadeLaneValues{{"effects": "on"}, {"secret_flow": "on"}} {
+		err := validate(lanes)
 		if err == nil || !strings.Contains(err.Error(), "not available in 1.0.10") || !strings.Contains(err.Error(), "GAP-0191") {
-			t.Fatalf("Validate(%+v) = %v, want a not-available-in-1.0.10 refusal naming the gaps", c, err)
+			t.Fatalf("ValidateCascade(%v) = %v, want a not-available-in-1.0.10 refusal naming the gaps", lanes, err)
 		}
 	}
-	if err := (CascadeConfig{Lanes: CascadeLanes{Effects: "maybe"}}).Validate(); err == nil {
-		t.Fatalf("Validate accepted an unknown lane value")
+	if err := validate(CascadeLaneValues{"effects": "maybe"}); err == nil {
+		t.Fatalf("ValidateCascade accepted an unknown lane value")
 	}
-	if err := (CascadeConfig{Lanes: CascadeLanes{Effects: "off", SecretFlow: "shadow"}}).Validate(); err != nil {
-		t.Fatalf("Validate rejected off/shadow: %v", err)
+	if err := validate(CascadeLaneValues{"effects": "off", "secret_flow": "shadow"}); err != nil {
+		t.Fatalf("ValidateCascade rejected off/shadow: %v", err)
+	}
+	// Process-wide lanes are top level only.
+	cfg := &Config{}
+	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {Cascade: &CascadeScope{Lanes: CascadeLaneValues{"effects": "off"}}}}
+	if err := cfg.ValidateCascade(false); err == nil || !strings.Contains(err.Error(), "process-wide") {
+		t.Fatalf("a connector scope set the effects lane: %v", err)
 	}
 }
 

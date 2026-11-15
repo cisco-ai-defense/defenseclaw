@@ -207,6 +207,42 @@ func TestGAP0589PowerShellCappedReadingFiveTiers(t *testing.T) {
 	}
 }
 
+// TestGAP0611OverInputBoundFiveTiers: a Windows-hook command padded past the
+// input bound (maxCommandBytes) is TRUNCATED at cap=bytes in every tier, on
+// both hooks that run PowerShell, and the protected redirect it holds keeps
+// its block (its bounded twin, read in the hook's dialect); an ordinary
+// padded command is exactly the unknown tier (rel-1-0-10:GAP-0611).
+func TestGAP0611OverInputBoundFiveTiers(t *testing.T) {
+	gap0589WindowsHost(t)
+	cwd := `C:\Users\alice`
+	for _, tier := range boundedTestTiers {
+		floor := bounded.Unknown(tier.tier)
+		for _, route := range gap0589Routes {
+			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
+			for _, tc := range []struct {
+				name, command string
+				want          bounded.Action
+			}{
+				{"redirect", overLimitWindowsRedirect, bounded.Block},
+				{"ordinary", `Get-ChildItem C:\Users\alice\project`, floor},
+			} {
+				alone, _ := route.decide(t, api, cwd, tc.command)
+				t.Logf("ROW %s | %s | over-64KiB %s | alone | %s", tier.name, route.name, tc.name, alone)
+				for name, padded := range overLimitWindowsPaddings(tc.command) {
+					action, findings := route.decide(t, api, cwd, padded)
+					t.Logf("ROW %s | %s | over-64KiB %s | %s | %s", tier.name, route.name, tc.name, name, action)
+					if got := boundedParse(action); got != tc.want {
+						t.Errorf("%s/%s %s %s: action %s, want %s; findings %v", tier.name, route.name, tc.name, name, action, tc.want, findings)
+					}
+					if !boundedHasLimit(findings, bounded.Bytes, true) {
+						t.Errorf("%s/%s %s %s: not TRUNCATED (no %s naming cap=bytes): %v", tier.name, route.name, tc.name, name, evaluationLimitRuleID, findings)
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestGAP0589POSIXOverCapControl is the POSIX control, unchanged from rel: a
 // Bash call past the command cap under the statement budget is at least the
 // unknown tier, and a state write after the cap still blocks in every tier.

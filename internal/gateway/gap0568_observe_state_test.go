@@ -229,24 +229,32 @@ func TestGAP0413PowerShellOverBudgetStateWriteHolds(t *testing.T) {
 	for _, row := range []struct {
 		name, command string
 		managedBlock  bool
+		// perUserBlock: the per-user gateway blocks it too. The last
+		// statement of a call over the statement budget is judged alone
+		// (powershell_cap_pieces.go, rel-1-0-10:GAP-0693), so a write of the
+		// state that names its path in this host's own spelling is proven
+		// there and blocks in every mode, as a proven write of the state does.
+		// The "~" spelling is a PowerShell home this POSIX host does not
+		// resolve, so it only alerts per-user here (a Windows host blocks it).
+		perUserBlock bool
 	}{
-		{"Set-Content of the state after 130 echoes", pad + "Set-Content -Path ~/.defenseclaw/config.yaml -Value x", true},
-		{"absolute Set-Content of the state after 130 echoes", pad + "Set-Content -Path " + state + " -Value x", true},
-		{"quote-split Set-Content after 200", strings.Join(assignments, "; ") + `; echo "claw\"; Set-Content -Path ~/.defenseclaw/config.yaml -Value x; \""`, true},
-		{"benign 200", strings.Join(assignments, "; "), false},
+		{"Set-Content of the state after 130 echoes", pad + "Set-Content -Path ~/.defenseclaw/config.yaml -Value x", true, false},
+		{"absolute Set-Content of the state after 130 echoes", pad + "Set-Content -Path " + state + " -Value x", true, true},
+		{"quote-split Set-Content after 200", strings.Join(assignments, "; ") + `; echo "claw\"; Set-Content -Path ~/.defenseclaw/config.yaml -Value x; \""`, true, false},
+		{"benign 200", strings.Join(assignments, "; "), false, false},
 		// rel-1-0-6:GAP-0448 (review r6 finding 1): long scripts that read,
 		// test or print the state, or only mention defense or claw, allow.
-		{"200 + Get-Content of the state", wh + "\nGet-Content ~/.defenseclaw/config.yaml", false},
-		{"Get-Content $HOME state + 200", "Get-Content $HOME/.defenseclaw/config.yaml\n" + wh, false},
-		{"200 + Test-Path of the state", wh + "\nTest-Path ~/.defenseclaw/config.yaml", false},
-		{"200 + defenseclaw status", wh + "\ndefenseclaw status", false},
-		{"Set-Location a claw repo + 200", "Set-Location ~/src/defenseclaw\n" + wh, false},
-		{"200 defense words", strings.ReplaceAll(wh, "Write-Host 'step", "Write-Output 'defense"), false},
-		{"200 + git log in a claw repo", wh + "\n$l = & git -C ~/src/defenseclaw log -1", false},
-		{"200 + Set-Content of the state", wh + "\nSet-Content -Path ~/.defenseclaw/config.yaml -Value x", true},
+		{"200 + Get-Content of the state", wh + "\nGet-Content ~/.defenseclaw/config.yaml", false, false},
+		{"Get-Content $HOME state + 200", "Get-Content $HOME/.defenseclaw/config.yaml\n" + wh, false, false},
+		{"200 + Test-Path of the state", wh + "\nTest-Path ~/.defenseclaw/config.yaml", false, false},
+		{"200 + defenseclaw status", wh + "\ndefenseclaw status", false, false},
+		{"Set-Location a claw repo + 200", "Set-Location ~/src/defenseclaw\n" + wh, false, false},
+		{"200 defense words", strings.ReplaceAll(wh, "Write-Host 'step", "Write-Output 'defense"), false, false},
+		{"200 + git log in a claw repo", wh + "\n$l = & git -C ~/src/defenseclaw log -1", false, false},
+		{"200 + Set-Content of the state", wh + "\nSet-Content -Path ~/.defenseclaw/config.yaml -Value x", true, false},
 	} {
 		for _, managed := range []bool{false, true} {
-			want := managed && row.managedBlock
+			want := managed && row.managedBlock || !managed && row.perUserBlock
 			if got := gap0568ToolHookAction(t, api, "claudecode", "PowerShell", home, cwd, row.command, true, managed) == "block"; got != want {
 				t.Errorf("%s managed=%t: block %t, want %t", row.name, managed, got, want)
 			}

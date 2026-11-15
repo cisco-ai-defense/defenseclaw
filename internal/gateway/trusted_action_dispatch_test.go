@@ -1920,7 +1920,10 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  "foreach i (x); " + dangerous + "; end",
 			wantFinding: true,
-			uncertain:   true,
+			// The Bash grammar rejects the zsh loop head; its statement that
+			// parses on its own runs once per item and is judged as the
+			// command it is (rel-1-0-10:GAP-0526): it blocks.
+			wantEnforce: true,
 		},
 		{
 			name: "zsh short select loop",

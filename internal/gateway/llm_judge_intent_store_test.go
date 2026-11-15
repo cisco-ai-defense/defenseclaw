@@ -62,7 +62,7 @@ func TestLLMJudgeUsesItsIntentStore(t *testing.T) {
 	ctx := ContextWithSessionID(context.Background(), "s1")
 	judge.ObserveSessionPrompt(ctx, "deploy the web app")
 	sample := judge.toolJudgeContextSample(ctx, "Bash", `{"command":"make deploy"}`)
-	for _, want := range []string{"deploy the web app", `<RECENT_TOOL_CALL index=1 tool="Read">`, "README", "make deploy"} {
+	for _, want := range []string{"deploy the web app", `index=1 tool="Read">`, "README", "make deploy"} {
 		if !strings.Contains(sample, want) {
 			t.Fatalf("sample lacks %q:\n%s", want, sample)
 		}

@@ -244,6 +244,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
 	}
 	t0 := time.Now()
+	ctx = withCascadeTrace(ctx, a.decisionConfig(ctx), "codex")
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	cfg := a.decisionConfig(ctx)
@@ -263,12 +264,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			}
 		}
 	case "UserPromptSubmit":
-		if !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
-			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ObserveSessionPrompt(ctx, req.Prompt)
-			}
-			a.observeUserDownloadRequest(ctx, req.Prompt)
-		}
+		intentEvent := !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration())
 		// Secure Client keeps the prompt of main, so AI Defense is sent the
 		// text it was sent before (issue #1092).
 		prompt := req.Prompt
@@ -282,7 +278,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Connector:    "codex",
 			contentScope: ruleContentScopeUntrusted,
 		})
-		a.forgetBlockedPrompt(ctx, req.Prompt, verdict)
+		if intentEvent {
+			a.observeUserTurn(ctx, req.Prompt, req.Prompt, req.CWD, verdict)
+		}
 		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{
 				targetType: "skill",
@@ -370,6 +368,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	// outside managed_enterprise / when the AID lane returned no
 	// directive.
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+	verdict = a.applyCascadeFinal(ctx, "codex", hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
