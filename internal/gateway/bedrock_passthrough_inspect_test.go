@@ -58,9 +58,9 @@ func bedrockInvokeStreamFrames(t *testing.T, texts ...string) []byte {
 func TestBedrockEventStreamTextIsIncremental(t *testing.T) {
 	frames := bedrockInvokeStreamFrames(t, "hello ", "world")
 	s := newBedrockEventStreamText()
-	var got strings.Builder
+	var got responseText
 	for i := range frames { // one byte at a time
-		got.WriteString(s.Feed(frames[i : i+1]))
+		got.AddAll(s.Feed(frames[i : i+1]))
 	}
 	if got.String() != "hello world" || s.Model() != "claude-haiku-4-5-20251001" || s.Broken() {
 		t.Fatalf("text %q model %q broken %v", got.String(), s.Model(), s.Broken())
@@ -71,7 +71,7 @@ func TestBedrockEventStreamTextIsIncremental(t *testing.T) {
 		{Name: ":message-type", Value: eventstream.StringValue("event")},
 		{Name: ":event-type", Value: eventstream.StringValue("contentBlockDelta")},
 	}, Payload: []byte(`{"contentBlockIndex":0,"delta":{"text":"conv"}}`)})
-	if got := newBedrockEventStreamText().Feed(buf.Bytes()); got != "conv" {
+	if got := responsePiecesText(newBedrockEventStreamText().Feed(buf.Bytes())); got != "conv" {
 		t.Fatalf("converse stream %q", got)
 	}
 	bad := newBedrockEventStreamText()
@@ -339,7 +339,7 @@ func TestPassthroughInspectsToolUseInBedrockStreams(t *testing.T) {
 		t.Fatalf("the refused tool call reached the agent: %d bytes", rec.Body.Len())
 	}
 	s := newBedrockEventStreamText()
-	if got := s.Feed(rec.Body.Bytes()); !strings.Contains(strings.ToLower(got), "defenseclaw") || s.Broken() {
+	if got := responsePiecesText(s.Feed(rec.Body.Bytes())); !strings.Contains(strings.ToLower(got), "defenseclaw") || s.Broken() {
 		t.Fatalf("the agent did not get a block it can show: %q broken=%v", got, s.Broken())
 	}
 	// The same stream with a harmless command is forwarded byte for byte.
@@ -390,7 +390,7 @@ func TestPassthroughBadBedrockFrameFailsByMode(t *testing.T) {
 		t.Fatalf("managed: the unframed bytes reached the agent")
 	}
 	s := newBedrockEventStreamText()
-	if got := s.Feed(rec.Body.Bytes()); s.Broken() || !strings.Contains(strings.ToLower(got), "defenseclaw") {
+	if got := responsePiecesText(s.Feed(rec.Body.Bytes())); s.Broken() || !strings.Contains(strings.ToLower(got), "defenseclaw") {
 		t.Fatalf("managed: the agent got no readable block: %q broken=%v (%d bytes)", got, s.Broken(), rec.Body.Len())
 	}
 	if rec := call(); !bytes.Equal(rec.Body.Bytes(), bad) {

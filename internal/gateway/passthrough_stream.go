@@ -58,6 +58,8 @@ type passthroughStream struct {
 	promptID       string
 	telemetry      ChatRequest
 	bedrock        *bedrockEventStreamText
+	// ndjson: a native Ollama stream, one JSON event per line (GAP-0370).
+	ndjson bool
 }
 
 // snapshotEvent reports an event whose content repeats what earlier events
@@ -72,10 +74,12 @@ func snapshotEvent(typ string) bool {
 }
 
 // eventContent feeds one event to the tool-call state machine and adds its
-// text to the accumulated reply.
+// text to the accumulated reply: the typed fields of the provider, each in
+// its lane (streamEventPieces, GAP-0370), and every other string the walker
+// reads (withWalkerPieces).
 // It returns why the event can be read two ways (a repeated or differently
 // spelled key), "" when it cannot.
-func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *strings.Builder, model *string) string {
+func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *responseText, model *string) string {
 	if !ev.HasData {
 		return ""
 	}
@@ -87,20 +91,26 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 	if *model == "" {
 		*model = responseModelFromRawJSON([]byte(data))
 	}
+	typed := streamEventPieces(data, s.provider)
 	sc, err := scanReplyJSON([]byte(data), true, s.p.maxBodyValues())
 	if err != nil {
 		// Not JSON: the text itself is the content.
-		acc.WriteString(data)
+		acc.AddAll(withWalkerPieces(typed, []string{data}))
 		return ""
 	}
 	calls.AddCalls(sc.Calls)
-	snapshot := snapshotEvent(sc.Type)
-	for _, seg := range sc.Segments {
-		if snapshot && strings.Contains(acc.String(), seg) {
-			continue
+	segs := sc.Segments
+	if snapshotEvent(sc.Type) {
+		// A snapshot repeats what earlier events carried.
+		kept := segs[:0:0]
+		for _, seg := range segs {
+			if !strings.Contains(acc.String(), seg) {
+				kept = append(kept, seg)
+			}
 		}
-		acc.WriteString(seg)
+		segs = kept
 	}
+	acc.AddAll(withWalkerPieces(typed, segs))
 	return sc.Ambiguous
 }
 
@@ -181,7 +191,7 @@ func (s *passthroughStream) run() {
 	s.copyHeaders()
 
 	flusher, _ := w.(http.Flusher)
-	var accumulated strings.Builder
+	var accumulated responseText
 	streamResponseModel := ""
 	lastScanLen := 0
 	const scanInterval = 500
@@ -195,7 +205,7 @@ func (s *passthroughStream) run() {
 	if s.bedrock == nil {
 		sseCalls = newSSEToolCalls(p.maxBodyValues())
 	}
-	framer := &sseFramer{}
+	framer := &sseFramer{ndjson: s.ndjson}
 	var bedrockPending []byte // the start of a Bedrock frame whose end has not come
 	var queue [][]byte        // events read and not yet sent
 	var queueAt []time.Time   // when each event of the queue was read
@@ -639,7 +649,7 @@ read:
 			var events []sseEvent
 			if s.bedrock != nil {
 				textBefore := accumulated.Len()
-				accumulated.WriteString(s.bedrock.Feed(chunk))
+				accumulated.AddAll(s.bedrock.Feed(chunk))
 				if accumulated.Len()-textBefore > streamLineMaxText {
 					// One read completes at most the frame in progress plus
 					// 4 KiB of others, so the text it adds is that frame's.

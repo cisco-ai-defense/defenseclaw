@@ -459,6 +459,10 @@ func dispatchTrustedAction(
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
+	// A backup file of sed -i or perl -i the readers cannot resolve is a
+	// path target past what they judge: at least the unknown tier
+	// (rel-1-0-10:GAP-0540).
+	defer func() { findings = sedBackupUnresolvedFindings(request, findings) }()
 	if request.simpleMemo == nil {
 		request.simpleMemo = &trustedSimpleMemo{}
 	}

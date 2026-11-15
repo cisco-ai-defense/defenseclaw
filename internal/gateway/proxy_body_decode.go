@@ -325,6 +325,9 @@ type sseFramer struct {
 	// DataEvents counts events that carried data.
 	DataEvents int
 	broken     bool
+	// ndjson frames newline-delimited JSON (a native Ollama stream): every
+	// line is one event, its data the line (GAP-0370).
+	ndjson bool
 	// skipping: the event in progress is over sseEventMax; its bytes are
 	// passed on (skipped) until the blank line that ends it. lineStart, cr
 	// and end are where the skip is in the line grammar.
@@ -383,6 +386,11 @@ func (f *sseFramer) Write(chunk []byte, final bool) []sseEvent {
 		line := f.buf[f.pos:i]
 		f.pos = next
 		f.scan = 0
+		if f.ndjson {
+			f.ndjsonLine(line)
+			out = append(out, f.dispatch())
+			continue
+		}
 		if len(line) == 0 {
 			out = append(out, f.dispatch())
 			continue
@@ -391,7 +399,11 @@ func (f *sseFramer) Write(chunk []byte, final bool) []sseEvent {
 	}
 	if final && len(f.buf) > 0 {
 		if f.pos < len(f.buf) {
-			f.field(f.buf[f.pos:])
+			if f.ndjson {
+				f.ndjsonLine(f.buf[f.pos:])
+			} else {
+				f.field(f.buf[f.pos:])
+			}
 			f.pos = len(f.buf)
 		}
 		out = append(out, f.dispatch())
@@ -430,7 +442,9 @@ func (f *sseFramer) skip(b []byte, final bool) (rest []byte, done bool) {
 		case c == '\r' || c == '\n':
 			i++
 			f.skipCR = c == '\r'
-			if f.skipLineStart {
+			if f.skipLineStart || f.ndjson {
+				// A blank line ends an SSE event; any line end ends an
+				// NDJSON one.
 				f.skipEnd = true
 				done = c == '\n'
 			}
@@ -477,6 +491,14 @@ func (f *sseFramer) dispatch() sseEvent {
 	f.data.Reset()
 	f.hasData = false
 	return ev
+}
+
+// ndjsonLine reads one NDJSON line: the line is the event's data.
+func (f *sseFramer) ndjsonLine(line []byte) {
+	if t := bytes.TrimSpace(line); len(t) > 0 {
+		f.data.Write(t)
+		f.hasData = true
+	}
 }
 
 func (f *sseFramer) field(line []byte) {
