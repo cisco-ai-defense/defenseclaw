@@ -335,6 +335,9 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 		res.skipped = true
 		return res
 	}
+	// The routing of the call's scope: decision_model, with the
+	// guardrail.cascade.system_one overrides of its connector and profile.
+	routing := d.routingFor(ctx)
 	if d.inflight != nil {
 		select {
 		case d.inflight <- struct{}{}:
@@ -375,13 +378,17 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	res.risk = 1 - probs["allow"]
 	res.riskScore = score
 	switch {
-	case choice == "allow" && res.risk <= d.allowAt && d.flowGuard && flow.guards():
+	case choice == "allow" && res.risk <= routing.allowAt && d.flowGuard && flow.guards():
 		// The flow guard: an allow the user did not ask for is not
-		// confident (S1FLOW); it escalates and never blocks.
+		// confident (S1FLOW); it escalates and adds no block itself.
+		// Without the judge (cascade 2) the model gives no answer and the
+		// rule verdict stands, so a call escalated on a CRITICAL rule
+		// finding is refused under a closed hook fail mode (the strict
+		// pack, a managed install, hook_fail_mode closed).
 		res.flowGuarded = true
-	case choice == "allow" && res.risk <= d.allowAt:
+	case choice == "allow" && res.risk <= routing.allowAt:
 		res.route = decisionAllow
-	case choice == "block" && res.risk >= d.blockAt && score >= d.blockRiskScore && !d.ruleFlagEscalates(ctx):
+	case choice == "block" && res.risk >= routing.blockAt && score >= routing.blockRiskScore && !routing.ruleFlagEscalates(ctx):
 		// A confident block needs the disposition AND the risk score (R4),
 		// and never lands on a call the rules flagged (RF): those escalate.
 		res.route = decisionBlock
@@ -390,9 +397,10 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 }
 
 // ruleFlagEscalates reports whether the rules flagged this call and
-// decision_model.escalate_rule_flagged keeps a confident block off it.
-func (d *decisionModel) ruleFlagEscalates(ctx context.Context) bool {
-	return d.escalateRuleFlagged && decisionRuleFloorFrom(ctx)
+// escalate_rule_flagged (decision_model, or the call's
+// guardrail.cascade.system_one override) keeps a confident block off it.
+func (r cascadeSystemOneRouting) ruleFlagEscalates(ctx context.Context) bool {
+	return r.escalateRuleFlagged && decisionRuleFloorFrom(ctx)
 }
 
 type decisionParseError struct{ msg string }
@@ -684,13 +692,16 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 	switch res.route {
 	case decisionAllow:
 		v := allowVerdict(decisionModelScanner)
-		v.Reason = fmt.Sprintf("decision-model: confident allow (risk %.2f <= %.2f); judge skipped", res.risk, dm.allowAt)
+		v.Reason = fmt.Sprintf("decision-model: confident allow (risk %.2f <= %.2f); judge skipped", res.risk, dm.routingFor(ctx).allowAt)
 		v.Confidence = 1 - res.risk
 		emitDecisionModel(ctx, dm.model, toolName, args, res, v)
+		recordCascadeSystemOne(ctx, res, v)
 		return v
 	case decisionBlock:
 		floor := dm.blockFloor(res)
+		floor.systemOneBlocked = true
 		emitDecisionModel(ctx, dm.model, toolName, args, res, floor)
+		recordCascadeSystemOne(ctx, res, floor)
 		// The hook sees the floor before the judge runs, so a judge that
 		// misses the hook answer window cannot drop it (GAP-0392).
 		decisionFloorSlotFrom(ctx).set(floor)
@@ -706,6 +717,7 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 		if !res.skipped {
 			emitDecisionModel(ctx, dm.model, toolName, args, res, nil)
 		}
+		recordCascadeSystemOne(ctx, res, nil)
 		return j.runToolJudgeLLM(ctx, toolName, args, sample)
 	}
 }
@@ -760,8 +772,10 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 		if !res.skipped {
 			emitDecisionModel(ctx, dm.model, toolName, args, res, nil)
 		}
+		recordCascadeSystemOne(ctx, res, nil)
 		return errorVerdict(decisionModelScanner)
 	}
+	routing := dm.routingFor(ctx)
 	if res.logLine != "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", res.logLine)
 	}
@@ -769,7 +783,7 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 	switch {
 	case res.route == decisionAllow:
 		v = allowVerdict(decisionModelScanner)
-		v.Reason = fmt.Sprintf("decision-model: confident allow (risk %.2f <= %.2f)", res.risk, dm.allowAt)
+		v.Reason = fmt.Sprintf("decision-model: confident allow (risk %.2f <= %.2f)", res.risk, routing.allowAt)
 		if decisionRuleFloorFrom(ctx) {
 			v.Reason += "; the rule finding stands"
 		}
@@ -778,11 +792,13 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 		v = &ScanVerdict{
 			Action:     guardrailActionBlock,
 			Severity:   "CRITICAL",
-			Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f, risk score %.2f >= %.2f)", res.risk, dm.blockAt, res.riskScore, dm.blockRiskScore),
+			Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f, risk score %.2f >= %.2f)", res.risk, routing.blockAt, res.riskScore, routing.blockRiskScore),
 			Findings:   []string{decisionModelFindingID},
 			Scanner:    decisionModelScanner,
 			Confidence: res.risk,
 		}
+	case res.refusal != "" && cascadeUnsureVerdict(routing.onUnsure, "", 0) != nil:
+		v = cascadeUnsureVerdict(routing.onUnsure, fmt.Sprintf("decision-model: declined (%s)", res.refusal), 0)
 	case res.refusal != "":
 		// GAP-0342: a refusal is the unsure answer, never the rule verdict
 		// alone: content written to trip the filter must not skip the model.
@@ -794,6 +810,8 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 			Scanner:         decisionModelScanner,
 			decisionConfirm: true,
 		}
+	case cascadeUnsureVerdict(routing.onUnsure, "", 0) != nil:
+		v = cascadeUnsureVerdict(routing.onUnsure, fmt.Sprintf("decision-model: %s (risk %.2f)", res.choice, res.risk), res.risk)
 	default:
 		v = &ScanVerdict{
 			Action:          guardrailActionConfirm,
@@ -863,9 +881,17 @@ func strongerDecisionVerdict(judged, floor *ScanVerdict) *ScanVerdict {
 		return &out
 	}
 	if guardrailSeverityRank(judged.Severity) >= guardrailSeverityRank(floor.Severity) {
-		return judged
+		if judged.systemOneBlocked == floor.systemOneBlocked {
+			return judged
+		}
+		// The judge's verdict stands, marked as a call System One
+		// confidently blocked (guardrail.cascade.judge.block_needs_system_one).
+		out := *judged
+		out.systemOneBlocked = floor.systemOneBlocked
+		return &out
 	}
 	out := *judged
+	out.systemOneBlocked = floor.systemOneBlocked
 	// The floor raises the verdict above a lone review finding.
 	out.reviewOnly = false
 	out.Severity = floor.Severity

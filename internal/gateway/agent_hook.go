@@ -3644,6 +3644,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
 	}
 	t0 := time.Now()
+	ctx = withCascadeTrace(ctx, a.decisionConfig(ctx), req.ConnectorName)
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
@@ -3716,6 +3717,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// onto the context so the downstream emit choke points and the OS
 	// toast honor it (managed_enterprise only; no-op otherwise).
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+	verdict = a.applyCascadeFinal(ctx, req.ConnectorName, hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
@@ -3833,6 +3835,9 @@ const hookOversizeUninspectedRuleID = "HOOK-OVERSIZE-COMMAND-NOT-INSPECTED"
 
 const oversizeUninspectedReason = "oversize, command not inspected: this hook payload is over DefenseClaw's size cap, " +
 	"so the gateway could read only part of the call."
+
+// contentCutReason is the reason of content cut at maxInspectContentLen.
+const contentCutReason = "content over the 256 KiB inspect cap: only the first 256 KiB were inspected"
 
 // oversizeUninspectedPayload reports a bounded review of an oversized call.
 // Every bounded review lacks part of the call (hookexec.OversizeUninspectedField),

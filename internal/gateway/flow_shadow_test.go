@@ -19,8 +19,8 @@ import (
 func TestSecretFlowLaneMode(t *testing.T) {
 	mk := func(rollout, mode string) config.GuardrailConfig {
 		g := config.GuardrailConfig{}
-		g.Cascade.Lanes.Effects = rollout
-		g.Cascade.Lanes.SecretFlow = mode
+		g.Cascade.SetLane(config.CascadeLaneEffects, rollout)
+		g.Cascade.SetLane(config.CascadeLaneSecretFlow, mode)
 		return g
 	}
 	for _, tc := range []struct {
@@ -92,8 +92,8 @@ func withSecretFlowGeneration(t *testing.T, effectsRules, mode string) {
 	before := liveGeneration.Load()
 	t.Cleanup(func() { liveGeneration.Store(before); secretFlowSessions.reset() })
 	cfg := config.DefaultConfig()
-	cfg.Guardrail.Cascade.Lanes.Effects = effectsRules
-	cfg.Guardrail.Cascade.Lanes.SecretFlow = mode
+	cfg.Guardrail.Cascade.SetLane(config.CascadeLaneEffects, effectsRules)
+	cfg.Guardrail.Cascade.SetLane(config.CascadeLaneSecretFlow, mode)
 	liveGeneration.Store(&Generation{N: 1, Config: cfg, activeRules: &compiledRulePackCategories{}})
 	secretFlowSessions.reset()
 }
