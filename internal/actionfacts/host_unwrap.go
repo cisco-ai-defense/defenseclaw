@@ -1104,7 +1104,7 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 	// line its author wrote (powerShellCmdLauncherLine).
 	var cmdLine *Input
 	if dialect == DialectPowerShell {
-		if line, ok := powerShellCmdLauncherLine(source); ok && !(unwrapped.layers > 0 && unwrapped.source == line) {
+		if line, ok := powerShellCmdLauncherLine(source); ok && (unwrapped.layers <= 0 || unwrapped.source != line) {
 			twin := input
 			twin.Args, twin.Argv = nil, nil
 			twin.Command, twin.DialectHint = line, DialectCMD
