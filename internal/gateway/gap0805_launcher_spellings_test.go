@@ -16,7 +16,8 @@ import (
 // tool spells it, as an argv array or as one string: at an install path with a
 // blank (rel-1-0-10:GAP-0804), behind a wrapper the over-limit screen reads
 // (start "", wsl, wsl -e, xargs, env -i, sudo -u, nohup, timeout;
-// rel-1-0-10:GAP-0805). The attack unit is the authorized_keys redirect
+// rel-1-0-10:GAP-0805), and past the 64 KiB command bound
+// (rel-1-0-10:GAP-0807). The attack unit is the authorized_keys redirect
 // fixture (overLimitWindowsRedirect). In every tier the redirect blocks, an
 // ordinary script is allowed, and argv and string agree.
 
@@ -80,6 +81,7 @@ func gap0805LauncherSpellings(t *testing.T, tierIndex int) {
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	pad := strings.Repeat("x", 70000)
 	rows := []struct {
 		id, ps, cmd string
 		want        string // block, allow, or floor (at least the unknown tier)
@@ -87,6 +89,7 @@ func gap0805LauncherSpellings(t *testing.T, tierIndex int) {
 		{"redirect", overLimitWindowsRedirect, overLimitWindowsRedirect, "block"},
 		{"benign-git", `git log --oneline -5`, `git log --oneline -5`, "allow"},
 		{"benign-listing", `Get-ChildItem C:\Users\alice\project`, `dir C:\Users\alice\project`, "allow"},
+		{"redirect-past-64KiB", "# " + pad + "\n" + overLimitWindowsRedirect, "rem " + pad + " & " + overLimitWindowsRedirect, "floor"},
 	}
 	for _, tier := range boundedTestTiers[tierIndex : tierIndex+1] {
 		floor := bounded.Unknown(tier.tier)
@@ -127,6 +130,57 @@ func gap0805LauncherSpellings(t *testing.T, tierIndex int) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// A POSIX argv launcher whose -c script runs the words after it as its
+// arguments ("$@", $1) is TRUNCATED when those words are past the argv
+// bounds (rel-1-0-10:GAP-0803), and a launcher nested past the launcher depth
+// is TRUNCATED at the depth cap (rel-1-0-10:GAP-0806). 5 tiers.
+func TestGAP0803LauncherArgumentsAndDepthAreBounded(t *testing.T) {
+	gap0589WindowsHost(t)
+	cwd := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	big := "# " + strings.Repeat("x", 5000) + "\n" + overLimitWindowsRedirect
+	many := []interface{}{"bash", "-c", `"$@"`, "_", "powershell.exe", "-Command", overLimitWindowsRedirect}
+	for i := 0; i < 300; i++ {
+		many = append(many, "x")
+	}
+	deep := overLimitWindowsRedirect
+	for i := 0; i < maxLauncherBodyDepth+2; i++ {
+		deep = "cmd /c " + deep
+	}
+	rows := []struct {
+		id   string
+		argv []interface{}
+	}{
+		{"dollar-at-word-past-4KiB", []interface{}{"bash", "-c", `"$@"`, "_", "powershell.exe", "-Command", big}},
+		{"positional-word-past-4KiB", []interface{}{"sh", "-c", `$1 "$2" "$3"`, "_", "pwsh", "-Command", big}},
+		{"dollar-at-300-words", many},
+		{"cmd-nested-past-the-depth", []interface{}{"cmd", "/c", deep}},
+	}
+	for _, tier := range boundedTestTiers {
+		floor := bounded.Unknown(tier.tier)
+		api := gap0589TierAPI(t, "codex", tier.posture, tier.managed, tier.tier)
+		for _, r := range rows {
+			resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
+				HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+				ToolInput: map[string]interface{}{"command": r.argv},
+			})
+			if boundedParse(resp.Action) < floor || !containsString(resp.RuleIDs, evaluationLimitRuleID) {
+				t.Errorf("%s/%s: action %s rules %v, want at least %s with %s", tier.name, r.id, resp.Action, resp.RuleIDs, floor, evaluationLimitRuleID)
+			}
+		}
+		// An ordinary -c script with few short arguments stays as it was.
+		resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
+			HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+			ToolInput: map[string]interface{}{"command": []interface{}{"bash", "-c", `echo "$1"`, "_", "hello"}},
+		})
+		if boundedParse(resp.Action) != bounded.Allow {
+			t.Errorf("%s/ordinary positional script: action %s, want allow: %v", tier.name, resp.Action, resp.RuleIDs)
 		}
 	}
 }

@@ -3,7 +3,10 @@
 
 package actionfacts
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // ShellLauncherCall names the launcher behind the wrappers the over-limit
 // launcher screen reads, at any install path, and the screen names the same
@@ -33,6 +36,7 @@ func TestShellLauncherCallReadsWrappers(t *testing.T) {
 		{"nice flag operand", []string{"nice", "-n", "10", "pwsh", "-c", body}, 3, DialectPowerShell, false, true},
 		{"xargs", []string{"xargs", "pwsh", "-c", body}, 1, DialectPowerShell, false, true},
 		{"nested wrappers", []string{"sudo", "env", "X=1", "nohup", "pwsh", "-c", body}, 4, DialectPowerShell, false, true},
+		{"bash -c with positional words", []string{"bash", "-c", `"$@"`, "_", "pwsh"}, 0, DialectPOSIX, true, true},
 		{"bash -c alone", []string{"bash", "-lc", "ls"}, 0, DialectPOSIX, false, true},
 		{"command -v only prints", []string{"command", "-v", "pwsh"}, 0, DialectNone, false, false},
 		{"ssh runs it elsewhere", []string{"ssh", "host", "pwsh", "-c", body}, 0, DialectNone, false, false},
@@ -41,7 +45,7 @@ func TestShellLauncherCallReadsWrappers(t *testing.T) {
 	}
 	for _, tc := range tests {
 		call, ok := ShellLauncherCall(tc.argv)
-		if ok != tc.ok || (ok && (call.Start != tc.start || call.Dialect != tc.dialect)) {
+		if ok != tc.ok || (ok && (call.Start != tc.start || call.Dialect != tc.dialect || call.Trailing != tc.trailing)) {
 			t.Errorf("%s: got %+v %t, want start %d dialect %q trailing %t ok %t", tc.name, call, ok, tc.start, tc.dialect, tc.trailing, tc.ok)
 		}
 		if ok && (call.Dialect == DialectPowerShell || call.Dialect == DialectCMD) && !hostLauncherArgv(tc.argv, 0) {
@@ -50,9 +54,10 @@ func TestShellLauncherCallReadsWrappers(t *testing.T) {
 	}
 }
 
-// ShellLauncherCallOfText reads a launcher in a later statement
-// (rel-1-0-10:GAP-0805).
+// ShellLauncherCallOfText reads a launcher in a later statement and past the
+// 64 KiB command bound (rel-1-0-10:GAP-0805, GAP-0807).
 func TestShellLauncherCallOfTextReadsStatements(t *testing.T) {
+	pad := strings.Repeat("x", 70000)
 	tests := []struct {
 		name, text, body string
 		statement        int
@@ -64,6 +69,7 @@ func TestShellLauncherCallOfTextReadsStatements(t *testing.T) {
 		{"after a redirect", `echo x > out.txt; pwsh -c 'dir'`, "dir", 2, true},
 		{"start title", `start "" powershell -Command 'dir'`, "dir", 0, true},
 		{"quoted install path", `& 'C:\Program Files\PowerShell\7\pwsh.exe' -Command 'dir'`, "dir", 0, true},
+		{"past the command bound", `pwsh -c '# ` + pad + "\ndir'", "# " + pad + "\ndir", 0, true},
 		{"no launcher", `git status; ls`, "", 0, false},
 		{"launcher word as data", `echo 'pwsh -c dir'`, "", 0, false},
 		{"unterminated quote", `echo x; pwsh -c 'dir`, "", 0, false},

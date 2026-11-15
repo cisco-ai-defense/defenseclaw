@@ -656,9 +656,15 @@ func dispatchTrustedAction(
 				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcher.twin))
 			}()
 		}
+		if launcher.depthCut {
+			// A launcher nested past maxLauncherBodyDepth is not read: TRUNCATED
+			// at the depth cap (the one bound rule, rel-1-0-10:GAP-0806).
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Depth), request) }()
+		}
 		// A script past the input bound is not read in full, so the bound of the argv
-		// call still cuts it (rel-1-0-10:GAP-0712).
-		if cut := trustedReadingCut(request.Input, facts, launcher.read && len(launcher.twin.Input.Command) <= actionfacts.MaxCommandBytes); cut.Any() {
+		// call still cuts it (rel-1-0-10:GAP-0712), and so do the words a POSIX -c
+		// script runs as its arguments and long wrapper words (rel-1-0-10:GAP-0803).
+		if cut := trustedReadingCut(request.Input, facts, launcher.read && launcher.fully && len(launcher.twin.Input.Command) <= actionfacts.MaxCommandBytes); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
 			// statement budget: the call is TRUNCATED (the one bound rule),
 			// never judged below the unknown tier of its pack, and what was

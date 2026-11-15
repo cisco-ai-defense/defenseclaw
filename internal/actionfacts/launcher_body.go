@@ -52,6 +52,10 @@ type LauncherCall struct {
 	// Body is the script text and Dialect its language.
 	Body    string
 	Dialect Dialect
+	// Trailing is set when words follow the script word that the script may
+	// run as code (the positional arguments of bash -c '"$@"' _ ...): they
+	// are not part of Body (rel-1-0-10:GAP-0803).
+	Trailing bool
 }
 
 // ShellLauncherCall reads the launcher an argv runs: argv[0], or the command
@@ -81,7 +85,7 @@ func ShellLauncherCall(argv []string) (LauncherCall, bool) {
 		call.Body, ok = cmdLauncherBody(launcher)
 	case "bash", "sh", "zsh", "dash", "ksh", "mksh":
 		call.Dialect = DialectPOSIX
-		call.Body, ok = posixLauncherBody(launcher)
+		call.Body, call.Trailing, ok = posixLauncherBody(launcher)
 	default:
 		return LauncherCall{}, false
 	}
@@ -238,8 +242,13 @@ func cmdLauncherBody(argv []string) (string, bool) {
 const maxLauncherTextWords = 64
 
 // maxLauncherTextStatements bounds the statements of a command string read
-// for a launcher.
-const maxLauncherTextStatements = 16
+// for a launcher; maxLauncherTextBytes the text: a launcher string past the
+// 64 KiB command bound still has its launcher read (rel-1-0-10:GAP-0807),
+// and the call's own reading is TRUNCATED at that bound all the same.
+const (
+	maxLauncherTextStatements = 16
+	maxLauncherTextBytes      = 1 << 20
+)
 
 // ShellLauncherBodyOfText returns the script of a launcher written as one
 // command string, such as `powershell.exe -Command '<script>'` or
@@ -261,7 +270,7 @@ func ShellLauncherBodyOfText(text string) (body string, dialect Dialect, ok bool
 // operator & is skipped. words are the words of that statement and
 // statement its index.
 func ShellLauncherCallOfText(text string) (call LauncherCall, words []string, statement int, ok bool) {
-	if text == "" || len(text) > maxCommandBytes {
+	if text == "" || len(text) > maxLauncherTextBytes {
 		return LauncherCall{}, nil, 0, false
 	}
 	from := 0
@@ -384,12 +393,12 @@ func launcherStatementEnd(text string, i int) int {
 // any option cluster (-c, -lc, -ic, -xc, -o pipefail -c ...). Whether a
 // startup file runs first does not matter here: it runs before the script,
 // never instead of it.
-func posixLauncherBody(argv []string) (string, bool) {
+func posixLauncherBody(argv []string) (string, bool, bool) {
 	for i := 1; i < len(argv); i++ {
 		word := argv[i]
 		switch {
 		case word == "--":
-			return "", false
+			return "", false, false
 		case strings.HasPrefix(word, "--"):
 			if word == "--rcfile" || word == "--init-file" {
 				i++
@@ -408,16 +417,16 @@ func posixLauncherBody(argv []string) (string, bool) {
 			i += valued
 			if command {
 				if i+1 >= len(argv) || strings.TrimSpace(argv[i+1]) == "" {
-					return "", false
+					return "", false, false
 				}
-				return argv[i+1], true
+				return argv[i+1], i+2 < len(argv), true
 			}
 		default:
 			// A script file or stdin: no script text in the argv.
-			return "", false
+			return "", false, false
 		}
 	}
-	return "", false
+	return "", false, false
 }
 
 // cmdSwitchWithValue reports a cmd startup switch with a valid value:

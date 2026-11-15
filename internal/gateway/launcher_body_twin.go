@@ -19,8 +19,16 @@ import (
 const maxArgvDecodeBytes = 256 << 10
 
 // maxLauncherBodyDepth bounds the launchers read through one another
-// (cmd /c powershell -Command ...): each level is one more analysis.
-const maxLauncherBodyDepth = 2
+// (cmd /c powershell -Command ...): each level is one more analysis. It is the
+// depth the over-limit launcher screen reads (actionfacts
+// maxLauncherScriptDepth); a launcher nested deeper is TRUNCATED at the depth
+// cap, never a silent allow (rel-1-0-10:GAP-0806).
+const maxLauncherBodyDepth = 4
+
+// maxLauncherPrefixBytes is the most a wrapper's words before the launcher
+// (sudo -u x, env NAME=value, timeout 5) may hold for the launcher script to
+// count as the whole call: longer wrapper words are not read either.
+const maxLauncherPrefixBytes = 4 << 10
 
 // trustedArgvCommandInput returns the argv array a shell execution tool call
 // sends as its command (the Codex shell tool: ["powershell.exe", "-Command",
@@ -53,10 +61,15 @@ func trustedArgvCommandInput(input actionfacts.Input) ([]string, bool) {
 }
 
 // launcherBodyReading is the second reading of a shell launcher call
-// (launcherBodyTwinRequest): the request that reads it.
+// (launcherBodyTwinRequest): the request that reads it, whether the launcher's
+// script is all the call runs (fully: no unread wrapper words, no words after
+// a POSIX -c script that it may run), and whether a launcher was found past
+// maxLauncherBodyDepth (depthCut).
 type launcherBodyReading struct {
-	twin trustedActionRequest
-	read bool
+	twin     trustedActionRequest
+	read     bool
+	fully    bool
+	depthCut bool
 }
 
 // launcherBodyTwinRequest is the second reading of a shell launcher call, so
@@ -115,9 +128,13 @@ func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Fac
 		return launcherBodyReading{}
 	}
 	if request.launcherDepth >= maxLauncherBodyDepth {
-		return launcherBodyReading{}
+		return launcherBodyReading{depthCut: true}
 	}
-	reading := launcherBodyReading{read: true}
+	prefix := 0
+	for _, word := range words[:call.Start] {
+		prefix += len(word)
+	}
+	reading := launcherBodyReading{read: true, fully: !call.Trailing && prefix <= maxLauncherPrefixBytes}
 	twin := request
 	twin.launcherDepth++
 	twin.record, twin.recordTelemetry = nil, nil
