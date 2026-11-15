@@ -33,7 +33,7 @@ type passthroughBody struct {
 // redaction, so the inspectors always see what the upstream gets
 // (GAP-0284): a message that also holds a refused string keeps its other
 // blocks and strings in the view, as in the body.
-func (b *passthroughBody) promptView() (msgs []ChatMessage, userText, turnText, ollamaSystemText string) {
+func (b *passthroughBody) promptView() (msgs []ChatMessage, userText, turnText, ollamaSystemText string, systemInstructionParts []string) {
 	msgs = b.Messages
 	userText = lastUserText(msgs)
 	// turnText is the whole user turn of a message list, inspected instead of
@@ -108,7 +108,7 @@ func (b *passthroughBody) promptView() (msgs []ChatMessage, userText, turnText, 
 				if role == "" {
 					role = "user"
 				}
-				geminiMsgs = append(geminiMsgs, ChatMessage{Role: role, Content: t.Text})
+				geminiMsgs = append(geminiMsgs, ChatMessage{Role: role, Content: t.Text, textParts: t.Parts})
 			}
 			userText = lastUserText(geminiMsgs)
 			turnText = promptTurnText(geminiMsgs)
@@ -118,7 +118,10 @@ func (b *passthroughBody) promptView() (msgs []ChatMessage, userText, turnText, 
 		}
 	}
 	if userText == "" && len(b.SystemInstruction) > 0 {
-		userText = extractGeminiSystemInstructionText(b.SystemInstruction)
+		// No message holds these parts: the caller puts them on the request
+		// context for the prompt rules' parts view (GAP-0465).
+		systemInstructionParts = extractGeminiSystemInstructionParts(b.SystemInstruction)
+		userText = strings.Join(systemInstructionParts, "\n")
 	}
 
 	// Ollama /api/generate + legacy completion endpoints: top-level
@@ -146,5 +149,5 @@ func (b *passthroughBody) promptView() (msgs []ChatMessage, userText, turnText, 
 	if userText == "" && b.Instructions != "" {
 		userText = b.Instructions
 	}
-	return msgs, userText, turnText, ollamaSystemText
+	return msgs, userText, turnText, ollamaSystemText, systemInstructionParts
 }

@@ -4275,3 +4275,187 @@ def test_static_audit_rejects_a_user_label_on_the_tokenomics_counters(
 
     assert any("defenseclaw_model_cost_USD_total filters on unknown labels: user" in error for error in errors)
     assert any("uses unknown exact kind value" in error for error in errors)
+
+
+# --- Routing, savings and budgets board (S10b, GAP-0588) ----------------------
+
+_ROUTING_BOARD_METRICS = {
+    "defenseclaw_model_cost_baseline_USD_total": "metric.defenseclaw.model.cost.baseline",
+    "defenseclaw_model_cost_compared_USD_total": "metric.defenseclaw.model.cost.compared",
+    "defenseclaw_semantic_routing_decision_total": "metric.defenseclaw.semantic_routing.decision",
+    "defenseclaw_budget_limit_USD": "metric.defenseclaw.budget.limit",
+    "defenseclaw_budget_spend_USD": "metric.defenseclaw.budget.spend",
+    "defenseclaw_budget_peak_subject_spend_USD": "metric.defenseclaw.budget.peak_subject_spend",
+    "defenseclaw_budget_subjects_exceeded": "metric.defenseclaw.budget.subjects_exceeded",
+    "defenseclaw_budget_store_healthy": "metric.defenseclaw.budget.store.healthy",
+    "defenseclaw_budget_store_sync_age_seconds": "metric.defenseclaw.budget.store.sync_age",
+}
+# Series the board also reads: the shared tokenomics counters and the routing latency histogram.
+_ROUTING_BOARD_OTHER = {
+    "defenseclaw_model_cost_USD_total",
+    "defenseclaw_model_tokens_total",
+    "defenseclaw_semantic_routing_latency_milliseconds_bucket",
+}
+
+
+def _routing_targets(datasource: str) -> list[tuple[str, str]]:
+    dashboard = _dashboard("defenseclaw-routing.json")
+    found = []
+    for panel in _all_panels(dashboard["panels"]):
+        for target in panel.get("targets", []):
+            if (target.get("datasource") or panel["datasource"])["type"] == datasource:
+                found.append((panel["title"], target["expr"]))
+    return found
+
+
+def test_routing_board_label_contract_matches_the_registry() -> None:
+    audit = _load_audit_module()
+    groups = {group["id"]: group for group in _genai_registry()["groups"]}
+    for prometheus_name, group_id in _ROUTING_BOARD_METRICS.items():
+        metric = groups[group_id]["metric"]
+        projected = {
+            mapping["label"]
+            for projection in metric.get("label_projections", [])
+            if projection["profile"] == "local-observability-v1"
+            for mapping in projection["mappings"]
+        }
+        # Prometheus turns a dot in a label name into an underscore (error.code -> error_code).
+        projected = {label.replace(".", "_") for label in projected}
+        assert audit.PROMETHEUS_METRIC_LABELS[prometheus_name] == projected, prometheus_name
+        # No metric names a person, a directory group or a budget subject.
+        assert not {"user", "user_id", "group", "identity", "subject", "principal"} & projected, prometheus_name
+    # A budget is named by its administrator-chosen id only.
+    assert audit.BUDGET_LABELS == {"budget_id", "scope", "period"}
+
+
+def test_routing_board_prometheus_queries_use_only_registered_series_and_labels() -> None:
+    audit = _load_audit_module()
+    known = set(_ROUTING_BOARD_METRICS) | _ROUTING_BOARD_OTHER
+    seen: set[str] = set()
+    for title, expression in _routing_targets("prometheus"):
+        names = set(re.findall(r"\bdefenseclaw_[A-Za-z_]+\b", expression))
+        assert names and names <= known, (title, names - known)
+        seen |= names
+        grouped = {label.strip() for group in re.findall(r"\b(?:by|on)\s*\(([^)]*)\)", expression) for label in group.split(",")}
+        allowed = set().union(*(audit.PROMETHEUS_METRIC_LABELS[name] for name in names)) | {"host_name", "le"}
+        assert grouped <= allowed, (title, grouped - allowed)
+        # Absent stays absent: a zero is only ever derived from a series that proves the reporter is alive.
+        assert "vector(0)" not in expression, title
+    assert set(_ROUTING_BOARD_METRICS) <= seen
+
+
+def test_routing_board_log_panels_read_registered_model_usage_fields() -> None:
+    registry = _genai_registry()
+    registered = {
+        attribute["id"].replace(".", "_")
+        for path in sorted((ROOT / "schemas/telemetry/v8").glob("*.yaml"))
+        for attribute in (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("attributes", [])
+    }
+    registered |= {
+        ref["ref"].replace(".", "_")
+        for group in registry["groups"]
+        for ref in (group.get("attributes") or [])
+        if "ref" in ref
+    }
+    fields = set()
+    log_panels = _routing_targets("loki")
+    assert len(log_panels) >= 6
+    for title, expression in log_panels:
+        assert 'event_name="model.usage"' in expression and "| json" in expression, title
+        assert "$__rate_interval" not in expression, title
+        fields |= set(re.findall(r"\bbody_[a-z0-9_]+", expression))
+    unknown = {field for field in fields if field[len("body_"):] not in registered}
+    assert not unknown, f"log fields the registry does not define: {sorted(unknown)}"
+    assert {"body_defenseclaw_cost_baseline_usd", "body_defenseclaw_cost_usd", "body_defenseclaw_route_decision"} <= fields
+
+
+def test_routing_board_has_the_requested_views() -> None:
+    dashboard = _dashboard("defenseclaw-routing.json")
+    titles = {panel["title"] for panel in dashboard["panels"]}
+    assert {
+        # routing: decisions over time by result, reason and model, top categories, fallbacks and refusals
+        "Decisions over time, by result",
+        "Decisions by reason (route source)",
+        "Calls by routed model (logs)",
+        "Top routed categories (range)",
+        "Fallbacks by cause (decisions)",
+        "Refusals by reason (managed)",
+        "Sensitive requests refused (fail closed)",
+        # savings
+        "Spent on compared calls (USD)",
+        "The same calls on the requested model (USD)",
+        "Saved (USD)",
+        "Calls with no comparison (share)",
+        "Requested models with no price (no comparison)",
+        # budgets
+        "Highest subject spend against the limit (%)",
+        "Budgets: limit, spend and subjects over the limit",
+        "Budget stops over time",
+        "Fleet budget store",
+        # per user, per group, per host
+        "Spend per user in range (logs)",
+        "Group budgets: spend against the limit (%)",
+        "Decisions, fallbacks and refusals by host (range)",
+    } <= titles
+    assert dashboard["uid"] == "defenseclaw-routing"
+    variables = {variable["name"]: variable for variable in dashboard["templating"]["list"]}
+    assert set(variables) == {"connector", "host", "budget", "group", "user"}
+    assert "host_name" in variables["host"]["definition"]
+    assert 'scope="group"' in variables["group"]["definition"]
+    assert variables["user"]["type"] == "textbox"
+
+
+def test_routing_board_savings_compare_like_with_like_and_show_absence() -> None:
+    dashboard = _dashboard("defenseclaw-routing.json")
+    saved = _panel(dashboard, "Saved (USD)")["targets"][0]["expr"]
+    # Both sides come from the counters that count a call only when both costs are known.
+    assert "defenseclaw_model_cost_baseline_USD_total" in saved and "defenseclaw_model_cost_compared_USD_total" in saved
+    assert "defenseclaw_model_cost_USD_total" not in saved
+    no_comparison = _panel(dashboard, "Calls with no comparison (share)")
+    assert no_comparison["datasource"]["type"] == "loki"
+    assert 'body_defenseclaw_cost_baseline_usd=""' in no_comparison["targets"][0]["expr"]
+    # A negative saving is visible, not clipped.
+    saved_panel = _panel(dashboard, "Saved (USD)")
+    steps = saved_panel["fieldConfig"]["defaults"]["thresholds"]["steps"]
+    assert steps[0]["color"] == "red" and steps[1]["value"] == 0
+
+
+def test_routing_board_per_user_and_group_panels_keep_identity_out_of_metrics() -> None:
+    dashboard = _dashboard("defenseclaw-routing.json")
+    per_user = _panel(dashboard, "Spend per user in range (logs)")
+    assert per_user["datasource"]["type"] == "loki"
+    assert "sum by (user)" in per_user["targets"][0]["expr"]
+    assert not any(
+        re.search(r"\buser\b|\bgroup\b", expression.replace('scope="group"', "").replace('scope="user"', "").replace("$group", ""))
+        for _title, expression in _routing_targets("prometheus")
+    )
+    group = _panel(dashboard, "Group budgets: spend against the limit (%)")
+    assert 'scope="group"' in group["targets"][0]["expr"] and "$group" in group["targets"][0]["expr"]
+    own = _panel(dashboard, "Own and all")["options"]["content"]
+    assert "never leave the endpoint" in own
+
+
+
+def test_routing_board_saving_survives_a_one_sided_counter() -> None:
+    """A call served by a free model has no compared cost; a free requested model has no baseline. Either way
+    the saving must still be computed from the side that exists, never blank."""
+    dashboard = _dashboard("defenseclaw-routing.json")
+    for title in ("Saved (USD)", "Saved (share of counterfactual)", "Saved per interval (USD)", "Saved by routed model (range)", "Saved by route decision (range)"):
+        expression = _panel(dashboard, title)["targets"][0]["expr"]
+        assert "defenseclaw_model_cost_baseline_USD_total" in expression and "defenseclaw_model_cost_compared_USD_total" in expression, title
+        # Both operands are guarded by an `or 0 * <other counter>` (or `or <other> * 0`) over the other counter.
+        assert expression.count(" or 0 * ") + expression.count(") or sum by") >= 2, title
+        if title == "Saved (share of counterfactual)":
+            # The denominator is unguarded and must be positive: with no baseline the panel is blank, not -Inf.
+            assert expression.rstrip().endswith("> 0)") or "> 0" in expression.split(" / ")[-1], title
+
+
+def test_routing_board_fail_closed_panel_is_not_a_made_up_zero() -> None:
+    dashboard = _dashboard("defenseclaw-routing.json")
+    panel = _panel(dashboard, "Sensitive requests refused (fail closed)")
+    expression = panel["targets"][0]["expr"]
+    assert " or 0 * " not in expression and "vector(0)" not in expression
+    assert panel["fieldConfig"]["defaults"]["noValue"] == "not reported by this gateway"
+    # The leak path is visible with its own panel.
+    leak = _panel(dashboard, "Sensitive requests that went to the original model")["targets"][0]["expr"]
+    assert 'filtered_by="sensitive"' in leak and 'result="fallback"' in leak

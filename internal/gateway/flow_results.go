@@ -220,6 +220,7 @@ func secretFlowResultDialect(sid string, req agentHookRequest, tool string, args
 func secretFlowResultCall(req agentHookRequest, home string) (effects.Call, effects.Options, bool) {
 	tool := agentHookTrustedActionTool(req.ConnectorName, req.ToolName, runtime.GOOS)
 	args, cwd := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, req.ToolArgs)
+	tool, args = agentHookNativeFileView(tool, args)
 	if strings.EqualFold(req.ConnectorName, "cursor") && canonicalEvent(req.HookEventName) == "aftershellexecution" {
 		// afterShellExecution names no tool: its payload is the command.
 		if command := payloadString(req.Payload, "command"); command != "" {

@@ -1782,7 +1782,7 @@
     "cascadeLanes": {
       "type": "object",
       "maxProperties": 64,
-      "description": "Live/shadow switch per registered lane: off, shadow or on. A lane that ships shadow-only (effects, secret_flow) accepts off and shadow; the gateway refuses any other value or lane name.",
+      "description": "Live/shadow switch per registered lane: off, shadow or on. A lane that ships shadow-only (effects, secret_flow) accepts off and shadow. The alignment lane (alignment check) accepts off, shadow, alert or block. The gateway refuses any other value or lane name.",
       "propertyNames": {
         "pattern": "^[a-z][a-z0-9_]{0,63}$"
       },
@@ -2275,7 +2275,8 @@
               "on_classifier_error",
               "sensitive",
               "systemone",
-              "route_only"
+              "route_only",
+              "context"
             ]
           }
         }
@@ -5989,8 +5990,33 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["aliases"],
-          "anyOf": [{"required": ["severity_at_least"]}, {"required": ["signals"]}],
+          "anyOf": [{"required": ["severity_at_least"]}, {"required": ["signals"]}, {"required": ["check"], "properties": {"check": {"enum": ["auto", "decision_model", "judge"]}}}],
           "properties": {
+            "check": {
+              "type": "string",
+              "enum": ["off", "auto", "decision_model", "judge"],
+              "description": "One bounded yes/no sensitive-data question per request to the decision model or the judge, besides the regex floor (off by default)."
+            },
+            "on_unavailable": {
+              "type": "string",
+              "enum": ["local", "ignore"],
+              "description": "A check that failed or timed out: local (default) routes to the sensitive aliases, ignore keeps the floor-only decision. Never a block."
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "anyOf": [{"const": 0}, {"minimum": 50, "maximum": 5000}],
+              "description": "0 means the default."
+            },
+            "max_bytes": {
+              "type": "integer",
+              "anyOf": [{"const": 0}, {"minimum": 256, "maximum": 65536}],
+              "description": "0 means the default."
+            },
+            "definition": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\u0000-\u0008\u000b-\u001f]*$"
+            },
             "signals": {
               "type": "array",
               "minItems": 1,
@@ -6083,6 +6109,34 @@
         },
         "admin": {
           "$ref": "#/$defs/routingAdmin"
+        },
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Bounded recent context for the router: older human-typed user turns and tool names (never tool results, assistant or system text). Absent or zero = the newest user turn only.",
+          "properties": {
+            "recent_user_turns": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8
+            },
+            "include_first_user_turn": {
+              "type": "boolean"
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "per_turn_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "include_tool_names": {
+              "type": "boolean"
+            }
+          }
         },
         "enabled": {
           "type": "boolean"

@@ -73,6 +73,7 @@ EXPECTED_DASHBOARD_UIDS = {
     "defenseclaw-identity",
     "defenseclaw-overview",
     "defenseclaw-policy-decisions",
+    "defenseclaw-routing",
     "defenseclaw-runtime",
     "defenseclaw-sandboxes",
     "defenseclaw-scanners",

@@ -585,10 +585,17 @@ func enterpriseHooksEnumerateDiscoverAll(ctx context.Context, account unixidenti
 	var privateInstalls []enterprisehooks.PrivateAgentInstall
 	incompleteSeen := map[string]bool{}
 	var incompletes []enterprisehooks.PrivateAgentInstall
-	addIncomplete := func(connector, skipped string) {
+	addIncomplete := func(connector, skipped, folder string) {
 		if !incompleteSeen[connector] {
 			incompleteSeen[connector] = true
-			incompletes = append(incompletes, enterprisehooks.PrivateAgentInstall{Connector: connector, Incomplete: true, Skipped: enterprisehooks.KnownPrivateInstallSkipped(skipped)})
+			// The folder a scan gap names is the worker's answer: keep it
+			// only as a clean absolute path in the account's own home.
+			if relative, err := filepath.Rel(account.Home, folder); err != nil || len(folder) > 512 || !filepath.IsAbs(folder) ||
+				filepath.Clean(folder) != folder || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+				folder = ""
+			}
+			incompletes = append(incompletes, enterprisehooks.PrivateAgentInstall{Connector: connector, Incomplete: true,
+				Skipped: enterprisehooks.KnownPrivateInstallSkipped(skipped), Folder: folder})
 		}
 	}
 	for _, install := range response.PrivateInstalls {
@@ -598,11 +605,11 @@ func enterpriseHooksEnumerateDiscoverAll(ctx context.Context, account unixidenti
 		// The record keeps every incomplete connector, but at most the bound
 		// of copies: one more copy marks the scan incomplete.
 		if install.Incomplete {
-			addIncomplete(install.Connector, install.Skipped)
+			addIncomplete(install.Connector, install.Skipped, install.Folder)
 			continue
 		}
 		if len(privateInstalls) >= enterprisehooks.PrivateAgentInstallMaxFindings {
-			addIncomplete(install.Connector, enterprisehooks.PrivateInstallSkippedFindings)
+			addIncomplete(install.Connector, enterprisehooks.PrivateInstallSkippedFindings, "")
 			continue
 		}
 		if install.Version != "" && !enterprisehooks.ValidUnixAgentVersion(install.Version) {
@@ -611,7 +618,7 @@ func enterpriseHooksEnumerateDiscoverAll(ctx context.Context, account unixidenti
 		install.Skipped = ""
 		if len(install.Path) > 512 || !filepath.IsAbs(install.Path) || filepath.Clean(install.Path) != install.Path ||
 			!enterprisehooks.UnixPrivateInstallPathAllowed(account.Home, install.Path) {
-			addIncomplete(install.Connector, enterprisehooks.PrivateInstallSkippedOutsideRoots)
+			addIncomplete(install.Connector, enterprisehooks.PrivateInstallSkippedOutsideRoots, "")
 			continue
 		}
 		privateInstalls = append(privateInstalls, install)

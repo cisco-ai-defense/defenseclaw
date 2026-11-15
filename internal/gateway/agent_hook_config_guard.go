@@ -162,7 +162,7 @@ func newAgentHookConfigGuard(cwd, home string) *agentHookConfigGuard {
 		if hermes := hermespath.ConfigPathForUserHome(guard.home); hermes != "" {
 			guard.files = append(guard.files, gatewayconnector.AgentHookConfigFile{Path: hermes, Format: gatewayconnector.AgentHookConfigHermesYAML})
 		}
-		if physical, err := filepath.EvalSymlinks(guard.home); err == nil && physical != guard.home {
+		if physical, err := seamEvalSymlinks(guard.home); err == nil && physical != guard.home {
 			guard.physicalHome = physical
 		}
 	}
@@ -198,7 +198,7 @@ func (g *agentHookConfigGuard) shellTarget(raw string) bool {
 				strings.HasPrefix(g.cwd, place+string(filepath.Separator)) {
 				continue
 			}
-			if info, err := os.Stat(place); err == nil && info.IsDir() {
+			if info, err := seamStat(place); err == nil && info.IsDir() {
 				return true
 			}
 		}
@@ -325,15 +325,15 @@ func (g *agentHookConfigGuard) resolvePlaces(raw string) []string {
 	places := []string{target}
 	current := target
 	for hop := 0; hop < agentHookConfigMaxLinkHops; hop++ {
-		if physical, err := filepath.EvalSymlinks(current); err == nil {
+		if physical, err := seamEvalSymlinks(current); err == nil {
 			places = append(places, physical)
 			break
 		}
 		// A file that does not exist yet, or a link to one: the folder it
 		// lands in, through its links, and the link's own target.
-		info, err := os.Lstat(current)
+		info, err := seamLstat(current)
 		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			link, err := os.Readlink(current)
+			link, err := seamReadlink(current)
 			if err != nil {
 				break
 			}
@@ -344,7 +344,7 @@ func (g *agentHookConfigGuard) resolvePlaces(raw string) []string {
 			places = append(places, current)
 			continue
 		}
-		if dir, err := filepath.EvalSymlinks(filepath.Dir(current)); err == nil {
+		if dir, err := seamEvalSymlinks(filepath.Dir(current)); err == nil {
 			places = append(places, filepath.Join(dir, filepath.Base(current)))
 		}
 		break
@@ -419,7 +419,7 @@ func (g *agentHookConfigGuard) read(raw string) ([]byte, bool) {
 	if len(places) == 0 {
 		return nil, false
 	}
-	file, err := os.Open(places[0])
+	file, err := seamOpen(places[0])
 	if err != nil {
 		return nil, false
 	}
@@ -1376,6 +1376,27 @@ func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHoo
 			other = append(other, path)
 		}
 	}
+	// Code that is not proven read-only is handed a hook config by a runner
+	// the shared reader does not follow (sudo find -exec, su -c, ssh, uv run,
+	// sh -c with $0 or $1, a brace word): the hand-off reading judges it
+	// (rel-1-0-10:GAP-0365).
+	handed, _ := hookpaths.InlineHandedPaths(part.Command, part.Dir, guard.home)
+	for _, word := range handed {
+		switch {
+		case !word.Dynamic:
+			if (slices.Contains(registered, word.Path) || guard.format(word.Path) != "") && !slices.Contains(other, word.Path) &&
+				!slices.Contains(owned, word.Path) {
+				other = append(other, word.Path)
+			}
+		default:
+			for _, name := range registered {
+				if hookpaths.CommandMentionsPath(part.Command, guard.home, name) && !slices.Contains(other, name) &&
+					!slices.Contains(owned, name) {
+					other = append(other, name)
+				}
+			}
+		}
+	}
 	return owned, other
 }
 
@@ -1402,6 +1423,14 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 		if json.Unmarshal(args[key], &command) == nil && command != "" {
 			return command
 		}
+	}
+	// Any other key the trusted-action parser reads as the command (agy
+	// run_command's CommandLine): read only under command and cmd, an
+	// Antigravity command that stops or disables DefenseClaw, or rewrites an
+	// agent's hook configuration, raised no guard finding where every other
+	// hook connector blocks it.
+	if command, ok := trustedShellCommandArgument(input.Args); ok {
+		return command
 	}
 	return ""
 }
@@ -1583,7 +1612,7 @@ func agentHookConfigGitGlobalSubcommand(argv []string, guard *agentHookConfigGua
 				}
 			}
 			for dir := root; ; dir = filepath.Dir(dir) {
-				if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+				if _, err := seamLstat(filepath.Join(dir, ".git")); err == nil {
 					return index, dir
 				}
 				if dir == filepath.Dir(dir) {
@@ -1804,7 +1833,7 @@ func agentHookConfigGitGlobReach(spec, worktree string, guard *agentHookConfigGu
 		}
 		// A pattern matches the tracked files of the tree, not every name a
 		// registration file could have in this folder.
-		if _, err := os.Lstat(file.Path); err != nil {
+		if _, err := seamLstat(file.Path); err != nil {
 			continue
 		}
 		base := guard.cwd
@@ -1973,7 +2002,7 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 				unknown = true
 				break
 			}
-			patch, err := os.ReadFile(places[0])
+			patch, err := seamReadFile(places[0])
 			if err != nil || len(patch) > agentHookConfigMaxBytes {
 				unknown = true
 				break
@@ -2067,7 +2096,7 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 			if !filepath.IsAbs(candidate) {
 				candidate = filepath.Join(guard.cwd, candidate)
 			}
-			info, err := os.Lstat(candidate)
+			info, err := seamLstat(candidate)
 			if err != nil {
 				continue
 			}
@@ -2078,7 +2107,7 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 				dir := filepath.Clean(candidate) + string(filepath.Separator)
 				for _, file := range guard.files {
 					if strings.HasPrefix(file.Path, dir) {
-						if _, err := os.Stat(file.Path); err == nil {
+						if _, err := seamStat(file.Path); err == nil {
 							return arg
 						}
 					}
@@ -2094,14 +2123,14 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 	for _, file := range guard.files {
 		relative, err := filepath.Rel(worktree, file.Path)
 		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			if _, err := os.Stat(file.Path); err == nil {
+			if _, err := seamStat(file.Path); err == nil {
 				return file.Path
 			}
 		}
 	}
 	for _, file := range agentHookConfigProjectFiles {
 		path := filepath.Join(worktree, filepath.FromSlash(strings.TrimPrefix(file.suffix, "/")))
-		if _, err := os.Stat(path); err == nil {
+		if _, err := seamStat(path); err == nil {
 			return path
 		}
 	}

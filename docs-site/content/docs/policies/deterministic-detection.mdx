@@ -21,7 +21,7 @@ This page inventories the detectors currently shipped in the repository and
 explains which layer owns each decision. Benchmark scores for these layers are
 published in [Deterministic Detection Benchmarks](/docs/guardrail/benchmarks).
 
-The balanced/default enabled rule catalog contains 273 local rules across seven families. The repository also contains 26 fixed bounded chains, eleven MCP-description YARA signatures, two post-event correlator patterns, five selectable high-assurance packs and one staged SSH integrity policy contract. The YAML and Go files in [Source of truth](#source-of-truth-and-validation) are authoritative if these counts change.
+The balanced/default enabled rule catalog contains 282 local rules across seven families. The repository also contains 26 fixed bounded chains, eleven MCP-description YARA signatures, two post-event correlator patterns, five selectable high-assurance packs and one staged SSH integrity policy contract. The YAML and Go files in [Source of truth](#source-of-truth-and-validation) are authoritative if these counts change.
 
 ## Decision architecture
 
@@ -56,9 +56,9 @@ rules and lexical fallback posture:
 
 | Profile | Declared rules | Enabled rules | CEL declarations | Tool-call-only | Never-match `a^` fallbacks |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Balanced/default | 277 | 273 | 137 | 151 | 88 |
-| Permissive | 277 | 269 | 137 | 151 | 90 |
-| Strict | 289 | 289 | 150 | 169 | 90 |
+| Balanced/default | 286 | 282 | 137 | 152 | 89 |
+| Permissive | 286 | 278 | 137 | 152 | 91 |
+| Strict | 298 | 298 | 150 | 170 | 91 |
 
 `a^` is an intentionally impossible RE2 pattern. It is used when a broad raw
 text fallback would add noise or could not safely prove the same semantic
@@ -70,18 +70,50 @@ the permissive ones. In every profile,
 `CMD-WRAPPED-DOWNLOAD-EXEC` and `CMD-SUBST-DOWNLOAD-EXEC` keep a `false`
 declaration because only their exact action proof can match them.
 
-The 252 enabled balanced/default rules are generated from
+The 282 enabled balanced/default rules are generated from
 `policies/guardrail/default/rules/*.yaml`:
 
 | Family | Rules | What it detects |
 | --- | ---: | --- |
-| `command` | 136 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
-| `sensitive-path` | 26 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
-| `secret` | 24 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and secret assignments (a credential-named key with a random-looking value) |
-| `trust-exploit` | 22 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, and obfuscation signals |
+| `command` | 151 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
+| `sensitive-path` | 29 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
+| `secret` | 26 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and secret assignments (a credential-named key with a random-looking value) |
+| `trust-exploit` | 30 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, role and chat-template spoofing, hidden text, and obfuscation signals |
 | `c2` | 18 | Known exfiltration endpoints, cloud metadata SSRF forms, DNS tunneling, and DNS exfiltration indicators |
-| `enterprise-data` | 13 | Structured payment, banking, contact, medical, birth-date, CSV, and JSON PII shapes |
-| `cognitive-file` | 11 | Agent instruction, memory, configuration, gateway, and detector-state modification |
+| `enterprise-data` | 15 | Structured payment, banking, contact, medical, birth-date, CSV, and JSON PII shapes |
+| `cognitive-file` | 13 | Agent instruction, memory, configuration, gateway, and detector-state modification |
+
+### Prompt-injection floor
+
+The default packs carry a small structural floor for text that reaches the model
+as user content (an `/llm` prompt, a hook prompt, a tool result). It is not a
+list of injection phrases; each rule claims one structure that ordinary prompts
+do not have:
+
+| Rule | Structure | Balanced/default | Strict |
+| --- | --- | --- | --- |
+| `TRUST-ADDRESSED-DEFER` | A message addressed to the assistant that defers the user's own task ("a message from X to you ... before you can solve the task ...") | alert (HIGH) | block |
+| `TRUST-FAKE-ROLE-HEADER` | A line that starts as a system or assistant header (`###(system_message)`, `[SYSTEM_PROMPT]`) | alert (HIGH) | block |
+| `TRUST-HIDDEN-TAGS` | Eight or more Unicode tag characters in a row (text no reader sees) | alert (HIGH) | block |
+| `TRUST-HIDDEN-INVISIBLE` | Sixteen or more zero-width or format characters in a row | alert (HIGH) | block |
+| `TRUST-HIDDEN-BIDI` | A bidirectional override or isolate control that is closed again | alert (MEDIUM) | block |
+| `TRUST-IGNORE-INSTEAD` | An override of the earlier instructions that names a replacement task ("ignore your previous <word> ... instead") | alert (HIGH) | block |
+| `TRUST-TODO-DATA-MOVE` | A message that opens with a task-list marker (`TODO:`, `FIXME:`) and tells the assistant to send, forward, share or transfer something | alert (HIGH) | block |
+| `TRUST-TODO-DIRECTIVE` | A message that opens with a task-list marker and tells the assistant to delete, change, visit, book or create something | alert (MEDIUM) | block |
+
+`TRUST-IGNORE-PREVIOUS` and `TRUST-DISREGARD` also accept the determiners
+people write ("ignore your previous instructions", "disregard the above
+rules"); like before they are CRITICAL and block in every pack that blocks
+CRITICAL. The prompt path also scans the trust rules on a folded view of the
+text (invisible separators removed, look-alike letters mapped), as the hook path
+does, so a directive with a zero-width character inside a word is still found.
+
+With `guardrail.detection_strategy: regex_judge` and an opted-in judge, a prompt
+that has only half of one of these shapes (a label directive such as `TODO:` as
+the first words, a signed message inside a tag envelope, "ignore your previous
+<word>", a message addressed to the assistant, or a deferral of the user's task)
+goes to the injection adjudicator. Without a judge these near misses do nothing,
+and a judge that fails never turns one into an alert.
 
 The generated Go catalog is checked against the YAML in CI. Edit the YAML
 sources, not `internal/gateway/rules_catalog_generated.go`.
@@ -452,6 +484,7 @@ An MCP or app tool reaches the gateway as a tool name and a JSON object. `intern
 | Send to a recipient, copy or URL | `to`, `recipients`, `url`, and the copy and redirect keys (`bcc`, `cc`, `bcc_override`, `forward_to`, `output_url`, `callback_url`) | `MCP-SEND-REDIRECT`: a hidden copy (`bcc`, `forward_to`) or output field (`output_url`) names a host that is none of the call's own parties (its recipients and its request URLs), or a `callback_url` names a host other than the call's own API (a call with no request URL of its own has nothing to compare and adds nothing). A visible `to` or `cc` is a recipient, not a copy. The caller's own domain has no trusted source in 1.0.10 (a `from` or `sender` field is the caller's claim), so this finding is an alert in every pack and never a block. `MCP-SEND-COLLECTOR`: a paste, file-drop or webhook-catcher host from the sandbox egress blocklist, for a fetch as for a send |
 | Security setting | argument names and values such as `skip_2fa: true`, `verify_ssl: false`, `include_sensitive_data: true`, `acl: public-read`, and `{"op": "disable_mfa"}` entries | `MCP-SETTING-DOWNGRADE` |
 | Code | the code argument of a code-execution tool | `MCP-CODE-DECODE-EXEC` (decoded text is passed to an evaluator) |
+| Page script | the script argument of a browser-automation tool that runs JavaScript in the page (Playwright `browser_evaluate` and `browser_run_code_unsafe`, Chrome DevTools `evaluate_script`, Puppeteer `puppeteer_evaluate`; the table's `page_script`). Navigation calls (`browser_navigate`, `navigate_page`, `puppeteer_navigate`) tell the gateway which page the session has open | `PAGE-SCRIPT-SESSION-EGRESS` (an experiment: an alert in every pack, strict and managed included; a block in strict waits for a corpus that navigates before a script): a value read from `document.cookie`, `localStorage`, `sessionStorage`, `indexedDB` or the Cookie Store API reaches `fetch`, `XMLHttpRequest`, `navigator.sendBeacon`, a `WebSocket` or an element `src` or `action` assignment, and the literal destination host is not the page's host. The script is read by a lexer and a name-level taint pass, not a JavaScript engine: a flow through a computed sink name or `eval` is not seen. A destination that is not a literal host, or a page the session has not navigated to (or left with a back or a tab switch), is the unknown tier: an alert in every pack. A script over 256 KiB, 65,536 tokens, 64 sends or 1,024 definitions is truncated: the call carries the limit finding (at least the unknown tier of the pack) and the part read before the bound is still judged |
 
 A string argument that holds a JSON document (a proxy tool's `arguments`, or the whole argument object sent as a string) is read as that document, with the numbers, `NaN` literals, comments, trailing commas and Python-literal spellings the receiving server accepts; a document in the shape of JSON that no reading parses (a server cannot parse it either) is read as text for the locations it names, so a protected path in it is still judged. Text under content keys (`content`, `text`, `newText`, ...) is collected for the rules that read what a call writes. What a call writes or sends is data, whatever its spelling (a JSON file body, a bug report, a path in a message): it is not read as arguments when the verb of the tool, or of the tool a proxy names, is a write or a send, or the tool is a text tool (the table's `text_tools`: a mail, chat or issue tool, or a name with a comment, reply, post, message, issue, ticket or note token, except for file, HTTP, database, Kubernetes and code tools). In a text tool only the free-text keys the table names (`text_tools.data_keys`: a chat `message`, a mail `html_body`, an issue `description`, a comment's `body`, `subject`, `title`, `note`, ...) are data: a JSON document, a path or a file URI under one of them is text. Every other key is read as in every other tool, including a value that is exactly an absolute path or a file URI (a `document`, `photo`, `attach`, `image_url`, a note's `name` or `save_as`). A tool that neither writes nor sends text reads such a value like any argument.
 
@@ -469,7 +502,7 @@ The whole lane (these effects and the table rules on shell and native file-tool 
 
 ### Protected SSH keys
 
-In action mode a plain read of the active user's `authorized_keys` is allowed: `cat`, `head`, `tail`, `less`, `ls`, `stat`, `grep`, `egrep`, `fgrep`, `wc` and `ssh-keygen -l` (list mode only), and on Windows `type`, `findstr` and `Select-String`, Git Bash included. A shell wrapper that only reports `$?` after the read does not change that. Any other use is a protected write and is blocked: a redirect, a pipe into a command that writes, an in-place flag, `ssh-keygen -R`, `tee`, or the file as a copy source. Reads through an interpreter, `diff | head` and a nested `sh -c` stay blocked. In observe mode the write raises the CRITICAL would-block alert and runs.
+In action mode a plain read of the active user's `authorized_keys` is allowed: `cat`, `head`, `tail`, `less`, `ls`, `stat`, `grep`, `egrep`, `fgrep`, `wc` and `ssh-keygen -l` (list mode only), and on Windows `type`, `findstr` and `Select-String`, Git Bash included. A shell wrapper that only reports `$?` after the read does not change that. Any other use is a protected write and is blocked: a redirect, a pipe into a command that writes, an in-place flag, `ssh-keygen -R`, `tee`, or the file as a copy source. Reads through an interpreter, `diff | head` and a nested `sh -c` stay blocked. Two cases the scan cannot prove are unknown, not protected writes: the keys file named only as an operand of a program the scan has no model of (a script, an unfamiliar program, a variable program), or named by a statement that only reads it beside other work, and a write whose target the scan cannot resolve and whose command names no protected file or folder, makes no link and builds no name at run time. A per-user install alerts on them in the default and permissive packs; the strict pack and every managed install block them. A write the scan proves, or one whose command spells a protected name, blocks in every pack. In observe mode the write raises the CRITICAL would-block alert and runs.
 
 A read of a private key under `~/.ssh` is blocked in action mode (`PATH-SSH-KEY`) whichever program prints it, not only `cat`. A key read also includes a stdin redirect (`xxd < ~/.ssh/id_ed25519`), a recursive read of the key directory (`grep -r`, `rg`, or `Get-ChildItem` piped into `Select-String`) and `python -c`, `node -e`, `perl -e` or `ruby -e` code that opens the key. A named file that is not a key (`grep -r Host ~/.ssh/config`), a `.pub` file and a listing are not key reads. Everyday key use never puts the key's content in front of the agent and is allowed by the default and strict packs: `ssh-keygen -y`, `ssh-add`, `ssh -i` and a signed `git commit -S`. Observe mode records the read as a would-block alert. On managed Linux with Tetragon, the kernel control `kernel.ssh_private_key_read` also refuses the open once the admin has acknowledged enforce ([Tetragon](/docs/enterprise/tetragon)).
 

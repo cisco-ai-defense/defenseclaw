@@ -26,9 +26,17 @@ func TestCascadeLaneHotReloadEveryLane(t *testing.T) {
 		bad              []string
 		good, goodMode   string
 	}{
+		// The tool judge's stages ship on; a reload turns each off (rel-1-0-10:GAP-0845).
+		"judge_read_skip":           {"on", "on", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "off", "off"},
+		"judge_unmodeled_alert":     {"on", "on", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "off", "off"},
+		"judge_tool_result_context": {"on", "on", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "off", "off"},
+
 		"effects":     {"off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null", "Off", "\" Shadow \""}, "shadow", "shadow"},
 		"secret_flow": {"off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null", "Off", "Shadow"}, "shadow", "shadow"},
 		"nonshell":    {"shadow", "shadow", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "on", "on"},
+		// The opt-in alignment check: off to alert by a reload, and none of
+		// the spellings of another value turns it on (GAP-0823).
+		"alignment": {"off", "off", []string{"on", "ON", "garbage", "\"\"", "\"Alert \"", "null", "true", "Block"}, "alert", "alert"},
 	}
 	for _, lane := range config.CascadeLaneNames() {
 		c, ok := cases[lane]
@@ -46,14 +54,21 @@ func TestCascadeLaneHotReloadEveryLane(t *testing.T) {
 				}
 			}
 			mode := func(cfg *config.Config) string {
+				if lane == config.CascadeLaneJudgeReadSkip || lane == config.CascadeLaneJudgeUnmodeledAlert || lane == config.CascadeLaneJudgeToolResultContext {
+					// What the judge decisions read (judgeLaneMode).
+					return judgeLaneMode(cfg, "", lane)
+				}
 				l := cfg.Guardrail.Cascade.Lanes
 				switch lane {
 				case "effects":
 					return l.EffectsMode()
 				case "secret_flow":
 					return l.SecretFlowMode()
+				case "nonshell":
+					return l.NonShellMode()
 				}
-				return l.NonShellMode()
+				// A scoped lane: what the gateway reads for a call.
+				return cfg.ResolveCascade("").LaneMode(lane)
 			}
 			write(c.start)
 			initial, err := config.LoadRuntimeV8File(path)

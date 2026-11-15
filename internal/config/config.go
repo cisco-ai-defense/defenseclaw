@@ -461,6 +461,8 @@ type RoutingConfig struct {
 	SystemOne         *RoutingSystemOneConfig `mapstructure:"systemone"           yaml:"systemone,omitempty"`
 	RouteOnly         RoutingRouteOnlyConfig  `mapstructure:"route_only"          yaml:"route_only,omitempty"`
 	Admin             *RoutingAdminConfig     `mapstructure:"admin"               yaml:"admin,omitempty"`
+	// Context is routing.context (routing_context.go); zero is off.
+	Context RoutingContextConfig `mapstructure:"context" yaml:"context,omitempty"`
 }
 
 type RoutingModelBackend struct {

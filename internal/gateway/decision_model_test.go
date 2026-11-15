@@ -191,8 +191,8 @@ func TestRunToolDecisionAllowSkipsJudge(t *testing.T) {
 
 // TestRunToolDecisionRetiredDecideStillRunsTheJudge: on_confident_block
 // decide is retired (owner 2026-11-13): it still loads, and a confident
-// block still goes to the judge, with the HIGH floor kept when the judge
-// gives no verdict.
+// block still goes to the judge, with System One's CRITICAL block kept when
+// the judge gives no verdict (GAP-0867).
 func TestRunToolDecisionRetiredDecideStillRunsTheJudge(t *testing.T) {
 	srv := fakeDecisionModel(t, "block", 0.02, nil)
 	defer srv.Close()
@@ -202,8 +202,8 @@ func TestRunToolDecisionRetiredDecideStillRunsTheJudge(t *testing.T) {
 	if judge.calls.Load() == 0 {
 		t.Fatal("a confident block skipped the LLM judge")
 	}
-	if v == nil || v.Severity != "HIGH" || v.Action != "block" {
-		t.Fatalf("verdict = %+v, want the HIGH decision-model floor", v)
+	if v == nil || v.Severity != "CRITICAL" || v.Action != "block" {
+		t.Fatalf("verdict = %+v, want the CRITICAL decision-model block", v)
 	}
 }
 

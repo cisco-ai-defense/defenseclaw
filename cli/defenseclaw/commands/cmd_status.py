@@ -534,6 +534,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health, cfg)
         _print_decision_model(cfg)
+        _print_alignment_lane(cfg)
         _print_hook_guardian(cfg)
         _print_fleet_health(cfg, _fleet_status_client(client, health))
         hint(
@@ -1012,6 +1013,7 @@ def _print_agents(
     gc = getattr(cfg, "guardrail", None)
     agent_missing = {c for c in actives if _agent_missing(cfg, c, health_map.get(c))}
     desktop_engine = _claude_desktop_engine_version(cfg) if "claudecode" in actives else ""
+    hermes_plugins = _hermes_shipped_plugins_note(cfg) if "hermes" in actives else ""
     # ``guardrail.enabled: false`` (``setup guardrail --disable``, or the
     # default ``uninstall``) makes the gateway tear every hook connector
     # down, so none of them enforces (GAP-1312). The OpenClaw row reports the
@@ -1214,6 +1216,8 @@ def _print_agents(
                     f"                {dim_text}{degraded}",
                     18,
                 )
+    if hermes_plugins:
+        _echo_wrapped(" " * 16 + ux._style(hermes_plugins, fg="yellow"), 18)
     # A connector with no tool-result block form says so (GAP-0605).
     from defenseclaw.commands.cmd_doctor import tool_result_injection_limit
 
@@ -1773,6 +1777,28 @@ def _agent_missing(cfg, connector: str, live: dict | None = None) -> bool:
         return False
 
 
+def _hermes_shipped_plugins_note(cfg) -> str:
+    """A note when the gateway cannot recognize the shipped plugins of the installed Hermes, or "".
+
+    Reads the version the last agent discovery recorded; nothing is run
+    (rel-1-0-10:GAP-0765).
+    """
+    try:
+        from defenseclaw.hermes_vendor_plugins import COVERED, shipped_plugin_coverage
+        from defenseclaw.inventory import agent_discovery
+
+        disc = agent_discovery._read_cache(data_dir=str(getattr(cfg, "data_dir", "") or "") or None)
+        signal = disc.agents.get("hermes") if disc is not None else None
+        if signal is None or not signal.installed:
+            return ""
+        coverage = shipped_plugin_coverage(signal.version)
+    except Exception:  # noqa: BLE001 - the note is optional.
+        return ""
+    if coverage.state in ("", COVERED):
+        return ""
+    return f"Hermes shipped plugins: {coverage.detail}; {coverage.step}"
+
+
 def _claude_desktop_engine_version(cfg) -> str:
     """The Claude Code version the last agent discovery read from Claude
     Desktop's engine (no claude CLI, GAP-0036), or "". Reads the cache only."""
@@ -2150,6 +2176,17 @@ def _print_judge_fallbacks(details: dict, cfg=None) -> None:
     if summary:
         hint = judge_max_parallel_hint(cfg)
         _status_row("Judge fallbacks", ux._style(summary + ("; " + hint if hint else ""), fg="yellow"))
+
+
+def _print_alignment_lane(cfg) -> None:
+    """``Alignment check`` row while guardrail.cascade.lanes.alignment is not
+    off (the lane is opt-in; nothing is printed while it is off)."""
+    from defenseclaw import cascade
+
+    mode = cascade.alignment_mode(cfg)
+    if mode.startswith("off") and "scopes" not in mode:
+        return
+    _status_row("Alignment check", mode)
 
 
 def _print_decision_model(cfg) -> None:

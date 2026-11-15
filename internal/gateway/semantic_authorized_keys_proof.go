@@ -1483,6 +1483,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
 	if decision != "" {
+		if request.nonWriteMention != nil && !request.StrictPolicy && !request.ManagedInstall && !request.ProtectedHomeHook &&
+			trustedShellCommandInput(request.Input) &&
+			hookpaths.ActionMentionsNoWriteRole(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) {
+			*request.nonWriteMention = true
+		}
 		return confirmed()
 	}
 	if !cannotResolveLocally && trustedPOSIXShellCall(input, facts) &&

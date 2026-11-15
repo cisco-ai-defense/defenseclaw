@@ -97,6 +97,9 @@ func TestOpenCodeSealedAuthorityRejectsLaterExecutableDrift(t *testing.T) {
 	if err := validateOpenCodeWindowsSetupAdmission(opts); err == nil ||
 		!strings.Contains(err.Error(), "digest does not match protected evidence") {
 		t.Fatalf("changed OpenCode image admission error = %v, want digest refusal", err)
+	} else if !strings.Contains(err.Error(), "run: defenseclaw setup opencode --yes") {
+		// GAP-0249: an OpenCode update names the step that admits it.
+		t.Fatalf("changed OpenCode image admission error = %v, want the setup step", err)
 	}
 }
 

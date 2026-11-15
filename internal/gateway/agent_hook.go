@@ -3702,9 +3702,21 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 				scopeText = ""
 			}
 			a.observeUserTurn(ctx, req.Content, scopeText, req.CWD, verdict)
+			a.observeAlignmentTurn(ctx, req.ConnectorName, req.Content, verdict)
 		}
 	case isResultLikeEvent(req.HookEventName):
-		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
+		// The tool-result judges get the call this output answers (judge_packet.go):
+		// a placeholder tool name or the whole hook envelope is no call.
+		var callTool string
+		var callArgs json.RawMessage
+		if !req.ToolNameIsLabel {
+			callTool = req.ToolName
+		}
+		if !req.ToolArgsAreHookEnvelope && !req.ToolArgsProjectionUncertain {
+			callArgs = req.ToolArgs
+		}
+		resultCtx := withToolResultCall(ctx, callTool, callArgs)
+		verdict = a.inspectMessageContent(resultCtx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a
 		// PostToolUse referencing an unregistered MCP server gets
 		// captured in audit / would-block telemetry. mergeAssetDecision
@@ -3741,6 +3753,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// toast honor it (managed_enterprise only; no-op otherwise).
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
 	verdict = a.applyCascadeFinal(ctx, req.ConnectorName, hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
+	verdict = a.applyAlignmentLane(ctx, req.ConnectorName, req.HookEventName, req.ToolName, req.ToolInvocationID, string(req.ToolArgs), req.CWD, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
@@ -4068,13 +4081,52 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 // PowerShell reading the selection made of a call it placed in no dialect
 // (selectWindowsShellDialectReading).
 func agentHookWindowsShellDialectReading(input actionfacts.Input) (actionfacts.Dialect, *windowsHintedReading) {
-	var args struct {
-		Command string `json:"command"`
-	}
-	if json.Unmarshal(input.Args, &args) != nil {
+	command, ok := trustedShellCommandArgument(input.Args)
+	if !ok {
 		return "", nil
 	}
-	return selectWindowsShellDialectReading(input.Tool, args.Command, input)
+	return selectWindowsShellDialectReading(input.Tool, command, input)
+}
+
+// trustedShellCommandArgument is the command text of projected shell
+// arguments under any key the trusted-action parser reads as the command
+// (command, cmd, script, CommandLine, ...: conflictingToolArgumentField).
+// The dialect selection read only "command", so agy run_command
+// ({"CommandLine": ...}) was never offered the PowerShell reading on a
+// Windows host and its PowerShell text was judged as POSIX
+// (rel-1-0-10:GAP-0784). Keys that disagree name no command: the conflicting
+// keys check judges that call.
+func trustedShellCommandArgument(raw json.RawMessage) (string, bool) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil {
+		return "", false
+	}
+	command, found := "", false
+	for key, value := range object {
+		if field, _ := conflictingToolArgumentField(key); field != "command" {
+			continue
+		}
+		var text string
+		if json.Unmarshal(value, &text) != nil || (found && text != command) {
+			return "", false
+		}
+		command, found = text, true
+	}
+	return command, found
+}
+
+// withWindowsShellDialect gives a structured shell call the Windows hook's
+// dialect reading when enabled (a Windows host, outside a sandbox and Secure
+// Client): its dialect is inferred from its command, PowerShell when the
+// PowerShell reading holds, never POSIX by default. The hook routes,
+// /inspect/tool and the LLM proxy's tool-call route all use it, so the same
+// PowerShell text is read as PowerShell on every route (rel-1-0-10:GAP-0784).
+func withWindowsShellDialect(action *trustedActionRequest, enabled bool) {
+	if !enabled {
+		return
+	}
+	action.Input.DialectHint, action.windowsPowerShellReading = agentHookWindowsShellDialectReading(action.Input)
+	action.windowsShellDialect, action.windowsDialectReadings = true, true
 }
 
 // inspectAgentHookToolCall judges one structured tool call as the trusted
@@ -4118,6 +4170,10 @@ func (a *APIServer) inspectAgentHookToolCall(
 		// command (see connector.CursorTrustedShellArgs).
 		if args, dir, ok := connector.CursorTrustedShellArgs(req.HookEventName, req.ToolArgs); ok {
 			actionTool, trustedArgs, toolCWD = "shell", args, dir
+		} else if args, ok := connector.CursorTrustedReadArgs(req.HookEventName, req.ToolArgs); ok {
+			// beforeReadFile names no tool either: its payload names the
+			// file read (rel-1-0-10:GAP-0781).
+			actionTool, trustedArgs = "Read", args
 		}
 	}
 	var hermesWriteViews []connector.HermesWriteView
@@ -4145,6 +4201,9 @@ func (a *APIServer) inspectAgentHookToolCall(
 			actionTool, trustedArgs = tool, args
 		}
 	}
+	if actionTool == fallbackTool {
+		actionTool, trustedArgs = agentHookNativeFileView(actionTool, trustedArgs)
+	}
 	// A sandbox shell call is also judged on its command alone when its
 	// other arguments leave the parse partial.
 	command, commandTool := sandboxShellCommand(ctx, req.ConnectorName, req.HookEventName, req.ToolName, actionTool, req.ToolArgs)
@@ -4158,35 +4217,44 @@ func (a *APIServer) inspectAgentHookToolCall(
 		CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 	}
 	dialectHint := a.agentHookWindowsDialectHint(ctx)
-	var windowsPowerShellReading *windowsHintedReading
-	if dialectHint {
-		actionInput.DialectHint, windowsPowerShellReading = agentHookWindowsShellDialectReading(actionInput)
-	}
 	var conflictSource *conflictingToolArgumentSource
 	if bytes.Equal(trustedArgs, shellProjectedArgs) {
 		// The conflicting-keys check reads the arguments as the call
 		// carried them and projects each candidate as above (GAP-0678).
 		conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
 	}
-	return a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-		Input:                    actionInput,
-		LegacyText:               string(req.ToolArgs),
-		conflictSource:           conflictSource,
-		Connector:                req.ConnectorName,
-		CopilotSharedLocalFile:   copilotSharedLocalFileCall(ctx, req),
-		EnforcementCapable:       enforcementCapable,
-		StrictPolicy:             a.strictPolicyTierForHook(ctx, req.ConnectorName),
-		ManagedInstall:           a.managedInstallForHook(ctx),
-		ManagedHookOverflowHold:  managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
-		ResolvedWriteTargets:     resolvedWritesFromContext(ctx),
-		patchTarget:              hermesV4APatch,
-		strictPatchLinks:         hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
-		SandboxGuestCWD:          sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
-		windowsShellDialect:      dialectHint,
-		windowsDialectReadings:   dialectHint,
-		windowsPowerShellReading: windowsPowerShellReading,
-		record:                   toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
-	}, command, commandTool, hermesWriteViews)
+	action := trustedActionRequest{
+		Input:                   actionInput,
+		LegacyText:              string(req.ToolArgs),
+		conflictSource:          conflictSource,
+		Connector:               req.ConnectorName,
+		CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
+		EnforcementCapable:      enforcementCapable,
+		StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		ManagedInstall:          a.managedInstallForHook(ctx),
+		ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
+		ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
+		patchTarget:             hermesV4APatch,
+		strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
+		record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
+	}
+	withWindowsShellDialect(&action, dialectHint)
+	action.posixReadingTwin = dialectHint && agentHookShellToolNamesNoShell(req.ConnectorName, actionTool)
+	return a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, action, command, commandTool, hermesWriteViews)
+}
+
+// agentHookShellToolNamesNoShell reports a shell tool whose name says
+// nothing of the shell that runs its command: agy's run_command (also as
+// send_command_input). On a Windows host its command gets the Windows
+// dialect reading (GAP-0784) and also the POSIX one it had before, as the
+// proxy judges a model reply's call (rel-1-0-10:GAP-0850). A tool that names
+// its shell (Bash for Git Bash, powershell, execute_pwsh) keeps one reading:
+// a call read as the other shell gains findings the shell that runs it never
+// has (windowsReadingTwinRequests).
+func agentHookShellToolNamesNoShell(connectorName, actionTool string) bool {
+	return strings.EqualFold(strings.TrimSpace(connectorName), "antigravity") &&
+		strings.EqualFold(strings.TrimSpace(actionTool), "run_command")
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for
@@ -4292,6 +4360,17 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 	// argument) still runs its command in the directory it names; judged
 	// in the session's, the command alone could miss a rule (GAP-0694).
 	return args, connector.ShellCommandCWD(connectorName, toolName, args)
+}
+
+// agentHookNativeFileView is a native file write, edit or read tool call as
+// the Claude Code Write, Edit or Read it performs
+// (connector.NativeFileToolView), so it gets the same file facts, protected
+// paths and content scan on every route; any other call is unchanged.
+func agentHookNativeFileView(tool string, args json.RawMessage) (string, json.RawMessage) {
+	if view, projected, ok := connector.NativeFileToolView(tool, args); ok {
+		return view, projected
+	}
+	return tool, args
 }
 
 // agentHookWindowsDialectHint reports whether a structured tool call's

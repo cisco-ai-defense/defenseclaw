@@ -209,9 +209,6 @@ jobs:
         # marker and A+B gateway tests that weigh about 705 s more; with them
         # every one of 42 shards plans over the 720 s cap, and 44 shards plan
         # at most 704 s. rel takes 44 first so feat and rel keep one count.
-        # 2026-11-15: feat/substrate (PR #1456) gateway tests with rel delta 3's
-        # timings plan over the 720 s cap at 44 shards; 46 shards plan at most
-        # 707 s there. rel takes the count first so feat and rel keep one.
         # 2026-11-15: with the GAP-0865 race timings (int/r110-b11d3 24d5ff5ad8), feat/substrate
         # (PR #1456) gateway tests plan over the 720 s cap up to 52 shards; 54 shards plan at
         # most 710 s there. rel takes the count first so feat and rel keep one.

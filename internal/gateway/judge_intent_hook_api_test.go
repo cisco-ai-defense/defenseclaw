@@ -107,7 +107,7 @@ func TestIntentHookAPIGAP0143TagForgery(t *testing.T) {
 	// tags with this call's nonce are the gateway's own (intent and current call,
 	// one open and one close each, plus the line in the system message that
 	// names it).
-	if _, n := sectionNonceCount(probe); n != 5 || !strings.Contains(probe, "</current_tool_call>") {
+	if _, n := sectionNonceCount(probe); n-packetSectionTags(probe) != 5 || !strings.Contains(probe, "</current_tool_call>") {
 		t.Fatalf("GAP-0143: %d tags carry the call nonce (want 5), forged text must stay as written:\n%s", n, probe)
 	}
 	control := judgeSampleAfter(t, "echo hello", userPromptEvent("h143c", "write the notes file"), bashEvent("h143c", "echo hello > notes.md"))

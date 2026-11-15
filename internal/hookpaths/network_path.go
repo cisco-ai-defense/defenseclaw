@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
@@ -488,7 +489,7 @@ func pathStat(name string) (os.FileInfo, error) {
 	if networkPathUnanswered(name) {
 		return nil, networkShareError("stat", name)
 	}
-	return os.Stat(name)
+	return os.Stat(fixturefs.Map(name))
 }
 
 // pathStatPinned is pathStat with the file identity read at once, for a
@@ -497,21 +498,21 @@ func pathStatPinned(name string) (os.FileInfo, error) {
 	if networkPathUnanswered(name) {
 		return nil, networkShareError("stat", name)
 	}
-	return pathidentity.StatPinned(name)
+	return pathidentity.StatPinned(fixturefs.Map(name))
 }
 
 func pathLstat(name string) (os.FileInfo, error) {
 	if linkUnanswered(name) {
 		return nil, networkShareError("lstat", name)
 	}
-	return os.Lstat(name)
+	return os.Lstat(fixturefs.Map(name))
 }
 
 func pathOpen(name string) (*os.File, error) {
 	if networkPathUnanswered(name) {
 		return nil, networkShareError("open", name)
 	}
-	return os.Open(name)
+	return os.Open(fixturefs.Map(name))
 }
 
 // pathOpenRoot is os.OpenRoot with the root read as pathOpen reads it.
@@ -521,7 +522,7 @@ func pathOpenRoot(name string) (*os.Root, error) {
 		noteBodyCut(cut)
 		return nil, networkShareError("openroot", name)
 	}
-	root, err := os.OpenRoot(name)
+	root, err := os.OpenRoot(fixturefs.Map(name))
 	noteBodyLinkLimit(err)
 	return root, err
 }
@@ -579,21 +580,23 @@ func pathReadDir(name string) ([]os.DirEntry, error) {
 	if networkPathUnanswered(name) {
 		return nil, networkShareError("readdir", name)
 	}
-	return os.ReadDir(name)
+	return os.ReadDir(fixturefs.Map(name))
 }
 
 func pathReadlink(name string) (string, error) {
 	if linkUnanswered(name) {
 		return "", networkShareError("readlink", name)
 	}
-	return os.Readlink(name)
+	target, err := os.Readlink(fixturefs.Map(name))
+	return fixturefs.Unmap(target), err
 }
 
 func pathEvalSymlinks(name string) (string, error) {
 	if networkPathUnanswered(name) {
 		return "", networkShareError("evalsymlinks", name)
 	}
-	return filepath.EvalSymlinks(name)
+	resolved, err := filepath.EvalSymlinks(fixturefs.Map(name))
+	return fixturefs.Unmap(resolved), err
 }
 
 // pathWalkDir is filepath.WalkDir with its root read as pathLstat reads
@@ -607,7 +610,9 @@ func pathWalkDir(root string, fn fs.WalkDirFunc) error {
 		}
 		return err
 	}
-	return filepath.WalkDir(root, fn)
+	return filepath.WalkDir(fixturefs.Map(root), func(path string, d fs.DirEntry, err error) error {
+		return fn(fixturefs.Unmap(path), d, err)
+	})
 }
 
 // Every read of a path that a hook call names, in this package and in the
@@ -621,6 +626,10 @@ func Lstat(name string) (os.FileInfo, error) { return pathLstat(name) }
 
 // Stat is os.Stat for a path a hook call names, read as pathStat reads it.
 func Stat(name string) (os.FileInfo, error) { return pathStat(name) }
+
+// EvalSymlinks is filepath.EvalSymlinks bounded like the other readers: the
+// gateway reads a link chain of a path a hook call names through it.
+func EvalSymlinks(name string) (string, error) { return pathEvalSymlinks(name) }
 
 // ReadDir is os.ReadDir for a directory a hook call names, read as pathReadDir reads it.
 func ReadDir(name string) ([]os.DirEntry, error) { return pathReadDir(name) }
