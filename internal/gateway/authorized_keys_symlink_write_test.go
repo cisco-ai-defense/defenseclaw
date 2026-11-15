@@ -635,13 +635,16 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 	link := filepath.Join(external, "kfile")
 	t.Setenv("HOME", home)
 	t.Chdir(project)
+	pack := "strict"
 	post := func(t *testing.T, connector, mode, command, header string) string {
 		t.Helper()
 		cfg := &config.Config{}
 		cfg.Guardrail.Mode = mode
 		cfg.Guardrail.Connector = connector
-		// A call over the evaluation limit blocks in the strict profile only.
-		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+		// The pack of the call: the chains below block in it by their own
+		// finding; a call over the evaluation limit is the unknown tier of the
+		// pack (alert in default, block in strict).
+		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), pack)
 		api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 		body := string(mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
 			"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command, "description": "d"}}))
@@ -699,25 +702,33 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 		// can list makes the decision unknown (GAP-1395).
 		t.Run(connector+" over analysis limits", func(t *testing.T) {
 			prefix := ": " + strings.Repeat("x", 65<<10) + " && "
-			for _, row := range []struct {
-				command string
-				block   bool
-			}{
-				{prefix + "echo marker >> " + link, true},
-				{chain(200, "") + " && L=" + link + " && echo marker >> \"$L\"", true},
-				{prefix + "echo marker > " + filepath.Join(external, "notes.txt"), false},
+			// The third row is an ordinary write past the input bound: it
+			// proves no finding, so it is TRUNCATED (cap=bytes), the unknown
+			// tier of the pack: an alert in the default pack, a block in the
+			// strict one (rel-1-0-10:GAP-0611, GAP-0748; it was an allow in
+			// both, the strict pin included, until 1.0.10). The first row
+			// proves a write of the keys file and blocks in both packs. The
+			// second is 201 statements, past the statement budget: its
+			// verdict is the unknown tier of the pack too (GAP-0568).
+			const alert = `{"action":"alert"`
+			defer func() { pack = "strict" }()
+			for _, tier := range []struct{ pack, budget, ordinary string }{
+				{"default", alert, alert}, {"strict", block, block},
 			} {
-				if err := os.Symlink(keys, link); err != nil && !os.IsExist(err) {
-					t.Fatal(err)
-				}
-				header := hookpaths.Resolve(mustJSON(t, map[string]any{"tool_name": "Bash",
-					"tool_input": map[string]string{"command": row.command}}))
-				want := allow
-				if row.block {
-					want = block
-				}
-				if got := post(t, connector, "action", row.command, header); !strings.HasPrefix(got, want) {
-					t.Fatalf("%.60s...%s = %.400s", row.command, row.command[len(row.command)-60:], got)
+				pack = tier.pack
+				for _, row := range []struct{ command, want string }{
+					{prefix + "echo marker >> " + link, block},
+					{chain(200, "") + " && L=" + link + " && echo marker >> \"$L\"", tier.budget},
+					{prefix + "echo marker > " + filepath.Join(external, "notes.txt"), tier.ordinary},
+				} {
+					if err := os.Symlink(keys, link); err != nil && !os.IsExist(err) {
+						t.Fatal(err)
+					}
+					header := hookpaths.Resolve(mustJSON(t, map[string]any{"tool_name": "Bash",
+						"tool_input": map[string]string{"command": row.command}}))
+					if got := post(t, connector, "action", row.command, header); !strings.HasPrefix(got, row.want) {
+						t.Fatalf("%s pack: %.60s...%s = %.400s, want %s", tier.pack, row.command, row.command[len(row.command)-60:], got, row.want)
+					}
 				}
 			}
 		})
