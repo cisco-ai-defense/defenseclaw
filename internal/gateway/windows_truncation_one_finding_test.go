@@ -21,8 +21,11 @@ import (
 func TestWindowsTruncationIsOneFinding(t *testing.T) {
 	for _, pack := range []string{"default", "strict"} {
 		for name, size := range map[string]int{
-			"word-limit":  6 << 10,
-			"input-bound": 64<<10 + 1<<10, // past the 64 KiB command bound
+			"word-limit": 6 << 10,
+			// The call past the 64 KiB input bound is not a row here: one long
+			// ordinary statement is left as the readers leave it (GAP-0318), and
+			// the byte floor of 551f865dbb that made it a truncation is reverted
+			// until psf2 returns it scoped to the Windows dialects.
 		} {
 			t.Run(pack+"/"+name, func(t *testing.T) {
 				big := `Set-Content -Path C:\Users\alice\work\a.txt -Value '` + strings.Repeat("x", size) + `'`
