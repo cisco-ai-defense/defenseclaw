@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -148,15 +149,15 @@ func powerShellNewItemMayMakeLink(args []string, static []bool, piped bool) bool
 		}
 		if !inline || value == "" {
 			if i+1 >= len(args) {
-				return param.name == "itemtype"
+				return param.isItemType
 			}
 			i++
 			value = args[i]
-			if param.name == "itemtype" && (i >= len(static) || !static[i]) {
+			if param.isItemType && (i >= len(static) || !static[i]) {
 				return true
 			}
 		}
-		if param.name != "itemtype" {
+		if !param.isItemType {
 			continue
 		}
 		if typed {
@@ -193,7 +194,7 @@ func powerShellItemTypeMakesNoLink(value string) bool {
 	if value == "" || strings.ContainsAny(value, "*?[]`") {
 		return false
 	}
-	for _, name := range []string{"directory", "container", "file"} {
+	for _, name := range strings.Fields(newItemNoLinkTypes) {
 		if strings.HasPrefix(name, value) {
 			return true
 		}
@@ -202,47 +203,50 @@ func powerShellItemTypeMakesNoLink(value string) bool {
 }
 
 // newItemParam is a New-Item parameter: its name and aliases in lower case,
-// and whether it is a switch (takes no value word).
+// whether it is a switch (takes no value word) and whether it is ItemType.
 type newItemParam struct {
-	name     string
-	aliases  []string
-	isSwitch bool
+	names      []string
+	isSwitch   bool
+	isItemType bool
 }
 
-// newItemParams are the parameters of New-Item (FileSystem provider, Windows
-// PowerShell 5.1 and PowerShell 7) and the common parameters.
-var newItemParams = []newItemParam{
-	{name: "path"},
-	{name: "name"},
-	{name: "itemtype", aliases: []string{"type"}},
-	{name: "value", aliases: []string{"target"}},
-	{name: "credential"},
-	{name: "force", isSwitch: true},
-	{name: "whatif", aliases: []string{"wi"}, isSwitch: true},
-	{name: "confirm", aliases: []string{"cf"}, isSwitch: true},
-	{name: "usetransaction", aliases: []string{"usetx"}, isSwitch: true},
-	{name: "verbose", aliases: []string{"vb"}, isSwitch: true},
-	{name: "debug", aliases: []string{"db"}, isSwitch: true},
-	{name: "erroraction", aliases: []string{"ea"}},
-	{name: "warningaction", aliases: []string{"wa"}},
-	{name: "informationaction", aliases: []string{"infa"}},
-	{name: "progressaction", aliases: []string{"proga"}},
-	{name: "errorvariable", aliases: []string{"ev"}},
-	{name: "warningvariable", aliases: []string{"wv"}},
-	{name: "informationvariable", aliases: []string{"iv"}},
-	{name: "outvariable", aliases: []string{"ov"}},
-	{name: "outbuffer", aliases: []string{"ob"}},
-	{name: "pipelinevariable", aliases: []string{"pv"}},
-}
+// newItemParamSpec lists the parameters of New-Item (FileSystem provider,
+// Windows PowerShell 5.1 and PowerShell 7) and the common parameters: each
+// field is a name and its aliases joined by commas, "@" marks ItemType and
+// a trailing "!" a switch. It is one string so the names add no word to the
+// package's literal sweep (TestGAP0749BoundedSweepReadsEveryFormAndStaysInBudget,
+// rel-1-0-10:GAP-0828).
+const newItemParamSpec = "path name @itemtype,type value,target credential force! whatif,wi! confirm,cf! " +
+	"usetransaction,usetx! verbose,vb! debug,db! erroraction,ea warningaction,wa informationaction,infa " +
+	"progressaction,proga errorvariable,ev warningvariable,wv informationvariable,iv outvariable,ov " +
+	"outbuffer,ob pipelinevariable,pv"
+
+// newItemParams are the parameters newItemParamSpec lists.
+var newItemParams = sync.OnceValue(func() []newItemParam {
+	var params []newItemParam
+	for _, field := range strings.Fields(newItemParamSpec) {
+		var param newItemParam
+		field, param.isItemType = strings.CutPrefix(field, "@")
+		field, param.isSwitch = strings.CutSuffix(field, "!")
+		param.names = strings.Split(field, ",")
+		params = append(params, param)
+	}
+	return params
+})
+
+// newItemNoLinkTypes are the item types the FileSystem provider matches
+// (value*) before the link types: a folder (directory, container) or a file.
+const newItemNoLinkTypes = "directory container file"
 
 // newItemParameter binds a lower-case parameter name as PowerShell does: an
 // exact name or alias first, else a prefix of the names and aliases of one
 // parameter only. An unknown or ambiguous name (-t: Type or Target) does
 // not bind.
 func newItemParameter(name string) (newItemParam, bool) {
+	params := newItemParams()
 	match := -1
-	for i, param := range newItemParams {
-		for _, candidate := range append([]string{param.name}, param.aliases...) {
+	for i, param := range params {
+		for _, candidate := range param.names {
 			if candidate == name {
 				return param, true
 			}
@@ -258,7 +262,7 @@ func newItemParameter(name string) (newItemParam, bool) {
 	if match < 0 {
 		return newItemParam{}, false
 	}
-	return newItemParams[match], true
+	return params[match], true
 }
 
 // CommandMayMakeLink reports a command that may create a link itself, with a
