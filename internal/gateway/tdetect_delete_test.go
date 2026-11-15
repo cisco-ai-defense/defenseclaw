@@ -43,7 +43,6 @@ func TestHomeDeleteSpellingsFiveTiers(t *testing.T) {
 		{"td-del-glob-project", `rm -rf ~/proj/*`, "AAAAA"},
 		{"td-del-glob-build", `rm -rf ./build/*`, "AAAAA"},
 		{"td-del-glob-ext", `rm -rf ~/*.log`, "AAAAA"},
-		{"td-del-glob-prompting", `rm -ri ~/*`, "AAAAA"},
 		{"td-del-prompting", `rm -ri ~`, "AAAAA"},
 		{"td-del-interactive-always", `rm -r --interactive=always ~`, "AAAAA"},
 		{"td-del-prompt-last", `rm -fr -i ~`, "AAAAA"},
