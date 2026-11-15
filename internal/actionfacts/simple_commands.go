@@ -61,6 +61,10 @@ type SimpleCommand struct {
 	// through a link on disk is not a file the command names
 	// (rel-1-0-6:GAP-0601 review 5).
 	UnboundUser bool
+	// OtherFolder marks the reading of a statement in another folder it may
+	// run in, after a cd that may fail (rel-1-0-10:GAP-0869): a reading,
+	// not a further statement of the call.
+	OtherFolder bool
 	// UnresolvedFolder means the directory of the command is unknown and an
 	// operand of Text depends on it: the gateway reads it in each folder
 	// that holds a protected file (rel-1-0-10:GAP-0871).
@@ -783,16 +787,23 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			}
 		}
 		for _, command := range own {
-			if len(mayRunIn[partIndex]) == 0 || !simpleRelativePathOperand(command.Text) {
+			// A statement the walk placed nowhere after no cd the tracking
+			// read (an unmodeled builtin, eval) stays unplaced: it is judged
+			// as an unresolved folder (UnresolvedFolder). After a cd the
+			// tracking read (a CDPATH miss), its folders are read.
+			dirs := mayRunIn[partIndex]
+			if len(dirs) == 0 || command.CWD == "" && len(dirs) == 1 && dirs[0] == input.CWD ||
+				!simpleRelativePathOperand(command.Text) {
 				continue
 			}
 			for _, dir := range mayRunIn[partIndex] {
 				again := command
 				again.CWD, again.AbsoluteOnly = dir, false
 				if emitted[again] {
-					continue
+					continue // the walk itself read it there
 				}
 				emitted[again] = true
+				again.OtherFolder = true
 				result = append(result, again)
 				if len(result) > maxSimpleEvaluations {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}

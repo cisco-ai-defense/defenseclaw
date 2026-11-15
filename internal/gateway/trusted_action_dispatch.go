@@ -12236,7 +12236,9 @@ func trustedSimpleCommandEvidenceCWDs(request trustedActionRequest, simples []ac
 	// an unknown directory); match the commands in order and skip those.
 	var placedCommands []actionfacts.SimpleCommand
 	for _, simple := range actionfacts.SimpleCommands(placed, actionfacts.Analyze(placed)) {
-		if simple.EvaluationFailure == "" {
+		// The readings of a statement in the other folders it may run in
+		// pair with no statement of the unplaced split.
+		if simple.EvaluationFailure == "" && !simple.OtherFolder {
 			placedCommands = append(placedCommands, simple)
 		}
 	}
