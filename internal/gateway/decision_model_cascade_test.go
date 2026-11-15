@@ -194,8 +194,8 @@ func TestDecisionModelAloneOnlyWhereTheJudgeDoesNotRun(t *testing.T) {
 	b.scannerCfg.DecisionModel.HookConnectors = []string{"*"}
 	b.SetHookDecisionJudge(newDecisionOnlyJudge(b.scannerCfg))
 	v = b.inspectToolPolicy(&ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{"command":"make -C ./fixtures"}`), Direction: "tool_call", Connector: "claudecode"})
-	if len(judge.captured) == 0 || v.Severity != "HIGH" {
-		t.Fatalf("judged connector: verdict %+v, judge calls %d; want cascade 3 (HIGH floor, judge ran)", v, len(judge.captured))
+	if len(judge.captured) == 0 || v.Severity != "CRITICAL" || v.Action != guardrailActionBlock {
+		t.Fatalf("judged connector: verdict %+v, judge calls %d; want cascade 3 (System One's block kept, judge ran: GAP-0867)", v, len(judge.captured))
 	}
 }
 
