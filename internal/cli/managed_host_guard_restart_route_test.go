@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -29,9 +30,9 @@ import (
 // is not installed on a managed computer, so the refusal named a file the
 // administrator did not have.
 func TestManagedWindowsGatewayRefusalNamesTheRestartRoute(t *testing.T) {
-	previous := managedHostWindowsStandalone
-	t.Cleanup(func() { managedHostWindowsStandalone = previous })
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	previous := hookcli.ManagedHostWindowsStandalone
+	t.Cleanup(func() { hookcli.ManagedHostWindowsStandalone = previous })
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	t.Setenv(managed.DeploymentModeEnv, "")
 	err := refusePerUserGatewayOnManagedHost()
 	if err == nil {

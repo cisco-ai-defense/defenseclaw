@@ -1963,6 +1963,15 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if policy, ok := CurrentPolicyHealth(); ok && administrator {
 		body["policy"] = a.policyHealthBody(policy)
 	}
+	if administrator && cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() {
+		// The machine-wide hook load, for the managed lifecycle probes: an
+		// ordinary account of a managed host does not read how many calls
+		// the other accounts made. A per-user /health needs no credential,
+		// so another local account could read this account load there: a
+		// per-user gateway serves it only in the authenticated /status.
+		// Secure Client keeps its health body (issue #1092).
+		body["hook_capacity"] = hookCapacity.snapshot()
+	}
 	if ledger := agentIdentityLedgerHealth(); ledger != nil {
 		body["agent_identities"] = ledger
 	}
@@ -2185,6 +2194,10 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// enforcement/observability posture, not just the primary's.
 		"connector_mode":  a.connectorModeSummary(r.Context()),
 		"connector_modes": a.connectorModesSummary(r.Context()),
+		// hook_capacity is the overload signal of the hook path: calls that
+		// ended at their answer budget per minute (deadline denies, late
+		// allows, shed) beside the calls answered in time (DESIGN 18).
+		"hook_capacity": hookCapacity.snapshot(),
 	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
 		set := a.guardrailProfileSet()

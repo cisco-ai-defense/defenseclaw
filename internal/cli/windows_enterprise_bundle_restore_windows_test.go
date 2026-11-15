@@ -22,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -525,8 +526,8 @@ func TestWindowsBundleVerifyFailsWhileTheGatewayEnforcesAnEdit(t *testing.T) {
 	opts := windowsBundleRestoreOptions()
 	err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "verify", opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs("verify", opts))
 	result := windowsBundleLifecycleResult(t, &stdout)
-	if commandExitCode(err) != enterprisestatus.WindowsExitFailure || result.OK || result.ExitCode != enterprisestatus.WindowsExitFailure {
-		t.Fatalf("verify of a tampered bundle device: exit %d (%v), ok=%v", commandExitCode(err), err, result.OK)
+	if cliusage.ExitCode(err) != enterprisestatus.WindowsExitFailure || result.OK || result.ExitCode != enterprisestatus.WindowsExitFailure {
+		t.Fatalf("verify of a tampered bundle device: exit %d (%v), ok=%v", cliusage.ExitCode(err), err, result.OK)
 	}
 	var problem string
 	for _, m := range result.Errors {
@@ -573,8 +574,8 @@ func TestWindowsBundleEnsureFailsClosedWhenTheBundleStoreCannotRestore(t *testin
 	command.SetErr(&bytes.Buffer{})
 	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, windowsBundleRestoreOptions(), `C:\stage\install-enterprise.ps1`)
 	result := windowsBundleLifecycleResult(t, &stdout)
-	if commandExitCode(err) != enterprisestatus.WindowsExitFailure || !windowsBundleHasCode(result.Errors, "bundle_restore_failed") || len(stub.calls) != 0 {
-		t.Fatalf("ensure over a damaged bundle store: exit %d, errors %+v, installer runs %q", commandExitCode(err), result.Errors, stub.calls)
+	if cliusage.ExitCode(err) != enterprisestatus.WindowsExitFailure || !windowsBundleHasCode(result.Errors, "bundle_restore_failed") || len(stub.calls) != 0 {
+		t.Fatalf("ensure over a damaged bundle store: exit %d, errors %+v, installer runs %q", cliusage.ExitCode(err), result.Errors, stub.calls)
 	}
 	if installed, err := os.ReadFile(host.layout.ConfigPath); err != nil || !bytes.Equal(installed, edited) {
 		t.Fatalf("the failed restore changed config.yaml (read %v)", err)
@@ -638,8 +639,8 @@ func TestWindowsBundleRepairChangesNothingWhenTheBundleStoreCannotRestore(t *tes
 	opts := windowsBundleRestoreOptions()
 	err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "repair", opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs("repair", opts))
 	result := windowsBundleLifecycleResult(t, &stdout)
-	if commandExitCode(err) != enterprisestatus.WindowsExitFailure || !windowsBundleHasCode(result.Errors, "bundle_restore_failed") || len(stub.calls) != 0 {
-		t.Fatalf("repair over a damaged bundle store: exit %d, errors %+v, installer runs %q", commandExitCode(err), result.Errors, stub.calls)
+	if cliusage.ExitCode(err) != enterprisestatus.WindowsExitFailure || !windowsBundleHasCode(result.Errors, "bundle_restore_failed") || len(stub.calls) != 0 {
+		t.Fatalf("repair over a damaged bundle store: exit %d, errors %+v, installer runs %q", cliusage.ExitCode(err), result.Errors, stub.calls)
 	}
 	if len(repaired) != 0 || len(result.Changes) != 0 {
 		t.Fatalf("repair changed the host before it stopped: permission repairs %q, changes %q", repaired, result.Changes)
@@ -808,8 +809,8 @@ func TestWindowsBundleRepairChangesNothingWhenItCannotProveTheBundlePrincipal(t 
 			opts := windowsBundleRestoreOptions()
 			err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "repair", opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs("repair", opts))
 			result := windowsBundleLifecycleResult(t, &stdout)
-			if commandExitCode(err) != enterprisestatus.WindowsExitFailure || !windowsBundleHasCode(result.Errors, "bundle_restore_failed") || len(stub.calls) != 0 {
-				t.Fatalf("exit %d, errors %+v, installer runs %q", commandExitCode(err), result.Errors, stub.calls)
+			if cliusage.ExitCode(err) != enterprisestatus.WindowsExitFailure || !windowsBundleHasCode(result.Errors, "bundle_restore_failed") || len(stub.calls) != 0 {
+				t.Fatalf("exit %d, errors %+v, installer runs %q", cliusage.ExitCode(err), result.Errors, stub.calls)
 			}
 			if len(result.Changes) != 0 {
 				t.Fatalf("a restore that only read reported changes %q", result.Changes)

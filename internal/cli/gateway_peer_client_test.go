@@ -10,21 +10,22 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestPerUserGatewayClientDoesNotTrustManagedModeFromEnvironment(t *testing.T) {
 	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
 	previousFactory := perUserGatewayClientFactory
-	previousSecureClient := secureClientHost
-	previousWindowsManaged := managedHostWindowsStandalone
+	previousSecureClient := hookcli.SecureClientHost
+	previousWindowsManaged := hookcli.ManagedHostWindowsStandalone
 	t.Cleanup(func() {
 		perUserGatewayClientFactory = previousFactory
-		secureClientHost = previousSecureClient
-		managedHostWindowsStandalone = previousWindowsManaged
+		hookcli.SecureClientHost = previousSecureClient
+		hookcli.ManagedHostWindowsStandalone = previousWindowsManaged
 	})
-	secureClientHost = func() bool { return false }
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.SecureClientHost = func() bool { return false }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	called := false
 	perUserGatewayClientFactory = func(time.Duration, string) (*http.Client, error) {
 		called = true
@@ -39,16 +40,16 @@ func TestPerUserGatewayClientDoesNotTrustManagedModeFromEnvironment(t *testing.T
 func TestManagedGatewayClientKeepsServiceAccountTransportDuringUpgrade(t *testing.T) {
 	previousFactory := perUserGatewayClientFactory
 	previousManagedFactory := managedGatewayClientFactory
-	previousSecureClient := secureClientHost
-	previousWindowsManaged := managedHostWindowsStandalone
+	previousSecureClient := hookcli.SecureClientHost
+	previousWindowsManaged := hookcli.ManagedHostWindowsStandalone
 	t.Cleanup(func() {
 		perUserGatewayClientFactory = previousFactory
 		managedGatewayClientFactory = previousManagedFactory
-		secureClientHost = previousSecureClient
-		managedHostWindowsStandalone = previousWindowsManaged
+		hookcli.SecureClientHost = previousSecureClient
+		hookcli.ManagedHostWindowsStandalone = previousWindowsManaged
 	})
-	secureClientHost = func() bool { return false }
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.SecureClientHost = func() bool { return false }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	perUserGatewayClientFactory = func(time.Duration, string) (*http.Client, error) {
 		t.Fatal("managed service account was required to match the CLI account")
 		return nil, nil
@@ -56,7 +57,7 @@ func TestManagedGatewayClientKeepsServiceAccountTransportDuringUpgrade(t *testin
 	called := false
 	managedGatewayClientFactory = func(_ time.Duration, addr, service string) (*http.Client, error) {
 		called = true
-		if addr != "127.0.0.1:18970" || service != managedServiceName(false) {
+		if addr != "127.0.0.1:18970" || service != hookcli.ManagedServiceName(false) {
 			t.Errorf("managed service peer = %q/%q", addr, service)
 		}
 		return nil, errors.New("connected managed gateway peer is unverified")
@@ -71,16 +72,16 @@ func TestManagedGatewayClientKeepsServiceAccountTransportDuringUpgrade(t *testin
 
 func TestSecureClientGatewayClientRequiresVerifiedServiceTransport(t *testing.T) {
 	previousFactory := managedGatewayClientFactory
-	previousSecureClient := secureClientHost
+	previousSecureClient := hookcli.SecureClientHost
 	t.Cleanup(func() {
 		managedGatewayClientFactory = previousFactory
-		secureClientHost = previousSecureClient
+		hookcli.SecureClientHost = previousSecureClient
 	})
-	secureClientHost = func() bool { return true }
+	hookcli.SecureClientHost = func() bool { return true }
 	called := false
 	managedGatewayClientFactory = func(_ time.Duration, addr, service string) (*http.Client, error) {
 		called = true
-		if addr != "127.0.0.1:18970" || service != managedServiceName(true) {
+		if addr != "127.0.0.1:18970" || service != hookcli.ManagedServiceName(true) {
 			t.Errorf("service peer = %q/%q", addr, service)
 		}
 		return nil, errors.New("connected managed gateway peer is unverified")

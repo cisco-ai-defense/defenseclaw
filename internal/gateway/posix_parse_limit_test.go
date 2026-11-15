@@ -74,7 +74,7 @@ func TestPosixInputBytesAreTruncatedInEveryTier(t *testing.T) {
 		{"data-command-substitution", "echo $(dcx - '" + word(4200) + "')", false},
 		{"data-in-pipeline", "dcx - '" + word(4200) + "' | cat", false},
 		{"data-two-words-two-calls", "dcx - '" + word(4200) + "'; ssh host '" + word(4200) + "'", false},
-		{"data-whitespace-padded-call-over-64k", "echo ok" + strings.Repeat(" ", 70000), false},
+		{"data-whitespace-padded-call-over-64k", "echo ok" + strings.Repeat(" ", 70000), true}, // past MaxCommandBytes: the psf2 byte floor (GAP-0611, GAP-0748)
 		{"data-heredoc-body-over-4k-is-not-a-word", "cat <<EOF\n" + word(8000) + "\nEOF\n", false},
 		{"data-word-then-seen-write", "dcx - '" + word(4200) + "'; " + boundedShellSeen, false},
 		{"data-seen-write-then-word", boundedShellSeen + "; dcx - '" + word(4200) + "'", false},
@@ -155,6 +155,9 @@ func TestPosixDataWordRecordIsNotACap(t *testing.T) {
 	record := withPosixDataWordRecord(nil)
 	if len(record) != 1 || !record[0].dataWordRecord || record[0].contributesToEnforcement() {
 		t.Fatalf("want one detection-only data-word record, got %+v", record)
+	}
+	if guardrailSeverityRank(record[0].Severity) != severityNone {
+		t.Fatalf("the data-word record carries severity %s onto an allowed call", record[0].Severity)
 	}
 	if boundedLimitIndex(record) != -1 {
 		t.Fatal("the data-word record counts as a limit the call hit")

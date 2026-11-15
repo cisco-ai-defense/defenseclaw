@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -30,10 +31,10 @@ import (
 const hookColdStartLockWait time.Duration = 0
 
 func hookColdStartSupported() bool {
-	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) || secureClientHost() {
+	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) || hookcli.SecureClientHost() {
 		return false
 	}
-	_, managedHost := managedHostWindowsStandalone()
+	_, managedHost := hookcli.ManagedHostWindowsStandalone()
 	return !managedHost
 }
 

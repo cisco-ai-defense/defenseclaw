@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 func TestOpenCursorHookInputFile(t *testing.T) {
@@ -33,7 +35,7 @@ func TestOpenCursorHookInputFile(t *testing.T) {
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	input, err := openCursorHookInputFile(hookDir, path)
+	input, err := hookcli.OpenCursorHookInputFile(hookDir, path)
 	if err != nil {
 		t.Fatalf("openCursorHookInputFile: %v", err)
 	}
@@ -56,7 +58,7 @@ func TestOpenCursorHookInputFileRejectsUntrustedPaths(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if input, err := openCursorHookInputFile(hookDir, outside); err == nil {
+	if input, err := hookcli.OpenCursorHookInputFile(hookDir, outside); err == nil {
 		_ = input.Close()
 		t.Fatal("accepted input outside the hooks directory")
 	}
@@ -64,7 +66,7 @@ func TestOpenCursorHookInputFileRejectsUntrustedPaths(t *testing.T) {
 	if err := os.WriteFile(wrongName, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if input, err := openCursorHookInputFile(hookDir, wrongName); err == nil {
+	if input, err := hookcli.OpenCursorHookInputFile(hookDir, wrongName); err == nil {
 		_ = input.Close()
 		t.Fatal("accepted a non-managed filename")
 	}
@@ -73,12 +75,12 @@ func TestOpenCursorHookInputFileRejectsUntrustedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate(cursorHookInputMaxBytes + 1); err != nil {
+	if err := f.Truncate(hookcli.CursorHookInputMaxBytes + 1); err != nil {
 		_ = f.Close()
 		t.Fatal(err)
 	}
 	_ = f.Close()
-	if input, err := openCursorHookInputFile(hookDir, oversized); err == nil {
+	if input, err := hookcli.OpenCursorHookInputFile(hookDir, oversized); err == nil {
 		_ = input.Close()
 		t.Fatal("accepted an oversized payload")
 	}
@@ -107,7 +109,7 @@ func TestBuildHookOptionsEnvWiring(t *testing.T) {
 	t.Setenv("DEFENSECLAW_TRACEPARENT", "tp-value")
 	writeHookSidecarForTest(t, home, "DEFENSECLAW_FAIL_MODE=closed\n")
 
-	opts := buildHookOptions("codex", "PreToolUse", "127.0.0.1:9999", "open")
+	opts := hookcli.BuildHookOptions("codex", "PreToolUse", "127.0.0.1:9999", "open")
 
 	if opts.Connector != "codex" {
 		t.Errorf("connector = %q", opts.Connector)
@@ -139,14 +141,14 @@ func TestBuildHookOptionsEnvWiring(t *testing.T) {
 
 func TestBuildHookOptionsDefaultAPIAddr(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-	opts := buildHookOptions("cursor", "", "", "open")
+	opts := hookcli.BuildHookOptions("cursor", "", "", "open")
 	if opts.APIAddr == "" {
 		t.Fatal("expected a default api addr when flag and env are empty")
 	}
 }
 
 func TestHookCommandExposesOnlyHiddenContractBinding(t *testing.T) {
-	cmd := newHookCmd()
+	cmd := hookcli.NewHookCmd()
 	flag := cmd.Flags().Lookup("hook-contract")
 	if flag == nil {
 		t.Fatal("hook command is missing installer-bound contract flag")
@@ -165,7 +167,7 @@ func TestBuildHookOptionsSidecarFallback(t *testing.T) {
 	writeHookSidecarForTest(t, home, "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:12345\nDEFENSECLAW_FAIL_MODE=closed\n")
 
 	// Empty flags + empty env: the sidecar supplies the address; fail closed.
-	opts := buildHookOptions("codex", "", "", "")
+	opts := hookcli.BuildHookOptions("codex", "", "", "")
 	if opts.APIAddr != "127.0.0.1:12345" {
 		t.Errorf("api addr = %q, want sidecar value", opts.APIAddr)
 	}
@@ -186,8 +188,8 @@ func TestBuildHookOptionsConnectorScopedSidecarMixedModes(t *testing.T) {
   "fail_mode_sources": {"claudecode": "config", "codex": "config"}
 }`)
 
-	claude := buildHookOptions("claudecode", "", "", "")
-	codex := buildHookOptions("codex", "", "", "")
+	claude := hookcli.BuildHookOptions("claudecode", "", "", "")
+	codex := hookcli.BuildHookOptions("codex", "", "", "")
 	if claude.FailMode != "closed" || codex.FailMode != "closed" {
 		t.Fatalf("per-user sidecar reopened a hook: Claude=%q Codex=%q", claude.FailMode, codex.FailMode)
 	}
@@ -204,7 +206,7 @@ func TestBuildHookOptionsFlagAndEnvBeatSidecar(t *testing.T) {
 	writeHookSidecarForTest(t, home, "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:12345\nDEFENSECLAW_FAIL_MODE=closed\n")
 
 	// An explicit flag for the address wins over the sidecar.
-	opts := buildHookOptions("codex", "", "127.0.0.1:7000", "")
+	opts := hookcli.BuildHookOptions("codex", "", "127.0.0.1:7000", "")
 	if opts.APIAddr != "127.0.0.1:7000" {
 		t.Errorf("api addr = %q, want flag value over sidecar", opts.APIAddr)
 	}
@@ -212,11 +214,11 @@ func TestBuildHookOptionsFlagAndEnvBeatSidecar(t *testing.T) {
 	// An inherited environment cannot reopen the installed closed mode
 	// (GAP-0315).
 	t.Setenv("DEFENSECLAW_FAIL_MODE", "open")
-	opts = buildHookOptions("codex", "", "", "")
+	opts = hookcli.BuildHookOptions("codex", "", "", "")
 	if opts.FailMode != "closed" {
 		t.Errorf("fail mode = %q, want the sidecar's closed over env 'open'", opts.FailMode)
 	}
-	if hookPreRunFailsClosed(hookFailureContext{connector: "kiro"}) != true {
+	if hookcli.HookPreRunFailsClosed(hookcli.HookFailureContext{Connector: "kiro"}) != true {
 		t.Error("pre-run failure: env 'open' reopened a closed kiro hook")
 	}
 
@@ -224,13 +226,13 @@ func TestBuildHookOptionsFlagAndEnvBeatSidecar(t *testing.T) {
 	writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:12345","fail_modes":{"codex":"open","kiro":"open"},"fail_mode_sources":{"codex":"config","kiro":"config"}}`)
 	for _, env := range []string{"", " Closed ", "closed", "CLOSED"} {
 		t.Setenv("DEFENSECLAW_FAIL_MODE", env)
-		if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "closed" {
+		if opts = hookcli.BuildHookOptions("codex", "", "", ""); opts.FailMode != "closed" {
 			t.Errorf("env %q: fail mode = %q, want closed", env, opts.FailMode)
 		}
-		if opts = buildHookOptions("codex", "", "", "open"); opts.FailMode != "closed" {
+		if opts = hookcli.BuildHookOptions("codex", "", "", "open"); opts.FailMode != "closed" {
 			t.Errorf("env %q: fail mode = %q, want closed despite --fail-mode open", env, opts.FailMode)
 		}
-		if !hookPreRunFailsClosed(hookFailureContext{connector: "kiro"}) {
+		if !hookcli.HookPreRunFailsClosed(hookcli.HookFailureContext{Connector: "kiro"}) {
 			t.Errorf("env %q: pre-run failure opened a kiro hook", env)
 		}
 	}
@@ -246,18 +248,18 @@ func TestBuildHookOptionsFlagAndEnvBeatSidecar(t *testing.T) {
 	} {
 		writeHookSidecarForTest(t, home, body)
 		_ = os.Remove(filepath.Join(home, "config.yaml"))
-		if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "closed" {
+		if opts = hookcli.BuildHookOptions("codex", "", "", ""); opts.FailMode != "closed" {
 			t.Errorf("sidecar %q without a configured open: fail mode = %q, want closed", body, opts.FailMode)
 		}
 		if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("guardrail:\n  hook_fail_mode: open\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if opts = buildHookOptions("codex", "", "", ""); opts.FailMode != "closed" {
+		if opts = hookcli.BuildHookOptions("codex", "", "", ""); opts.FailMode != "closed" {
 			t.Errorf("sidecar %q: fail mode = %q, want closed despite persisted open", body, opts.FailMode)
 		}
 	}
 	t.Setenv("DEFENSECLAW_FAIL_MODE", "open")
-	if opts = buildHookOptions("claudecode", "", "", ""); opts.FailMode != "closed" {
+	if opts = hookcli.BuildHookOptions("claudecode", "", "", ""); opts.FailMode != "closed" {
 		t.Errorf("v2 sidecar closed claudecode: fail mode = %q, want closed over env open", opts.FailMode)
 	}
 }
@@ -269,7 +271,7 @@ func TestReadHookSidecarParsing(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	got := readHookSidecar(path)
+	got := hookcli.ReadHookSidecar(path)
 	if got["DEFENSECLAW_GATEWAY_ADDR"] != "127.0.0.1:18970" {
 		t.Errorf("addr = %q", got["DEFENSECLAW_GATEWAY_ADDR"])
 	}
@@ -277,7 +279,7 @@ func TestReadHookSidecarParsing(t *testing.T) {
 		t.Errorf("legacy fail mode must be ignored: %v", got)
 	}
 	// A missing file yields an empty map, not a nil-map panic.
-	if m := readHookSidecar(filepath.Join(dir, "absent")); len(m) != 0 {
+	if m := hookcli.ReadHookSidecar(filepath.Join(dir, "absent")); len(m) != 0 {
 		t.Errorf("expected empty map for missing file, got %v", m)
 	}
 }
@@ -300,7 +302,7 @@ func TestReadHookSidecarIgnoresLegacyFailModes(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			parsed := readHookSidecar(path)
+			parsed := hookcli.ReadHookSidecar(path)
 			if got := parsed["DEFENSECLAW_GATEWAY_ADDR"]; got != tc.wantAddr {
 				t.Fatalf("gateway address = %q, want %q", got, tc.wantAddr)
 			}
@@ -319,18 +321,18 @@ func TestBuildHookOptionsRejectsNonLoopbackAddr(t *testing.T) {
 	// and fall back to the local gateway, matching the .sh hooks.
 	t.Setenv("DEFENSECLAW_GATEWAY_ADDR", "evil.example.com:443")
 
-	opts := buildHookOptions("codex", "", "", "open")
+	opts := hookcli.BuildHookOptions("codex", "", "", "open")
 	if opts.APIAddr == "evil.example.com:443" {
 		t.Fatal("non-loopback gateway address from env must be rejected")
 	}
-	if !hookIsLoopbackAddr(opts.APIAddr) {
+	if !hookcli.HookIsLoopbackAddr(opts.APIAddr) {
 		t.Fatalf("fallback api addr %q is not loopback", opts.APIAddr)
 	}
 
 	// A non-loopback IP literal is likewise refused.
 	t.Setenv("DEFENSECLAW_GATEWAY_ADDR", "10.0.0.5:8787")
-	opts = buildHookOptions("codex", "", "", "open")
-	if !hookIsLoopbackAddr(opts.APIAddr) {
+	opts = hookcli.BuildHookOptions("codex", "", "", "open")
+	if !hookcli.HookIsLoopbackAddr(opts.APIAddr) {
 		t.Fatalf("fallback api addr %q is not loopback", opts.APIAddr)
 	}
 }
@@ -341,7 +343,7 @@ func TestHookIsLoopbackAddr(t *testing.T) {
 		"[::1]:8787", "::1", "127.5.6.7:1",
 	}
 	for _, a := range loopback {
-		if !hookIsLoopbackAddr(a) {
+		if !hookcli.HookIsLoopbackAddr(a) {
 			t.Errorf("hookIsLoopbackAddr(%q) = false, want true", a)
 		}
 	}
@@ -350,7 +352,7 @@ func TestHookIsLoopbackAddr(t *testing.T) {
 		":8787", "8.8.8.8", "192.168.1.10:80",
 	}
 	for _, a := range remote {
-		if hookIsLoopbackAddr(a) {
+		if hookcli.HookIsLoopbackAddr(a) {
 			t.Errorf("hookIsLoopbackAddr(%q) = true, want false", a)
 		}
 	}

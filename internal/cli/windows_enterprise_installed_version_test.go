@@ -11,11 +11,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 
 	"github.com/spf13/cobra"
 
@@ -381,7 +383,7 @@ func TestWindowsEnterpriseDirectLifecycleRefusesConnectorlessConfig(t *testing.T
 			if called {
 				t.Fatal("installer ran with connectorless config")
 			}
-			if !errors.Is(err, errWindowsEnterpriseInvalidArguments) && commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+			if !errors.Is(err, errWindowsEnterpriseInvalidArguments) && cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
 				t.Fatalf("%s refusal = %v", action, err)
 			}
 			var result enterprisestatus.Result
@@ -471,7 +473,7 @@ func TestWindowsEnterpriseEnsureKeepsThePlanAfterRecoveringTheConfigGeneration(t
 				actions = append(actions, argAfter(call, "-Action"))
 			}
 			if tc.action == "" {
-				if err == nil || commandExitCode(err) == 0 || result.OK || strings.Join(actions, ",") != "Status" ||
+				if err == nil || cliusage.ExitCode(err) == 0 || result.OK || strings.Join(actions, ",") != "Status" ||
 					len(result.Errors) == 0 || !strings.Contains(result.Errors[0].Message, "access denied") {
 					t.Fatalf("refusal: err=%v ok=%v actions=%q errors=%+v", err, result.OK, actions, result.Errors)
 				}
