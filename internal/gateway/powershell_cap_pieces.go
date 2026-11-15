@@ -153,7 +153,7 @@ func powerShellStatements(runes []rune, complete bool) []string {
 			i = scan.hereString(i) - 1
 		case r == '<' && i+1 < len(runes) && runes[i+1] == '#' && actionfacts.PowerShellCommentStarts(runes, i, false):
 			end := i + 2
-			for end+1 < len(runes) && !(runes[end] == '#' && runes[end+1] == '>') {
+			for end+1 < len(runes) && (runes[end] != '#' || runes[end+1] != '>') {
 				end++
 			}
 			if end+1 >= len(runes) {
