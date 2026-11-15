@@ -500,7 +500,14 @@ func dispatchTrustedAction(
 		return trustedActionLimitFindings(request.EnforcementCapable)
 	}
 	if request.EnforcementCapable && shellReason == "shell-parse-bound" {
-		return trustedActionLimitFindings(true)
+		if !trustedCallReadsSyntaxTail(request) {
+			return trustedActionLimitFindings(true)
+		}
+		// A plain syntax error stops the recovering parse at its proof
+		// bound too, but the statements that parse are read: they are
+		// judged in full below, and the bound still decides the call at
+		// least as the evaluation limit does (rel-1-0-10:GAP-0526).
+		defer func() { findings = withTrustedActionLimitFinding(findings, true) }()
 	}
 	if bound == shellReadingNestedProof {
 		// The readers below read it, but past this weight they do not prove
@@ -800,6 +807,28 @@ func dispatchTrustedActionWith(
 				if simple.EvaluationFailure != "" {
 					if simple.EvaluationFailure == actionfacts.EvaluationFailureInternal {
 						findings = withSimpleCommandFindings(findings, trustedActionParseFailureFindings(request.EnforcementCapable))
+						continue
+					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureUnresolvedBody {
+						// A nested shell body the walk cannot resolve: what it
+						// runs is unknown (rel-1-0-10:GAP-0535).
+						findings = withSimpleCommandFindings(findings, trustedActionUnresolvedBodyFindings(request.EnforcementCapable))
+						continue
+					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureSyntaxCap {
+						// The reading of the syntax error stopped at a cap:
+						// the unknown tier, and the statements read before it
+						// are judged as the other simple commands are.
+						findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
+						continue
+					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax {
+						// A text with a syntax error: its readable statements
+						// are judged as the simple commands around this one,
+						// and the part that was not read is unknown
+						// (rel-1-0-10:GAP-0526).
+						findings = withSimpleCommandFindings(findings, trustedActionSyntaxUnreadFindings(request.EnforcementCapable,
+							unreadPartMayWriteProtected(request, generation, syntaxUnreadText(wholeCommand))))
 						continue
 					}
 					if simple.EvaluationFailure != "limit" {
@@ -9758,7 +9787,8 @@ func trustedCallOverStatementBudgetWith(input actionfacts.Input, facts actionfac
 	}
 	if facts.Parse.Dialect == actionfacts.DialectPOSIX && facts.Parse.Status != actionfacts.StatusLimitExceeded &&
 		!slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
-			return simple.EvaluationFailure == "parse"
+			return simple.EvaluationFailure == "parse" || simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax ||
+				simple.EvaluationFailure == actionfacts.EvaluationFailureUnresolvedBody
 		}) {
 		// A complete POSIX split already enforced the limit. The extra
 		// count is needed only when the analyzer reached its own bound or
@@ -9897,6 +9927,146 @@ func trustedActionParseFailureFindings(enforcementCapable bool) []RuleFinding {
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
 
+// syntaxUnreadTitle is the reason of a command with a shell syntax error:
+// the statements that parse were judged, the rest was not read.
+const syntaxUnreadTitle = "Part of this command has a shell syntax error and could not be read, so that part was not checked"
+
+// trustedActionSyntaxUnreadFindings is the record of a command read only in
+// part because of a syntax error (actionfacts.EvaluationFailureSyntax):
+// detection-only (unreadPartFindings), or an alert when alert is set
+// (unreadPartMayWriteProtected). A block proven on a statement that was read
+// stays a block (rel-1-0-10:GAP-0526).
+func trustedActionSyntaxUnreadFindings(enforcementCapable, alert bool) []RuleFinding {
+	findings := unreadPartFindings(syntaxUnreadTitle, enforcementCapable)
+	if alert {
+		findings = unreadPartAlert(findings, enforcementCapable)
+	}
+	return findings
+}
+
+// unreadPartMayWriteProtected is the parser-differential check of the
+// strict pack and of a managed install: the shell parser here rejects text
+// that a shell may still run, so the raw text of the syntax-error remainder
+// that was not read (unread) is scanned with what already exists, the
+// DefenseClaw state names (hookpaths.MayNameState) and the pack's tool-call
+// pattern rules of the action categories (ruleActionCategory). A hit turns
+// the record into an alert; it never blocks. Measured on the owner traces
+// (s7-gate syn-rel vs syn-head3, agent-transcripts-sample strict): a
+// blocking check would add 150 false blocks of 56,443 calls, over the 0.1%
+// bar, so 1.0.10 ships it alert-only (lead decision 2026-11-14,
+// rel-1-0-10:GAP-0526). Default and permissive outside managed keep the
+// detection-only record.
+func unreadPartMayWriteProtected(request trustedActionRequest, generation *compiledRulePackCategories, unread string) bool {
+	if !request.StrictPolicy && !request.ManagedInstall || strings.TrimSpace(unread) == "" {
+		return false
+	}
+	if hookpaths.MayNameState(unread) {
+		return true
+	}
+	options := ruleScanOptions{includeToolCallOnly: true, contentScope: ruleContentScopeAll}
+	for _, finding := range scanRuleGeneration(generation, unread, request.Input.Tool, options) {
+		if trustedActionCatalogCategoryIsAction(generation, finding.RuleID) {
+			return true
+		}
+	}
+	return false
+}
+
+// syntaxUnreadText is command with the statements shellparse.ReadSyntaxTail
+// read blanked: the part a shell may run that the readers did not. A text
+// whose syntax error is in a nested body (no top-level reading) is unread
+// whole.
+func syntaxUnreadText(command string) string {
+	tail, ok := shellparse.ReadSyntaxTail(command)
+	if !ok {
+		return command
+	}
+	unread, from := []byte(command), 0
+	for _, statement := range tail.Statements {
+		at := strings.Index(command[from:], statement)
+		if at < 0 {
+			continue
+		}
+		at += from
+		for i := at; i < at+len(statement); i++ {
+			if unread[i] != '\n' {
+				unread[i] = ' '
+			}
+		}
+		from = at + len(statement)
+	}
+	return string(unread)
+}
+
+// trustedActionCatalogCategoryIsAction reports a rule of the generation in a
+// category about what a tool call does (ruleActionCategory).
+func trustedActionCatalogCategoryIsAction(generation *compiledRulePackCategories, ruleID string) bool {
+	if generation == nil {
+		return false
+	}
+	for _, member := range append([]*compiledRulePackCategories{generation}, generation.members...) {
+		for _, category := range member.categories {
+			if !ruleActionCategory(category.Name) {
+				continue
+			}
+			for _, rule := range category.Rules {
+				if rule.ID == ruleID {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// unreadPartFindings is the audit record of the part of a command the
+// readers could not read (a syntax error, an unresolved shell body):
+// parseFailureRuleID, detection-only. What was read is judged in full and a
+// block proven there stands. The unread part itself does not raise the
+// verdict: on the owner traces (agent-transcripts-sample, aidev-sample,
+// small; s7-gate syn-rel vs syn-head2) about 2% of benign calls hold a
+// text Bash rejects or a dynamic -c body, and an enforcing unknown tier
+// alerted 984 of them in default and blocked them in strict
+// (rel-1-0-10:GAP-0526, GAP-0535). The record keeps the call from being a
+// silent allow in the audit log.
+func unreadPartFindings(title string, enforcementCapable bool) []RuleFinding {
+	findings := trustedActionParseFailureFindings(enforcementCapable)
+	for index := range findings {
+		findings[index].Title = title
+		// A record, not a finding about the call: it does not raise the
+		// severity of an allowed answer (the alert variants raise it back).
+		findings[index].Severity = "LOW"
+		findings[index].enforcement = findingEnforcementDetectionOnly
+	}
+	return findings
+}
+
+// unreadPartAlert turns unread-part records into the unknown tier as an
+// alert: CRITICAL, capped below confirm and block (findingEnforcementAlertOnly).
+func unreadPartAlert(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	if !enforcementCapable {
+		return findings
+	}
+	for index := range findings {
+		findings[index].Severity = "CRITICAL"
+		findings[index].enforcement = findingEnforcementAlertOnly
+	}
+	return findings
+}
+
+// unresolvedBodyTitle is the reason of a command that starts a shell body
+// whose text, or whose -c option word, is not known before it runs.
+const unresolvedBodyTitle = "This command runs a shell body that could not be read before it runs, so the body was not checked"
+
+// trustedActionUnresolvedBodyFindings is the finding of a command with a
+// nested shell body the walk cannot resolve
+// (actionfacts.EvaluationFailureUnresolvedBody): the unknown tier as an
+// alert in every pack, never a block (lead decision 2026-11-14,
+// rel-1-0-10:GAP-0535).
+func trustedActionUnresolvedBodyFindings(enforcementCapable bool) []RuleFinding {
+	return unreadPartAlert(unreadPartFindings(unresolvedBodyTitle, enforcementCapable), enforcementCapable)
+}
+
 // shellReadingBound is the reading bound a command is past
 // (trustedActionCommandBound).
 type shellReadingBound uint8
@@ -9988,6 +10158,23 @@ func trustedCallShellParseReason(request trustedActionRequest) string {
 		return ""
 	}
 	return hookpaths.ShellParseReason(request.Connector, request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome)
+}
+
+// trustedCallReadsSyntaxTail reports a call with a plain syntax error, in
+// its command or in a static eval or shell -c body of it, that the
+// per-command pass reads in part (actionfacts.EvaluationFailureSyntax): that
+// pass judges the statements that parse (rel-1-0-10:GAP-0526). It is asked
+// only of a call at the recovered-parse proof bound.
+func trustedCallReadsSyntaxTail(request trustedActionRequest) bool {
+	if _, ok := trustedBashCommandInput(request.Input); !ok {
+		return false
+	}
+	simples := actionfacts.SimpleCommands(request.Input, actionfacts.Analyze(request.Input))
+	return slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
+		return simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax
+	}) && slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
+		return simple.EvaluationFailure == "" && simple.Text != ""
+	})
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
