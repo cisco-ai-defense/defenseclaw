@@ -410,6 +410,16 @@ func dispatchTrustedAction(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	// A call judged as the twin of its data word leaves a detection-only
+	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
+	// other defer, so a limit finding any of them raises is kept as it is and
+	// the record never stands in for it.
+	var unreadDataWord bool
+	defer func() {
+		if unreadDataWord {
+			findings = withPosixDataWordRecord(findings)
+		}
+	}()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	defer recoverTrustedActionFault(request, &findings)
 	if trustedActionFaultHook != nil {
@@ -599,7 +609,11 @@ func dispatchTrustedAction(
 			// observe mode allows the budget finding but hard-blocks a
 			// proven write to the active state, and that proof is formed
 			// only there (withOverBudgetStateMutation).
-			return withOverBudgetStateMutation(parent, request, facts, trustedActionLimitFindings(request.EnforcementCapable))
+			// A call whose analysis also stopped at a byte bound names that cap
+			// (GAP-0382); the finding is the same one.
+			return withOverBudgetStateMutation(parent, request, facts,
+				withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
+					posixParseTruncation(request, facts), request))
 		}
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
@@ -739,6 +753,24 @@ func dispatchTrustedAction(
 	}
 	if windowsTwinCut.Any() {
 		defer func() { findings = withBoundedTruncation(findings, windowsTwinCut, request) }()
+	}
+	// A POSIX shell call the analysis stopped reading at a byte bound (one word
+	// past the string bound ends it with no command) is truncated: judged at
+	// the unknown tier of the pack, never a clean allow (rel-1-0-10:GAP-0382).
+	if set := posixParseTruncation(request, facts); set.Any() {
+		defer func() {
+			findings = withBoundedTruncation(findings, set, request)
+		}()
+	}
+	// A word past the bound that the local shell only passes on (a big script
+	// handed to dcx or ssh) is data: the call is judged as its twin with the
+	// word shortened, and the word leaves a detection-only record
+	// (rel-1-0-10:GAP-0382).
+	if twin, ok := posixDataWordTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+			unreadDataWord = true
+		}()
 	}
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
 	// that view when the action already names a possible active hook mutation;

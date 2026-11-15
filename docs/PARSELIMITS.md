@@ -287,3 +287,57 @@ gap.
   alone or a script that writes nothing keeps its rel verdict.
 - `internal/actionfacts/pipeline_scope_test.go`: the statement split of a
   pipeline is linear.
+
+## The byte bounds of the analysis are caps of the bound rule
+
+The analysis of a call (`actionfacts.Analyze`) has its own byte bounds, below
+the reading budget's 1 MiB: one literal word over 4 KiB, the command text over
+64 KiB, the arguments over 256 KiB. Past one of them the analysis ends with
+`limit_exceeded` / `input_limit` and no command, so the readers have nothing to
+judge. Such a POSIX shell call is TRUNCATED in the sense of the bound rule
+(`internal/guardrail/bounded`, cap `bytes`, `gateway/posix_parse_limit.go`): an
+alert in the default and permissive packs (a managed install's included), a
+block in the strict pack, never below what the text read before the bound
+proves (rel-1-0-10:GAP-0382; before it the call was allowed with no finding in
+every pack). A count bound (a statement of more argv words than the analysis
+keeps) stays with the operand bound, and a Windows host call keeps its own rule
+(GAP-0345, GAP-0318). The property test of the bound rule pins the cap
+(`shell-parse input bytes`).
+
+### A word the local shell only passes on is data, not truncated
+
+A word over 4 KiB is split by its position in the call
+(`actionfacts.SplitOverLimitWords`), not by the name of the program:
+
+- CODE position stays truncated: the command name; an operand of a shell,
+  `eval`, `source` or `.`, or of a wrapper that starts the next word as a
+  command; the code operand of an interpreter (read from the inline
+  interpreter table, every operand for an interpreter the table lacks); a word
+  before the destination of `ssh`; and any word that is not the plain operand
+  of a simple command (a redirect target, a here-string, a loop or case word).
+  A call text over 64 KiB, or arguments over 256 KiB, is truncated too: no word
+  is to blame.
+- DATA position: the plain operand of any other program, which includes the
+  script handed to `dcx`, `ssh` (after the destination), `docker exec` or a
+  deployment tool. The local shell does not run it, and its hook never sees
+  what runs where it is sent. The call is judged as its twin, the same call
+  with each such word shortened to a stand-in of the same quoting, so every
+  other statement is read in full and a proven write still blocks; the word
+  itself leaves a detection-only `ACTION-COMPOUND-LIMIT` record (reason
+  `bounded_truncated cap=bytes; operand`) that raises no action.
+
+A command named through a variable is read by the program the text shows it to
+be: `$K/dcx` is `dcx` wherever `$K` points, and a bare `$D` (also `"$D"`)
+that the text sets once, at the top level, to a literal (`D=/opt/tools/dcx;
+$D ...`) is that program. A name the text does not show (`$CMD`), one it sets
+twice or rebinds (`read`, `getopts`, `mapfile`, `eval`, `source`, `printf -v`, a
+loop variable, an assigning expansion), is unknown and its words stay in code
+position. A call text over 64 KiB, or arguments over 256 KiB, stays truncated
+even when the only long word is data: the twin of that reading is not built.
+
+`ssh` has no remote-exec reading of the command text (the analysis reads its
+options and destination only), so the words after the destination are data,
+and a limit of this reading: what the remote host runs is not judged here. A
+call with one word in code position and another in data position is truncated.
+Nothing names a program as data: a program is data unless the analysis or one
+of its readers already reads its operands as code.

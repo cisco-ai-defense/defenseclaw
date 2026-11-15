@@ -107,10 +107,13 @@ func withBoundedReason(finding *RuleFinding, reason string) {
 }
 
 // boundedLimitIndex is the index of the evaluation-limit finding in
-// findings, or -1.
+// findings, or -1. The detection-only record of a data word
+// (RuleFinding.dataWordRecord) is not a limit the call hit and is skipped:
+// only an enforcing cap or a truncated reading counts, so a record never
+// makes a call capped or stands in for its limit finding (rel-1-0-10:GAP-0760).
 func boundedLimitIndex(findings []RuleFinding) int {
 	return slices.IndexFunc(findings, func(finding RuleFinding) bool {
-		return canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
+		return !finding.dataWordRecord && canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
 	})
 }
 
@@ -119,7 +122,8 @@ func boundedLimitIndex(findings []RuleFinding) int {
 // maps the result to at least the unknown tier of the pack and never below
 // those findings (guardrailActionForProfile). An evaluation-limit finding the
 // call already carries is kept, title included, and gains the bounded reason,
-// so a call has one limit finding. The caller's slice is not changed. No cap
+// so a call has one limit finding; a data-word record beside it is not one
+// and stays detection-only (GAP-0760). The caller's slice is not changed. No cap
 // hit: findings as they are, without allocation.
 func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request trustedActionRequest) []RuleFinding {
 	if !set.Any() {
