@@ -183,6 +183,13 @@ func (r *sedBackupReader) read(command string, scope sedBackupScope, depth int) 
 // call reads one simple command; a cd changes the scope of the later calls.
 func (r *sedBackupReader) call(words []string, scope *sedBackupScope, depth int) {
 	if strings.Contains(words[0], sedHole) {
+		// A program word that holds a hole is a run-time word, which other
+		// layers judge; a hole that is a brace list past the caps (optionHole)
+		// is a word the reader could not expand, so the call may be an editor
+		// (bound rule, rel-1-0-10:GAP-0739).
+		if r.optionHole {
+			r.unresolved = true
+		}
 		return
 	}
 	switch programBase(words[0]) {
@@ -233,6 +240,9 @@ func (r *sedBackupReader) changeDirectory(words []string, scope *sedBackupScope)
 func (r *sedBackupReader) run(words []string, scope sedBackupScope, implicit bool, depth int) {
 	words, scope = r.unwrap(words, scope)
 	if len(words) == 0 || strings.Contains(words[0], sedHole) {
+		if len(words) > 0 && r.optionHole {
+			r.unresolved = true // as in call: a brace list past the caps names the program
+		}
 		return
 	}
 	switch program := sedProgram(words[0]); {
