@@ -996,6 +996,78 @@ def test_set_aside_model_keys_never_go_onto_another_model(data_dir: Path, capsys
     assert kept["items"] == {"routing.models[1]": "deep"}
 
 
+def test_set_aside_decision_and_switched_routing_are_put_back(data_dir: Path) -> None:
+    """rel-1-0-10:GAP-0767/0769: the decision goes back to its place, routing back on with its classifier."""
+    import yaml
+
+    config = _write_config(
+        data_dir,
+        "config_version: 9\nrouting:\n  enabled: false\n  models:\n    - name: fast\n      provider: openai\n"
+        "      model: gpt-5-mini\n  signals:\n    keywords:\n      - name: quick\n        keywords: [quick question]\n"
+        "  decisions:\n    - name: quick\n      conditions: [{type: keyword, name: quick}]\n      model_refs: [fast]\n"
+        "    - name: last\n      conditions: [{type: keyword, name: quick}]\n      model_refs: [fast]\n",
+    )
+    record = data_dir / "config-set-aside.json"
+    held = {"name": "codex-fast", "conditions": [{"type": "connector", "name": "codex"}], "model_refs": ["fast"]}
+    record.write_text(
+        json.dumps({"version": 1, "for": "1.0.9", "keys": {"routing.classifier": "rules"},
+                    "decisions": [{"index": 1, "value": held}], "switched": {"routing.enabled": True}}),
+        encoding="utf-8",
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    routing = yaml.safe_load(config.read_text(encoding="utf-8"))["routing"]
+    assert [d["name"] for d in routing["decisions"]] == ["quick", "codex-fast", "last"]
+    assert routing["decisions"][1] == held
+    assert routing["classifier"] == "rules" and routing["enabled"] is True
+    assert not record.exists()
+
+
+def test_a_decision_that_no_longer_fits_is_kept_and_the_rest_goes_back(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delta check D-1/D-2: a decision the validated writer refuses (its model is gone on the gateway
+    check), or whose name was reused, is kept in the record with its value; the classifier and
+    routing still go back."""
+    import yaml
+    from defenseclaw import config_writer
+
+    real_apply = config_writer.apply
+
+    def refusing_decisions(changes, *args, **kwargs):
+        if any(c.path == "routing.decisions" for c in changes):
+            raise ValueError("routing.decisions[1].model_refs: unknown model alias deep")
+        return real_apply(changes, *args, **kwargs)
+
+    monkeypatch.setattr(config_writer, "apply", refusing_decisions)
+    config = _write_config(
+        data_dir,
+        "config_version: 9\nrouting:\n  enabled: false\n  models:\n    - name: fast\n      provider: openai\n"
+        "      model: gpt-5-mini\n  signals:\n    keywords:\n      - name: quick\n        keywords: [quick question]\n"
+        "  decisions:\n    - name: quick\n      conditions: [{type: keyword, name: quick}]\n      model_refs: [fast]\n",
+    )
+    record = data_dir / "config-set-aside.json"
+    gone = {"name": "deep-codex", "conditions": [{"type": "connector", "name": "codex"}], "model_refs": ["deep"]}
+    reused = {"name": "quick", "conditions": [{"type": "connector", "name": "codex"}], "model_refs": ["fast"]}
+    record.write_text(
+        json.dumps({"version": 1, "for": "1.0.9", "keys": {"routing.classifier": "rules"},
+                    "decisions": [{"index": 0, "value": reused}, {"index": 1, "value": gone}],
+                    "switched": {"routing.enabled": True}}),
+        encoding="utf-8",
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    routing = yaml.safe_load(config.read_text(encoding="utf-8"))["routing"]
+    assert routing["classifier"] == "rules" and routing["enabled"] is True
+    assert [d["name"] for d in routing["decisions"]] == ["quick"]
+    assert routing["decisions"][0]["conditions"] == [{"type": "keyword", "name": "quick"}]
+    kept = json.loads(record.read_text(encoding="utf-8"))
+    assert kept["keys"] == {}
+    assert sorted(d["value"]["name"] for d in kept["decisions"]) == ["deep-codex", "quick"]
+
+
 def test_set_aside_key_that_cannot_be_put_back_is_named_with_its_command(
     data_dir: Path, capsys: pytest.CaptureFixture
 ) -> None:

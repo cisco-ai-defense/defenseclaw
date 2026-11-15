@@ -1826,6 +1826,123 @@ def test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade() -> None:
     assert missing == [], f"add these to upgrade_shim.NEWER_CONFIG_KEYS: {missing}"
 
 
+def _schema_enum_values(schema: dict) -> dict[str, set]:
+    """The enum values of every key path (_schema_key_paths naming) that has an enum."""
+
+    defs = schema.get("$defs", {})
+    out: dict[str, set] = {}
+
+    def walk(node: object, prefix: str, refs: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            return
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/") and ref.count("/") == 2:
+            name = ref.rsplit("/", 1)[-1]
+            if name not in refs:
+                walk(defs.get(name), prefix, (*refs, name))
+        if prefix and isinstance(node.get("enum"), list):
+            out.setdefault(prefix, set()).update(json.dumps(v) for v in node["enum"])
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            for branch in node.get(keyword, []):
+                walk(branch, prefix, refs)
+        for key, child in node.get("properties", {}).items():
+            walk(child, f"{prefix}.{key}" if prefix else key, refs)
+        if isinstance(node.get("items"), dict):
+            walk(node["items"], f"{prefix}[]", refs)
+        for value in [node.get("additionalProperties"), *(node.get("patternProperties") or {}).values()]:
+            if isinstance(value, dict):
+                walk(value, f"{prefix}.*", refs)
+
+    walk(schema, "", ())
+    return out
+
+
+# Keys both releases have whose allowed values 1.0.10 widens, and what a downgrade does with a
+# value 1.0.9 refuses (rel-1-0-10:GAP-0767): the decision is set aside whole.
+_WIDENED_SINCE_1_0_9 = {"routing.decisions[].conditions[].type": "decision set aside"}
+
+
+def test_every_value_new_since_1_0_9_is_handled_on_a_downgrade() -> None:
+    # A value 1.0.9 refuses under a key it has is the same failure as a new key (1.0.9 refuses
+    # config.yaml), so every widened enum must be handled by the set-aside.
+    old = _schema_enum_values(json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8")))
+    new = _schema_enum_values(
+        json.loads((_REPO_ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json").read_text(encoding="utf-8"))
+    )
+    widened = sorted(path for path in set(old) & set(new) if new[path] - old[path])
+    assert widened == sorted(_WIDENED_SINCE_1_0_9), f"handle these in upgrade_shim and list them here: {widened}"
+    assert {json.dumps(t) for t in upgrade_shim.OLDER_DECISION_CONDITION_TYPES} | {'"KEYWORD"'} == old[
+        "routing.decisions[].conditions[].type"
+    ]
+
+
+_DECISION_AND_CLASSIFIER_CONFIG = """config_version: 9
+routing:
+  enabled: true
+  classifier: rules
+  models:
+    - name: fast
+      provider: openai
+      model: gpt-5-mini
+  signals:
+    keywords:
+      - name: quick
+        keywords: [quick question]
+  decisions:
+    - name: quick
+      conditions: [{type: keyword, name: quick}]
+      model_refs: [fast]
+    - name: codex-fast
+      conditions: [{type: connector, name: codex}]
+      model_refs: [fast]
+    - name: last
+      conditions: [{type: KEYWORD, name: quick}]
+      model_refs: [fast]
+"""
+
+
+def test_downgrade_to_1_0_9_sets_aside_a_newer_decision_and_switches_routing_off(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_DECISION_AND_CLASSIFIER_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert [d["name"] for d in config["routing"]["decisions"]] == ["quick", "last"]
+    assert config["routing"]["enabled"] is False and "classifier" not in config["routing"]
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record["keys"] == {"routing.classifier": "rules"}
+    assert record["decisions"] == [
+        {"index": 1, "value": {"name": "codex-fast", "conditions": [{"type": "connector", "name": "codex"}], "model_refs": ["fast"]}}
+    ]
+    assert record["switched"] == {"routing.enabled": True}
+    out = capsys.readouterr().out
+    assert "routing decision codex-fast" in out and "Routing is switched off for 1.0.9" in out
+
+
+def test_downgrade_keeps_routing_on_with_the_vllm_classifier(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    body = _DECISION_AND_CLASSIFIER_CONFIG.replace("  classifier: rules\n", "").replace(
+        "    - name: codex-fast\n      conditions: [{type: connector, name: codex}]\n      model_refs: [fast]\n", ""
+    )
+    (home / "config.yaml").write_text(body, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    assert yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["routing"]["enabled"] is True
+    assert not _set_aside(home).exists()
+
+
 def test_the_downgrade_guard_fails_on_a_key_the_list_does_not_cover() -> None:
     # The guard above would pass on an empty diff; prove it bites: a key that is in the
     # 1.0.10 schema, not in the frozen 1.0.9 list and not in NEWER_CONFIG_KEYS is reported,

@@ -120,9 +120,24 @@ NEWER_CONFIG_KEYS = (
     ("routing.sensitive", (1, 0, 10)),
     ("routing.systemone", (1, 0, 10)),
 )
+# Values an older release refuses or cannot run, under keys it has
+# (rel-1-0-10:GAP-0767, GAP-0769), with the first release that has them:
+# - a routing.decisions item with a condition type other than these (1.0.10
+#   adds connector, api_family and request): the whole decision is set aside
+#   (by its name and place) and migrate puts it back where it was;
+# - routing.enabled true with routing.classifier rules or systemone: the
+#   classifier is set aside (NEWER_CONFIG_KEYS), so the older release would
+#   start the vLLM Semantic Router, which needs Docker; routing is switched
+#   off for it and migrate switches it back on.
+OLDER_DECISION_CONDITION_TYPES = ("keyword",)
+NEWER_DECISION_CONDITIONS_SINCE = (1, 0, 10)
+IN_PROCESS_CLASSIFIERS = ("rules", "systemone")
+IN_PROCESS_CLASSIFIERS_SINCE = (1, 0, 10)
 # Where a downgrade keeps the keys it set aside, in the data folder:
 # {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value},
-#  "items": {"<list item key>": "<its name>"}} (items: keys inside a list item).
+#  "items": {"<list item key>": "<its name>"},  (keys inside a list item)
+#  "decisions": [{"index": N, "value": {...}}],  (routing.decisions items set aside whole)
+#  "switched": {"routing.enabled": true}}        (values switched off for the older release)
 SET_ASIDE_FILE = "config-set-aside.json"
 _TIMEOUT = 30
 
@@ -663,6 +678,37 @@ def _newer_key_values(raw: object, pattern: str) -> tuple[dict[str, object], dic
     return found, items
 
 
+def _newer_decisions(raw: object, target: tuple[int, int, int]) -> list[dict[str, object]]:
+    """The routing.decisions items the older release ``target`` refuses: a condition type it lacks."""
+
+    if target >= NEWER_DECISION_CONDITIONS_SINCE:
+        return []
+    routing = raw.get("routing") if isinstance(raw, dict) else None
+    decisions = routing.get("decisions") if isinstance(routing, dict) else None
+    out: list[dict[str, object]] = []
+    for index, item in enumerate(decisions if isinstance(decisions, list) else []):
+        conditions = item.get("conditions") if isinstance(item, dict) else None
+        if any(
+            isinstance(c, dict) and str(c.get("type") or "").lower() not in OLDER_DECISION_CONDITION_TYPES
+            for c in (conditions if isinstance(conditions, list) else [])
+        ):
+            out.append({"index": index, "value": item})
+    return out
+
+
+def _switched_off(raw: object, target: tuple[int, int, int]) -> dict[str, object]:
+    """Values the older release ``target`` cannot run, to switch off for it: routing on with an
+    in-process classifier it does not have (it would start the Docker vLLM Semantic Router)."""
+
+    if target >= IN_PROCESS_CLASSIFIERS_SINCE:
+        return {}
+    routing = raw.get("routing") if isinstance(raw, dict) else None
+    in_process = isinstance(routing, dict) and routing.get("classifier") in IN_PROCESS_CLASSIFIERS
+    if in_process and routing.get("enabled") is True:
+        return {"routing.enabled": True}
+    return {}
+
+
 def _set_aside_newer_keys(version: str) -> None:
     """Take the keys DefenseClaw ``version`` does not have out of config.yaml.
 
@@ -690,12 +736,25 @@ def _set_aside_newer_keys(version: str) -> None:
         values, names = _newer_key_values(raw, pattern)
         found.update(values)
         items.update(names)
-    if not found:
+    decisions = _newer_decisions(raw, target)
+    switched = _switched_off(raw, target)
+    if not found and not decisions and not switched:
         return
-    names = ", ".join(found)
+    names = ", ".join(
+        [*found]
+        + [f"routing decision {d['value'].get('name')}" for d in decisions if isinstance(d["value"], dict)]
+        + (["routing on with the classifier " + str(raw["routing"]["classifier"])] if switched else [])
+    )
+    # In the order the validated writer accepts: a decision of a newer condition type needs
+    # the classifier that is about to go.
+    fixes = ["remove the routing.decisions entries whose conditions are not keyword ones"] if decisions else []
+    if switched:
+        fixes.append("defenseclaw routing disable")
+    if found:
+        fixes.append(f"defenseclaw config unset {' '.join(found)}")
     stop = (
-        f"DefenseClaw {version} does not have {names}, so its installer would refuse config.yaml; "
-        f"remove it with 'defenseclaw config unset {' '.join(found)}' and run the upgrade again"
+        f"DefenseClaw {version} does not have {names}, so its installer would refuse config.yaml "
+        f"or its gateway could not run it; {'; '.join(fixes)}, and run the upgrade again"
     )
     held = os.path.join(_data_home(), SET_ASIDE_FILE)
     try:
@@ -703,17 +762,19 @@ def _set_aside_newer_keys(version: str) -> None:
     except Exception as exc:  # noqa: BLE001 - a broken install: say what to remove by hand
         raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
     previous: bytes | None = None
-    kept: object = None
-    kept_items: object = None
+    document: object = {}
     try:
         with open(held, "rb") as stream:
             previous = stream.read()
         document = json.loads(previous.decode("utf-8"))
-        kept, kept_items = document.get("keys"), document.get("items")
     except FileNotFoundError:
         pass
-    except (OSError, ValueError, AttributeError):
-        kept = kept_items = None
+    except (OSError, ValueError):
+        document = {}
+    if not isinstance(document, dict):
+        document = {}
+    kept, kept_items = document.get("keys"), document.get("items")
+    kept_decisions, kept_switched = document.get("decisions"), document.get("switched")
     keys = dict(kept) if isinstance(kept, dict) else {}
     keys.update(found)
     record: dict[str, object] = {"version": 1, "for": version, "keys": keys}
@@ -721,13 +782,27 @@ def _set_aside_newer_keys(version: str) -> None:
     named.update(items)
     if named:
         record["items"] = named
+    held_decisions = [d for d in kept_decisions if isinstance(d, dict)] if isinstance(kept_decisions, list) else []
+    held_decisions += decisions
+    if held_decisions:
+        record["decisions"] = held_decisions
+    held_switched = dict(kept_switched) if isinstance(kept_switched, dict) else {}
+    held_switched.update(switched)
+    if held_switched:
+        record["switched"] = held_switched
+    changes = [Change(key, unset=True) for key in found]
+    if decisions:
+        drop = {d["index"] for d in decisions}
+        left = [item for index, item in enumerate(raw["routing"]["decisions"]) if index not in drop]
+        changes.append(Change("routing.decisions", left) if left else Change("routing.decisions", unset=True))
+    changes += [Change(key, False) for key in switched]
     try:
         _write_private_json(held, record)
     except OSError as exc:
         raise ShimError(f"{stop} (could not write {held}: {exc})") from None
     try:
         apply(
-            [Change(key, unset=True) for key in found],
+            changes,
             ACTOR_MIGRATION,
             f"set aside for the downgrade to {version}",
             path=config,
@@ -742,6 +817,11 @@ def _set_aside_newer_keys(version: str) -> None:
             pass
         raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
     print(f"  → DefenseClaw {version} does not have {names}: set aside in {held}.")
+    if switched:
+        print(
+            f"    Routing is switched off for {version}: without the classifier above it would need Docker "
+            "(the vLLM Semantic Router). Turn it on there with 'defenseclaw routing setup' if you want it."
+        )
     print(
         "    Installing a release that has it puts it back. If the installer stops, "
         "or after a rollback, put it back with: defenseclaw migrate"
