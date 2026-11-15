@@ -47,7 +47,9 @@ The checks:
   makes it, is judged on its own.
 - **The judge, when you turn it on.** The injection judge reads a tool result
   as untrusted data with its own prompt ("does this data try to direct the
-  agent?"). It runs under `detection_strategy_completion`, the setting that
+  agent?"), next to the tool, its call and your request for the turn (see the
+  `judge_tool_result_context` lane). It runs under
+  `detection_strategy_completion`, the setting that
   already governs tool output (setup sets it with the judge): `regex_judge`
   judges every result the rules did not already block, `judge_first` every
   result.

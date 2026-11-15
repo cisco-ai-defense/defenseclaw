@@ -63,8 +63,9 @@ const (
 	// finding on a call the parser does not model (MCP and other tools)
 	// keeps its alert (GAP-0397); off makes it audit-only like a modeled call.
 	CascadeLaneJudgeUnmodeledAlert = "judge_unmodeled_alert"
-	// CascadeLaneJudgeToolResultContext: the tool-result judges get the tool,
-	// what its call did and the user's request next to the output.
+	// CascadeLaneJudgeToolResultContext: the tool-result judges (injection,
+	// and PII for a listed tool) get the tool, its call, what the call did
+	// and the user's request next to the output, in nonce sections.
 	CascadeLaneJudgeToolResultContext = "judge_tool_result_context"
 )
 
@@ -79,7 +80,7 @@ func init() {
 	})
 	RegisterCascadeLane(CascadeLane{
 		Name: CascadeLaneJudgeToolResultContext, Default: CascadeLaneOn,
-		Description: "LLM judge (when on for the connector): the tool-result judges see the tool, what its call did (arguments redacted) and the user's request next to the output; off judges the output alone",
+		Description: "LLM judge (when on for the connector): the tool-result judges (injection, and PII for a listed tool) see the tool, its call (arguments redacted), what the call did and the user's request next to the output; off judges the output alone",
 	})
 }
 
@@ -95,7 +96,7 @@ func (l CascadeLaneValues) mode(name string) string {
 	if !ok {
 		return ""
 	}
-	if v, set := l[name]; set && !cascadeLaneValue(cascadeOr(v, "")) {
+	if v, set := l[name]; set && !lane.accepts(cascadeOr(v, "")) {
 		// A value Validate refuses as no lane value (an empty one included)
 		// reads as shadow, so a config that skipped the loader can not turn a
 		// lane on (or silently off) by a spelling.
@@ -135,19 +136,21 @@ func checkCascadeLanesSource(plain map[string]any) error {
 		if !present {
 			continue
 		}
+		// The values the lane takes: off, shadow, on, or its own list (the
+		// alignment lane: off, shadow, alert, block; GAP-0823).
+		allowed := strings.Join(CascadeLaneAllowed(s.Name), ", ")
 		if v == nil {
-			return fmt.Errorf("config: guardrail.cascade.lanes.%s has no value; set it to one of off, shadow, on or remove the key", s.Name)
+			return fmt.Errorf("config: guardrail.cascade.lanes.%s has no value; set it to one of %s or remove the key", s.Name, allowed)
 		}
-		if str, ok := v.(string); ok && str == "" {
-			return fmt.Errorf("config: guardrail.cascade.lanes.%s is empty; set it to one of off, shadow, on or remove the key", s.Name)
-		}
-		allowed := CascadeLaneAllowed(s.Name)
 		str, ok := v.(string)
 		switch {
-		case !ok || !cascadeLaneValue(str):
-			return fmt.Errorf("config: guardrail.cascade.lanes.%s %v is not one of %s (exact values)", s.Name, v, strings.Join(allowed, ", "))
-		case !slices.Contains(allowed, str):
-			return fmt.Errorf("config: guardrail.cascade.lanes.%s: on is not available in 1.0.10: the lane ships shadow-only (%s); allowed: %s", s.Name, s.ShadowOnly, strings.Join(allowed, ", "))
+		case ok && str == "":
+			return fmt.Errorf("config: guardrail.cascade.lanes.%s is empty; set it to one of %s or remove the key", s.Name, allowed)
+		case ok && slices.Contains(CascadeLaneAllowed(s.Name), str):
+		case ok && str == CascadeLaneOn && s.ShadowOnly != "":
+			return fmt.Errorf("config: guardrail.cascade.lanes.%s: on is not available in 1.0.10: the lane ships shadow-only (%s); allowed: %s", s.Name, s.ShadowOnly, allowed)
+		default:
+			return fmt.Errorf("config: guardrail.cascade.lanes.%s %v is not one of %s (exact values)", s.Name, v, allowed)
 		}
 	}
 	return nil
@@ -186,6 +189,9 @@ func CascadeLaneAllowed(name string) []string {
 	lane, ok := cascadeLane(name)
 	if !ok {
 		return nil
+	}
+	if lane.Values != nil {
+		return append([]string(nil), lane.Values...)
 	}
 	if lane.ShadowOnly != "" {
 		return []string{CascadeLaneOff, CascadeLaneShadow}

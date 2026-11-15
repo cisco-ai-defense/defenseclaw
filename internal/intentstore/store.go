@@ -60,6 +60,19 @@ type Store interface {
 	Reset(ctx context.Context, key string) error
 }
 
+// Reader is a Store that can also return a key's context without recording
+// a call. The judge that reads a tool's output takes the turn's user request
+// from it: a replica that did not see the turn's prompt gets the request the
+// replica that did see it recorded. A Store without Reader gives that judge
+// no request (it judges the output as with an unknown request), never a copy
+// kept in one process (rel-1-0-10:GAP-0848).
+type Reader interface {
+	Store
+	// Lookup returns key's context as the next AppendToolCall would find it,
+	// and false when the store holds nothing for key. It records nothing.
+	Lookup(ctx context.Context, key string) (Snapshot, bool, error)
+}
+
 // Limits bound a Process store.
 type Limits struct {
 	// MaxSessions is how many keys are kept; a full store first drops the
@@ -91,7 +104,7 @@ func NewProcess(limits Limits) *Process {
 	return &Process{limits: limits, now: time.Now}
 }
 
-var _ Store = (*Process)(nil)
+var _ Reader = (*Process)(nil)
 
 // ObservePrompt implements Store.
 func (p *Process) ObservePrompt(_ context.Context, key, intent string) error {
@@ -128,7 +141,13 @@ func (p *Process) Reset(_ context.Context, key string) error {
 	return nil
 }
 
-// Peek returns key's context without recording anything (tests and
+// Lookup implements Reader.
+func (p *Process) Lookup(_ context.Context, key string) (Snapshot, bool, error) {
+	snap, ok := p.Peek(key)
+	return snap, ok, nil
+}
+
+// Peek returns key's context without recording anything (Lookup, tests and
 // diagnostics).
 func (p *Process) Peek(key string) (Snapshot, bool) {
 	p.mu.Lock()

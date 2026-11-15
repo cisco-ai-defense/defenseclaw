@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // Tool results on the /llm proxy (rel-1-0-10 GAP-0171).
@@ -223,6 +225,15 @@ func firstNonBlank(v ...string) string {
 	return ""
 }
 
+// proxyJudgeConfig is the configuration of the proxy request's pinned
+// generation, nil (every lane at its default) when it has none.
+func proxyJudgeConfig(ctx context.Context) *config.Config {
+	if gen := pinnedGeneration(ctx); gen != nil {
+		return gen.Config
+	}
+	return nil
+}
+
 // InspectToolResult runs the tool-result checks on one tool output for the
 // proxy: the shared content rules and structural checks, then the opt-in
 // judge under the completion strategy (the hook lane's opt-in for tool
@@ -259,6 +270,9 @@ func (g *GuardrailInspector) InspectToolResult(ctx context.Context, tool, conten
 	if strategy == "judge_first" || (strategy == "regex_judge" && (local == nil || local.Action != guardrailActionBlock)) {
 		if judge := g.requestJudge(ctx); judge != nil {
 			judgeCtx, endJudge := g.startPhaseSpan(ctx, "judge.tool_result")
+			if !judgeLaneOn(proxyJudgeConfig(ctx), "", config.CascadeLaneJudgeToolResultContext) {
+				judgeCtx = withoutToolResultCall(judgeCtx)
+			}
 			start := time.Now()
 			jv := judge.RunJudges(judgeCtx, directionToolResult, content, tool)
 			if jv != nil && strings.EqualFold(jv.Severity, "CRITICAL") {

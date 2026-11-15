@@ -5808,10 +5808,11 @@ func injectNotificationForPassthrough(raw json.RawMessage, content, path string)
 func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args string) trustedActionRequest {
 	connectorName := p.connectorName()
 	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, json.RawMessage(args))
+	actionTool, trusted := agentHookNativeFileView(agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS), trusted)
 	cfg := proxyDecisionConfig(ctx)
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
-			Tool:       agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS),
+			Tool:       actionTool,
 			Args:       trusted,
 			CWD:        proxyToolCallCWD(toolCWD),
 			ActiveHome: hookActiveHome(ctx),
@@ -5859,6 +5860,21 @@ var proxyNeutralCWD = sync.OnceValue(func() string {
 	}
 	return dir
 })
+
+// toolCallCodeGuardFindings is CodeGuard over a write call's content
+// (codeGuardScanWriteArgs), as inspectTrustedToolPolicyCtx scans it for the
+// hook routes. A Secure Client install keeps its own scanners.
+func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action trustedActionRequest) []RuleFinding {
+	if p.toolCallSecureClient(ctx) || ManagedEnterpriseActive() || !codeGuardWriteTool(action.Input.Tool) {
+		return nil
+	}
+	rulesDir := ""
+	if cfg := proxyDecisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
+	}
+	scan := codeGuardScanWriteArgs(rulesDir, action.Input.Tool, action.Input.Args)
+	return codeGuardRuleFindings(scan, true, action.EnforcementCapable)
+}
 
 // proxyPOSIXReading is a tool call judged with the Windows shell dialect, as
 // it is read without it (the POSIX default); ok is false when the call has
@@ -5935,6 +5951,9 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		if posix, ok := proxyPOSIXReading(action); ok {
 			findings = mergeBoundedFindings(findings, trustedToolCallFindings(ctx, posix, "", p.toolCallSecureClient(ctx)))
 		}
+		// CodeGuard reads the file content a write call carries, as on the
+		// hook routes (rel-1-0-10:GAP-0776: the proxy never ran it).
+		findings = append(findings, p.toolCallCodeGuardFindings(ctx, action)...)
 		// Stamp the tool's capability class (read_fs / exec_shell /
 		// network_fetch / …) onto each finding from this call so the
 		// sliding-window correlator can reason about operator-defined

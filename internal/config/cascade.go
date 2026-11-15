@@ -68,6 +68,10 @@ const (
 	CascadeLaneOff    = "off"
 	CascadeLaneShadow = "shadow"
 	CascadeLaneOn     = "on"
+	// CascadeLaneAlert and CascadeLaneBlock are the live values of a lane
+	// that emits its own finding (CascadeLane.Values), at that action.
+	CascadeLaneAlert = "alert"
+	CascadeLaneBlock = "block"
 
 	// DefaultCascadePolicyTimeout bounds one Rego evaluation on the hook path.
 	DefaultCascadePolicyTimeout = 5 * time.Millisecond
@@ -339,6 +343,10 @@ type CascadeLane struct {
 	ShadowOnly string
 	// Description is shown by explain.
 	Description string
+	// Values, when set, is the value set of a lane that emits its own
+	// finding at an action the admin picks (for example off, shadow, alert,
+	// block). Nil means off, shadow and on.
+	Values []string
 	// Global, when set, makes the lane a process-wide switch: only the top
 	// level (guardrail.cascade.lanes) may set it.
 	Global bool
@@ -357,7 +365,7 @@ func RegisterCascadeLane(lane CascadeLane) {
 	cascadeLanesMu.Lock()
 	defer cascadeLanesMu.Unlock()
 	lane.Name = strings.TrimSpace(lane.Name)
-	if lane.Name == "" || !cascadeLaneValue(lane.Default) {
+	if lane.Name == "" || !lane.accepts(lane.Default) {
 		panic(fmt.Sprintf("config: cascade lane %q: bad registration", lane.Name))
 	}
 	if lane.ShadowOnly != "" && lane.Default == CascadeLaneOn {
@@ -387,6 +395,14 @@ func cascadeLane(name string) (CascadeLane, bool) {
 
 func cascadeLaneValue(v string) bool {
 	return v == CascadeLaneOff || v == CascadeLaneShadow || v == CascadeLaneOn
+}
+
+// accepts reports whether v is one of the values of the lane.
+func (l CascadeLane) accepts(v string) bool {
+	if l.Values != nil {
+		return slices.Contains(l.Values, v)
+	}
+	return cascadeLaneValue(v)
 }
 
 // CascadeLockableKeys are the names guardrail.cascade.admin.locked accepts.
@@ -881,7 +897,7 @@ func validateCascadeScope(path string, s CascadeScope) error {
 			errs = append(errs, fmt.Errorf("%s.lanes.%s: no such lane in this release (lanes: %s)", path, name, cascadeLaneNames()))
 		case lane.Global && path != "guardrail.cascade":
 			errs = append(errs, fmt.Errorf("%s.lanes.%s: the %s lane is process-wide; set it at guardrail.cascade.lanes.%s only", path, name, name, name))
-		case !cascadeLaneValue(value):
+		case !lane.accepts(value):
 			errs = append(errs, fmt.Errorf("%s.lanes.%s: %q is not one of %s", path, name, value, strings.Join(CascadeLaneAllowed(name), ", ")))
 		case value == CascadeLaneOn && lane.ShadowOnly != "":
 			errs = append(errs, fmt.Errorf("%s.lanes.%s: on is not available in 1.0.10: the lane ships shadow-only (%s); allowed: off, shadow (shadow records its verdict without changing the answer)", path, name, lane.ShadowOnly))
@@ -1559,7 +1575,9 @@ func meetCascadeRank(v string) int {
 
 func laneRank(v string) int {
 	switch v {
-	case CascadeLaneOn:
+	case CascadeLaneBlock:
+		return 3
+	case CascadeLaneOn, CascadeLaneAlert:
 		return 2
 	case CascadeLaneShadow:
 		return 1

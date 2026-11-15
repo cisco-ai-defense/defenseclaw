@@ -187,6 +187,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		))
 		if intentEvent {
 			a.observeUserTurn(ctx, req.Prompt, req.Prompt, req.CWD, verdict)
+			a.observeAlignmentTurn(ctx, "claudecode", req.Prompt, verdict)
 		}
 		if req.HookEventName == "UserPromptExpansion" {
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
@@ -331,6 +332,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// toast honor it (managed_enterprise only; no-op otherwise).
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
 	verdict = a.applyCascadeFinal(ctx, "claudecode", hookCascadeSurface(req.HookEventName), req.HookEventName, claudeCodeToolName(req), verdict)
+	// The alignment check adds its own finding after the pipeline decided
+	// (cascade lane alignment, off by default).
+	verdict = a.applyAlignmentLane(ctx, "claudecode", req.HookEventName, claudeCodeToolName(req), req.ToolUseID, string(claudeCodeToolArgs(req)), req.CWD, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction

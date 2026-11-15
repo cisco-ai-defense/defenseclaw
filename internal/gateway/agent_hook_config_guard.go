@@ -1198,6 +1198,27 @@ func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHoo
 			other = append(other, path)
 		}
 	}
+	// Code that is not proven read-only is handed a hook config by a runner
+	// the shared reader does not follow (sudo find -exec, su -c, ssh, uv run,
+	// sh -c with $0 or $1, a brace word): the hand-off reading judges it
+	// (rel-1-0-10:GAP-0365).
+	handed, _ := hookpaths.InlineHandedPaths(part.Command, part.Dir, guard.home)
+	for _, word := range handed {
+		switch {
+		case !word.Dynamic:
+			if (slices.Contains(registered, word.Path) || guard.format(word.Path) != "") && !slices.Contains(other, word.Path) &&
+				!slices.Contains(owned, word.Path) {
+				other = append(other, word.Path)
+			}
+		default:
+			for _, name := range registered {
+				if hookpaths.CommandMentionsPath(part.Command, guard.home, name) && !slices.Contains(other, name) &&
+					!slices.Contains(owned, name) {
+					other = append(other, name)
+				}
+			}
+		}
+	}
 	return owned, other
 }
 
@@ -1224,6 +1245,14 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 		if json.Unmarshal(args[key], &command) == nil && command != "" {
 			return command
 		}
+	}
+	// Any other key the trusted-action parser reads as the command (agy
+	// run_command's CommandLine): read only under command and cmd, an
+	// Antigravity command that stops or disables DefenseClaw, or rewrites an
+	// agent's hook configuration, raised no guard finding where every other
+	// hook connector blocks it.
+	if command, ok := trustedShellCommandArgument(input.Args); ok {
+		return command
 	}
 	return ""
 }

@@ -318,6 +318,11 @@ type trustedActionRequest struct {
 	windowsPowerShellReading *windowsHintedReading
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
+	// posixReadingTwin is a Windows-dialect call of a shell tool that does
+	// not name its shell (agy run_command): it is also judged in the POSIX
+	// reading it had before the Windows dialect, and what that reading
+	// proves is kept (posixReadingTwinRequest, rel-1-0-10:GAP-0850).
+	posixReadingTwin bool
 	// launcherDepth is the number of shell launchers whose body this request
 	// reads (launcherBodyTwinRequest), bounded by maxLauncherBodyDepth.
 	launcherDepth int
@@ -341,6 +346,10 @@ type trustedActionRequest struct {
 	// same input and facts. dispatchTrustedAction makes it; a copy of the
 	// request shares it, and a child command with another input reads its own.
 	simpleMemo *trustedSimpleMemo
+	// inlineTierNested marks a request derived from one already dispatched:
+	// only the outermost call applies the inline hand-off tier
+	// (withInlineHandoffTier).
+	inlineTierNested bool
 }
 
 // trustedSimpleMemo holds the first simple-command split asked of it.
@@ -439,8 +448,25 @@ func dispatchTrustedAction(
 	defer hookpaths.HookCall()()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	defer recoverTrustedActionFault(request, &findings)
+	// A call whose shell the tool does not name is judged in the POSIX
+	// reading too, before any bound below decides the call: a credential
+	// operand the POSIX reading proves past the argv bound kept its block
+	// there, and the PowerShell reading left it at the unknown tier
+	// (rel-1-0-10:GAP-0850). The twins made below never repeat it.
+	if twin, ok := posixReadingTwinRequest(request); ok {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	request.posixReadingTwin = false
 	if trustedActionFaultHook != nil {
 		trustedActionFaultHook(request)
+	}
+	// The hand-off tier is for the call's final findings only: a twin or a
+	// simple-command pass inside it is a proof the outer call reads as proven.
+	if !request.inlineTierNested {
+		request.inlineTierNested = true // every twin and pass below is a copy of this request
+		defer func() { findings = withInlineHandoffTier(parent, request, findings) }()
 	}
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
@@ -1645,7 +1671,8 @@ func withActiveStateTargetMention(
 	if !hereStringMutates && !xargsMutates && !globbedStateMutation(facts) &&
 		(!placed || !globbedStateMutation(linkFacts)) && !throughLink(globbedStateMutationThroughLink) &&
 		!findGlobTwinStateMutation(facts, request) &&
-		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) &&
+		!archiveExtractsIntoState(facts, request) && !inlineHandoffStateWrite(facts, request) &&
+		!provenLinkedStateWrite(facts, request) &&
 		!provenFollowedInPlaceStateWrite(facts, request) && !fileToolWriteThroughLinkToState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known {
@@ -12265,4 +12292,22 @@ func trustedSimpleCommandEvidenceCWDs(request trustedActionRequest, simples []ac
 		return nil
 	}
 	return cwds
+}
+
+// posixReadingTwinRequest is the POSIX reading of a call the Windows hook
+// placed in a Windows dialect when the tool does not name its shell
+// (posixReadingTwin): the reading the call had before the dialect, as the
+// proxy judges both readings (proxyPOSIXReading). It is a reading twin: it
+// records nothing, makes no further readings, and only its proven findings
+// are kept (withTwinProvenBlocks), so the call is never weaker than either
+// reading.
+func posixReadingTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if !request.posixReadingTwin || request.readingTwin || !request.windowsShellDialect ||
+		request.Input.DialectHint == actionfacts.DialectPOSIX {
+		return trustedActionRequest{}, false
+	}
+	twin := windowsReadingTwin(request)
+	twin.Input.DialectHint = ""
+	twin.windowsShellDialect, twin.windowsPowerShellReading, twin.posixReadingTwin = false, nil, false
+	return twin, true
 }
