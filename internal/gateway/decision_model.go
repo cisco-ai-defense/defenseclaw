@@ -83,6 +83,15 @@ var decisionModelQuestions = map[string]any{
 	},
 }
 
+// decisionBench holds bench-only switches (s7/sysone-bench only; set by
+// S7SetDecisionRouting under -tags s7bench, never in the product).
+//   - noBreaker: an offline replay counts each cache miss once.
+//   - mediumAlerts: a judge lone MEDIUM review finding on a call the
+//     decision model escalated is not made audit-only (variant b).
+//   - allowRiskVeto: a risk score at or above block_risk_score turns a
+//     confident allow into an escalation.
+var decisionBench struct{ noBreaker, mediumAlerts, allowRiskVeto bool }
+
 // decisionRoute is what the guardrail does with one decision-model answer.
 type decisionRoute int
 
@@ -280,6 +289,9 @@ func (d *decisionModel) budget(ctx context.Context) time.Duration {
 func (d *decisionModel) breakerOpen(now time.Time) bool {
 	d.breakerMu.Lock()
 	defer d.breakerMu.Unlock()
+	if decisionBench.noBreaker {
+		return false
+	}
 	if now.Before(d.openUntil) {
 		d.skippedWhileOpen++
 		return true
@@ -386,7 +398,7 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 		// finding is refused under a closed hook fail mode (the strict
 		// pack, a managed install, hook_fail_mode closed).
 		res.flowGuarded = true
-	case choice == "allow" && res.risk <= routing.allowAt:
+	case choice == "allow" && res.risk <= routing.allowAt && !(decisionBench.allowRiskVeto && score >= routing.blockRiskScore):
 		res.route = decisionAllow
 	case choice == "block" && res.risk >= routing.blockAt && score >= routing.blockRiskScore && !routing.ruleFlagEscalates(ctx):
 		// A confident block needs the disposition AND the risk score (R4),
@@ -646,26 +658,44 @@ const maxPendingDecisionStates = 1024
 
 // keepDecisionState records the decision-model state of a call under the
 // lock that recorded the call in its session, so concurrent calls of one
-// session cannot swap histories. It is keyed by the judge sample, which
-// renders the same content.
+// session cannot swap histories. It is keyed by the digest of the judge sample
+// (unique per call: it carries the call's nonce); at the cap the oldest
+// pending state goes, not all of them.
 func (j *LLMJudge) keepDecisionState(sample string, state decisionModelState) {
 	j.decisionStatesMu.Lock()
 	defer j.decisionStatesMu.Unlock()
-	if j.decisionStates == nil || len(j.decisionStates) >= maxPendingDecisionStates {
-		j.decisionStates = make(map[string]decisionModelState)
+	if j.decisionStates == nil {
+		j.decisionStates = make(map[[sha256.Size]byte]decisionStateEntry)
 	}
-	j.decisionStates[sample] = state
+	for len(j.decisionStates) >= maxPendingDecisionStates {
+		var oldest [sha256.Size]byte
+		oldestSeq := uint64(1<<63 - 1)
+		for key, e := range j.decisionStates {
+			if e.seq < oldestSeq {
+				oldest, oldestSeq = key, e.seq
+			}
+		}
+		delete(j.decisionStates, oldest)
+	}
+	j.decisionStateSeq++
+	j.decisionStates[sha256.Sum256([]byte(sample))] = decisionStateEntry{state: state, seq: j.decisionStateSeq}
+}
+
+type decisionStateEntry struct {
+	state decisionModelState
+	seq   uint64
 }
 
 // takeDecisionState returns the state kept for sample, or the current call
 // alone when none was kept (a call without a session).
 func (j *LLMJudge) takeDecisionState(sample, toolName, args string) decisionModelState {
 	j.decisionStatesMu.Lock()
-	state, ok := j.decisionStates[sample]
-	delete(j.decisionStates, sample)
+	key := sha256.Sum256([]byte(sample))
+	e, ok := j.decisionStates[key]
+	delete(j.decisionStates, key)
 	j.decisionStatesMu.Unlock()
 	if ok {
-		return state
+		return e.state
 	}
 	return decisionModelState{CurrentToolCall: decisionModelToolCall{Tool: sanitizeToolName(toolName), Arguments: boundToolJudgeArguments(args)}}
 }
@@ -718,7 +748,13 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 			emitDecisionModel(ctx, dm.model, toolName, args, res, nil)
 		}
 		recordCascadeSystemOne(ctx, res, nil)
-		return j.runToolJudgeLLM(ctx, toolName, args, sample)
+		judged := j.runToolJudgeLLM(ctx, toolName, args, sample)
+		if decisionBench.mediumAlerts && judged != nil && judged.reviewOnly && !res.skipped && res.failure == "" {
+			c := *judged
+			c.reviewOnly = false
+			return &c
+		}
+		return judged
 	}
 }
 

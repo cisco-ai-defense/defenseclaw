@@ -675,8 +675,19 @@ func (a *APIServer) applyAgentHookToolChains(
 			rootRepository, rootResult, rootAdded, denyEligible, latency)
 	}
 
+	// A pre-tool proposal the gateway blocked keeps only its secret-read step
+	// pending: a blocked call that never runs never promotes it, but one the
+	// agent runs anyway (its exact success outcome arrives) is a completed
+	// credentials read, and the egress after it is judged as the chain. The
+	// strict tier blocks some credential-store reads outright (the tool-shape
+	// path rules), and without this the read left no chain behind.
+	pendingProjection := predecessorProjection
+	preparePending := resp.Action != guardrailActionBlock
+	if !preparePending {
+		pendingProjection, preparePending = blockedSecretReadPredecessor(predecessorProjection)
+	}
 	if structuredAction &&
-		resp.Action != guardrailActionBlock &&
+		preparePending &&
 		invocationDigest != "" &&
 		lifecycle.IsPreProposalEvent(req.HookEventName) {
 		prepareInput := audit.ToolChainPreparePendingInput{
@@ -685,11 +696,13 @@ func (a *APIServer) applyAgentHookToolChains(
 			PreSemanticEventID:   audit.SemanticEventID(req.SemanticEventID),
 			PreInputFingerprint:  inputFingerprint,
 			RulesetFingerprint:   rulesetFingerprint,
-			Projection:           predecessorProjection,
-			SQLValueSource:       pendingSQLValueSource(req.toolChain),
-			ReturnedCredentialSource: actionfacts.ExactReturnedCredentialSource(
+			Projection:           pendingProjection,
+		}
+		if resp.Action != guardrailActionBlock {
+			prepareInput.SQLValueSource = pendingSQLValueSource(req.toolChain)
+			prepareInput.ReturnedCredentialSource = actionfacts.ExactReturnedCredentialSource(
 				req.toolChain.facts,
-			),
+			)
 		}
 		if rootRepository != nil {
 			// Additive: a root-scope persistence failure changes nothing here.
@@ -702,6 +715,36 @@ func (a *APIServer) applyAgentHookToolChains(
 		}
 	}
 	return resp, finalization
+}
+
+// blockedSecretReadPredecessor is the secret-read steps of a blocked pre-tool
+// proposal, with their own join digests and nothing else, or false when the
+// proposal has none. Two steps: the secret-read chain, and the value-lineage
+// chain whose step 1 the success result's value digests attach to
+// (resolvePendingTx refuses a success that carries value digests when the
+// pending row lacks that step, which lost the chain, GAP-0549).
+func blockedSecretReadPredecessor(
+	projection guardrail.ToolChainProjection,
+) (guardrail.ToolChainProjection, bool) {
+	out := guardrail.ToolChainProjection{ParseStatus: projection.ParseStatus}
+	kept := false
+	for _, id := range []string{
+		guardrail.ToolChainSecretReadThenEgress,
+		guardrail.ToolChainSensitiveReadValueExternalTransmit,
+	} {
+		bit, ok := guardrail.ToolChainStepMask(id, 1)
+		index, indexed := guardrail.ToolChainIndexByID(id)
+		if !ok || !indexed || projection.DetectionStepMask&bit == 0 {
+			continue
+		}
+		kept = true
+		out.DetectionStepMask |= bit
+		out.EnforcementStepMask |= projection.EnforcementStepMask & bit
+		out.EnforcementJoinDigests[index] = projection.EnforcementJoinDigests[index]
+		out.EnforcementOutputJoinDigests[index] = projection.EnforcementOutputJoinDigests[index]
+		out.ValueJoinDigests[index] = projection.ValueJoinDigests[index]
+	}
+	return out, kept
 }
 
 // toolChainProjectionForPolicyPosture keeps useful but proximity-only chain
@@ -728,6 +771,14 @@ func toolChainProjectionForNamedPosture(
 ) guardrail.ToolChainProjection {
 	if posture == "strict" {
 		return projection
+	}
+	// A proven secret-read-then-egress chain blocks only in strict; the
+	// default and permissive tiers keep it as an alert (GAP-0595).
+	if definition, ok := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainSecretReadThenEgress,
+	); ok {
+		projection.EnforcementStepMask &^= definition.Step1Bit | definition.Step2Bit |
+			definition.Step3Bit | definition.Step4Bit | definition.MutationBit
 	}
 
 	definition, ok := guardrail.ToolChainDefinitionByID(
@@ -1276,12 +1327,18 @@ func projectTrustedActionChainSteps(
 
 	externalEgress := externalDataBearingUpload(facts)
 	uploadDigest, uploadIdentityExact := exactExternalUploadPathDigest(facts)
-	egressDetection := externalEgress || hasAnyFinding(
+	egressDetection := externalEgress || senderReaderEgress(facts) || hasAnyFinding(
 		"CMD-WGET-POST",
 		"CMD-CURL-UPLOAD",
 		"exfil.secret_read_and_egress_oneliner",
 	)
 	egressEnforcement := externalEgress && facts.EnforcementEligible()
+	// A sender the shared reader could not read in full (a function, trap or
+	// coprocess body, interpreter code, a destination the shell builds) is the
+	// unknown tier of the one bound rule for the secret-read chain: it joins
+	// any exact credentials read and, with the strict pack's enforcement bits,
+	// blocks (GAP-0672). The other two egress chains keep their own proofs.
+	unknownSender := !egressEnforcement && senderReaderUnknownDestination(facts)
 	for _, chainID := range []string{
 		guardrail.ToolChainGuardrailsOffThenEgress,
 		guardrail.ToolChainSecretManagerReadThenEgress,
@@ -1290,6 +1347,13 @@ func projectTrustedActionChainSteps(
 		chainEnforcement := egressEnforcement
 		if chainID == guardrail.ToolChainSecretReadThenEgress {
 			chainEnforcement = chainEnforcement && uploadIdentityExact
+			if unknownSender {
+				addToolChainStep(projection, chainID, 2, true, true)
+				setToolChainEnforcementJoinDigest(
+					projection, chainID, guardrail.ToolChainUnreadSenderDigest,
+				)
+				continue
+			}
 		}
 		addToolChainStep(
 			projection,
@@ -2339,6 +2403,39 @@ func systemDiscoveryRoot(value string) bool {
 	default:
 		return false
 	}
+}
+
+// senderReaderEgress reports a sender the shared sender reader
+// (actionfacts.ReadSenders) finds beyond the upload facts
+// externalDataBearingUpload reads, or one whose destination it cannot read:
+// a remote copy (rsync, sftp), a program a find -exec or an xargs runs, a
+// sender in a shell part the projection did not read, an upload to a host
+// the shell builds (GAP-0597, GAP-0598, GAP-0599). It sends to an external
+// host, or to a destination that is not read (never "no sender"). It detects
+// the egress step only: an enforcement proof needs the exact upload.
+func senderReaderEgress(facts actionfacts.Facts) bool {
+	for _, sender := range actionfacts.ReadSenders(facts).Senders {
+		if sender.DestinationUnknown {
+			return true
+		}
+		if sender.Origin == actionfacts.SenderProjected {
+			continue // externalDataBearingUpload reads it
+		}
+		for _, network := range sender.Network {
+			if isExternalNetwork(network) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// senderReaderUnknownDestination reports a call the shared sender reader
+// cannot prove sends nothing: a sender whose destination it cannot read in
+// full, a part it cannot read (a program word the shell builds, a source the
+// parser gave up on) or a reading cap (never "no sender").
+func senderReaderUnknownDestination(facts actionfacts.Facts) bool {
+	return actionfacts.ReadSenders(facts).UnknownTier()
 }
 
 func externalDataBearingUpload(facts actionfacts.Facts) bool {

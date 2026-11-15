@@ -10,13 +10,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 func TestOpenClawOutageKnownValueNearVariants(t *testing.T) {
 	home := t.TempDir()
-	previous := outageAccountHome
-	outageAccountHome = func() string { return home }
-	t.Cleanup(func() { outageAccountHome = previous })
+	previous := hookcli.OutageAccountHome
+	hookcli.OutageAccountHome = func() string { return home }
+	t.Cleanup(func() { hookcli.OutageAccountHome = previous })
 	root := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)

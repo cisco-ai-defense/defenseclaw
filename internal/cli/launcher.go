@@ -29,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -219,7 +220,7 @@ var launcherClient *sandboxapi.Client
 func launcherSandboxPreRun(cmd *cobra.Command, args []string) error {
 	cleanup := cmd.Annotations[sandboxConfigOptional] == "true"
 	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cleanup); err != nil {
-		return withExitCode(err, 3)
+		return cliusage.WithExitCode(err, 3)
 	}
 	// The configuration of a managed computer, which the commands read as
 	// such: no per-user config.yaml is written, and `sandbox setup` and the
@@ -228,7 +229,7 @@ func launcherSandboxPreRun(cmd *cobra.Command, args []string) error {
 	cfg = managedSandboxCommandConfig()
 	client, err := launcherManagedClient(runtime.GOOS)
 	if err != nil {
-		return withExitCode(err, 3)
+		return cliusage.WithExitCode(err, 3)
 	}
 	launcherClient = client
 	// A run the organization does not allow the account at all starts no
@@ -402,6 +403,13 @@ func executeLauncher(ctx context.Context, root *cobra.Command, args []string) in
 		// (rel-1-0-6 GAP-0104).
 		if command, ok := launcherAuditedWriter(args); ok && !launcherAsksHelp(args) {
 			reportManagedCommandRefusal(command, "")
+		}
+		if managedRoutingNamedRefusal(args) && !launcherAsksHelp(args) {
+			// A routing command the launcher does not run is the managed
+			// routing answer: the key the administrator config owns, exit 3
+			// (GAP-0573), not the generic refusal.
+			fmt.Fprintln(root.ErrOrStderr(), managedRoutingRefusal(args[1:]))
+			return 3
 		}
 		fmt.Fprintln(root.ErrOrStderr(), launcherRefusal)
 		return 2

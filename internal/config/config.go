@@ -457,6 +457,8 @@ type RoutingConfig struct {
 	SystemOne         *RoutingSystemOneConfig `mapstructure:"systemone"           yaml:"systemone,omitempty"`
 	RouteOnly         RoutingRouteOnlyConfig  `mapstructure:"route_only"          yaml:"route_only,omitempty"`
 	Admin             *RoutingAdminConfig     `mapstructure:"admin"               yaml:"admin,omitempty"`
+	// Context is routing.context (routing_context.go); zero is off.
+	Context RoutingContextConfig `mapstructure:"context" yaml:"context,omitempty"`
 }
 
 type RoutingModelBackend struct {
@@ -2485,6 +2487,43 @@ func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
 	return "regex_judge"
 }
 
+// Values of guardrail.judge.intent_scope.
+const (
+	IntentScopeAlert  = "alert"
+	IntentScopeShadow = "shadow"
+	IntentScopeOff    = "off"
+)
+
+// IntentScopeMode is the normalized guardrail.judge.intent_scope: the lane of
+// the task-scope floor (INTENT-SCOPE-SEND). The lane is shadow-only in 1.0.10:
+// the built-in default, and the value of any key the loader accepts, is shadow
+// (record the finding, leave the verdict alone) or off. "alert" exists for the
+// tests and the benchmark harness, which set it on the struct; the loader
+// refuses it (ValidateIntentScope). Promotion is the day the default below
+// becomes alert. It moves under guardrail.cascade.lanes with the lane registry
+// of s7/cascade-config.
+func (j JudgeConfig) IntentScopeMode() string {
+	switch strings.ToLower(strings.TrimSpace(j.IntentScope)) {
+	case IntentScopeAlert:
+		return IntentScopeAlert
+	case IntentScopeOff:
+		return IntentScopeOff
+	}
+	return IntentScopeShadow
+}
+
+// ValidateIntentScope refuses a guardrail.judge.intent_scope value the shadow-only
+// lane does not accept.
+func (j JudgeConfig) ValidateIntentScope() error {
+	switch strings.ToLower(strings.TrimSpace(j.IntentScope)) {
+	case "", IntentScopeShadow, IntentScopeOff:
+		return nil
+	case IntentScopeAlert:
+		return fmt.Errorf("config: guardrail.judge.intent_scope: %q is not available in 1.0.10: the task-scope lane is shadow-only (rel-1-0-10:GAP-0341, GAP-0372, GAP-0363); use shadow or off", j.IntentScope)
+	}
+	return fmt.Errorf("config: guardrail.judge.intent_scope: unknown value %q (shadow or off)", j.IntentScope)
+}
+
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
 // an LLM to detect prompt injection and PII exfiltration.
 type JudgeConfig struct {
@@ -2523,6 +2562,12 @@ type JudgeConfig struct {
 	// scripts abandon the gateway call at curl --max-time 10; the
 	// gateway applies a 5s default when unset.
 	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
+
+	// IntentScope is what DefenseClaw does with a tool call that sends data to a
+	// destination the user's task does not name (INTENT-SCOPE-SEND): "shadow"
+	// records the finding in a judge event and a log line and leaves the verdict
+	// alone, "off" does not look. Empty is the built-in default (shadow).
+	IntentScope string `mapstructure:"intent_scope" yaml:"intent_scope,omitempty"`
 
 	// MaxParallel bounds how many judge calls the gateway sends to the
 	// judge model at once; an explicit 0 sets no bound. When omitted,
@@ -2877,6 +2922,13 @@ func loadFileSource(configFile string, raw []byte, publishProvenance, enforceMan
 	if err != nil {
 		return nil, err
 	}
+	if publishProvenance {
+		// The strict loader (LoadFromFile) runs no schema pass; the gateway's does
+		// and refuses a lane without a value, so refuse it here the same way.
+		if err := checkCascadeLanesSource(document.Plain); err != nil {
+			return nil, err
+		}
+	}
 	candidate, err := loadConfigSourceChecked(configFile, raw, publishProvenance, enforceManagedTrust, checkPolicyInputs)
 	if err != nil {
 		return nil, err
@@ -3230,6 +3282,9 @@ func loadConfigSourceCheckedWithLayout(
 		}
 	}
 	cfg.Guardrail.Judge.MaxParallelExplicit = viper.InConfig("guardrail.judge.max_parallel")
+	if err := cfg.Guardrail.Judge.ValidateIntentScope(); err != nil {
+		return nil, err
+	}
 	foldV8ScannerKeys(&cfg)
 	cleanCustomPackPaths(&cfg)
 	if err := restoreRuntimeV8GuardrailConnectors(&cfg, configFile, sourceBytes); err != nil {
@@ -3407,7 +3462,7 @@ func loadConfigSourceCheckedWithLayout(
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "routing_invalid")
 		}
-		return nil, fmt.Errorf("config: routing: %w", err)
+		return nil, fmt.Errorf("config: %w", &SettingError{Path: "routing", cause: err})
 	}
 	if err := cfg.validateRoutingAdminRules(); err != nil {
 		if ReportConfigLoadError != nil {

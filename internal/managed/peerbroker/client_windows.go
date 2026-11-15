@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cmidbroker"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 	"golang.org/x/sys/windows"
@@ -92,12 +93,14 @@ func (c *Client) Lookup(ctx context.Context, local, remote *net.TCPAddr) (peercr
 	return DecodeResponse(buffer[:count])
 }
 
-// verifyPipeServer proves the pipe server is the guardian: it is the
-// process that published the name, its process runs as LocalSystem (an
-// ordinary account can create a pipe with the published name while the
-// guardian is down, but not a LocalSystem process) and, when SCM answers,
-// it is the PID of the guardian service. A server that fails is
-// UnavailableHeld with its PID.
+// verifyPipeServer proves the pipe server is the guardian before the
+// request is written (rel-1-0-10:GAP-0106): it is the process that
+// published the name, and its token is LocalSystem with the enabled service
+// SID of the guardian service (the installer sets sidtype unrestricted on
+// it), which only SCM gives a process it starts for that service. An
+// ordinary account that creates a pipe with a name it learned cannot carry
+// either, whatever SCM answers. Every failure fails closed: UnavailableHeld
+// with the server PID, and the gateway refuses the route-only caller.
 func verifyPipeServer(pipe windows.Handle, guardianService string, publishedPID uint32) error {
 	var pid uint32
 	if err := windows.GetNamedPipeServerProcessId(pipe, &pid); err != nil || pid == 0 {
@@ -105,6 +108,10 @@ func verifyPipeServer(pipe windows.Handle, guardianService string, publishedPID 
 	}
 	held := &UnavailableError{Reason: UnavailableHeld, HolderPID: pid}
 	if pid != publishedPID {
+		return held
+	}
+	guardianSID, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + guardianService)
+	if err != nil || guardianSID == nil {
 		return held
 	}
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
@@ -116,23 +123,20 @@ func verifyPipeServer(pipe windows.Handle, guardianService string, publishedPID 
 	if err := windows.OpenProcessToken(process, windows.TOKEN_QUERY, &token); err != nil {
 		return held
 	}
-	user, err := token.GetTokenUser()
-	token.Close()
-	if err != nil || user == nil || user.User.Sid == nil || !user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
-		return held
-	}
-	guardianPID, err := cmidbroker.ServiceProcessID(guardianService)
-	switch {
-	case errors.Is(err, cmidbroker.ErrUnavailable):
-		// The guardian service is not running: this LocalSystem process
-		// is not it.
-		return held
-	case err != nil:
-		// A hardened service descriptor can deny the status query; the
-		// LocalSystem token and published PID checks above are the boundary.
-		return nil
-	case guardianPID != pid:
+	defer token.Close()
+	if !tokenIsGuardian(token, guardianSID) {
 		return held
 	}
 	return nil
+}
+
+// tokenIsGuardian: LocalSystem (never the service account as its user: the
+// guardian logs on as LocalSystem) with the guardian service SID enabled.
+func tokenIsGuardian(token windows.Token, guardianSID *windows.SID) bool {
+	user, err := token.GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil || !user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		return false
+	}
+	isGuardian, err := managed.WindowsTokenRunsAsService(token, guardianSID)
+	return err == nil && isGuardian
 }

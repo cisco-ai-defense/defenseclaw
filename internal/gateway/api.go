@@ -65,6 +65,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
+	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
 
 // APIServer exposes a local REST API for CLI and plugin communication
@@ -536,6 +537,31 @@ func (a *APIServer) hookSessionJudges(ctx context.Context) []*LLMJudge {
 		}
 	}
 	return out
+}
+
+// promptVerdictBlocks reports whether the guardrail blocked the user prompt
+// verdict judged: such a prompt is never a turn's task.
+func promptVerdictBlocks(verdict *ToolInspectVerdict) bool {
+	return verdict != nil && normalizedGuardrailAction(verdict.Action) == guardrailActionBlock
+}
+
+// observeUserTurn starts a new turn for the session after its prompt was
+// inspected: on every hook-lane judge, and in the user-download allowance. The
+// prompt becomes the turn's task, and names run-from hosts, only when the
+// guardrail did not block it: a blocked prompt is not a task DefenseClaw lets
+// later tool calls be excused by. scopeText is the part of the prompt that may
+// name scope targets; "" when it is not known to be what the owner typed.
+func (a *APIServer) observeUserTurn(ctx context.Context, prompt, scopeText, cwd string, verdict *ToolInspectVerdict) {
+	if promptVerdictBlocks(verdict) {
+		prompt, scopeText = "", ""
+	} else {
+		// Only text the owner typed names a run-from host, as for the scope.
+		a.observeUserDownloadRequest(ctx, scopeText)
+	}
+	for _, judge := range a.hookSessionJudges(ctx) {
+		judge.ObserveSessionPromptScope(ctx, prompt, scopeText)
+		judge.SnapshotSessionGitRemotes(ctx, cwd)
+	}
 }
 
 // SetHookJudge wires the LLM judge onto the API server so the hook
@@ -1947,6 +1973,15 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if policy, ok := CurrentPolicyHealth(); ok && administrator {
 		body["policy"] = a.policyHealthBody(policy)
 	}
+	if administrator && cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() {
+		// The machine-wide hook load, for the managed lifecycle probes: an
+		// ordinary account of a managed host does not read how many calls
+		// the other accounts made. A per-user /health needs no credential,
+		// so another local account could read this account load there: a
+		// per-user gateway serves it only in the authenticated /status.
+		// Secure Client keeps its health body (issue #1092).
+		body["hook_capacity"] = hookCapacity.snapshot()
+	}
 	if ledger := agentIdentityLedgerHealth(); ledger != nil {
 		body["agent_identities"] = ledger
 	}
@@ -2169,6 +2204,10 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// enforcement/observability posture, not just the primary's.
 		"connector_mode":  a.connectorModeSummary(r.Context()),
 		"connector_modes": a.connectorModesSummary(r.Context()),
+		// hook_capacity is the overload signal of the hook path: calls that
+		// ended at their answer budget per minute (deadline denies, late
+		// allows, shed) beside the calls answered in time (DESIGN 18).
+		"hook_capacity": hookCapacity.snapshot(),
 	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
 		set := a.guardrailProfileSet()
@@ -4904,10 +4943,19 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 	})
 }
 
-const (
-	apiRequestBodyMaxBytes  int64 = 1 << 20
-	otlpRequestBodyMaxBytes int64 = 64 << 20
-)
+const otlpRequestBodyMaxBytes int64 = 64 << 20
+
+// apiRequestBodyMaxBytes is the ordinary API request body limit, read from the
+// embedded limits file the OpenClaw plugin build copies too.
+var apiRequestBodyMaxBytes = func() int64 {
+	var limits struct {
+		BodyMax int64 `json:"body_max_bytes"`
+	}
+	if err := json.Unmarshal(publicschemas.InspectToolRequestLimits, &limits); err != nil || limits.BodyMax <= 0 {
+		panic("gateway: schemas/inspect-tool-request-limits.json has no body_max_bytes")
+	}
+	return limits.BodyMax
+}()
 
 // apiBodyLimitMiddleware preserves the ordinary API mutation ceiling while
 // allowing exact OTLP-HTTP ingest routes to receive exporter batches. The

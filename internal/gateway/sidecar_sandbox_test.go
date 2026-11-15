@@ -153,7 +153,14 @@ func freePort(t *testing.T) int {
 	freePortMu.Lock()
 	defer freePortMu.Unlock()
 	if freePortNext == 0 {
-		freePortNext = freePortLow + int(time.Now().UnixNano()%int64(freePortHigh-freePortLow))
+		// The start is spread by process id, a golden-ratio step apart: test
+		// binaries started together (a sharded run, twelve copies on one box)
+		// walk the band from places far from each other, so one binary's
+		// probe is not the port another binary binds a moment later (a daemon
+		// refused Ready with sandbox_port_busy at 24 copies on one box,
+		// rel-1-0-10:GAP-0558). A start by the clock alone put copies started
+		// within a second of each other at random, often near, offsets.
+		freePortNext = freePortLow + int(uint64(os.Getpid())*2654435761%uint64(freePortHigh-freePortLow))
 	}
 	for range freePortHigh - freePortLow {
 		port := freePortNext

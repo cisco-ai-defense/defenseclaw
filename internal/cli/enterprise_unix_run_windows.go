@@ -15,6 +15,7 @@ package cli
 import (
 	"errors"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/spf13/cobra"
 )
 
@@ -22,7 +23,7 @@ import (
 // help stay identical everywhere; they refuse to run.
 
 func runUnixLifecycle(_ *cobra.Command, platform, _ string, _ *unixLifecycleOptions) error {
-	return withExitCode(errors.New("`enterprise "+platform+"` manages Linux and macOS hosts; use `enterprise windows` on Windows"), 1639)
+	return cliusage.WithExitCode(errors.New("`enterprise "+platform+"` manages Linux and macOS hosts; use `enterprise windows` on Windows"), 1639)
 }
 
 func runUnixTransactionWatch(_ *cobra.Command, platform string, _ int, _ string) error {

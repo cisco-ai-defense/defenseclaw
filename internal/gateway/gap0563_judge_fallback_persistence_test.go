@@ -72,13 +72,13 @@ func TestGAP0563HookJudgeFallbackPersistsAfterEarlyTelemetry(t *testing.T) {
 			if tc.connector == connector.AgentGatewayConnectorName {
 				body, _ = json.Marshal(map[string]any{
 					"event": "pre_tool", "session_id": session, "tool_use_id": "tool-1", "cwd": t.TempDir(),
-					"tool": map[string]any{"name": "bash", "kind": "shell", "input": "echo ok"},
+					"tool": map[string]any{"name": "bash", "kind": "shell", "input": "make ok"},
 				})
 				path, handler = connector.AgentGatewayHookPath, fixture.api.handleAgentGatewayHook()
 			} else {
 				body, _ = json.Marshal(map[string]any{
 					"hook_event_name": "PreToolUse", "session_id": session, "tool_use_id": "tool-1", "cwd": t.TempDir(),
-					"tool_name": "Bash", "tool_input": map[string]any{"command": "echo ok"},
+					"tool_name": "Bash", "tool_input": map[string]any{"command": "make ok"},
 				})
 				path, handler = "/api/v1/claudecode/hook", fixture.api.handleAgentHook("claudecode")
 			}

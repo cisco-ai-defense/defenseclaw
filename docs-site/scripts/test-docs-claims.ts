@@ -29,6 +29,22 @@ function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
 
+describe('Tool judge task scope', () => {
+  const text = () => page('guardrail/index.mdx').split('### Which connectors give the judge your task')[1].split('### Let tool calls go first')[0];
+  it('lists the connectors that keep the task and documents the scope finding', () => {
+    const section = text();
+    assert.match(section, /\*\*Kept:\*\*[^*]*Claude Code[^*]*Devin\./);
+    assert.match(section, /\*\*Kept, but names no destination:\*\* Hermes/);
+    assert.match(section, /\*\*Not kept[^*]*\*\*[^*]*OpenCode[^*]*OpenClaw/);
+    assert.match(section, /`INTENT-SCOPE-SEND`/);
+    assert.match(section, /Naming a mailbox covers that address only; a person you name without an address counts when you also name the domain of the mailbox/);
+    assert.match(section, /In this release the check only records: it writes a judge event of kind `tool_intent_scope_shadow`/);
+    assert.match(section, /`guardrail\.judge\.intent_scope` to `off` to stop the check; `shadow` is the default/);
+    assert.match(section, /never from words in quoted text, a commit message or a here-document/);
+    assert.match(section, /hosts of the git remotes of your working folder count as named/);
+  });
+});
+
 describe('Rollback gateway state', () => {
   it('qualifies automatic startup and names the command for a stopped gateway', () => {
     const text = page('get-started/upgrade.mdx').split('## Rollback')[1].split('## Update notices')[0];
@@ -1882,8 +1898,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0633", page: "reference/env-vars.mdx", has: ["exported in a shell is dropped when the", "The writers keep writing as usual"], lacks: ["where the profile is standalone, the Linux default"] },
   { gap: "GAP-0669", page: "stories/cursor-secret-exfil.mdx", has: ["defenseclaw setup cursor --yes --mode action --rule-pack default --no-human-approval --restart", "`--yes` re-applies hooks when Cursor is already configured and skips the optional LLM judge prompt", "✓ cursor mode=action"] },
   { gap: "GAP-0520", page: "guardrail/index.mdx", has: ["**Select action connector(s) for LLM judge.**"] },
-  { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["19 DefenseClaw dashboards (20 with the Fleet assets)"] },
-  { gap: "GAP-0388", page: "observability/grafana-dashboards.mdx", has: ["DefenseClaw provisions 19 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
+  { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["20 DefenseClaw dashboards (21 with the Fleet assets)"] },
+  { gap: "GAP-0388", page: "observability/grafana-dashboards.mdx", has: ["DefenseClaw provisions 20 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
   { gap: "GAP-1716", page: "get-started/windows/install-lifecycle.mdx", section: "Upgrade", has: ["exit code 0 means the installer started, not that it finished", "-Rollback -Yes`, which waits and sets the exit code"] },
   { gap: "GAP-1716", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["**Windows upgrade and rollback return before the installer finishes:**"] },
   { gap: "GAP-0922, GAP-0923", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["macOS has no setting that stops a user's sandbox profile", "DefenseClaw does not see or audit its tool calls"], lacks: ["unshare -Urm"] },
@@ -1981,7 +1997,7 @@ const r105Rows: DocRow[] = [
   // pod docs it3 (2026-10-28)
   { gap: "GAP-2264", page: "hitl.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
   { gap: "GAP-2264", page: "stories/hitl-approvals.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
-  { gap: "GAP-2260", page: "guardrail/semantic-routing.mdx", has: ["Native Windows is not supported: there `defenseclaw setup routing` says so and refuses `--enable`, and `--disable` still turns off a routing block copied from another machine."] },
+  { gap: "GAP-2260", page: "guardrail/semantic-routing.mdx", has: ["On native Windows `defenseclaw setup routing` says so and refuses `--enable`; `--disable` still turns off a routing block copied from another machine."] },
   { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem, `coverage_complete` is `false`, or `security_complete` is `false` for any reason other than `hook_process_fail_open`, `unprivileged_user_namespaces` and `unprivileged_ptrace`; a host with only those warnings passes and gets them on standard error). Add `--require-security-complete` to fail on incomplete security too |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |", "a host whose `verify` passes with incomplete security still fails it", "a host whose `verify` passes with only incomplete security passes"] },
   // pod docs r105 loop i1 (2026-10-28)
   { gap: "GAP-2411", page: "enterprise/troubleshooting.mdx", has: ["On Linux and macOS `status` warns `policy_not_applied` with `policy.applied: false` and `security_complete: false`, and `verify` reports it as an error and exits `1`."], lacks: ["`policy.applied: false` and do not warn"] },

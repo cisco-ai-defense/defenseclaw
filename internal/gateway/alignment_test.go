@@ -94,13 +94,46 @@ func TestAlignmentFindingNeverLowersOrRemoves(t *testing.T) {
 func TestAlignmentLaneOffDoesNoWork(t *testing.T) {
 	api := &APIServer{scannerCfg: &config.Config{}}
 	ctx := ContextWithSessionID(context.Background(), "s-align-off")
-	api.observeAlignmentTurn(ctx, "claudecode", "pay the rent")
+	api.observeAlignmentTurn(ctx, "claudecode", "pay the rent", nil)
 	v := &ToolInspectVerdict{Action: "allow", Severity: "NONE"}
 	if out := api.applyAlignmentLane(ctx, "claudecode", "PreToolUse", "send_money", "toolu_1", `{"amount":1}`, "/w", v); out != v {
 		t.Fatal("the lane changed a verdict while off")
 	}
 	if len(api.alignment.sessions) != 0 {
 		t.Fatalf("the lane kept %d sessions while off", len(api.alignment.sessions))
+	}
+}
+
+// A prompt the guardrail blocked is no task (GAP-0823, as observeUserTurn):
+// the lane keeps the turns before it, and the next allowed prompt is the
+// latest turn again.
+func TestAlignmentBlockedPromptIsNoTurn(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Cascade.Lanes = map[string]string{config.CascadeLaneAlignment: config.CascadeLaneAlert}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := ContextWithSessionID(context.Background(), "s-align-blocked")
+	turns := func() (string, string) {
+		api.alignment.mu.Lock()
+		defer api.alignment.mu.Unlock()
+		sess := api.alignment.sessions[judgeSessionKey(ctx)]
+		if sess == nil {
+			return "", ""
+		}
+		return sess.firstTurn, sess.latestTurn
+	}
+	api.observeAlignmentTurn(ctx, "claudecode", "pay the rent", &ToolInspectVerdict{Action: "block", Severity: "HIGH"})
+	if first, latest := turns(); first != "" || latest != "" {
+		t.Fatalf("a blocked first prompt became the task: %q / %q", first, latest)
+	}
+	api.observeAlignmentTurn(ctx, "claudecode", "pay the rent", &ToolInspectVerdict{Action: "allow", Severity: "NONE"})
+	api.observeAlignmentTurn(ctx, "claudecode", "now the water bill", &ToolInspectVerdict{Action: "block", Severity: "HIGH"})
+	first, latest := turns()
+	if first == "" || first != latest || !strings.Contains(latest, "rent") {
+		t.Fatalf("a blocked prompt replaced the turn: first %q latest %q", first, latest)
+	}
+	api.observeAlignmentTurn(ctx, "claudecode", "now the water bill", &ToolInspectVerdict{Action: "alert", Severity: "MEDIUM"})
+	if _, latest := turns(); !strings.Contains(latest, "water") {
+		t.Fatalf("an alerted prompt is still the user's task: latest %q", latest)
 	}
 }
 

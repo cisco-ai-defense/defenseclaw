@@ -10,9 +10,11 @@ previews (destructive ones through the consequence modal).
 
 from __future__ import annotations
 
+from defenseclaw.tui.command_line import ParsedCommand
 from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.screens.field_editor import FieldEditorScreen
 from defenseclaw.tui.services.routing_state import (
+    APPLYING_POLL_SECONDS,
     VIEW_USAGE,
     RoutingPanelAction,
     RoutingPanelModel,
@@ -64,7 +66,7 @@ class RoutingPanelMixin:
             if code == 0:
                 model.apply_status_json(out)
             else:
-                model.set_error(_first_line(err) or "defenseclaw routing status failed; run it in a terminal to see why")
+                model.set_error(_plain_error(err, "defenseclaw routing status failed; run it in a terminal to see why"))
             if model.view == VIEW_USAGE:
                 code, out, err = await _communicate_captured(
                     "defenseclaw", ("routing", "usage", "--json", "--since", model.usage_since())
@@ -72,17 +74,22 @@ class RoutingPanelMixin:
                 if code == 0:
                     model.apply_usage_json(out)
                 else:
-                    model.usage = {"rows": [], "error": _first_line(err) or "usage is not available"}
+                    model.usage = {"rows": [], "error": _plain_error(err, "usage is not available; run defenseclaw routing usage")}
         except Exception as exc:  # noqa: BLE001 - never a stack trace in the TUI
             model.set_error(f"routing status failed: {exc}")
         finally:
             self._routing_load_running = False
         overview = getattr(self, "overview_model", None)
         if overview is not None and hasattr(overview, "set_routing_tile"):
-            overview.set_routing_tile(overview_tile(model.status) if model.enabled else "")
+            overview.set_routing_tile(overview_tile(model.status, model.applying) if model.enabled else "")
         if self._routing_load_pending:
             self._routing_load_pending = False
             self._schedule_routing_load()
+        elif model.applying and not getattr(self, "_app_shutting_down", False):
+            # Routing is on in config.yaml and the gateway has not reloaded
+            # yet: read again shortly (bounded by the model) instead of
+            # leaving "on" and "disabled" side by side.
+            self.set_timer(APPLYING_POLL_SECONDS, self._schedule_routing_load)  # type: ignore[attr-defined]
         if getattr(self, "active_panel", "") == "routing":
             self._update_body_only()  # type: ignore[attr-defined]
 
@@ -113,7 +120,17 @@ class RoutingPanelMixin:
             self._update_body_only()  # type: ignore[attr-defined]
             return True
         if kind == "intent" and action.intent is not None:
-            self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)  # type: ignore[attr-defined]
+            intent = action.intent
+            if intent.risk == "read-only":
+                # A read-only command runs at once, as from the action bar and
+                # the palette: no confirm modal (rel-1-0-10:GAP-0809).
+                parsed = ParsedCommand(
+                    binary=intent.binary, args=tuple(intent.args), display_name=intent.label,
+                    category=intent.category, risk="read-only", needs_preview=False,
+                )
+                self.run_worker(self._run_and_report(parsed), exclusive=False, thread=False)  # type: ignore[attr-defined]
+                return True
+            self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)  # type: ignore[attr-defined]
             return True
         if kind == "prompt":
             self._open_routing_prompt(action.prompt)
@@ -158,9 +175,14 @@ class RoutingPanelMixin:
         tabs.add_tab(Tab("M Routing", id="tab-routing"))
 
 
-def _first_line(stderr: bytes | str) -> str:
+def _plain_error(stderr: bytes | str, fallback: str) -> str:
+    """One plain sentence from a failed command: its Error: line, never a
+    Python traceback line (GAP-0578)."""
     text = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr or "")
+    if "Traceback (most recent call last)" in text:
+        return fallback
     for line in text.splitlines():
-        if line.strip():
-            return line.strip()[:200]
-    return ""
+        line = line.strip()
+        if line:
+            return line.removeprefix("Error:").strip()[:200] or fallback
+    return fallback

@@ -23,7 +23,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -161,7 +163,7 @@ func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 		// managed decommission without touching the active deployment.
 		if auditExportManagedHost() {
 			if !auditExportCallerIsAdministrator() {
-				return withExitCode(&managedViewRefusal{
+				return cliusage.WithExitCode(&managedViewRefusal{
 					code:    "elevation_required",
 					message: windowsManagedStandardUserViewAnswer("the audit log", "audit", "export", "-o", "<file>"),
 				}, enterprisestatus.WindowsExitAccessDenied)
@@ -213,7 +215,7 @@ func init() {
 	auditExportCmd.Flags().BoolVar(&auditExportForce, "force", false, "Overwrite the --output file if it already exists")
 	auditExportCmd.Flags().StringVar(&auditExportConnector, "connector", "", "Only export rows attributed to this connector (matches the authoritative connector column, then structured.connector, then the details connector= field). Activity rows are omitted when set.")
 	auditExportCmd.Flags().StringVar(&auditExportDB, "db", "", "Read this audit database instead of the configured one, for example the install a rollback left in ~/.defenseclaw/previous/data/audit.db")
-	_ = auditExportCmd.Flags().SetAnnotation("db", secureClientAbsentAnnotation, []string{"true"})
+	_ = auditExportCmd.Flags().SetAnnotation("db", hookcli.SecureClientAbsentAnnotation, []string{"true"})
 
 	auditCmd.AddCommand(auditExportCmd)
 	rootCmd.AddCommand(auditCmd)
@@ -557,9 +559,9 @@ type auditExportWindow struct {
 // status 2, like unknown flags and unparsable numbers (GAP-2110).
 func auditUsageError(cmd *cobra.Command, err error) error {
 	if cmd == nil {
-		return withExitCode(err, 2)
+		return cliusage.WithExitCode(err, 2)
 	}
-	return usageError(cmd, err)
+	return cliusage.UsageError(cmd, err)
 }
 
 // parseAuditExportWindow reads --since, --until, --limit and --newest.

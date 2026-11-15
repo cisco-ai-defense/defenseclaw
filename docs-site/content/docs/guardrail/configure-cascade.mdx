@@ -91,7 +91,7 @@ defenseclaw guardrail cascade explain --connector codex --input decision.json
 
 `--input` replays a policy input you saved yourself (the `input` the policy receives, below, or the `input` of one recorded line).
 
-A live decision the policy changed also carries the finding `CASCADE-POLICY:<rule id>` in its audit row, and `CASCADE-UNKNOWN-FLOOR`, `CASCADE-CRITICAL-FLOOR` or `CASCADE-POLICY-ERROR` when those decided.
+A live decision the policy changed also carries the finding `CASCADE-POLICY:<rule id>` in its audit row, and `CASCADE-UNKNOWN-FLOOR`, `CASCADE-PROVEN-BLOCK-FLOOR`, `CASCADE-CRITICAL-FLOOR` or `CASCADE-POLICY-ERROR` when those decided.
 
 ## The Rego policy
 
@@ -106,11 +106,11 @@ The policy receives, for each call:
 | `subject` | The verified profile (`profile`, `profiles` when several match), the group that matched, and how the person was identified. No user names or group lists. |
 | `findings` | Up to 64 rule findings: `rule_id`, `severity`, `enforceable`, `alert_only`, `confidence`, `tags`. No evidence, arguments or content. |
 | `flagged` | Whether any layer flagged the call. |
-| `truncated` | `any`: the input was read only up to a limit; `uninspected`: DefenseClaw did not read it in full (a limit that decides, or a hook payload over the size cap); `input_findings_capped`: more findings than this input holds. |
+| `truncated` | `any`: the input was read only up to a limit; `uninspected`: DefenseClaw did not read it in full (a limit that decides, a hook payload over the size cap, or inspect content over 256 KiB); `proven_block`: an uninspected input whose read part already proved a block; `input_findings_capped`: more findings than this input holds. |
 | `layers` | `rules` (`action`, `severity`), `system_one` (`ran`, `route`, `risk`, `risk_score`, `action`), `judge` (`ran`, `failed`, `action`, `severity`, `confidence`), and the model layers' finding IDs. |
 | `cascade_action`, `unknown_action`, `limits` | The action before the policy, the unknown tier's action, and your limits. |
 
-The final action is the policy's strictest decision, held between `limits.lowest` (for a flagged call, never above the cascade's own action) and `limits.highest` (never below it), then raised to the unknown tier (`unknown_action`) when `truncated.uninspected` or `truncated.input_findings_capped` is true, whatever `policy.lowest` says, and to the CRITICAL floor where a proven CRITICAL finding exists.
+The final action is the policy's strictest decision, held between `limits.lowest` (for a flagged call, never above the cascade's own action) and `limits.highest` (never below it), then raised to the unknown tier (`unknown_action`) when `truncated.uninspected` or `truncated.input_findings_capped` is true, whatever `policy.lowest` says, back to block when `truncated.proven_block` is true, and to the CRITICAL floor where a proven CRITICAL finding exists.
 
 ## Examples
 
@@ -195,7 +195,7 @@ With the default `policy.lowest: alert`, the second rule can turn a question int
 ## Rules that always hold
 
 - An empty `guardrail.cascade` decides exactly as the rule pack does.
-- The unknown tier is never below alert: an input DefenseClaw could not read in full is never a silent allow. The Rego policy cannot lower it either, whatever `policy.lowest` says: on every surface the final step raises such a call back to the unknown tier.
+- The unknown tier is never below alert: an input DefenseClaw could not read in full is never a silent allow. The Rego policy cannot lower it either, whatever `policy.lowest` says: on every surface the final step raises such a call back to the unknown tier, and a block proven in the part DefenseClaw read stays a block.
 - A proven CRITICAL finding never ends below `admin.critical_floor`; only the top-level administrator can set it to `log`, and doctor warns when it is.
 - System One and the judge never lower the rules' verdict. The Rego policy lowers only within `policy.lowest` (and never an input DefenseClaw did not read in full below the unknown tier), and an error or timeout raises the call to the unknown tier.
 - A connector or profile cannot weaken the administrator's cascade: a locked or invalid value there is ignored and named, never a reason to fall back.

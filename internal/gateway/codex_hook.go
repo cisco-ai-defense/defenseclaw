@@ -40,6 +40,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -264,13 +265,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			}
 		}
 	case "UserPromptSubmit":
-		if !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
-			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ObserveSessionPrompt(ctx, req.Prompt)
-			}
-			a.observeAlignmentTurn(ctx, "codex", req.Prompt)
-			a.observeUserDownloadRequest(ctx, req.Prompt)
-		}
+		intentEvent := !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration())
 		// Secure Client keeps the prompt of main, so AI Defense is sent the
 		// text it was sent before (issue #1092).
 		prompt := req.Prompt
@@ -284,7 +279,10 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Connector:    "codex",
 			contentScope: ruleContentScopeUntrusted,
 		})
-		a.forgetBlockedPrompt(ctx, req.Prompt, verdict)
+		if intentEvent {
+			a.observeUserTurn(ctx, req.Prompt, req.Prompt, req.CWD, verdict)
+			a.observeAlignmentTurn(ctx, "codex", req.Prompt, verdict)
+		}
 		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{
 				targetType: "skill",
@@ -326,8 +324,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 		windowsReadings := windowsHookHost() && !isSandboxHookRequest(ctx) &&
 			(cfg == nil || !cfg.SecureClientIntegration())
+		var windowsPowerShellReading *windowsHintedReading
 		if windowsReadings {
-			actionInput.DialectHint = selectWindowsShellDialect(
+			actionInput.DialectHint, windowsPowerShellReading = selectWindowsShellDialectReading(
 				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
 			)
 		}
@@ -342,6 +341,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			DowngradeReadOnlyDataArgs:     mode != "action",
 			SandboxGuestCWD:               req.guestCWD,
 			windowsDialectReadings:        windowsReadings,
+			windowsPowerShellReading:      windowsPowerShellReading,
 			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
@@ -446,6 +446,16 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			evalCtx.RuleIDs, policy)
 	}
 	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	// A tool result cannot be unread; one that carries text aimed at the
+	// agent tells the agent not to follow it (GAP-0605), after the display
+	// reason is shaped.
+	if req.HookEventName == "PostToolUse" && rawAction != "allow" && verdictHasPromptInjection(verdict) {
+		resp.Reason = connector.WithToolResultInjectionGuidance(resp.Reason)
+		if resp.AdditionalContext != "" {
+			resp.AdditionalContext = connector.WithToolResultInjectionGuidance(resp.AdditionalContext)
+		}
+		resp.CodexOutput = codexOutput(req.HookEventName, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
+	}
 	if action == "alert" && hasAlertOnlySQLFinding(verdict.Findings) {
 		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
 			resp.AdditionalContext += sqlAlertOnlyHookNotice
@@ -668,6 +678,12 @@ func codexOutput(event, action, rawAction, reason, additional string) map[string
 					"additionalContext": additional,
 				}
 			}
+			// Codex shows the user only systemMessage (GAP-0605).
+			if event == "PostToolUse" {
+				if notice := connector.ToolResultUserNotice(action, reason, additional); notice != "" {
+					out["systemMessage"] = notice
+				}
+			}
 			return out
 		}
 	}
@@ -692,12 +708,20 @@ func codexOutput(event, action, rawAction, reason, additional string) map[string
 	case "SessionStart":
 		return map[string]interface{}{"systemMessage": additional}
 	case "UserPromptSubmit", "PostToolUse":
-		return map[string]interface{}{
+		out := map[string]interface{}{
 			"hookSpecificOutput": map[string]interface{}{
 				"hookEventName":     event,
 				"additionalContext": additional,
 			},
 		}
+		// additionalContext reaches the model only; a result finding also
+		// shows the user a line (GAP-0605).
+		if event == "PostToolUse" {
+			if notice := connector.ToolResultUserNotice(action, reason, additional); notice != "" {
+				out["systemMessage"] = notice
+			}
+		}
+		return out
 	case "PreToolUse":
 		return map[string]interface{}{"systemMessage": additional}
 	default:
@@ -1020,6 +1044,8 @@ func (a *APIServer) inspectCodexToolResult(
 	for _, j := range a.hookSessionJudges(ctx) {
 		j.ObserveToolResult(ctx, content) // decision_model.history_tool_results only
 	}
+	// The tool-result judges get the call this output answers (judge_packet.go).
+	ctx = withToolResultCall(ctx, req.ToolName, req.ToolInput)
 	if sandboxToolResultUntrusted(ctx) {
 		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, ruleContentScopeUntrusted))
 	}
@@ -3809,11 +3835,12 @@ func sanitizeHookCWD(cwd string) string {
 // resolveHookCWD resolves a hook working directory to the real directory
 // it names; tests stand in for a service account that may not stat it.
 var resolveHookCWD = func(cwd string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(cwd)
+	resolved, err := filepath.EvalSymlinks(fixturefs.Map(cwd))
 	if err != nil {
 		return "", err
 	}
-	info, err := os.Stat(resolved)
+	resolved = fixturefs.Unmap(resolved)
+	info, err := os.Stat(fixturefs.Map(resolved))
 	if err != nil {
 		return "", err
 	}

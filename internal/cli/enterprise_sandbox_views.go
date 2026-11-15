@@ -27,6 +27,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
@@ -142,7 +143,7 @@ required pack must be an administrator-owned file other users cannot modify.`,
 			}
 			out, err := sandboxPackDigestOf(args[0], packDir)
 			if err != nil {
-				return withExitCode(err, enterprisestatus.UnixExitFailure)
+				return cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 			}
 			if asJSON {
 				return writeSandboxViewJSON(cmd.OutOrStdout(), out)
@@ -219,18 +220,18 @@ func sandboxViewStore(cmd *cobra.Command, platform string, asJSON bool) (sandbox
 	// `enterprise <os>` groups, so cfg was unset and a verified standalone
 	// deployment was refused (GAP-0182, GAP-0242).
 	if err := enterpriseDiscoveryPinManagedEnv(); err != nil {
-		return nil, withExitCode(err, enterprisestatus.UnixExitFailure)
+		return nil, cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	if err := enterpriseDiscoveryLoadConfig(cmd); err != nil {
-		return nil, withExitCode(err, enterprisestatus.UnixExitFailure)
+		return nil, cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return nil, withExitCode(fmt.Errorf("`%s` needs a standalone managed deployment (deployment_mode: managed_enterprise, enterprise.profile: standalone)", view),
+		return nil, cliusage.WithExitCode(fmt.Errorf("`%s` needs a standalone managed deployment (deployment_mode: managed_enterprise, enterprise.profile: standalone)", view),
 			enterprisestatus.UnixExitFailure)
 	}
 	store, err := sandboxRegistrationStore(cfg.DataDir)
 	if err != nil {
-		return nil, withExitCode(err, enterprisestatus.UnixExitFailure)
+		return nil, cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	return store, nil
 }
@@ -256,7 +257,7 @@ func newEnterpriseSandboxListCommand(platform string) *cobra.Command {
 			}
 			all, err := store.ListAll()
 			if err != nil {
-				return withExitCode(fmt.Errorf("read the sandbox registrations: %w", err), enterprisestatus.UnixExitFailure)
+				return cliusage.WithExitCode(fmt.Errorf("read the sandbox registrations: %w", err), enterprisestatus.UnixExitFailure)
 			}
 			filterUser := strings.TrimSpace(user)
 			if strings.ContainsAny(filterUser, `@\`) {
@@ -301,7 +302,7 @@ func newEnterpriseSandboxExplainCommand(platform string) *cobra.Command {
 			}
 			all, err := store.ListAll()
 			if err != nil {
-				return withExitCode(fmt.Errorf("read the sandbox registrations: %w", err), enterprisestatus.UnixExitFailure)
+				return cliusage.WithExitCode(fmt.Errorf("read the sandbox registrations: %w", err), enterprisestatus.UnixExitFailure)
 			}
 			var reg *sandboxreg.Registration
 			for i := range all {
@@ -311,7 +312,7 @@ func newEnterpriseSandboxExplainCommand(platform string) *cobra.Command {
 				}
 			}
 			if reg == nil {
-				return withExitCode(fmt.Errorf("no registration %q; `sandbox list` shows the ids", id), enterprisestatus.UnixExitFailure)
+				return cliusage.WithExitCode(fmt.Errorf("no registration %q; `sandbox list` shows the ids", id), enterprisestatus.UnixExitFailure)
 			}
 			view := explainRegistration(cfg, *reg)
 			if asJSON {

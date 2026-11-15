@@ -22,7 +22,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -138,7 +140,7 @@ arguments, 75 another lifecycle run holds the lock.`,
 			if len(args) > 0 {
 				// The suggestion, usage and --help lines every other gateway
 				// group prints for a mistyped subcommand (GAP-2374).
-				return lifecycleFlagError(cmd, fmt.Errorf("unknown action %q for %q%s", args[0], cmd.CommandPath(), didYouMean(cmd, args[0])))
+				return lifecycleFlagError(cmd, fmt.Errorf("unknown action %q for %q%s", args[0], cmd.CommandPath(), cliusage.DidYouMean(cmd, args[0])))
 			}
 			return cmd.Help()
 		},
@@ -238,7 +240,7 @@ func (v *lockWaitValue) String() string {
 	return v.wait.String()
 }
 
-func (v *lockWaitValue) flagTakes() string { return "a duration from 0 to 15m, such as 30s or 5m" }
+func (v *lockWaitValue) FlagTakes() string { return "a duration from 0 to 15m, such as 30s or 5m" }
 
 func addLockWaitFlag(flags *pflag.FlagSet, wait *time.Duration) {
 	flags.Var(&lockWaitValue{wait: wait}, "lock-wait", lockWaitUsage)
@@ -258,7 +260,7 @@ func typedLockWait(cmd *cobra.Command, wait time.Duration) string {
 // every other gateway command ("unexpected argument", GAP-2330) and the
 // lifecycle's invalid-arguments exit code.
 func lifecycleNoArgs(cmd *cobra.Command, args []string) error {
-	if err := strayArgumentError(cmd, args); err != nil {
+	if err := cliusage.StrayArgumentError(cmd, args); err != nil {
 		return lifecycleFlagError(cmd, err)
 	}
 	return nil
@@ -348,7 +350,7 @@ func unixKeepStateUsage(platform string) string {
 // invalidLifecycleArguments labels err with the lifecycle's invalid-arguments
 // exit code (2 on Linux and macOS; 1639 where Windows runs these groups).
 func invalidLifecycleArguments(err error) error {
-	return withExitCode(err, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))
+	return cliusage.WithExitCode(err, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))
 }
 
 // lifecycleFlagError reports an unknown flag, a malformed value or a stray
@@ -359,7 +361,7 @@ func lifecycleFlagError(c *cobra.Command, err error) error {
 	if c == nil || err == nil {
 		return invalidLifecycleArguments(err)
 	}
-	return invalidLifecycleArguments(&delegatedUsageError{msg: usageMessage(c, err), err: err})
+	return invalidLifecycleArguments(&cliusage.DelegatedUsageError{Msg: cliusage.UsageMessage(c, err), Err: err})
 }
 
 // lifecycleArgumentError reports an argument error of a lifecycle verb (an
@@ -375,17 +377,17 @@ func lifecycleArgumentError(cmd *cobra.Command, action string, asJSON bool, err 
 		return err
 	}
 	message := err.Error()
-	var usage *delegatedUsageError
-	if errors.As(err, &usage) && usage.err != nil {
-		message = usage.err.Error()
+	var usage *cliusage.DelegatedUsageError
+	if errors.As(err, &usage) && usage.Err != nil {
+		message = usage.Err.Error()
 	}
 	profile := managed.ProfileStandalone
-	if secureClientHost() {
+	if hookcli.SecureClientHost() {
 		profile = managed.ProfileSecureClient
 	}
 	result := enterprisestatus.New(action, profile, runtime.GOOS, "")
 	result.AddError("invalid_arguments", message)
-	result.Finish(runtime.GOOS, commandExitCode(err))
+	result.Finish(runtime.GOOS, cliusage.ExitCode(err))
 	data, mErr := json.MarshalIndent(result, "", "  ")
 	if mErr != nil {
 		return err
@@ -450,7 +452,7 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 	}
 	cmd.SetFlagErrorFunc(flagError)
 	cmd.Args = func(c *cobra.Command, args []string) error {
-		if err := strayArgumentError(c, args); err != nil {
+		if err := cliusage.StrayArgumentError(c, args); err != nil {
 			return flagError(c, err)
 		}
 		return nil

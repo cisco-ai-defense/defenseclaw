@@ -45,7 +45,8 @@ import (
 //     DefenseClaw did not read in full (TRUNCATED, oversize-uninspected, or
 //     more findings than the policy input holds) never ends below the
 //     unknown tier, whatever policy.lowest says (the ONE BOUND RULE), and a
-//     proven CRITICAL finding never ends below admin.critical_floor.
+//     block proven in the part that was read stays a block; a proven
+//     CRITICAL finding never ends below admin.critical_floor.
 //
 // Models only raise the rule verdict; the policy is the only point that can
 // lower it. An empty cascade decides exactly as before, and without a policy
@@ -57,6 +58,7 @@ const (
 	cascadePolicyErrorID     = "CASCADE-POLICY-ERROR"
 	cascadeCriticalFloorID   = "CASCADE-CRITICAL-FLOOR"
 	cascadeUnknownFloorID    = "CASCADE-UNKNOWN-FLOOR"
+	cascadeProvenBlockID     = "CASCADE-PROVEN-BLOCK-FLOOR"
 	cascadeNoVerdictID       = "CASCADE-NO-VERDICT"
 	cascadeScanner           = "cascade"
 	maxCascadeInputFindings  = 64
@@ -346,9 +348,11 @@ func cascadeUninspected(v *ToolInspectVerdict) bool {
 // its error) applied to before within the limits, then the floors. An
 // uninspected call (cascadeUninspected, or a policy input whose findings
 // were capped) ends at least at unknownAction, whatever policy.lowest says:
-// the ONE BOUND RULE floor, the same on every surface. A proven CRITICAL
-// ends at least at admin.critical_floor.
-func cascadeFinalAction(before string, flagged, provenCritical, uninspected bool, decisions []policy.CascadeDecision, evalErr error,
+// the ONE BOUND RULE floor, the same on every surface. provenBlock (an
+// uninspected input whose read part already proved a block) keeps the
+// block: what was seen before the cap still decides (GAP-0579). A proven
+// CRITICAL ends at least at admin.critical_floor.
+func cascadeFinalAction(before string, flagged, provenCritical, uninspected, provenBlock bool, decisions []policy.CascadeDecision, evalErr error,
 	unknownAction string, e config.EffectiveCascade,
 ) CascadeOutcome {
 	out := CascadeOutcome{Before: config.CascadeActionName(cascadeRank(before)), Decisions: decisions}
@@ -380,6 +384,9 @@ func cascadeFinalAction(before string, flagged, provenCritical, uninspected bool
 		if uninspected {
 			lo = max(lo, cascadeRank(unknownAction))
 		}
+		if provenBlock {
+			lo = max(lo, cascadeRank(config.CascadeBlock))
+		}
 		if target >= cur {
 			final = max(cur, min(target, hi))
 		} else {
@@ -394,6 +401,10 @@ func cascadeFinalAction(before string, flagged, provenCritical, uninspected bool
 	if uninspected && final < cascadeRank(unknownAction) {
 		final = cascadeRank(unknownAction)
 		out.DecidedBy = "unknown"
+	}
+	if provenBlock && final < cascadeRank(config.CascadeBlock) {
+		final = cascadeRank(config.CascadeBlock)
+		out.DecidedBy = "proven_block"
 	}
 	if provenCritical && final < cascadeRank(e.CriticalFloor) {
 		final = cascadeRank(e.CriticalFloor)
@@ -420,7 +431,7 @@ func (a *APIServer) applyCascadeFinal(ctx context.Context, connector, surface, e
 	}
 	if prepared == nil {
 		if critical && cascadeRank(v.Action) < cascadeRank(e.CriticalFloor) {
-			out := cascadeFinalAction(v.Action, true, true, false, nil, nil, "", e)
+			out := cascadeFinalAction(v.Action, true, true, false, false, nil, nil, "", e)
 			v.applyCascadeOutcome(out, nil)
 		}
 		return v
@@ -429,6 +440,7 @@ func (a *APIServer) applyCascadeFinal(ctx context.Context, connector, surface, e
 	unknownAction := bounded.Unknown(a.boundedTier(ctx, connector)).String()
 	input := a.cascadePolicyInput(ctx, cfg, e, connector, surface, event, tool, v, flagged, unknownAction)
 	uninspected := cascadeInputUninspected(input)
+	provenBlock := uninspected && cascadeInputProvenBlock(input)
 	evalCtx, cancel := context.WithTimeout(ctx, e.PolicyTimeout)
 	decisions, err := prepared.Evaluate(evalCtx, input)
 	cancel()
@@ -438,7 +450,7 @@ func (a *APIServer) applyCascadeFinal(ctx context.Context, connector, surface, e
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] cascade policy error connector=%s surface=%s: %v; judged as unknown\n", connector, surface, err)
 	}
-	out := cascadeFinalAction(v.Action, flagged, critical, uninspected, decisions, err, unknownAction, e)
+	out := cascadeFinalAction(v.Action, flagged, critical, uninspected, provenBlock, decisions, err, unknownAction, e)
 	v.applyCascadeOutcome(out, err)
 	if out.DecidedBy != "" || err != nil {
 		recordCascadeDecision(cfg, connector, surface, out, input)
@@ -460,6 +472,20 @@ func cascadeInputUninspected(input map[string]any) bool {
 	}
 	anyCap, _ := t["any"].(bool)
 	return anyCap || capped
+}
+
+// cascadeInputProvenBlock reads truncated.proven_block: an uninspected input
+// whose read part already proved a block (cascadeProvenBlock).
+func cascadeInputProvenBlock(input map[string]any) bool {
+	t, _ := input["truncated"].(map[string]any)
+	p, _ := t["proven_block"].(bool)
+	return p
+}
+
+// cascadeProvenBlock reports an uninspected verdict whose block the content
+// that was read proved, not the uninspected marker (uninspectedRaised).
+func cascadeProvenBlock(v *ToolInspectVerdict) bool {
+	return v != nil && !v.uninspectedRaised && cascadeRank(v.Action) >= cascadeRank(config.CascadeBlock) && cascadeUninspected(v)
 }
 
 // applyCascadeOutcome writes the final step's outcome onto v.
@@ -492,6 +518,9 @@ func (v *ToolInspectVerdict) applyCascadeOutcome(out CascadeOutcome, err error) 
 	case "unknown":
 		note = "an input DefenseClaw did not read in full is at least " + out.Final + " (the unknown tier); the cascade policy cannot lower it below that"
 		finding = cascadeUnknownFloorID
+	case "proven_block":
+		note = "a block proven in the part of the input DefenseClaw read stands; the cascade policy cannot lower it"
+		finding = cascadeProvenBlockID
 	default:
 		if err != nil {
 			finding = cascadePolicyErrorID
@@ -597,7 +626,7 @@ func (a *APIServer) cascadePolicyInput(ctx context.Context, cfg *config.Config, 
 		"subject":        subject,
 		"findings":       findings,
 		"flagged":        flagged,
-		"truncated":      map[string]any{"any": limitHit || truncated, "input_findings_capped": truncated, "uninspected": cascadeUninspected(v)},
+		"truncated":      map[string]any{"any": limitHit || truncated, "input_findings_capped": truncated, "uninspected": cascadeUninspected(v), "proven_block": cascadeProvenBlock(v)},
 		"layers":         layers,
 		"cascade_action": normalizedGuardrailAction(v.Action),
 		"unknown_action": unknownAction,
@@ -673,10 +702,10 @@ func noteCascade(logger *audit.Logger, g *Generation) {
 // severity mapping, the default pack's audit-only review finding, then the
 // judge's role (guardrail.cascade.judge), recorded for the cascade policy.
 func (a *APIServer) finishHookJudge(ctx context.Context, cfg *config.Config, connector, strategyDirection string,
-	judge *LLMJudge, ruleFloor bool, v *ScanVerdict,
+	judge *LLMJudge, ruleFloor, effectsModeled bool, v *ScanVerdict,
 ) *ScanVerdict {
 	decisionOnly := judge != nil && judge.decisionOnly
-	out := judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+	out := judgeReviewOnlyAudit(cfg, connector, ruleFloor, effectsModeled, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
 	out = applyCascadeJudgeRole(cfg, connector, decisionOnly, out)
 	if !decisionOnly {
 		recordCascadeJudge(ctx, out)

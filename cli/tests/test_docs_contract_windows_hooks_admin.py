@@ -56,7 +56,7 @@ def test_managed_windows_refuses_the_per_user_config_load():
     root = (CLI_GO / "root.go").read_text(encoding="utf-8")
     assert "managedWindowsConfigLoadError(cmd, err)" in root
     guard = _go_func((CLI_GO / "managed_host_guard.go").read_text(encoding="utf-8"), "managedWindowsConfigLoadError")
-    assert "managedHostWindowsStandalone()" in guard
+    assert "hookcli.ManagedHostWindowsStandalone()" in guard
     assert guard.rstrip().endswith("return managedWindowsAdminCommandAnswer(where, command)")
     # Only the in-process service pin skips the per-user config, and an
     # elevated prompt does not have it.

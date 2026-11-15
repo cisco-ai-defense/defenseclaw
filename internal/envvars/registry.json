@@ -390,6 +390,26 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_WRITE_CLI_SNAPSHOT",
+      "category": "test_fixture",
+      "purpose": "Makes the actionfacts CLI-command drift test rewrite its reviewed snapshot of registered command names (testdata/defenseclaw_cli_commands.txt) instead of comparing against it, so a developer can classify a newly added command (GAP-0705).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/actionfacts/defenseclaw_control_drift_test.go",
+          "description": "TestDefenseClawStopVerbsFollowTheCLI rewrites testdata/defenseclaw_cli_commands.txt from the registered command names when the variable is 1"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_AUDIT_DB_LOCK_HELPER_PATH",
       "category": "test_fixture",
       "purpose": "Passes the temporary audit database path to isolated subprocesses that verify SQLite kernel-lock and WAL lifecycle behavior.",
@@ -1569,11 +1589,11 @@
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/cli/hook.go",
+          "location": "internal/hookcli/hook.go",
           "description": "Primary env resolution of the hook's gateway API address"
         },
         {
-          "location": "internal/cli/hook.go",
+          "location": "internal/hookcli/hook.go",
           "description": "Sidecar .hookcfg fallback for the same key"
         }
       ],
@@ -2412,7 +2432,7 @@
           "description": "Body-cap enforcement in the native per-user Claude Code hook"
         },
         {
-          "location": "internal/cli/hook.go",
+          "location": "internal/hookcli/hook.go",
           "description": "Body-cap enforcement in the native hook command"
         }
       ],
@@ -2492,7 +2512,7 @@
       "since": "1.0.7",
       "consumers": [
         {
-          "location": "internal/cli/notify.go",
+          "location": "internal/hookcli/notify.go",
           "description": "Native Codex notifier chain guard"
         }
       ]
@@ -6197,7 +6217,7 @@
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/cli/hook.go",
+          "location": "internal/hookcli/hook.go",
           "description": "Native hook reads it (precedence over TRACEPARENT / OTEL_TRACEPARENT)"
         },
         {
@@ -6225,7 +6245,7 @@
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/cli/hook.go",
+          "location": "internal/hookcli/hook.go",
           "description": "Native hook reads it alongside traceparent"
         },
         {
@@ -7600,6 +7620,30 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_STANDALONE_ENSURE_VERIFY_DEGRADED",
+      "category": "upgrade_internal",
+      "purpose": "Asks the standalone Windows installer's Verify, run by ensure to decide whether to repair, to accept a fresh, complete guardian reconcile whose only failures are user targets the guardian itself reported failed or pending (a signed-out account, a hook file DefenseClaw did not write). A repair cannot fix those, so ensure reports them and does not repair. The administrator's verify stays strict. It is not an installer parameter because the installer parameter set is the Secure Client command line. The installer reads it only for a Verify and clears it so no child process inherits it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/windows_enterprise_standalone.go",
+          "description": "Sets it in the strict installer environment only for the Verify an ensure runs before it plans a repair"
+        },
+        {
+          "location": "packaging/windows/install-enterprise.ps1",
+          "description": "Reads and clears it, and passes AcceptDegradedTargets to the lifecycle only for the Verify action"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DCLAW_FLEET_API_TOKEN",
       "category": "fleet",
       "purpose": "Opaque bearer token for the Fleet management API; the CLI generator uses URL-safe random text.",
@@ -8323,6 +8367,66 @@
       "since": "1.0.5"
     },
     {
+      "name": "DEFENSECLAW_HOOK_ARGV_COMPARE",
+      "category": "test_fixture",
+      "purpose": "Names a full-CLI defenseclaw-hook binary (rel/1.0.10 9efb4f1799 or older) that TestArgvGoldenMatchesTheFullCLIMain compares the slim main with, case by case, on the host it runs on.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute path of a defenseclaw-hook binary",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-hook/main_argv_golden_test.go",
+          "description": "Live argv comparison of the slim hook main with the full-CLI main (Windows and macOS hosts)"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_ARGV_HELPER",
+      "category": "test_fixture",
+      "purpose": "Carries the argv of one golden case to the child test process that runs the hook main.",
+      "default": "unset",
+      "accepted_values": [
+        "argv joined by the unit separator",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-hook/main_argv_golden_test.go",
+          "description": "Child-process mode of the argv golden test"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_ARGV_RECORD",
+      "category": "test_fixture",
+      "purpose": "Names a full-CLI defenseclaw-hook binary whose answers TestArgvGoldenMatchesTheFullCLIMain records into testdata/argv-golden-<goos>.json instead of comparing.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute path of a defenseclaw-hook binary",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-hook/main_argv_golden_test.go",
+          "description": "Records the argv golden from the full-CLI main"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_PREMAIN_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the child-process mode of the defenseclaw-hook test binary (1 = stderr before main, panic = a recovered panic) so the parent test can assert nothing reaches the agent's stderr.",
@@ -8342,6 +8446,66 @@
         }
       ],
       "since": "1.0.7"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_TIMEOUT_SCALE",
+      "category": "test_fixture",
+      "purpose": "Fixes the host slowdown factor that wall-clock-bounded Go tests multiply their windows by (internal/testenv HostSlowdown), instead of measuring it: a number of at least 1, for example 4 on a CI runner known to run about four times slower than an idle host. It changes only how long a test waits, never the verdict a test asserts.",
+      "default": "unset",
+      "accepted_values": [
+        "number >= 1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/testenv/hostslowdown.go",
+          "description": "HostSlowdown returns the value (capped at MaxHostSlowdown) when it is set; the GAP-0558 hook tests stretch their windows by it"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_CASCADE_BENCH",
+      "category": "test_fixture",
+      "purpose": "Turns on the opt-in cascade policy latency benchmark of the cascade-config tests for that many seconds (TestCascadePolicyLatencyAt100PerSecond; off in CI).",
+      "default": "unset",
+      "accepted_values": [
+        "seconds (integer)",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/cascade_ccfix_test.go",
+          "description": "The cascade bench rows run only with the variable set"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_FULL_SWEEP",
+      "category": "test_fixture",
+      "purpose": "Turns on the full syntax-tail sweep of the shellparse/gateway syntax-tail tests (long, off in CI).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/syntax_tail_test.go",
+          "description": "The full sweep runs only with the variable set; the default run covers the sampled rows"
+        }
+      ],
+      "since": "1.0.10"
     },
     {
       "name": "DEFENSECLAW_INSTALL_POLICY_API",

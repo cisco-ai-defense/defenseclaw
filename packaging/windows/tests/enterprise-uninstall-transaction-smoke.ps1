@@ -2952,12 +2952,8 @@ targets:
                 [bool]$RequireEnumerator = $true,
                 [int]$TimeoutSeconds = 90,
                 [switch]$AllowFailedTargets,
-                [string[]]$AllowedFailedTargetSIDs,
                 [switch]$GuardianCoverageDeferred
             )
-            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
-                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
-            }
             if ($GuardianCoverageDeferred) {
                 # GAP-0947 pin: only the standalone rollback of a held Codex
                 # republish defers the guardian coverage proof.
@@ -2982,12 +2978,8 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [string]$ExpectedManifestSHA256,
                 [int]$TimeoutSeconds = 90,
-                [switch]$AllowFailedTargets,
-                [string[]]$AllowedFailedTargetSIDs
+                [switch]$AllowFailedTargets
             )
-            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
-                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
-            }
             if ($script:HarnessState.service_start_modes[
                     $GatewayServiceName
                 ] -ne 4) {
@@ -3067,12 +3059,8 @@ targets:
                 [switch]$AllowTransactionRecordedBrokerAbsence,
                 [switch]$AllowTransactionRecordedEnumeratorAbsence,
                 [string[]]$ExpectedGatewayAccount,
-                [switch]$AcceptDegradedTargets,
-                [string[]]$AllowedFailedTargetSIDs
+                [switch]$AcceptDegradedTargets
             )
-            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
-                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
-            }
             if ($null -ne $ExpectedGatewayAccount) {
                 $script:HarnessState.verified_gateway_account = @($ExpectedGatewayAccount)
             }
@@ -3362,12 +3350,8 @@ targets:
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
-                [switch]$AcceptDegradedTargets,
-                [string[]]$AllowedFailedTargetSIDs
+                [switch]$AcceptDegradedTargets
             )
-            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
-                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
-            }
             return [ordered]@{
                 ok = $true
                 installed = $false
@@ -7627,12 +7611,8 @@ targets:
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
-                [switch]$AcceptDegradedTargets,
-                [string[]]$AllowedFailedTargetSIDs
+                [switch]$AcceptDegradedTargets
             )
-            if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
-                throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
-            }
             return [pscustomobject]@{
                 schema_version = 1
                 ok = $true

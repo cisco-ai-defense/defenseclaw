@@ -376,7 +376,10 @@ func TestExtractArgsBoundsAndTypeFailures(t *testing.T) {
 		issue  IssueCode
 	}{
 		{name: "malformed", raw: json.RawMessage(`{"command":`), status: StatusInvalid, issue: IssueInvalidJSON},
-		{name: "non string argv", raw: json.RawMessage(`{"argv":["id",7]}`), status: StatusInvalid, issue: IssueInvalidJSON},
+		// A JSON number or boolean is its JSON text (GAP-0598); a null or
+		// an object is still no argv word.
+		{name: "null argv element", raw: json.RawMessage(`{"argv":["id",null]}`), status: StatusInvalid, issue: IssueInvalidJSON},
+		{name: "object argv element", raw: json.RawMessage(`{"argv":["id",{"a":1}]}`), status: StatusInvalid, issue: IssueInvalidJSON},
 		{name: "scalar limit", raw: json.RawMessage(`{"command":"` + strings.Repeat("a", maxCommandBytes+1) + `"}`), status: StatusLimitExceeded, issue: IssueInputLimit},
 		{name: "path scalar limit", raw: json.RawMessage(`{"path":"` + strings.Repeat("a", maxScalarBytes+1) + `"}`), status: StatusLimitExceeded, issue: IssueInputLimit},
 		{name: "argv count", raw: manyArgvJSON(maxArgvItems + 1), status: StatusLimitExceeded, issue: IssueInputLimit},

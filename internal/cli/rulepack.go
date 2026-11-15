@@ -32,7 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
-	"github.com/defenseclaw/defenseclaw/policies"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 const rulePackWireVersion = 1
@@ -55,6 +55,8 @@ var shippedToolCallRegexIDs = map[string]bool{
 	"tamper.docker_insecure_http_registry":            true,
 	"tamper.agent_hook_config_disable":                true,
 	"tamper.agent_hook_config_write":                  true,
+	"tamper.defenseclaw_control_disable":              true,
+	"tamper.defenseclaw_control_unproven":             true,
 	"exfil.credential_archive_external_upload":        true,
 	"persistence.global_ld_preload_install":           true,
 	"privilege.host_namespace_entry":                  true,
@@ -67,6 +69,26 @@ var shippedToolCallRegexIDs = map[string]bool{
 	"exec.escaped_binary_write":                   true,
 	"exec.inline_code_network_and_exec":           true,
 	"source_control.clone_then_run_or_adhoc_push": true,
+	// Non-shell tool and command rules (s7/nonshell): selected by the toolshape and actionfacts proofs, regex inert.
+	"CMD-GIT-SHOW-SECRET":         true,
+	"CMD-PERSIST-SYSTEM-SCHEDULE": true,
+	"CMD-PRIV-PATH-HIJACK":        true,
+	"CMD-PRIV-SETUID":             true,
+	"CMD-SECRET-LOOKUP":           true,
+	"CMD-SECRET-REVEAL":           true,
+	"MCP-CODE-DECODE-EXEC":        true,
+	"MCP-SEND-COLLECTOR":          true,
+	"MCP-SEND-REDIRECT":           true,
+	"MCP-SETTING-DOWNGRADE":       true,
+	"MCP-SQL-AUDIT-OFF":           true,
+	"MCP-SQL-CREDENTIAL":          true,
+	"MCP-SQL-DESTRUCTIVE":         true,
+	"MCP-SQL-PRIVILEGE":           true,
+	"PATH-CRED-STORE":             true,
+	"PATH-CRED-STORE-USER":        true,
+	"PATH-K8S-CLUSTER-CRED":       true,
+	// Page-script reader (s7/browserjs, GAP-0560): the finding is code-owned (pageScriptEgress), alert only in every pack, regex inert.
+	"PAGE-SCRIPT-SESSION-EGRESS": true,
 }
 
 type rulePackWireDiagnostic struct {

@@ -67,6 +67,11 @@ benchmarks/fixtures/** -text
 # checkout changed the digest, so the pinned bundle read as a user skill.
 internal/hermesskills/testdata/vendor/** -text
 
+# The Hermes shipped-plugin fixtures are git archives of plugins at Hermes
+# release tags; internal/watcher/hermes_vendor_plugin_digests.go pins their
+# bytes, so they are never converted (rel-1-0-10:GAP-0765).
+internal/watcher/testdata/hermes-vendor/** binary
+
 # The Secure Client evaluation goldens are compared byte for byte, also on a
 # Windows checkout.
 internal/gateway/testdata/secure_client_evaluation/** text eol=lf
@@ -129,6 +134,7 @@ internal/unixidentity/testdata/dscl-listing/* text eol=lf -whitespace
 # their detached signature over the exact bytes; a Windows CRLF checkout
 # broke the signature (TestClaudeReleaseManifestSignatureAndPlatformChecksum).
 internal/sensor/testdata/** -text
+cmd/defenseclaw-hook/testdata/outage-packs/** -text
 
 # Go fuzz corpus entries ("go test fuzz v1") are read line by line, some by
 # tests that strconv.Unquote a line (hookpaths fuzzCorpusString); a Windows

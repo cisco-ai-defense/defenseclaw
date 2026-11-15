@@ -17,7 +17,11 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -56,10 +60,13 @@ var cascadeSurfaces = []struct{ connector, surface, event, tool string }{
 }
 
 // GAP-0579 probe matrix: policy.lowest {log, allow, alert} x {TRUNCATED,
-// oversize-uninspected, normal} x every surface x {default, strict} pack,
-// under a policy that lowers everything. An input DefenseClaw did not read
-// in full ends at least at the unknown tier (default alert, strict block);
-// a normal flagged call is lowered to the lowest limit as before.
+// oversize-uninspected, the 256 KiB content cut, each from allow, alert and
+// a proven block, normal} x every surface x {default, strict} pack, under a
+// policy that lowers everything. An input DefenseClaw did not read in full
+// ends at least at the unknown tier (default alert, strict block), and a
+// block the read part proved stays a block (s7-ccrev2's 54-cell probe is
+// the oversize+block rows); a normal flagged call is lowered to the lowest
+// limit as before.
 func TestCascadeBoundFloorProbeMatrix(t *testing.T) {
 	for _, posture := range []string{"default", "strict"} {
 		tier, unknown := bounded.TierDefault, "alert"
@@ -86,15 +93,43 @@ func TestCascadeBoundFloorProbeMatrix(t *testing.T) {
 					v.markOversizeUninspected()
 					return v
 				},
+				"oversize+block": func() *ToolInspectVerdict {
+					v := ruleVerdict("block", "HIGH")
+					v.markOversizeUninspected()
+					return v
+				},
+				"oversize+alert": func() *ToolInspectVerdict {
+					v := ruleVerdict("alert", "MEDIUM")
+					v.markOversizeUninspected()
+					return v
+				},
+				"cut": func() *ToolInspectVerdict {
+					v := &ToolInspectVerdict{Action: "allow", Severity: "NONE"}
+					v.markContentCut(unknown)
+					return v
+				},
+				"cut+alert": func() *ToolInspectVerdict {
+					v := ruleVerdict("alert", "MEDIUM")
+					v.markContentCut(unknown)
+					return v
+				},
+				"cut+block": func() *ToolInspectVerdict {
+					v := ruleVerdict("block", "HIGH")
+					v.markContentCut(unknown)
+					return v
+				},
 				"normal": func() *ToolInspectVerdict {
-					return &ToolInspectVerdict{Action: "block", Severity: "HIGH", Findings: []string{"COG-CLAUDE-MD"},
-						DetailedFindings: []RuleFinding{{RuleID: "COG-CLAUDE-MD", Severity: "HIGH"}}}
+					return ruleVerdict("block", "HIGH")
 				},
 			}
+			provenBlock := map[string]bool{"truncated+finding": true, "oversize+block": true, "cut+block": true}
 			for kind, mk := range kinds {
 				for _, s := range cascadeSurfaces {
 					got := api.applyCascadeFinal(t.Context(), s.connector, s.surface, s.event, s.tool, mk())
 					name := posture + "/" + lowest + "/" + kind + "/" + s.connector + "/" + s.surface
+					if provenBlock[kind] && got.Action != "block" {
+						t.Errorf("%s: a block proven before the cap ended %s (findings %v, reason %q)", name, got.Action, got.Findings, got.Reason)
+					}
 					if kind == "normal" {
 						want := lowest
 						if want == "log" {
@@ -110,6 +145,69 @@ func TestCascadeBoundFloorProbeMatrix(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+func ruleVerdict(action, severity string) *ToolInspectVerdict {
+	return &ToolInspectVerdict{Action: action, Severity: severity, Findings: []string{"COG-CLAUDE-MD"},
+		DetailedFindings: []RuleFinding{{RuleID: "COG-CLAUDE-MD", Severity: severity}}}
+}
+
+// The marker is set whatever the verdict (GAP-0579): a block the bounded
+// prefix proved keeps its reason and gains the marker; the 256 KiB cut
+// raises to the unknown tier and never lowers.
+func TestCascadeUninspectedMarkerWhateverTheVerdict(t *testing.T) {
+	v := ruleVerdict("block", "HIGH")
+	v.markOversizeUninspected()
+	v.markOversizeUninspected()
+	if !cascadeUninspected(v) || !cascadeProvenBlock(v) || v.Findings[0] != hookOversizeUninspectedRuleID || len(v.Findings) != 2 {
+		t.Fatalf("oversize after a block: uninspected=%v proven=%v findings=%v", cascadeUninspected(v), cascadeProvenBlock(v), v.Findings)
+	}
+	v = &ToolInspectVerdict{Action: "allow", Severity: "NONE"}
+	v.markOversizeUninspected()
+	if v.Action != "block" || cascadeProvenBlock(v) {
+		t.Fatalf("oversize from allow: action=%s proven=%v", v.Action, cascadeProvenBlock(v))
+	}
+	for unknown, want := range map[string]string{"alert": "alert", "confirm": "alert", "block": "block", "": "alert"} {
+		v = &ToolInspectVerdict{Action: "allow", Severity: "NONE"}
+		v.markContentCut(unknown)
+		if v.Action != want || !cascadeUninspected(v) || cascadeProvenBlock(v) || v.Reason != contentCutReason {
+			t.Errorf("cut from allow, unknown %q: action=%s (want %s) uninspected=%v reason=%q", unknown, v.Action, want, cascadeUninspected(v), v.Reason)
+		}
+	}
+	v = ruleVerdict("block", "HIGH")
+	v.markContentCut("alert")
+	if v.Action != "block" || !cascadeProvenBlock(v) {
+		t.Fatalf("cut after a block: action=%s proven=%v", v.Action, cascadeProvenBlock(v))
+	}
+}
+
+// The 256 KiB cut on the inspect routes marks the call: a benign prompt
+// over the cap is at least the unknown tier, never a silent allow, and a
+// policy that lowers everything cannot take it below that.
+func TestCascadeInspectContentCutIsUninspected(t *testing.T) {
+	api := cascadeModuleConfig(t, "default", cascadeAllowAllModule, "")
+	api.scannerCfg.Guardrail.Cascade.Policy.Lowest = "allow"
+	api.scannerCfg.Guardrail.Mode = "action"
+	big := strings.Repeat("hello world ", maxInspectContentLen/12+64)
+	for _, tc := range []struct {
+		path string
+		h    http.HandlerFunc
+		body any
+	}{
+		{"/api/v1/inspect/request", api.handleInspectRequest, RequestInspectRequest{Content: big}},
+		{"/api/v1/inspect/response", api.handleInspectResponse, ResponseInspectRequest{Content: big}},
+	} {
+		raw, _ := json.Marshal(tc.body)
+		rec := httptest.NewRecorder()
+		tc.h(rec, httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(raw)))
+		var got ToolInspectVerdict
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("%s: %v (%d %s)", tc.path, err, rec.Code, rec.Body.String())
+		}
+		if cascadeRank(got.Action) < cascadeRank("alert") || !slices.Contains(got.Findings, hookOversizeUninspectedRuleID) {
+			t.Errorf("%s: content over the cap ended %s findings %v", tc.path, got.Action, got.Findings)
 		}
 	}
 }
@@ -348,3 +446,29 @@ decisions contains {"action": "block", "id": "secrets-medium", "reason": "secret
 	f.severity in {"MEDIUM", "HIGH", "CRITICAL"}
 }
 `
+
+// GAP-0580: cascade explain shows the mode that applies, the locked
+// top-level one, for a connector under application_protection, with and
+// without a profile.
+func TestCascadeExplainLockedModeUnderApplicationProtection(t *testing.T) {
+	raw := []byte("config_version: 9\ndata_dir: " + t.TempDir() + "\n" +
+		"guardrail:\n  enabled: true\n  mode: action\n  cascade:\n    admin:\n      locked: [mode]\n" +
+		"  profiles:\n    contractors:\n      mode: observe\n" +
+		"application_protection:\n  enabled: true\n  guardrail:\n    mode: observe\n")
+	t.Setenv("HOME", t.TempDir())
+	cfg, err := config.LoadRuntimeV8FromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range []string{"", "contractors"} {
+		for _, c := range []string{"cursor", "codex"} {
+			ex, err := ExplainCascade(cfg, c, profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ex.Rules.Mode != "action" {
+				t.Errorf("profile %q, %s: explain shows mode %s, want the locked action", profile, c, ex.Rules.Mode)
+			}
+		}
+	}
+}

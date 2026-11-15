@@ -746,9 +746,11 @@ func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, ra
 			}
 		}()
 	}
-	verdict := g.inspectStrategy(ctx, strategy, direction, content, messages, model, mode)
+	// The content rules of a prompt also read it as the model reads its text
+	// parts (withPromptPartsView, GAP-0465).
+	verdict := g.inspectStrategy(withPromptPartsView(ctx, direction, content, messages), strategy, direction, content, messages, model, mode)
 	if raw != "" {
-		verdict = mergePromptVerdicts(verdict, g.inspectStrategy(ctx, strategy, direction, raw, messages, model, mode))
+		verdict = mergePromptVerdicts(verdict, g.inspectStrategy(withPromptPartsView(ctx, direction, raw, messages), strategy, direction, raw, messages, model, mode))
 	}
 
 	elapsed := time.Since(start)
@@ -1174,7 +1176,17 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	ciscoClient := g.currentCiscoInspector()
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
-	signals := triagePatterns(direction, content)
+	signals := triagePatternsFor(ctx, direction, content)
+	judge := g.requestJudge(ctx)
+	if judge != nil && direction == "prompt" {
+		// Opt-in only: a prompt with one half of an injection shape goes to the
+		// injection adjudicator. With no judge these signals do not exist, so
+		// the default posture never alerts on a near miss.
+		signals = append(signals, promptInjectionReviewSignals(content)...)
+		if view := promptPartsViewOf(ctx, content); view != "" {
+			signals = append(signals, promptInjectionReviewSignals(view)...)
+		}
+	}
 	high, review, _ := partitionSignals(signals)
 
 	// Keep trust, credential, and PII detection on untrusted content. Concrete
@@ -1257,7 +1269,6 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	// signals as MEDIUM alerts so they appear in the audit log rather than
 	// being silently dropped.
 	var judgeVerdict *ScanVerdict
-	judge := g.requestJudge(ctx)
 	if len(review) > 0 {
 		if judge != nil {
 			judgeStart := time.Now()
@@ -1266,9 +1277,15 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 			endJudge(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(judgeStart))
 		}
 		if judgeVerdict == nil || judgeVerdict.JudgeFailed {
-			judgeVerdict = signalsToVerdict(review, "local-triage-fallback")
-			judgeVerdict.Severity = "MEDIUM"
-			judgeVerdict.Action = "alert"
+			// A near-miss injection signal only asks the judge; when the judge
+			// cannot answer it is dropped, never turned into an alert.
+			fallback := withoutInjectionReviewSignals(review)
+			judgeVerdict = nil
+			if len(fallback) > 0 {
+				judgeVerdict = signalsToVerdict(fallback, "local-triage-fallback")
+				judgeVerdict.Severity = "MEDIUM"
+				judgeVerdict.Action = "alert"
+			}
 		}
 	}
 
@@ -1358,7 +1375,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		}()
 		regexStart := time.Now()
 		_, endRegex := g.startPhaseSpan(ctx, "regex")
-		sigs := triagePatterns(direction, content)
+		sigs := triagePatternsFor(ctx, direction, content)
 		// Regex phase without a verdict still records latency — timing
 		// alone is a useful signal when comparing judge_first budgets.
 		endRegex("", "", time.Since(regexStart))
@@ -1842,17 +1859,54 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 // scanLocalPatternsFor is scanLocalPatterns for a guardrail proxy request:
 // its content rules come from the rule pack of the request's profile
 // (proxyRuleGeneration).
+//
+// A prompt with a parts view (withPromptPartsView) is also scanned as the
+// model reads it, and the two verdicts are unioned (GAP-0465).
 func scanLocalPatternsFor(ctx context.Context, direction, content string) *ScanVerdict {
-	return scanLocalPatternsWithActivation(direction, content, proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx)))
+	rules, patterns := proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx))
+	verdict := scanLocalPatternsWithActivation(direction, content, rules, patterns)
+	if view := promptPartsViewOf(ctx, content); view != "" {
+		verdict = unionLocalPatternVerdicts(verdict, scanLocalPatternsWithActivation(direction, view, rules, patterns))
+	}
+	return verdict
 }
 
 // scanProxyContentRules is the content rule scan of a guardrail proxy
-// request, with the rule pack of its profile (proxyRuleGeneration).
+// request, with the rule pack of its profile (proxyRuleGeneration), on
+// content and on its parts view (withPromptPartsView, GAP-0465).
 func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 	if ManagedEnterpriseActive() {
 		return nil
 	}
-	return scanContentRuleCategoryWithGeneration(proxyRuleGeneration(ctx), content, "", ruleContentScopeUntrusted, "")
+	generation := proxyRuleGeneration(ctx)
+	findings := scanUntrustedContentRules(generation, content)
+	if view := promptPartsViewOf(ctx, content); view != "" {
+		findings = unionRuleFindings(findings, scanUntrustedContentRules(generation, view))
+	}
+	return findings
+}
+
+// scanUntrustedContentRules is the content rule scan of untrusted text with
+// generation: every content rule on the text as written, then the trust rules
+// on the same text with invisible separators and look-alike letters folded,
+// merged per rule ID keeping the stronger finding (unionRuleFindings,
+// rel-1-0-10:GAP-0527). A directive with a zero-width character
+// spliced into a word, or a Latin letter swapped for a Cyrillic one, reads the
+// same to a model and must not read differently to the rules. The hook path
+// does the same (messageRuleFindings); the Secure Client generation keeps its
+// single pass.
+func scanUntrustedContentRules(generation *compiledRulePackCategories, content string) []RuleFinding {
+	findings := scanContentRuleCategoryWithGeneration(generation, content, "", ruleContentScopeUntrusted, "")
+	if secureClientGeneration() {
+		return findings
+	}
+	folded := trustPatternText(content)
+	if folded == content {
+		return findings
+	}
+	return unionRuleFindings(findings, scanRuleGeneration(generation, folded, "", ruleScanOptions{
+		contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit",
+	}))
 }
 
 func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {
@@ -1979,8 +2033,11 @@ func scanLocalPatternsWithActivation(
 	// Content scanning retains trust, credential, and PII rules. Literal
 	// commands, paths, cognitive files, and C2 indicators are action categories
 	// and require parsed tool-call facts before they can affect enforcement.
+	// The fixed-phrase and local-PII flags above are the legacy detectors: a
+	// hit is at least MEDIUM, HIGH for the high-signal ones. A rule-pack
+	// finding carries its own severity and nothing else (rel-1-0-10:GAP-0172).
 	maxRuleSev := "NONE"
-	ruleFindings := scanContentRuleCategoryWithGeneration(rules, content, "", ruleContentScopeUntrusted, "")
+	ruleFindings := scanUntrustedContentRules(rules, content)
 	catalogPIIEvidence := make(map[string]struct{})
 	for _, rf := range ruleFindings {
 		if strings.HasPrefix(rf.RuleID, "ENT-") && hasTag(rf.Tags, "pii") {
@@ -1999,13 +2056,27 @@ func scanLocalPatternsWithActivation(
 		flags = append(flags, candidate.flag)
 		isHigh = true
 	}
+	legacySeverity := "NONE"
+	if len(flags) > 0 {
+		legacySeverity = "MEDIUM"
+		if isHigh {
+			legacySeverity = "HIGH"
+		}
+	}
 	for _, rf := range ruleFindings {
 		flags = append(flags, rf.RuleID+":"+rf.Title)
-		if severityRank[rf.Severity] >= severityRank["HIGH"] {
-			isHigh = true
+		ruleSeverity := rf.Severity
+		if severityRank[ruleSeverity] == 0 || (rf.enforcement == findingEnforcementDetectionOnly && severityRank[ruleSeverity] < severityRank["MEDIUM"]) {
+			// A rule without a known severity, and a shipped weak-literal rule
+			// that the trust-literal context demoted to detection-only LOW
+			// (TRUST-FICTIONAL, TRUST-PROMPT-EXTRACT), keep the MEDIUM floor the
+			// prompt scan always gave them. Whether the prompt path should honor
+			// that demotion as the tool path does is the injection floor's
+			// decision (rel-1-0-10:GAP-0175), not this gap's.
+			ruleSeverity = "MEDIUM"
 		}
-		if severityRank[rf.Severity] > severityRank[maxRuleSev] {
-			maxRuleSev = rf.Severity
+		if severityRank[ruleSeverity] > severityRank[maxRuleSev] {
+			maxRuleSev = ruleSeverity
 		}
 	}
 
@@ -2013,10 +2084,7 @@ func scanLocalPatternsWithActivation(
 		return allowVerdict("local-pattern")
 	}
 
-	severity := "MEDIUM"
-	if isHigh {
-		severity = "HIGH"
-	}
+	severity := legacySeverity
 	if severityRank[maxRuleSev] > severityRank[severity] {
 		severity = maxRuleSev
 	}
@@ -2204,6 +2272,68 @@ func triagePatterns(direction, content string) []TriageSignal {
 	}
 
 	return signals
+}
+
+// promptInjectionReviewFindingID marks a near-miss injection signal: text that
+// has one half of an injection shape but not what a rule needs to alert.
+const promptInjectionReviewFindingID = "TRIAGE-INJECTION-REVIEW"
+
+// promptInjectionReviewPatterns are the near misses the opt-in judge may look
+// at on a prompt (strategy regex_judge). They run on the normalised, lower-cased
+// text. They are structural halves of the shapes the trust-exploit rules alert
+// on, so a prompt that matches one is rare in ordinary use; they never alert
+// on their own, and they do not exist without a judge.
+var promptInjectionReviewPatterns = []struct {
+	name string
+	re   *regexp.Regexp
+}{
+	// A signed pseudo-letter inside a markup envelope.
+	{"signed message inside a tag envelope", regexp.MustCompile(`(?s)<[a-z_]{3,}>.{0,900}?\bsigned,?\s+[^\n<]{1,60}\s*</[a-z_]{3,}>`)},
+	// A label directive as the first words ("todo:", "important!").
+	{"label directive opening the prompt", regexp.MustCompile(`^\s*(?:todo|important|urgent|attention|new task|priority)\s*[:!]+\s*\S`)},
+	// "ignore your previous <word>": the noun is free, the rules need an instruction noun.
+	{"ignore-previous opening with a free object", regexp.MustCompile(`(?m)(?:^|[.!?;,:]\s*)ignore\s+(?:(?:all|any|every|the|these|those|of)\s+)*(?:(?:your|my)\s+)?(?:previous|prior|above|earlier|preceding|former)\s+\w+`)},
+	// Half of TRUST-ADDRESSED-DEFER: a message addressed to the assistant.
+	{"message addressed to the assistant", regexp.MustCompile(`(?s)\b(?:message|note|notice)s?\s+(?:from\s+[^\n.]{1,80}?\s+)?to\s+(?:you|the\s+(?:ai|assistant|model|agent|llm|bot))\b`)},
+	// The other half: deferring the user's own task.
+	{"defers the user's own task", regexp.MustCompile(`(?s)\b(?:before|prior\s+to)\s+(?:you\s+)?(?:can\s+)?(?:solv|complet|finish|continu|proceed)\w*\s+(?:on\s+|with\s+)?(?:the|your|my)\s+(?:original\s+|initial\s+|first\s+)?(?:task|request)\b`)},
+}
+
+// promptInjectionReviewSignals returns one NEEDS_REVIEW injection signal per
+// near-miss pattern the prompt matches (at most three), for the injection
+// adjudicator. Call it only when a judge is configured.
+func promptInjectionReviewSignals(content string) []TriageSignal {
+	if ManagedEnterpriseActive() || content == "" {
+		return nil
+	}
+	lower := normalizeForTriage(content)
+	var out []TriageSignal
+	for _, p := range promptInjectionReviewPatterns {
+		if !p.re.MatchString(lower) {
+			continue
+		}
+		out = append(out, TriageSignal{
+			Level: "NEEDS_REVIEW", FindingID: promptInjectionReviewFindingID,
+			Category: "injection", Pattern: p.name,
+			Evidence:   extractEvidenceRegex(content, lower, p.re),
+			Confidence: 0.50,
+		})
+		if len(out) == 3 {
+			break
+		}
+	}
+	return out
+}
+
+// withoutInjectionReviewSignals drops the near-miss injection signals.
+func withoutInjectionReviewSignals(signals []TriageSignal) []TriageSignal {
+	var out []TriageSignal
+	for _, s := range signals {
+		if s.FindingID != promptInjectionReviewFindingID {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // partitionSignals separates triage signals by level.
@@ -2690,20 +2820,31 @@ func promptSideInstructionText(messages []ChatMessage) string {
 // OpenClaw 2026.9 appends a synthetic context message after the prompt, so the
 // last message alone would leave the prompt itself unscanned (GAP-0190).
 func currentTurnUserText(messages []ChatMessage) string {
-	var turn []string
+	turn := currentTurnUserMessages(messages)
+	texts := make([]string, len(turn))
+	for i, msg := range turn {
+		texts[i] = msg.Content
+	}
+	return strings.Join(texts, "\n")
+}
+
+// currentTurnUserMessages is the non-blank user messages after the last
+// assistant or tool message, oldest first (currentTurnUserText).
+func currentTurnUserMessages(messages []ChatMessage) []ChatMessage {
+	var turn []ChatMessage
 	for i := len(messages) - 1; i >= 0; i-- {
 		role := messages[i].Role
 		if role == "assistant" || role == "tool" {
 			break
 		}
 		if role == "user" && strings.TrimSpace(messages[i].Content) != "" {
-			turn = append(turn, messages[i].Content)
+			turn = append(turn, messages[i])
 		}
 	}
 	for i, j := 0, len(turn)-1; i < j; i, j = i+1, j-1 {
 		turn[i], turn[j] = turn[j], turn[i]
 	}
-	return strings.Join(turn, "\n")
+	return turn
 }
 
 // promptTurnText is the user text the proxy inspects before a call: the user
@@ -3064,6 +3205,14 @@ func blockMessage(customMsg, direction, reason string) string {
 				"concern was detected in the prompt (%s). "+
 				"If you believe this is a false positive, contact your "+
 				"administrator or adjust the guardrail policy.", reason)
+	}
+	if direction == directionToolResult {
+		return fmt.Sprintf(
+			"[DefenseClaw] This request was blocked. A tool's output "+
+				"carried instructions aimed at the agent (%s), so it was "+
+				"not sent to the model. If you believe this is a false "+
+				"positive, contact your administrator or adjust the "+
+				"guardrail policy.", reason)
 	}
 	return fmt.Sprintf(
 		"[DefenseClaw] The model's response was blocked due to a "+

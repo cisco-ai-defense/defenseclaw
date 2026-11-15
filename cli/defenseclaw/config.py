@@ -2817,6 +2817,10 @@ class JudgeConfig:
     # ``curl --max-time 10`` budget — the proxy lane's 30s would let the
     # client hang up before a verdict lands).
     hook_timeout: float = 0.0
+    # What the tool judge does with a call that sends data to a destination the
+    # user's task does not name (Go ``JudgeConfig.IntentScope``): ``"shadow"``
+    # (record only, the built-in default) or ``"off"``.
+    intent_scope: str = ""
     # Most judge calls sent to the judge model at once (Go
     # ``JudgeConfig.MaxParallel``); 0 = no limit. With a limit, tool-call
     # judging goes ahead of prompt judging (#1395).
@@ -3584,6 +3588,16 @@ class GuardrailConfig:
         from defenseclaw.observability.v8_config import validate_judge_extra_body
 
         validate_judge_extra_body(self.judge.extra_body, "config.yaml")
+        scope = (self.judge.intent_scope or "").strip().lower()
+        if scope not in ("", "shadow", "off"):
+            # Same refusal as the gateway loader (JudgeConfig.ValidateIntentScope):
+            # the task-scope lane is shadow-only in 1.0.10.
+            if scope == "alert":
+                raise ValueError(
+                    "guardrail.judge.intent_scope: 'alert' is not available in 1.0.10: the task-scope lane "
+                    "is shadow-only (rel-1-0-10:GAP-0341, GAP-0372, GAP-0363); use shadow or off"
+                )
+            raise ValueError(f"guardrail.judge.intent_scope: unknown value {self.judge.intent_scope!r} (shadow or off)")
         _validate_guardrail_level("guardrail.block_at", self.block_at)
         _validate_guardrail_level("guardrail.alert_at", self.alert_at)
         seen: dict[str, str] = {}
@@ -4308,6 +4322,9 @@ class RoutingConfig:
     sensitive: dict[str, Any] = field(default_factory=dict)
     systemone: dict[str, Any] = field(default_factory=dict)
     route_only: dict[str, Any] = field(default_factory=dict)
+    # routing.context: bounded recent context for the router (recent_user_turns,
+    # include_first_user_turn, max_bytes, per_turn_bytes, include_tool_names).
+    context: dict[str, Any] = field(default_factory=dict)
     # routing.admin: the floor keys (S1) plus rules / budgets / visibility
     # (S11), kept as a mapping so every key round-trips.
     admin: dict[str, Any] = field(default_factory=dict)
@@ -4342,7 +4359,7 @@ class RoutingConfig:
 
 
 # Nested routing keys added in 1.0.10, kept as raw mappings.
-ROUTING_NESTED_1010_KEYS = ("categories", "sensitive", "systemone", "route_only", "admin")
+ROUTING_NESTED_1010_KEYS = ("categories", "sensitive", "systemone", "route_only", "admin", "context")
 
 
 @dataclass
@@ -5690,6 +5707,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             judge.pop("hook_connectors", None)
         if not judge.get("hook_timeout"):
             judge.pop("hook_timeout", None)
+        if not judge.get("intent_scope"):
+            judge.pop("intent_scope", None)
         judge.pop("_max_parallel_explicit_zero", None)
         if not judge.get("max_parallel") and not cfg.guardrail.judge._max_parallel_explicit_zero:
             judge.pop("max_parallel", None)
@@ -6158,6 +6177,8 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "decision_model.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
+        # Task-scope check of the tool judge: empty = built-in default, stripped on save.
+        "guardrail.judge.intent_scope",
         # Judge call bound: 0 = no limit, stripped on save.
         "guardrail.judge.max_parallel",
         # Identity-based guardrail profile selection: empty = no profiles.
@@ -7081,6 +7102,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         timeout=raw.get("timeout", 30.0),
         hook_connectors=raw.get("hook_connectors", []),
         hook_timeout=raw.get("hook_timeout", 0.0),
+        intent_scope=raw.get("intent_scope", "") or "",
         max_parallel=_judge_max_parallel(raw.get("max_parallel", 0)),
         extra_body=raw.get("extra_body", {}),
         _max_parallel_explicit_zero=type(raw.get("max_parallel")) is int and raw["max_parallel"] == 0,
@@ -9014,6 +9036,7 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
         systemone=mapping("systemone"),
         route_only=mapping("route_only"),
         admin=mapping("admin"),
+        context=mapping("context"),
     )
 
 

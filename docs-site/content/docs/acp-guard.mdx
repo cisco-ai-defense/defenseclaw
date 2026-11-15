@@ -166,6 +166,7 @@ A frame that makes the editor or the agent act (`terminal/create`, `fs/read_text
 - A command runs in the directory the frame names, else in the directory the editor gave the session (`session/new`, `session/load`), which the guard sends with each agent frame. A relative `cwd` is joined to it. A command, or a file named relative, with no directory known (a session the guard did not see, or evicted from its table of 1,024) is judged as given and then raised to the unknown tier of the active pack: an alert in the default and permissive packs, a block in strict.
 - A permission that names more than 64 locations has the first 64 judged one by one (a block among them stays a block) and is then raised to the same unknown tier: in the default and permissive packs it is allowed with an alert, so the editor asks the user the permission; in strict it is blocked.
 - A tool call the agent reports after it ran it (`tool_call` in `session/update`) cannot be refused any more. A block of it is recorded as an alert that would have blocked, with the finding and its severity, and the report is allowed; the agent's own permission request, sent before it ran, is where the action is judged. A report cut short or with no known directory follows the unknown tier: a plain alert in the default and permissive packs, an alert that would have blocked in strict.
+- Hermes runs its own tools. It asks the editor a permission only for the dangerous commands its own approval policy names, and reports every other tool call after it ran, so the guard cannot refuse a normal Hermes command. It judges the report as the tool call it shows: Hermes sends a command it runs only as the text it displays for the call (`$ <command>`), with no `rawInput`, and the guard reads that text as the shell command. What the active pack blocks is recorded as an alert that would have blocked, with its rule and severity. A Hermes terminal report that shows no command is judged as an action that cannot be read, never as clean. `defenseclaw acp status`, `defenseclaw doctor` and the Setup form say that the guard does not refuse Hermes tool calls. To refuse a command before it runs, run the Hermes connector hooks in action mode next to the guard (`defenseclaw setup hermes --mode action`).
 - Multi-step chain rules (a download then its run, a secret read then an upload) do not cover ACP yet: each ACP step is judged alone.
 - Two keys that differ only in letter case are refused, as one that names a key twice is, except inside the free-form members `rawOutput` and `_meta`.
 
@@ -270,7 +271,7 @@ On a per-user install `defenseclaw acp catalog` prints the list. On a managed co
 | Kiro | `kiro-cli acp` | Tested with Zed |
 | Cursor | `agent acp` | Cataloged |
 | OpenCode | `opencode acp` | Cataloged |
-| Hermes | `hermes acp` | Cataloged |
+| Hermes | `hermes acp` | Cataloged. Reports its tool calls after they ran: alerts, no refusal |
 | GitHub Copilot CLI | `copilot --acp --stdio` | Cataloged |
 | Devin | `devin acp` | Cataloged |
 
@@ -279,7 +280,7 @@ Zed is tested. JetBrains is cataloged. A cataloged entry point matches the vendo
 ## What it does not do
 
 - It does not stop an agent entry the editor launches without `defenseclaw-acp`. `defenseclaw acp detect` lists those entries.
-- It can only withhold what the agent sends. An agent that runs its own tools may already have run a step when its output is blocked. Keep the agent's connector hooks in action mode next to the guard to stop a step before it runs.
+- It can only withhold what the agent sends. An agent that runs its own tools (Hermes) has already run a step when its report arrives: the guard alerts on it and records that it would have blocked it, and `defenseclaw acp status` says so. An agent that runs its own tools may already have run a step when its output is blocked. Keep the agent's connector hooks in action mode next to the guard to stop a step before it runs.
 - An organization-wide "only these agents" rule also needs IDE policy and operating-system application control.
 
 ## API and diagnostics

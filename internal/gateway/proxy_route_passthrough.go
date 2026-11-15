@@ -69,8 +69,8 @@ type passthroughRouteInput struct {
 }
 
 // routePassthrough asks the router about one passthrough request. ok is
-// false when the request goes out unchanged; deny is set for a managed
-// refusal.
+// false when the request goes out unchanged; a denied outcome is a managed
+// admin refusal or a sensitive request no local model can take.
 func (p *GuardrailProxy) routePassthrough(r *http.Request, in passthroughRouteInput) (route passthroughRoute, ok bool, outcome SemanticRouteOutcome) {
 	if in.APIFamily == "" || in.Signed || !p.routerActive(r.Context()) {
 		return passthroughRoute{}, false, p.gateUnrouted(r, in)
@@ -89,21 +89,24 @@ func (p *GuardrailProxy) routePassthrough(r *http.Request, in passthroughRouteIn
 	input := &ModelRouterInput{
 		Model: model, RequestModel: model, APIFamily: in.APIFamily, Connector: p.connectorName(),
 		Listener: engine.ListenerGuardrail, Severity: in.Severity, RequestedProvider: in.Provider,
-		ConversationID: r.Header.Get("X-DC-Session-Id"), Text: in.Text, Caller: caller, Profiles: profiles,
+		ConversationID: routeConversationID(r), Text: passthroughRouterText(in.APIFamily, in.Body, in.Text), Caller: caller, Profiles: profiles,
+		Body: in.Body,
 	}
 	if hasTools {
 		input.Tools = []interface{}{true}
 	}
 	outcome = p.routeDetailed(r.Context(), input)
 	p.applyRouteGate(r.Context(), &outcome, in.Provider, model)
-	p.recordSemanticRoutingDecisionV8(r.Context(), outcome)
+	// Recorded when the function returns: by then the outcome says whether the
+	// call really went to the routed model.
+	defer func() { p.recordSemanticRoutingDecisionV8(r.Context(), routedMetricOutcome(outcome, ok)) }()
 	d := outcome.Decision
 	if outcome.Result != SemanticRouteApplied || d == nil {
 		return passthroughRoute{}, false, outcome
 	}
 	if probe.PreviousResponseID != "" && !strings.EqualFold(d.Provider, in.Provider) {
 		// A stored response id belongs to the original provider (DESIGN 5).
-		return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model)
+		return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model, "the call continues a stored response of the original provider (previous_response_id)")
 	}
 	origin := originOf(d.TargetURL)
 	sameProvider := strings.EqualFold(d.Provider, in.Provider)
@@ -115,17 +118,17 @@ func (p *GuardrailProxy) routePassthrough(r *http.Request, in passthroughRouteIn
 		}
 	}
 	if origin == "" {
-		return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model)
+		return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model, "the model has no base_url and its provider no known endpoint")
 	}
 	route = passthroughRoute{Origin: origin, Path: r.URL.RequestURI(), Body: in.Body, Provider: d.Provider}
 	switch in.APIFamily {
 	case config.RoutingAPIConverse, config.RoutingAPIInvoke:
 		if !strings.EqualFold(d.Provider, "bedrock") {
-			return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model)
+			return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model, "a Bedrock Converse or InvokeModel call goes only to a Bedrock model")
 		}
 		route.Path = swapBedrockPathModel(r.URL, d.Model)
 		if route.Path == "" {
-			return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model)
+			return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model, "the Bedrock model id could not be replaced in the request path")
 		}
 	default:
 		route.Body = patchModelInBody(in.Body, d.Model)

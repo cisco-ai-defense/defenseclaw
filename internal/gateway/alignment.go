@@ -175,9 +175,11 @@ func (a *APIServer) alignmentLaneMode(ctx context.Context, connector string) str
 }
 
 // observeAlignmentTurn records a user turn for the lane: the first turn of
-// the session is kept, the latest replaces the one before.
-func (a *APIServer) observeAlignmentTurn(ctx context.Context, connector, prompt string) {
-	if a.alignmentLaneMode(ctx, connector) == config.CascadeLaneOff {
+// the session is kept, the latest replaces the one before. verdict is the
+// guardrail's answer on the prompt (nil when it was not inspected): a blocked
+// prompt is no task, as for observeUserTurn, so the turns before it stand.
+func (a *APIServer) observeAlignmentTurn(ctx context.Context, connector, prompt string, verdict *ToolInspectVerdict) {
+	if promptVerdictBlocks(verdict) || a.alignmentLaneMode(ctx, connector) == config.CascadeLaneOff {
 		return
 	}
 	key := judgeSessionKey(ctx)

@@ -75,6 +75,12 @@ func TestGAP0370ReceiptCapabilityPrecedesDelayedHookWork(t *testing.T) {
 	go func() {
 		resp, err := server.Client().Do(req)
 		if resp != nil {
+			// Read the answer to its end, as the hook does: the server ends it
+			// only after offer read the receipt. Closing it at the headers
+			// dropped the still-open connection, so under load the late
+			// receipt below could lose the race to that close and offer read
+			// EOF (rel-1-0-10:GAP-0799).
+			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 		}
 		done <- err

@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -48,7 +49,7 @@ func explainOwnGuardrailProfile(cmd *cobra.Command, user, connectorName, agent s
 	}
 	status, body, err := ownProfileExplain(ctx, socket, strings.TrimSpace(user), connectorName, agent)
 	if err != nil {
-		return withExitCode(fmt.Errorf("the managed gateway did not explain your guardrail profile (%v); try again, and if it keeps failing contact your IT help desk", err), enterprisestatus.UnixExitFailure)
+		return cliusage.WithExitCode(fmt.Errorf("the managed gateway did not explain your guardrail profile (%v); try again, and if it keeps failing contact your IT help desk", err), enterprisestatus.UnixExitFailure)
 	}
 	var refused struct {
 		Error   string `json:"error"`
@@ -58,14 +59,14 @@ func explainOwnGuardrailProfile(cmd *cobra.Command, user, connectorName, agent s
 		return managedAdminViewRefusal(cmd, fmt.Errorf("%s: %w", refused.Message, refusal), asJSON)
 	}
 	if status != http.StatusOK || !json.Valid(body) {
-		return withExitCode(fmt.Errorf("the managed gateway did not explain your guardrail profile (HTTP %d): %s", status, strings.TrimSpace(string(body))), enterprisestatus.UnixExitFailure)
+		return cliusage.WithExitCode(fmt.Errorf("the managed gateway did not explain your guardrail profile (HTTP %d): %s", status, strings.TrimSpace(string(body))), enterprisestatus.UnixExitFailure)
 	}
 	answer := json.RawMessage(body)
 	if err := printEnterpriseIdentityView(cmd.OutOrStdout(), answer); err != nil {
 		return err
 	}
 	if lookupErr := unresolvedProfileExplainAccount(answer); lookupErr != "" {
-		failure := withExitCode(fmt.Errorf("user lookup failed: %s", lookupErr), enterprisestatus.UnixExitFailure)
+		failure := cliusage.WithExitCode(fmt.Errorf("user lookup failed: %s", lookupErr), enterprisestatus.UnixExitFailure)
 		silenceJSONReportedError(cmd, asJSON, failure)
 		return failure
 	}

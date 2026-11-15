@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"maps"
 	"math"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -229,12 +230,31 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			word *syntax.Word
 			cwd  string
 			vals actionValues
+			// enters: the statement changes the directory (cd ~/.ssh), which
+			// decides what the statements after it write.
+			enters bool
+			// read: the word only names a file a reader statement reads
+			// (actionPlainReadStatements), so it is no write target.
+			read bool
 		}
 		var pendingReads []pendingRead
 		direct := actionDirectStatements(file)
+		var plainReads map[*syntax.Stmt]bool
+		if !stateOnly && depth == 0 {
+			// A nested shell body keeps the whole-body reading
+			// (TestR104StructuralProtectedNamedPOSIX: sh -c 'cat KEYS').
+			plainReads = actionPlainReadStatements(file, home)
+		}
 		// Quoting makes *, ? and [ literal only in a POSIX reading of a
 		// POSIX home; a Windows-spelled home reads them as wildcards.
 		literalReading := !spelledWindows && !actionPosixWindowsHome(home)
+		if memo.nonWritesExcused() && !stateOnly {
+			// A pipeline of readers (sudo sha256sum KEYS | sed -n 1,5p | tail) prints
+			// to the terminal: its statements read like a direct reader does.
+			for stmt := range actionReadOnlyPipelines(file, home) {
+				direct[stmt] = true
+			}
+		}
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -306,6 +326,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			if !ok {
 				return true
 			}
+			if call, isCall := stmt.Cmd.(*syntax.CallExpr); isCall && !stateOnly && actionSSHCopyIDToThisHost(call, home) {
+				// ssh-copy-id to this host adds the key to an authorized_keys
+				// file of the machine the agent runs on, which the call never
+				// names (rel-1-0-10:GAP-0791).
+				found = true
+				return false
+			}
 			values["PWD"] = effectiveCWD
 			// The shell expands and opens a statement's redirects before the
 			// command runs, so what the command itself binds (printf -v and
@@ -352,6 +379,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						found = true
 						return false
 					}
+					// A variable only holds the text: where it is used decides, and
+					// the use is judged with its value (actionUpdateValues). The text
+					// scan does not read a sentence a variable holds either.
+					if memo.nonWritesExcused() && len(call.Args) == 0 && assign.Value != nil {
+						judgedWords = append(judgedWords, assign.Value)
+					}
 				}
 				var moved *syntax.Word
 				var movedEntry string
@@ -378,6 +411,14 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// A read-only call after a plain mv replaced a link reads the
 				// moved file under that name (rel-1-0-6:GAP-0217).
 				readOnly := !stateOnly && actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home)
+				if !readOnly && !stateOnly && memo.nonWritesExcused() {
+					// A shell body or an ssh remote command that only reads, or a
+					// reader whose output goes to a sink the scan cannot resolve
+					// (a variable-named file): the effect is UNCERTAIN, not a known
+					// copy of the content into a resolved file.
+					readOnly = actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) ||
+						actionReaderToUnknownSink(stmt, home)
+				}
 				readsReplaced := len(replacedEntries) > 0 && readOnly
 				var quick func([]string) bool
 				if !stateOnly {
@@ -389,7 +430,34 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					found = true
 					return false
 				}
+				// A glob that can reach a protected file by name is decided by identity,
+				// as it always was: no excuse of a read or of an unknown program applies
+				// to a call that holds one (rel-1-0-10:GAP-0018, GAP-0350).
+				callHasGlob := false
 				for _, word := range call.Args {
+					if actionWordHasUnquotedGlob(word, command) {
+						callHasGlob = true
+						break
+					}
+				}
+				roleUnknown := memo.nonWritesExcused() && !callHasGlob && actionCallRoleUnknown(call, home)
+				// A statement that only reads, outside a pipeline and not a cd, names
+				// the file to read it: its words leave the text scan too (a quoted
+				// remote command, a shell body), as a read-only statement's hit words
+				// are judged above. The walk keeps the old reading when a link is
+				// removed or replaced (a word then names a removed entry).
+				blankReads := memo.nonWritesExcused() && !callHasGlob && readOnly && direct[stmt] && !actionCallChangesDirectory(call, home)
+				for _, word := range call.Args {
+					if blankReads && len(removedEntries) == 0 && len(replacedEntries) == 0 {
+						judgedWords = append(judgedWords, word)
+					}
+					if roleUnknown && !actionOptionWithAttachedValue(word, home) {
+						// A word handed to a program the scan has no model of is
+						// data of unknown role, not a write target: ActionMentionsNoWriteRole
+						// leaves it out of this walk and of the text scan.
+						judgedWords = append(judgedWords, word)
+						continue
+					}
 					if readsReplaced && actionReplacedEntryWord(word, values, effectiveCWD, home, replacedEntries) {
 						judgedWords = append(judgedWords, word)
 						continue
@@ -414,8 +482,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						continue
 					}
 					if actionExpandedWordGlob(word, values, effectiveCWD, home, check) || checkBraceFields(word, false) || checkWord(word) {
-						if readOnly && direct[stmt] {
-							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values)})
+						read := readOnly && plainReads[stmt] && !actionWordHasUnquotedGlob(word, command)
+						if readOnly && (direct[stmt] || read) {
+							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values), enters: actionCallChangesDirectory(call, home) || callHasGlob, read: read})
 							judgedWords = append(judgedWords, word)
 							continue
 						}
@@ -433,6 +502,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		for _, read := range pendingReads {
 			if found {
 				break
+			}
+			if (read.read || (memo.nonWritesExcused() && !read.enters)) && len(removedEntries) == 0 && len(replacedEntries) == 0 {
+				// No link was removed or replaced: a statement that only reads names
+				// the file to read it (ActionMentionsNoWriteRole; a reader statement
+				// of actionPlainReadStatements). Where one was, the rel-1-0-4:GAP-2590
+				// reading below decides (a read of the removed entry only).
+				continue
 			}
 			found = !actionReplacedEntryWord(read.word, read.vals, read.cwd, home, removedEntries)
 		}
@@ -470,6 +546,266 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 	}
 	return false
+}
+
+// actionSSHCopyIDToThisHost reports an ssh-copy-id call whose destination is
+// this machine: a loopback name or address, or the machine's own host name,
+// with any user. The command appends the key to that account's
+// ~/.ssh/authorized_keys over a login, the same write as typing the path
+// (rel-1-0-10:GAP-0791). A destination that is a dynamic word is not read
+// here (the call is not proven local), so it keeps the rel verdict.
+func actionSSHCopyIDToThisHost(call *syntax.CallExpr, home string) bool {
+	if len(call.Args) < 2 {
+		return false
+	}
+	if program, known := staticProgramWord(call.Args[0], home); !known || programBase(program) != "ssh-copy-id" {
+		return false
+	}
+	valueOptions := map[string]bool{"-i": true, "-p": true, "-o": true, "-F": true, "-t": true, "-J": true}
+	var operands []string
+	for index := 1; index < len(call.Args); index++ {
+		word, known := StaticWord(call.Args[index], home)
+		if !known {
+			return false
+		}
+		switch {
+		case valueOptions[word]:
+			index++
+		case strings.HasPrefix(word, "-") && len(word) > 1:
+		default:
+			operands = append(operands, word)
+		}
+	}
+	if len(operands) != 1 {
+		return false
+	}
+	host := operands[0]
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		host = host[at+1:]
+	}
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	switch host {
+	case "localhost", "localhost.localdomain", "ip6-localhost", "::1", "0:0:0:0:0:0:0:1":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	if name, err := os.Hostname(); err == nil && name != "" {
+		name = strings.ToLower(name)
+		return host == name || host == strings.SplitN(name, ".", 2)[0]
+	}
+	return false
+}
+
+// actionPlainReadStatements are the statements whose words name files only
+// for a reader to read them (rel-1-0-10:GAP-0570): a known reader statement
+// (actionKnownReadOnlyShell: ls, cat, stat, grep ...) at the top of the call
+// or in an && or || list, and each stage of such a pipeline whose stages are
+// all readers (ls -la ~/.ssh | head -5). Such a statement prints to the
+// terminal or to /dev/null: it writes no file and hands no name to the other
+// statements, so a protected path it names is not a write target of the
+// call, whatever the others run (ssh -V, make). A statement that changes
+// folder (cd, pushd, popd) is not one: the folder decides what later
+// relative names reach. A call has none when it reads $_ (the last word of
+// the statement before, which can pass a name on), assigns a variable or
+// declares a function (PATH=/tmp/x can change what a later reader runs, as
+// actionKnownReadOnlyShell reads it), or prints an expansion with echo or
+// printf (the rel-1-0-6:GAP-0225 ruling keeps the mention there: only a
+// fixed-text echo is verdict-neutral, actionFixedTextEchoes).
+func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]bool {
+	if file == nil {
+		return nil
+	}
+	if actionRebindsReaderNames(file, home) {
+		return nil
+	}
+	neutral := actionFixedTextEchoes(file)
+	// An agent's exit-status wrapper (status=$?; printf '%s' "$status";
+	// exit "$status", GAP-2168) prints the status only and stays neutral.
+	status := map[string]bool{"?": true}
+	kept := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.ParamExp:
+			kept = node.Param != nil && node.Param.Value == "_"
+		case *syntax.Assign, *syntax.FuncDecl, *syntax.DeclClause:
+			kept = true
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 && actionExitStatusAssignment(node) {
+				for _, assign := range node.Assigns {
+					status[assign.Name.Value] = true
+				}
+				return false
+			}
+			if len(node.Args) > 0 && !neutral[node] {
+				program, known := staticProgramWord(node.Args[0], home)
+				base := programBase(program)
+				if !known || (base == "echo" || base == "printf") && !actionStatusReport(node.Args[1:], status) {
+					kept = true
+				}
+			}
+		}
+		return !kept
+	})
+	if kept {
+		return nil
+	}
+	reads := map[*syntax.Stmt]bool{}
+	var stages func(stmt *syntax.Stmt) bool
+	stages = func(stmt *syntax.Stmt) bool {
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+			if binary.Op != syntax.Pipe && binary.Op != syntax.PipeAll {
+				return false
+			}
+			return stages(binary.X) && stages(binary.Y)
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return false
+		}
+		if program, known := staticProgramWord(call.Args[0], home); !known || slices.Contains(cdPrograms, programBase(program)) {
+			return false
+		}
+		reads[stmt] = true
+		return true
+	}
+	// The statements actionDirectStatements reads, and the pipelines in
+	// the same places, which it leaves out.
+	var visit func(stmt *syntax.Stmt)
+	visit = func(stmt *syntax.Stmt) {
+		if stmt == nil || stmt.Background || stmt.Coprocess || stmt.Negated {
+			return
+		}
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && (binary.Op == syntax.AndStmt || binary.Op == syntax.OrStmt) {
+			visit(binary.X)
+			visit(binary.Y)
+			return
+		}
+		alone := &syntax.File{Stmts: []*syntax.Stmt{stmt}}
+		if !actionKnownReadOnlyShell(alone, home) || !actionReadersAreSystemPrograms(alone, home, 0) {
+			return
+		}
+		marked := maps.Clone(reads)
+		if !stages(stmt) {
+			reads = marked
+		}
+	}
+	for _, stmt := range file.Stmts {
+		visit(stmt)
+	}
+	return reads
+}
+
+// actionRebindsReaderNames reports a call that changes what a bare program
+// name runs, so a bare reader name in it is not the system reader
+// (rel-1-0-10:GAP-0790): a hash -p or an alias that binds a name to another
+// program, or a file the call writes (a redirect, tee, or the destination of
+// cp, mv, ln, install) under the name of a bare program the call runs, in any
+// folder (a copy named ls in ~/bin or /usr/local/bin).
+func actionRebindsReaderNames(file *syntax.File, home string) bool {
+	programs := map[string]bool{}
+	var written []string
+	rebound := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Redirect:
+			switch node.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll:
+				if node.Word != nil {
+					written = append(written, actionWordLiteralText(node.Word))
+				}
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				return true
+			}
+			program, known := staticProgramWord(node.Args[0], home)
+			if !known {
+				return true
+			}
+			base := programBase(program)
+			if !strings.Contains(program, "/") {
+				programs[base] = true
+			}
+			var operands []string
+			for _, arg := range node.Args[1:] {
+				operands = append(operands, actionWordLiteralText(arg))
+			}
+			switch base {
+			case "hash":
+				rebound = slices.Contains(operands, "-p")
+			case "alias":
+				for _, operand := range operands {
+					rebound = rebound || strings.Contains(operand, "=")
+				}
+			case "tee":
+				for _, operand := range operands {
+					if !strings.HasPrefix(operand, "-") {
+						written = append(written, operand)
+					}
+				}
+			case "cp", "mv", "ln", "install":
+				var names []string
+				for _, operand := range operands {
+					if !strings.HasPrefix(operand, "-") {
+						names = append(names, operand)
+					}
+				}
+				if len(names) > 0 {
+					written = append(written, names[len(names)-1])
+					if strings.HasSuffix(names[len(names)-1], "/") {
+						// Into a folder: each source keeps its name there.
+						written = append(written, names[:len(names)-1]...)
+					}
+				}
+			}
+		}
+		return !rebound
+	})
+	if rebound {
+		return true
+	}
+	for _, path := range written {
+		if name := filepath.Base(path); name != "." && name != "/" && programs[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// actionReadersAreSystemPrograms reports that every program a plain reader
+// statement runs is one the shell finds on its trusted PATH or a fixed system
+// path: a bare name (ls, cat) or a program in /bin, /usr/bin or
+// /usr/local/bin (readerDirectories). A program named by any other path
+// (./ls, /tmp/x/ls, ~/bin/cat) can be a file the call or an earlier call put
+// there under a reader's name, so it is an unknown program, not a reader
+// (rel-1-0-10:GAP-0715). A bash -c body is read the same way.
+func actionReadersAreSystemPrograms(file *syntax.File, home string, depth int) bool {
+	if depth >= 8 {
+		return false
+	}
+	trusted := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || !trusted || len(call.Args) == 0 {
+			return trusted
+		}
+		program, known := staticProgramWord(call.Args[0], home)
+		if !known || strings.Contains(program, "\\") ||
+			strings.Contains(program, "/") && !slices.Contains(readerDirectories, filepath.Dir(program)) {
+			trusted = false
+			return false
+		}
+		if programBase(program) == "bash" && len(call.Args) == 3 {
+			if child, parsed := parseShell(actionWordLiteralText(call.Args[2])); parsed &&
+				!actionReadersAreSystemPrograms(child, home, depth+1) {
+				trusted = false
+			}
+		}
+		return trusted
+	})
+	return trusted
 }
 
 // actionInterpreterSSHName and actionInterpreterKeysName match the two
@@ -1708,6 +2044,8 @@ func actionGlobFacts(command, cwd, home string) map[string]string {
 const (
 	actionGlobMaxReads = 64
 	actionGlobMaxNames = 4096
+	// actionGlobMaxEntries bounds the names one expansion reads in all.
+	actionGlobMaxEntries = 1 << 18
 )
 
 // actionExpandGlob lists the existing names an absolute pattern selects. A
@@ -1737,6 +2075,8 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 	}
 	paths := []string{start}
 	reads := 0
+	// entries counts the names read from every folder of this expansion.
+	entries := 0
 	complete = true
 	for _, component := range strings.Split(rest, separator) {
 		if component == "" {
@@ -1778,20 +2118,41 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 				complete, unseen = false, true
 				continue
 			}
-			names, err := directory.Readdirnames(actionGlobMaxNames + 1)
+			// The directory is read in chunks and matched as it streams, so
+			// a busy folder (/tmp, a build cache, node_modules: tens of
+			// thousands of names) is expanded like any other. Only a folder
+			// past the total read budget is unproved; the old bound counted
+			// the folder's names, not the matches, and made every pattern in
+			// a folder of more than 4096 names an authorized-keys block
+			// (rel-1-0-10:GAP-0018).
+			var matched []string
+			for {
+				chunk, chunkErr := directory.Readdirnames(actionGlobMaxNames)
+				entries += len(chunk)
+				for _, name := range chunk {
+					if actionGlobNameMatch(component, name) && !actionGlobSkipsDotName(component, name, dots) {
+						matched = append(matched, name)
+					}
+				}
+				if chunkErr != nil {
+					err = chunkErr
+					break
+				}
+				if len(chunk) == 0 || entries > actionGlobMaxEntries {
+					break
+				}
+			}
 			_ = directory.Close()
 			if err != nil && err != io.EOF && actionGlobNotDirectory(dir, err) {
 				// A file the previous component matched has no entries;
 				// the shell skips it (*/* in a project with files).
 				continue
 			}
-			if err != nil && err != io.EOF || len(names) > actionGlobMaxNames {
+			if err != nil && err != io.EOF || entries > actionGlobMaxEntries {
 				complete = false
 			}
-			for _, name := range names {
-				if actionGlobNameMatch(component, name) && !actionGlobSkipsDotName(component, name, dots) {
-					next = append(next, filepath.Join(dir, name))
-				}
+			for _, name := range matched {
+				next = append(next, filepath.Join(dir, name))
 			}
 		}
 		if len(next) == 0 {
@@ -2667,6 +3028,15 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 }
 
 func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bool {
+	return actionKnownReadOnlyShellMode(file, home, depth, false)
+}
+
+// actionKnownReadOnlyShellMode is actionKnownReadOnlyShellDepth; bodies also
+// reads a shell given a literal -c body and an ssh remote command as the
+// readers they run, one level deeper. The whole-command rule keeps its
+// stricter reading (TestR104StructuralProtectedNamedPOSIX pins sh -c cat
+// KEYS as a protected-target); ActionMentionsNoWriteRole asks the wider one.
+func actionKnownReadOnlyShellMode(file *syntax.File, home string, depth int, bodies bool) bool {
 	if depth >= 8 {
 		return false
 	}
@@ -2729,6 +3099,12 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			safe = false
 			return false
 		}
+		// A privilege or run wrapper in front of a reader (sudo sha256sum
+		// FILE, env LC_ALL=C cmp A B, timeout 5 stat FILE) reads as the
+		// reader does; it is the wrapped program that decides.
+		if wrapped, ok := actionReadOnlyWrappedCall(call, home); ok {
+			call = wrapped
+		}
 		program, known := staticProgramWord(call.Args[0], home)
 		if !known {
 			safe = false
@@ -2758,7 +3134,15 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			// decision 2, TGT-0194; GAP-2168). So do the size and path
 			// readers: du reports sizes, readlink and realpath print a
 			// resolved name; none has an output option.
-			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
+			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath",
+			// Checksum, compare and attribute readers print or compare what
+			// they read and have no output file (sha256sum FILE, cmp A B,
+			// lsattr FILE): a call that only names a protected file to one of
+			// them is not a write to it (rel-1-0-10:GAP-0018). diff is not on
+			// the list: TestHomeSpelledAuthorizedKeysWriteBlocks pins a diff of
+			// the keys file as a block.
+			"sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "md5sum", "b2sum", "cksum", "shasum",
+			"cmp", "lsattr", "getfacl", "namei", "od", "hexdump", "strings", "nl", "cut":
 		case "echo":
 			// The literal */* operand prints expanded names. Every other
 			// statement remains subject to the same read-only walk.
@@ -2789,17 +3173,88 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			// (rel-1-0-6:GAP-0145).
 			body, static := actionPowerShellCommandBody(call.Args, home)
 			safe = static && actionPowerShellListOnlyBody(body, home)
-		case "bash":
-			// A literal bash -c body that only reads is still read-only when
-			// the outer call is judged from a home containing protected files.
-			// The exact launch and every child statement are checked below.
-			safe = actionReadOnlyBashCLaunch(call, home, depth)
+		case "ssh":
+			// The remote command line runs on another machine; it is judged
+			// as if it ran here, which can only be stricter.
+			if body, ok := actionSSHRemoteBody(call, home); ok && bodies && depth+1 < 8 {
+				child, parsed := parseShell(body)
+				safe = parsed && actionKnownReadOnlyShellMode(child, home, depth+1, bodies)
+			} else {
+				safe = false
+			}
+		case "sed":
+			safe = actionSedPrintsOnly(call, home)
 		default:
-			safe = false
+			base := programBase(program)
+			switch {
+			case slices.Contains(actionBodyShells, base):
+				// A shell given a literal -c (or -lc) body is read-only when
+				// the body it runs is (rel-1-0-10:GAP-0018).
+				if body, ok := actionShellBodyOfCall(call, home); ok && bodies && depth+1 < 8 {
+					child, parsed := parseShell(body)
+					safe = parsed && actionKnownReadOnlyShellMode(child, home, depth+1, bodies)
+				} else {
+					safe = base == "bash" && actionReadOnlyBashCLaunch(call, home, depth)
+				}
+			case slices.Contains(actionStateProbePrograms, base):
+				// test and [ only report the state of a file (-e, -L, -r, -s).
+				safe = true
+			case base == actionSearchProgram:
+				// ripgrep searches its operands; --pre runs a program on every
+				// file it opens.
+				safe = true
+				for _, arg := range call.Args[1:] {
+					option, known := StaticWord(arg, home)
+					if !known || slices.ContainsFunc(actionSearchHelperFlags, func(flag string) bool { return strings.HasPrefix(option, flag) }) {
+						safe = false
+						break
+					}
+				}
+			default:
+				safe = false
+			}
 		}
 		return safe
 	})
 	return seen && safe
+}
+
+// actionReadOnlyWrappedCall is the call a sudo, doas, env, nohup, command,
+// timeout, nice, stdbuf, ionice or setsid wrapper runs, when the wrapper's
+// options are all ones the literal-wrapper reader knows (actionLiteralCommandWords).
+// A wrapper that starts a shell (sudo -s, sudo -i) has no wrapped command and
+// is not unwrapped; the wrapped program is then judged like any other call,
+// and a shell or an unknown program stays outside the read-only list.
+func actionReadOnlyWrappedCall(call *syntax.CallExpr, home string) (*syntax.CallExpr, bool) {
+	program, known := staticProgramWord(call.Args[0], home)
+	if !known {
+		return nil, false
+	}
+	switch programBase(program) {
+	case "sudo", "doas", "env", "nohup", "command", "timeout", "nice", "stdbuf", "ionice", "setsid":
+	default:
+		return nil, false
+	}
+	words, ok := actionLiteralCommandWords(call.Args, home)
+	if !ok || len(words) == 0 || len(words) == len(call.Args) {
+		return nil, false
+	}
+	return &syntax.CallExpr{Args: words}, true
+}
+
+// actionCallChangesDirectory reports a cd, pushd or popd call: it reads
+// nothing, and the directory it enters decides what the statements after it
+// write (cd ~/.ssh && cp a.txt note.txt).
+func actionCallChangesDirectory(call *syntax.CallExpr, home string) bool {
+	program, known := staticProgramWord(call.Args[0], home)
+	if !known {
+		return false
+	}
+	switch programBase(program) {
+	case "cd", "pushd", "popd":
+		return true
+	}
+	return false
 }
 
 func actionReadOnlyBashCLaunch(call *syntax.CallExpr, home string, depth int) bool {
@@ -3053,6 +3508,10 @@ var actionPowerShellListOnly = map[string]bool{
 	"select-object": true, "select": true, "format-list": true, "fl": true, "format-table": true, "ft": true,
 	"format-wide": true, "fw": true, "measure-object": true, "measure": true, "sort-object": true,
 	"out-string": true, "write-output": true, "echo": true,
+	// Get-Content reads what a file holds and writes nothing; the bare
+	// statement is read-only already (actionKnownReadOnlyWindowsStatement), so a
+	// launcher around it is too (rel-1-0-10:GAP-0157).
+	"get-content": true, "gc": true,
 }
 
 // actionPowerShellListOnlyBodyText is the text a list-only body may hold:
@@ -3085,11 +3544,61 @@ func actionPowerShellListOnlyBody(body, home string) bool {
 				program, static = StaticWord(node.Args[0], home)
 			}
 			listOnly = static && actionPowerShellListOnly[strings.ToLower(program)]
+			for _, arg := range node.Args[1:] {
+				// An unquoted glob word is not static to the POSIX reading but is
+				// a listing to PowerShell; only a parameter that keeps the
+				// objects is refused.
+				if option, known := StaticWord(arg, home); known && actionPowerShellKeepsObjects(option) {
+					listOnly = false
+				}
+			}
 			calls++
 		}
 		return listOnly
 	})
 	return listOnly && calls > 0
+}
+
+// actionPowerShellReadsContent are the list-only commands that print file
+// content, not names or properties.
+var actionPowerShellReadsContent = map[string]bool{"get-content": true, "gc": true}
+
+// powerShellListOnlyWords is the text of a PowerShell script of plain words:
+// letters, digits, path characters, wildcards, pipes, statement ends and
+// quotes. No variable, sub-expression, script block, escape, redirect or call
+// operator.
+var powerShellListOnlyWords = lazyregexp.New(`^[A-Za-z0-9_./~:*?,|; \t'"\\-]+$`)
+
+// PowerShellListOnlyBody reports a PowerShell script whose every command only
+// lists names or properties (Get-ChildItem, Test-Path, Select-Object ...) and
+// whose text holds no other syntax: it proves no write to any path it names. A
+// second reading of such a script adds nothing the call as written lacks
+// (rel-1-0-10:GAP-0364).
+func PowerShellListOnlyBody(body, _ string) bool {
+	// The script is read as PowerShell words (statements split at ; and |). A
+	// command that reads file content (Get-Content and its aliases) is not a
+	// listing: what it prints can be a credential.
+	if !powerShellListOnlyWords.MatchString(body) {
+		return false
+	}
+	statements := 0
+	for _, statement := range strings.FieldsFunc(body, func(r rune) bool { return r == ';' || r == '|' }) {
+		words := strings.Fields(statement)
+		if len(words) == 0 {
+			continue
+		}
+		command := strings.ToLower(strings.Trim(words[0], `'"`))
+		if !actionPowerShellListOnly[command] || actionPowerShellReadsContent[command] {
+			return false
+		}
+		for _, word := range words[1:] {
+			if actionPowerShellKeepsObjects(word) {
+				return false
+			}
+		}
+		statements++
+	}
+	return statements > 0
 }
 
 // actionWindowsLaunchText is the text a list-only PowerShell launch may hold
@@ -4574,6 +5083,28 @@ func actionWindowsDiscardTarget(word string) bool {
 	return false
 }
 
+// actionPowerShellKeepsObjects reports a PowerShell common parameter that
+// stores what the stage outputs in a variable or buffer (-OutVariable, -ov,
+// -PipelineVariable, -pv, -OutBuffer, -ob, with the abbreviations the engine
+// accepts). The stage then hands the object, with its path, to a later
+// statement that names no path (Get-Item <key> -OutVariable k; Set-Content
+// -Path $k.FullName x), so the read is not only a read.
+func actionPowerShellKeepsObjects(option string) bool {
+	if len(option) < 3 || option[0] != '-' {
+		return false
+	}
+	name := strings.ToLower(option[1:])
+	if colon := strings.IndexByte(name, ':'); colon >= 0 {
+		name = name[:colon]
+	}
+	for _, full := range []string{"outvariable", "pipelinevariable", "outbuffer"} {
+		if strings.HasPrefix(full, name) && len(name) >= 2 && name[0] == full[0] {
+			return true
+		}
+	}
+	return name == "ov" || name == "pv" || name == "ob"
+}
+
 func actionKnownReadOnlyWindowsStatement(words []string) bool {
 	if len(words) == 0 {
 		return false
@@ -4590,12 +5121,12 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 	}
 	program := programBase(words[0])
 	for _, option := range words[1:] {
-		if actionReadOptionMayWrite(option) {
+		if actionReadOptionMayWrite(option) || actionPowerShellKeepsObjects(option) {
 			return false
 		}
 	}
 	switch program {
-	case "cat", "get-content", "get-childitem", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location",
+	case "cat", "get-content", "get-childitem", "get-item", "gi", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location",
 		// cmd type, and the search and select filters, only read (GAP-2168).
 		"type", "findstr", "select-string", "sls", "select-object", "select",
 		// Git Bash search and count programs read their operands as on a
@@ -5296,4 +5827,75 @@ func actionPathHasDotComponent(word string) bool {
 		}
 	}
 	return false
+}
+
+// actionReaderToUnknownSink reports a statement that only reads (the statement
+// without its output redirects is a reader) whose every output redirect names a
+// file the scan cannot resolve (a word with a variable or substitution in it).
+// Such a sink is unknown: the statement is no known copy of the protected
+// content into a named file, which keeps its block.
+func actionReaderToUnknownSink(stmt *syntax.Stmt, home string) bool {
+	if len(stmt.Redirs) == 0 {
+		return false
+	}
+	for _, redir := range stmt.Redirs {
+		if redir.Word == nil {
+			return false
+		}
+		switch redir.Op {
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll:
+		default:
+			return false
+		}
+		if _, static := StaticWord(redir.Word, home); static {
+			return false
+		}
+	}
+	bare := *stmt
+	bare.Redirs = nil
+	return actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{&bare}}, home, 0, true)
+}
+
+// actionReadOnlyPipelines returns the statements of every list operand or top
+// level statement that is a pipeline whose stages all only read, with no
+// redirect: the statements of such a pipeline, stage by stage.
+func actionReadOnlyPipelines(file *syntax.File, home string) map[*syntax.Stmt]bool {
+	out := map[*syntax.Stmt]bool{}
+	var mark func(stmt *syntax.Stmt)
+	var stages func(stmt *syntax.Stmt)
+	stages = func(stmt *syntax.Stmt) {
+		if stmt == nil {
+			return
+		}
+		out[stmt] = true
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && (binary.Op == syntax.Pipe || binary.Op == syntax.PipeAll) {
+			stages(binary.X)
+			stages(binary.Y)
+		}
+	}
+	mark = func(stmt *syntax.Stmt) {
+		if stmt == nil {
+			return
+		}
+		binary, ok := stmt.Cmd.(*syntax.BinaryCmd)
+		if !ok {
+			return
+		}
+		switch binary.Op {
+		case syntax.AndStmt, syntax.OrStmt:
+			mark(binary.X)
+			mark(binary.Y)
+		case syntax.Pipe, syntax.PipeAll:
+			if len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated &&
+				actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) {
+				stages(stmt)
+			}
+		}
+	}
+	if file != nil {
+		for _, stmt := range file.Stmts {
+			mark(stmt)
+		}
+	}
+	return out
 }
