@@ -92,7 +92,8 @@ type Options struct {
 	Retention time.Duration
 	// PurgeAfter purges the state of an actor suspended, or silent, that
 	// long (default 7 days), unless its window still holds a secret read
-	// (GAP-0292). A deleted actor is purged at once.
+	// (GAP-0292) and Deleted does not confirm it gone (GAP-0311). A deleted
+	// actor is purged at once.
 	PurgeAfter time.Duration
 	// MaxActors bounds the actors with state per atespace (default 4,096):
 	// a new actor past it evicts a retired actor first, else the one used
@@ -107,7 +108,10 @@ type Options struct {
 	// Deleted reports whether the actor's registration is marked deleted
 	// (true also when it has none). A deleted event purges only then: the
 	// controller marks the registration first, and a peer that cannot write
-	// registrations cannot wipe a live actor's chains (GAP-0142).
+	// registrations cannot wipe a live actor's chains (GAP-0142). Sweep asks
+	// it too, for an actor past PurgeAfter whose window holds a secret read:
+	// a delete the controller never sent (GAP-0311). Nil, or an error,
+	// keeps the actor.
 	Deleted func(ctx context.Context, atespace, uid string) (bool, error)
 	// Current reports whether uid is the live incarnation of the actor
 	// atespace/name: its name's newest registration, not deleted. An egress
@@ -228,6 +232,12 @@ type actorState struct {
 	// ActiveUnixNano is the receive time of the actor's last request (0
 	// before the first).
 	ActiveUnixNano int64 `json:"active_unix_nano,omitempty"`
+	// RunningHighUnixNano is the high-water mark of the running time: the
+	// latest the leader gave one of the actor's events. The running time
+	// never goes below it, so a backward step of the leader's wall clock (an
+	// NTP step, a failover onto a node whose clock lags) never puts a check
+	// before an event it follows (GAP-0310).
+	RunningHighUnixNano int64 `json:"running_high_unix_nano,omitempty"`
 	// SinceUnixNano is the start of the suspension the controller reported
 	// last (0 while running); it only decides retention (Sweep).
 	SinceUnixNano int64 `json:"since_unix_nano,omitempty"`
@@ -245,25 +255,33 @@ type actorState struct {
 	Egress *egressSnapshot `json:"egress,omitempty"`
 }
 
-// running is wall in the actor's running time.
+// running is wall in the actor's running time. It never goes back: a wall
+// time before the last request counts as that request's, and the result is
+// never below the high-water mark (GAP-0310).
 func (c actorState) running(wall time.Time) time.Time {
+	w := max(wall.UnixNano(), c.ActiveUnixNano)
 	off := c.UncountedNanos
 	if c.ActiveUnixNano != 0 {
-		if idle := wall.UnixNano() - c.ActiveUnixNano - int64(ActiveGap); idle > 0 {
+		if idle := w - c.ActiveUnixNano - int64(ActiveGap); idle > 0 {
 			off += idle
 		}
 	}
-	return wall.Add(-time.Duration(off))
+	r := max(w-off, c.RunningHighUnixNano)
+	return wall.Add(time.Duration(r - wall.UnixNano()))
 }
 
 // active is c after a request of the actor at wall. The running time at
-// wall does not change; from wall on it runs again.
+// wall does not change; from wall on it runs again. A wall time before the
+// last request is a backward step of the leader's clock: the running time
+// goes on from the last request's, never back (GAP-0310).
 func (c actorState) active(wall time.Time) actorState {
 	w := wall.UnixNano()
-	if w <= c.ActiveUnixNano {
+	switch {
+	case w == c.ActiveUnixNano:
 		return c
-	}
-	if c.ActiveUnixNano != 0 {
+	case w < c.ActiveUnixNano:
+		c.UncountedNanos -= c.ActiveUnixNano - w
+	case c.ActiveUnixNano != 0:
 		if idle := w - c.ActiveUnixNano - int64(ActiveGap); idle > 0 {
 			c.UncountedNanos += idle
 		}
@@ -772,11 +790,13 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 	cst := child.state
 	s.mu.Unlock()
 	cst = forkClock(cst, pst)
+	copyAt := cst.running(at)
+	cst.RunningHighUnixNano = copyAt.UnixNano()
 	result := LifecycleResult{}
 	if _, err := os.Stat(s.dbPath(parent)); err == nil {
 		r, err := st.CopyToolChainFork(ctx, s.dbPath(parent), audit.ToolChainForkCopy{
 			ParentInstance: parentInstance, ChildInstance: childInstance,
-			ParentActorDigest: parentDigest, ChildActorDigest: childDigest, At: cst.running(at),
+			ParentActorDigest: parentDigest, ChildActorDigest: childDigest, At: copyAt,
 		})
 		if errors.Is(err, audit.ErrToolChainForkAlreadyStarted) {
 			return LifecycleResult{}, nil
@@ -804,6 +824,7 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 func forkClock(cst, pst actorState) actorState {
 	if !cst.Forked {
 		cst.UncountedNanos, cst.ActiveUnixNano = pst.UncountedNanos, pst.ActiveUnixNano
+		cst.RunningHighUnixNano = max(cst.RunningHighUnixNano, pst.RunningHighUnixNano)
 		cst.SinceUnixNano, cst.Forked = 0, true
 	}
 	if cst.Task == "" {
@@ -879,8 +900,11 @@ func (s *Service) stateOf(e *actorEntry) actorState {
 	return e.state
 }
 
+// setState replaces the actor's state; the high-water mark a concurrent
+// call raised meanwhile is kept (GAP-0310).
 func (s *Service) setState(e *actorEntry, st actorState) error {
 	s.mu.Lock()
+	st.RunningHighUnixNano = max(st.RunningHighUnixNano, e.state.RunningHighUnixNano)
 	e.state = st
 	s.mu.Unlock()
 	return s.writeState(e)
@@ -903,7 +927,7 @@ func (s *Service) writeState(e *actorEntry) error {
 
 func (s *Service) repo(ctx context.Context, st *audit.Store, e *actorEntry, scope Scope) (*audit.ToolChainRepository, error) {
 	opts := []audit.ToolChainOption{audit.WithToolChainClock(func() time.Time {
-		return s.stateOf(e).running(s.opts.Now())
+		return s.stamp(e, s.opts.Now())
 	})}
 	switch scope {
 	case ScopeSession:
@@ -913,6 +937,21 @@ func (s *Service) repo(ctx context.Context, st *audit.Store, e *actorEntry, scop
 		return nil, bad(errors.New("chainstate: scope is session or actor"))
 	}
 	return st.ToolChainRepositoryWith(ctx, opts...)
+}
+
+// stamp is wall in the actor's running time for a time the leader gives
+// one of its events or checks: it raises the high-water mark, so nothing
+// later is ever before it, whatever the wall clock does (GAP-0310).
+func (s *Service) stamp(e *actorEntry, wall time.Time) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.raiseLocked(e, e.state.running(wall))
+}
+
+// raiseLocked raises the actor's high-water mark to t (s.mu held).
+func (s *Service) raiseLocked(e *actorEntry, t time.Time) time.Time {
+	e.state.RunningHighUnixNano = max(e.state.RunningHighUnixNano, t.UnixNano())
+	return t
 }
 
 // touch records a request of the actor itself: a hook chain call, an
@@ -965,7 +1004,7 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 		if err := st.RecordToolChainJoin(ctx, audit.ToolChainJoin{
 			ConnectorInstanceID: instance, SemanticEventID: audit.SemanticEventID(in.Join.SemanticEventID),
 			EventName: in.Join.EventName, InputFingerprint: in.Join.InputFingerprint,
-			ReceivedAt: s.stateOf(e).running(s.opts.Now()), SessionDigest: in.Join.SessionDigest,
+			ReceivedAt: s.stamp(e, s.opts.Now()), SessionDigest: in.Join.SessionDigest,
 		}); err != nil {
 			return ObserveResponse{}, bad(err)
 		}
@@ -1046,7 +1085,7 @@ func (s *Service) notePending(e *actorEntry, scope Scope, p guardrail.ToolChainP
 	if scope != ScopeActor || !startsEgressChain(p.DetectionStepMask) {
 		return nil
 	}
-	e.memo.notePending(s.stateOf(e).running(s.opts.Now()), p)
+	e.memo.notePending(s.stamp(e, s.opts.Now()), p)
 	return s.writeState(e)
 }
 
@@ -1089,6 +1128,14 @@ func (s *Service) readMemo(ctx context.Context, st *audit.Store, e *actorEntry) 
 	if err != nil {
 		return false, err
 	}
+	s.mu.Lock()
+	for _, ev := range state.Events {
+		s.raiseLocked(e, ev.ReceivedAt)
+	}
+	for _, p := range state.Pending {
+		s.raiseLocked(e, p.PreparedAt)
+	}
+	s.mu.Unlock()
 	return e.memo.set(memoWindow{Ruleset: state.RulesetFingerprint, Next: state.NextSequence,
 		Events: state.Events, Pending: state.Pending}), nil
 }
@@ -1305,7 +1352,7 @@ func (s *Service) syntheticEvent(ctx context.Context, st *audit.Store, instance 
 	sum := sha256.Sum256([]byte(name + "\x00" + string(id)))
 	fp := hex.EncodeToString(sum[:])
 	err = st.RecordToolChainJoin(ctx, audit.ToolChainJoin{ConnectorInstanceID: instance, SemanticEventID: id,
-		EventName: name, InputFingerprint: fp, ReceivedAt: s.stateOf(e).running(wall), SessionDigest: session})
+		EventName: name, InputFingerprint: fp, ReceivedAt: s.stamp(e, wall), SessionDigest: session})
 	return id, fp, err
 }
 
@@ -1426,7 +1473,7 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 		return EgressVerdict{}, err
 	}
 	s.touch(e)
-	v, ok := e.memo.verdict(s.stateOf(e).running(s.opts.Now()), s.EgressAction())
+	v, ok := e.memo.verdict(s.stamp(e, s.opts.Now()), s.EgressAction())
 	switch {
 	case !ok:
 		s.egress.push(egressRecord{actor: e.actor, sync: true})
@@ -1497,10 +1544,18 @@ type SweepResult struct {
 // Sweep retires actors suspended past the retention (the atespace cap
 // evicts them first) and purges actors suspended, or silent, past
 // PurgeAfter whose window holds no secret read (GAP-0292).
-func (s *Service) Sweep(_ context.Context) (SweepResult, error) {
+//
+// A window that holds a secret read is purged past PurgeAfter only for an
+// actor Deleted confirms gone: a delete the controller never sent (it keeps
+// its actor list in memory, so an actor deleted while it was down or
+// restarting is never reported). Such an actor makes no requests, so its
+// clock is frozen and its window would hold forever (GAP-0311). An actor
+// that exists, or one the lookup cannot answer for, is kept.
+func (s *Service) Sweep(ctx context.Context) (SweepResult, error) {
 	now := s.opts.Now()
 	var res SweepResult
 	var retired []*actorEntry
+	var held []Actor
 	s.mu.Lock()
 	for _, e := range s.actors {
 		if e.refs != 0 {
@@ -1510,16 +1565,22 @@ func (s *Service) Sweep(_ context.Context) (SweepResult, error) {
 		if e.state.SinceUnixNano != 0 {
 			since = time.Unix(0, e.state.SinceUnixNano)
 		}
+		old := now.Sub(since) > s.opts.PurgeAfter
 		switch {
-		case now.Sub(since) > s.opts.PurgeAfter && !s.holdsEgressLocked(e):
+		case old && !s.holdsEgressLocked(e):
 			s.purgeLocked(e)
 			res.Purged++
-		case e.state.SinceUnixNano != 0 && !e.state.Retired && now.Sub(since) > s.opts.Retention:
+			continue
+		case old && s.opts.Deleted != nil:
+			held = append(held, e.actor)
+		}
+		if e.state.SinceUnixNano != 0 && !e.state.Retired && now.Sub(since) > s.opts.Retention {
 			e.state.Retired = true
 			retired = append(retired, e)
 		}
 	}
 	s.mu.Unlock()
+	res.Purged += s.purgeDeleted(ctx, held)
 	s.runPurges()
 	for _, e := range retired {
 		if err := s.writeState(e); err != nil {
@@ -1528,6 +1589,32 @@ func (s *Service) Sweep(_ context.Context) (SweepResult, error) {
 		res.Retired++
 	}
 	return res, nil
+}
+
+// purgeDeleted purges the actors in held whose registration Deleted
+// confirms gone, as their delete event would have (GAP-0311). The lookups
+// run outside mu; an actor in use again since, or one the lookup fails
+// for, is kept.
+func (s *Service) purgeDeleted(ctx context.Context, held []Actor) int {
+	n := 0
+	for _, a := range held {
+		gone, err := s.opts.Deleted(ctx, a.Atespace, a.UID)
+		if err != nil {
+			s.warnf("sweep: %s/%s kept, its registration could not be read: %v", a.Atespace, a.UID, err)
+			continue
+		}
+		if !gone {
+			continue
+		}
+		s.mu.Lock()
+		if e := s.actors[a.key()]; e != nil && e.refs == 0 {
+			s.goneLocked(a.key())
+			s.purgeLocked(e)
+			n++
+		}
+		s.mu.Unlock()
+	}
+	return n
 }
 
 // Run sweeps every 10 minutes until ctx ends.
