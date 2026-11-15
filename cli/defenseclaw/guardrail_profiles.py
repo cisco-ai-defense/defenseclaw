@@ -113,6 +113,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "69e71164e4798439ed96acd8070ff36eb03bfe2ce260b3c46221824497610275",
             # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
             "657b41873648522db2f5f1d2237a822f94712b4775267cd7e129b62c2bfbbc16",
+            # 1.0.10 (s7/g596 merged with rel/1.0.10 2dfe1b576e): the DefenseClaw self-protection rules
+            # (tamper.defenseclaw_control_disable and _unproven).
+            "29601a642245542d5166e1c1b691af8c10bf4008f32e486d8ec816c70a3de24b",
         }
     ),
     "permissive": frozenset(
@@ -182,6 +185,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "1e424c14053a75a0eb15df080839833433717195bd0bd7736ec35cddd4564524",
             # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
             "d0744d25ec528674c66da161034c6bfe2478a54cde9167647fe80c3e86454d8b",
+            # 1.0.10 (s7/g596 merged with rel/1.0.10 2dfe1b576e): the DefenseClaw self-protection rules
+            # (tamper.defenseclaw_control_disable and _unproven).
+            "476ab409c5035a4e4fea8c02f92631a524a5337e4cf192484f2dc10dd117c1af",
         }
     ),
     "strict": frozenset(
@@ -250,6 +256,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "23259c8008f836ee1e60f5dd9ebe86050736da685dc76e8bf4fdcbd56ab53f0f",
             # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
             "b956db73b9de22f9b3d9b107754c458bf4c042d7d109ae4baeb32803f9f378d7",
+            # 1.0.10 (s7/g596 merged with rel/1.0.10 2dfe1b576e): the DefenseClaw self-protection rules
+            # (tamper.defenseclaw_control_disable and _unproven).
+            "5d8ad2ee32f71f469d330c20b8b923841464eda375030927c85d95f0317feef2",
         }
     ),
 }

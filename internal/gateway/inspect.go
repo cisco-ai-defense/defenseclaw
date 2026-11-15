@@ -1113,6 +1113,10 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 				len(agentHookConfigFindings(ctx, action, nil)) != 0) {
 			allowed = false
 		}
+		// An allowed tool name does not authorize turning DefenseClaw off.
+		if len(defenseClawControlFindings(ctx, action, nil)) != 0 {
+			allowed = false
+		}
 	}
 	if allowed {
 		if !isWriteToolName(strings.ToLower(req.Tool)) {
@@ -1173,6 +1177,9 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// names, its SQL, code, settings and send destinations (rel-1-0-10:GAP-0016).
 	ruleFindings = nonShellToolFindings(ctx, action, ruleFindings, req.MCPServerName)
 	ruleFindings = shellToolFindings(ctx, action, ruleFindings)
+	// The DefenseClaw CLI, gateway and services are not an agent's to stop
+	// (GAP-0596): the rule holds on every install, Secure Client included.
+	ruleFindings = defenseClawControlFindings(ctx, action, ruleFindings)
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
 		cgScan = waitCodeGuard()
