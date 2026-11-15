@@ -2613,6 +2613,21 @@ attributes:
     overrides: {max_utf8_bytes: 65536, max_item_utf8_bytes: 512, max_items: 512, max_depth: 2, max_properties: 448}
     notes: Sealed typed array aligned by index with the coding-agent identifier section; flattened limits cover 64 seven-property records
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.component.location
+  type: string
+  brief: Where one install of a discovered AI component is on the endpoint
+  examples: ['~/.local/bin/claude', /opt/homebrew/bin/codex]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 512
+    notes: Home-relative ("~/...") under a user's home, so no account name is sent, else the absolute path of a system location. Set on managed scans for each agent binary found, one signal per install
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.ai.component.identity_score
   type: double
   brief: Confidence that the discovered component is correctly identified
@@ -7498,6 +7513,8 @@ groups:
   - ref: defenseclaw.ai.component.vendor
     requirement_level: recommended
   - ref: defenseclaw.ai.component.product
+    requirement_level: recommended
+  - ref: defenseclaw.ai.component.location
     requirement_level: recommended
   - ref: defenseclaw.ai.component.identity_score
     requirement_level: recommended
