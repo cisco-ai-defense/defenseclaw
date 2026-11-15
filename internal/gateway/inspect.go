@@ -1714,14 +1714,13 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// its own rule pack (empty ⇒ process-global default set).
 	// Prompts and tool results can contain invisible separators or letters
 	// that resemble Latin script. Keep this extra view confined to trust rules.
-	secureClient := false
-	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
-		secureClient = true
-	}
+	cfg := a.decisionConfig(ctx)
+	secureClient := cfg != nil && cfg.SecureClientIntegration()
+	generation := snapshotRulePackGenerationFor(ctx, req.Connector)
 	var ruleFindings []RuleFinding
 	if isToolResultDirection(req.Direction) && !secureClient {
 		// One tool-result path for every connector (tool_result_inspect.go).
-		ruleFindings = toolResultRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, req.contentScope, !ManagedEnterpriseActive())
+		ruleFindings = toolResultRuleFindings(generation, content, req.contentScope, !ManagedEnterpriseActive())
 	} else {
 		folded := ""
 		if !secureClient {
@@ -1729,7 +1728,37 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 				folded = view
 			}
 		}
-		ruleFindings = messageRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, folded, req.contentScope, !ManagedEnterpriseActive())
+		ruleFindings = messageRuleFindings(generation, content, folded, req.contentScope, !ManagedEnterpriseActive())
+	}
+	// A prompt whose content is a JSON block array is also read as the model
+	// reads its text parts, with no separator (GAP-0465). So are the text
+	// blocks of a tool result, for the trust rules only (GAP-0528): the joined
+	// text exists to find an instruction split across blocks, and a secret or
+	// PII rule on it would read the digits and keys the blocks end and begin
+	// with as one token, and the unescaped text of a JSON item as a new
+	// plain-text string, which is not what the tool returned.
+	if joined := messagePartsJoinedText(req.Direction, content); joined != "" {
+		joinedFolded := ""
+		if !secureClient {
+			if view := trustPatternText(joined); view != joined {
+				joinedFolded = view
+			}
+		}
+		if isToolResultDirection(req.Direction) {
+			joinedFindings := messageRuleFindings(generation, "", joined, req.contentScope, false)
+			if joinedFolded != "" {
+				joinedFindings = unionRuleFindings(joinedFindings,
+					messageRuleFindings(generation, "", joinedFolded, req.contentScope, false))
+			}
+			if !secureClient {
+				// The tool-result disposition: HIGH at most (tool_result_inspect.go).
+				capToolResultSeverity(joinedFindings)
+			}
+			ruleFindings = unionRuleFindings(ruleFindings, joinedFindings)
+		} else {
+			ruleFindings = unionRuleFindings(ruleFindings,
+				messageRuleFindings(generation, joined, joinedFolded, req.contentScope, !ManagedEnterpriseActive()))
+		}
 	}
 
 	var verdict *ToolInspectVerdict
@@ -2960,7 +2989,8 @@ func (a *APIServer) emitCodeGuardTelemetry(
 // generation: every rule on content (scanRaw; scope as for
 // scanContentRuleCategoryWithGeneration), then the trust rules on folded
 // ("" for none), the same content with invisible separators and look-alike
-// letters folded, for a rule the first pass did not find. A strictest
+// letters folded, merged per rule ID keeping the stronger finding
+// (unionRuleFindings, rel-1-0-10:GAP-0527). A strictest
 // combination of profiles runs it with each member's own rules and keeps
 // every member's finding, so even distinct definitions of one rule ID keep
 // their separate audit provenance.
@@ -2989,17 +3019,7 @@ func messageRuleFindings(generation *compiledRulePackCategories, content, folded
 	if folded == "" {
 		return findings
 	}
-	seen := make(map[string]bool, len(findings))
-	for _, finding := range findings {
-		seen[finding.RuleID] = true
-	}
-	for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
+	return unionRuleFindings(findings, scanRuleGeneration(generation, folded, "message", ruleScanOptions{
 		contentScope: scope, onlyCategory: "trust-exploit",
-	}) {
-		if !seen[finding.RuleID] {
-			findings = append(findings, finding)
-			seen[finding.RuleID] = true
-		}
-	}
-	return findings
+	}))
 }
