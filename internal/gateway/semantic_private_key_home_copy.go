@@ -456,8 +456,9 @@ const ownSSHFolderCopyTitle = "A copy of your own SSH folder content to another 
 // (rel-1-0-10:GAP-0018). Where the destination is not provably inside the home
 // (a link that leaves it, a shared folder, another account, /tmp), a wrapper
 // runs the copy, anything else is written, or the home is hidden from this
-// gateway, the block stays. The destination's mode bits are not read: a managed
-// gateway cannot see the home, and a copy keeps the modes of its sources.
+// gateway, the block stays. Only its owner may reach the destination
+// (ownSSHFolderPrivateDestination), and nothing in the call opens access to it
+// (trustedActionCallOpensAccess).
 func trustedActionOwnSSHFolderCopy(request trustedActionRequest, input actionfacts.Input) bool {
 	home := strings.TrimRight(input.ActiveHome, "/")
 	if request.ProtectedHomeHook || home == "" || !trustedShellCommandInput(input) || trustedActionCallOpensAccess(request) {
@@ -618,15 +619,20 @@ func ownSSHFolderPrivateDestination(destination, cwd, home string) bool {
 	if !pathWithin(value, home) || pathWithin(value, home+"/.ssh") {
 		return false
 	}
+	// Only a name that does not exist yet (ENOENT) is a part the copy makes; any
+	// other error (EACCES, ENOTDIR, ELOOP, ENAMETOOLONG, I/O) proves nothing
+	// about who can reach the place, so it is not private: the block of rel
+	// (ONE BOUND RULE, rel-1-0-10:GAP-0855).
 	existing := value
-	for existing != home && pathWithin(existing, home) {
-		if _, err := hookpaths.Lstat(existing); err == nil {
+	for {
+		_, err := hookpaths.Lstat(existing)
+		if err == nil {
 			break
 		}
+		if !os.IsNotExist(err) || existing == home || !pathWithin(existing, home) {
+			return false
+		}
 		existing = path.Dir(existing)
-	}
-	if _, err := hookpaths.Lstat(existing); err != nil {
-		return false
 	}
 	realHome, err := hookpaths.EvalSymlinks(home)
 	if err != nil {

@@ -264,3 +264,59 @@ func TestPosixModeOpensAccess(t *testing.T) {
 		}
 	}
 }
+
+// Only a name that does not exist yet is a part the copy makes. A destination
+// whose stat fails otherwise (a name too long, a folder the user cannot search,
+// a file used as a folder, a link loop) is not proven private, so every tier
+// keeps the block of rel (ONE BOUND RULE, rel-1-0-10:GAP-0855). The rows are
+// the "mine" row of TestOwnSSHFolderCopyPrivacyIsThePermissionBits with such a
+// destination; a missing name below "mine" keeps the alert.
+func TestOwnSSHFolderCopyStatErrorIsNotPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	keepTempDirOffDevice(t)
+	home, cwd := shellProtectedFileHome(t)
+	key := filepath.Join(home, ".ssh", "id_rsa")
+	mine := filepath.Join(home, "mine")
+	for _, dir := range []string{mine, filepath.Join(mine, "locked")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{key: "x\n", filepath.Join(mine, "file"): "x\n"} {
+		if err := os.WriteFile(name, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, link := range [][2]string{{"loop_b", "loop_a"}, {"loop_a", "loop_b"}} {
+		if err := os.Symlink(filepath.Join(mine, link[0]), filepath.Join(mine, link[1])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := map[string]string{
+		"name too long":  strings.Repeat("a", 300) + "/",
+		"file as folder": "file/x/",
+		"link loop":      "loop_a/x/",
+	}
+	if os.Geteuid() != 0 {
+		// The owner of a folder without search permission gets EACCES below it.
+		rows["no search permission"] = "locked/x/"
+		if err := os.Chmod(filepath.Join(mine, "locked"), 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(mine, "locked"), 0o700) })
+	}
+	for name, dest := range rows {
+		command := "cp " + key + " '" + mine + "/" + dest + "'"
+		for _, tier := range ownSSHFolderCopyTiers {
+			if got, rules := shellProtectedFileRoute(t, home, cwd, "claudecode", tier.posture, tier.managed, command); got != "block" {
+				t.Errorf("%s (%s, managed=%v): %s, want the block of rel (%v)", name, tier.posture, tier.managed, got, rules)
+			}
+		}
+	}
+	command := "cp " + key + " '" + mine + "/not/yet/'"
+	if got, rules := shellProtectedFileRoute(t, home, cwd, "claudecode", "default", false, command); got != "alert" {
+		t.Errorf("missing name below an owner-only folder: %s, want alert (%v)", got, rules)
+	}
+}
