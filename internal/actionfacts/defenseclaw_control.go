@@ -1393,11 +1393,14 @@ var (
 	// that the guardrail, its judge, its state, the connectors' hooks or the
 	// managed policy rest on: `config set` or `config unset` of a key under
 	// one is the same effect as a write to config.yaml, which the state rule
-	// blocks. A drift test requires every section of the Config schema to be
-	// listed here or in its reviewed neutral list (observability, webhooks,
-	// notifications, routing, update, ai_discovery), so a new section is
-	// classified when it is added. The config writer checks a key against the
-	// schema before it writes, so a key under no section changes nothing.
+	// blocks. observability is a guard section too: changing or turning off
+	// the audit and OTLP export hides the evidence of what the agent did
+	// (lead ruling 2026-11-15, after GAP-0753). A drift test requires every
+	// section of the Config schema to be listed here or in its reviewed
+	// neutral list (webhooks, notifications, routing, update, ai_discovery),
+	// so a new section is classified when it is added. The config writer
+	// checks a key against the schema before it writes, so a key under no
+	// section changes nothing.
 	defenseClawGuardConfigRoots = map[string]bool{
 		"config_version": true, "llm": true, "default_llm_api_key_env": true, "default_llm_model": true,
 		"decision_model": true, "data_dir": true, "audit_db": true, "judge_bodies_db": true,
@@ -1408,7 +1411,7 @@ var (
 		"gateway": true, "cloud_auth": true, "asset_policy": true, "registries": true,
 		"claude_code": true, "codex": true, "connector_hooks": true, "application_protection": true,
 		"managed": true, "enterprise": true, "fleet": true, "connectors": true, "admission": true,
-		"llm_providers": true,
+		"llm_providers": true, "observability": true,
 	}
 	// defenseClawWeakValues are the values of a mode option that move a guard to
 	// a weaker state.
@@ -1429,8 +1432,8 @@ var (
 // after the verb, options included: click takes an option anywhere, so the
 // key is the first word that is not an option or an option's value
 // (GAP-0787, `config set --expect-sha256 HEX KEY VALUE`). A key under a guard
-// section is the configuration change; a key under a neutral section (an
-// observability sink, routing, a webhook) is not a guard change; a key or an
+// section (observability among them) is the configuration change; a key
+// under a neutral section (routing, a webhook) is not a guard change; a key or an
 // option the parse left open is a reading the rules cannot prove either way.
 func configChangeKind(args []string, unset bool) (DefenseClawControlKind, bool) {
 	var keys []string
