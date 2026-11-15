@@ -260,6 +260,17 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 	}
 	reason := CredentialSenderNone
 	for _, sender := range reading.Senders {
+		if sender.Origin == SenderProjected && !senderToExternal(sender) {
+			continue // the data stays on this host or its private network
+		}
+		// A relative operand is rooted at the working directory the hook
+		// reports. A cd earlier in the call moves it to a place the hook
+		// does not report: such an operand is judged by its shape alone, as
+		// when the hook has no working directory (GAP-0773).
+		scoped := facts
+		if cwdMovedBefore(facts, sender.CommandID) {
+			scoped.CWD = ""
+		}
 		// A projected upload or remote copy (curl, scp, rsync, wget: the
 		// exact credential-file upload rule judges its files) keeps that
 		// rule's reach; the file check here is for the senders it does not
@@ -278,27 +289,42 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 				operands = files
 			}
 		}
-		if remoteOperandCount(sender.Operands) >= 2 {
+		if sender.Program == "scp" && remoteOperandCount(sender.Operands) >= 2 {
 			exact = true // scp -3: the file goes through the local host to a second remote
 		}
 		for _, operand := range operands {
-			if exact && credentialPathOperand(operand, facts.CWD, facts.ActiveHome) {
+			if exact && credentialPathOperand(operand, scoped.CWD, facts.ActiveHome) {
 				return CredentialSenderFile
 			}
-			if credentialMayHold(operand, facts.CWD, facts.ActiveHome) {
+			if credentialMayHold(operand, scoped.CWD, facts.ActiveHome) {
 				reason = CredentialSenderDirectory
 			}
 		}
-		if exact && sender.CommandID != 0 {
+		// what is fed to the sender is what it sends: a file or text on its
+		// standard input, the output of the commands piped or substituted
+		// into it (GAP-0775). A sender the exact rule judges keeps that
+		// rule for the files its options name; the fed data it does not read.
+		if sender.CommandID != 0 && (exact || senderToExternal(sender)) {
 			command := byID[sender.CommandID]
 			for _, redirect := range command.Redirects {
 				if redirect.FD == 0 && redirect.Access == PathAccessRead &&
-					credentialPathOperand(redirect.Target, facts.CWD, facts.ActiveHome) {
+					credentialPathOperand(redirect.Target, scoped.CWD, facts.ActiveHome) {
 					return CredentialSenderFile
 				}
 			}
-			if credentialProducerFeeds(facts, sender.CommandID, 4) {
+			switch credentialProducerFeeds(scoped, sender.CommandID, 4) {
+			case CredentialSenderFile:
 				return CredentialSenderFile
+			case CredentialSenderDirectory:
+				reason = CredentialSenderDirectory
+			}
+		}
+		for _, word := range strings.Fields(sender.FedText) {
+			if credentialPathOperand(word, scoped.CWD, facts.ActiveHome) {
+				return CredentialSenderFile
+			}
+			if credentialMayHold(word, scoped.CWD, facts.ActiveHome) {
+				reason = CredentialSenderDirectory
 			}
 		}
 	}
@@ -311,6 +337,22 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 func judgedByUploadRule(facts Facts, command CommandFact) bool {
 	return facts.Authoritative() && command.Dialect == DialectPOSIX &&
 		command.Effect == EffectExecute && !command.ControlFlowUncertain
+}
+
+// cwdMovedBefore reports a command that changes the working directory (cd,
+// pushd, popd) ahead of the command with the given id, or anywhere in the
+// call when the id is unknown.
+func cwdMovedBefore(facts Facts, id int64) bool {
+	for _, command := range facts.Commands {
+		if id != 0 && command.ID >= id {
+			continue
+		}
+		switch senderProgramName(command.Program) {
+		case "cd", "pushd", "popd", "chdir":
+			return true
+		}
+	}
+	return false
 }
 
 // credentialToRemoteOperand reads a command no network program of the
@@ -338,23 +380,64 @@ func credentialToRemoteOperand(facts Facts) CredentialSenderReason {
 	return CredentialSenderNone
 }
 
-// credentialProducerFeeds reports a command, up to hops pipe stages before
-// the sender, that reads a credentials file.
-func credentialProducerFeeds(facts Facts, id int64, hops int) bool {
+// credentialProducerFeeds reads the commands up to hops stages before the
+// sender, through a pipe or a command substitution: a credentials file they
+// read (or name) is CredentialSenderFile, a folder that may hold one
+// CredentialSenderDirectory.
+func credentialProducerFeeds(facts Facts, id int64, hops int) CredentialSenderReason {
 	if hops <= 0 {
-		return false
+		return CredentialSenderNone
+	}
+	reason := CredentialSenderNone
+	byID := map[int64]CommandFact{}
+	for _, command := range facts.Commands {
+		byID[command.ID] = command
 	}
 	for _, flow := range facts.DataFlows {
-		if flow.ToCommandID != id || flow.From != DataStdout || flow.To != DataStdin {
+		if flow.ToCommandID != id || flow.From != DataStdout || (flow.To != DataStdin && flow.To != DataProcess) {
 			continue
 		}
+		var words []string
 		for _, candidate := range facts.Paths {
-			if candidate.CommandID == flow.FromCommandID && candidate.Access == PathAccessRead &&
-				credentialPathOperand(firstNonEmpty(candidate.Resolved, candidate.Value), facts.CWD, facts.ActiveHome) {
-				return true
+			if candidate.CommandID == flow.FromCommandID && candidate.Access == PathAccessRead {
+				words = append(words, firstNonEmpty(candidate.Resolved, candidate.Value))
 			}
 		}
-		if credentialProducerFeeds(facts, flow.FromCommandID, hops-1) {
+		switch senderProgramName(byID[flow.FromCommandID].Program) {
+		case "echo", "printf":
+			// these print their words: not a read of the files they name
+		default:
+			words = append(words, commandWords(byID[flow.FromCommandID])...)
+		}
+		for _, word := range words {
+			if credentialPathOperand(word, facts.CWD, facts.ActiveHome) {
+				return CredentialSenderFile
+			}
+			if credentialMayHold(word, facts.CWD, facts.ActiveHome) {
+				reason = CredentialSenderDirectory
+			}
+		}
+		if inner := credentialProducerFeeds(facts, flow.FromCommandID, hops-1); inner == CredentialSenderFile {
+			return CredentialSenderFile
+		} else if inner != CredentialSenderNone {
+			reason = inner
+		}
+	}
+	return reason
+}
+
+// senderToExternal reports a projected sender whose destination is not proven
+// loopback, private or link-local.
+func senderToExternal(sender SenderFact) bool {
+	if len(sender.Network) == 0 {
+		return true
+	}
+	for _, network := range sender.Network {
+		host := strings.ToLower(firstNonEmpty(network.NormalizedHost, network.Host))
+		switch {
+		case network.Scope == NetworkScopeLoopback || network.Scope == NetworkScopeLinkLocal || network.Scope == NetworkScopePrivate:
+		case host == "localhost" || strings.HasSuffix(host, ".localhost"):
+		default:
 			return true
 		}
 	}

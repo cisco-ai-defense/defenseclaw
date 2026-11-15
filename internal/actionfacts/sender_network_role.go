@@ -143,7 +143,7 @@ func readCommandNetworkRole(facts Facts, command CommandFact, assumeFed bool) (S
 		sender := SenderFact{
 			CommandID: command.ID, Program: prog, Origin: SenderNetworkRole,
 			Network: connects, DestinationUnknown: !command.ArgvComplete,
-			Operands: staticOperands(words),
+			Operands: senderOperandWords(prog, words), FedText: command.LiteralStdin,
 		}
 		external := false
 		for _, network := range connects {
@@ -174,14 +174,14 @@ func readCommandNetworkRole(facts Facts, command CommandFact, assumeFed bool) (S
 	}
 	if mailSenderPrograms[prog] {
 		return SenderFact{CommandID: command.ID, Program: prog, Origin: SenderUnprovenRole, DestinationUnknown: true,
-			Operands: staticOperands(words)}, true
+			Operands: senderOperandWords(prog, words)}, true
 	}
 	if !unprovenRoleSends(prog, words, fed) {
 		return SenderFact{}, false
 	}
 	return SenderFact{
 		CommandID: command.ID, Program: prog, Origin: SenderUnprovenRole, DestinationUnknown: true,
-		Operands: staticOperands(words),
+		Operands: senderOperandWords(prog, words),
 	}, true
 }
 

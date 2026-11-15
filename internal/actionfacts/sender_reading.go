@@ -82,6 +82,10 @@ type SenderFact struct {
 	// Operands are the static operand words of the sender's command (what a
 	// credential-file check reads); empty for an embedded program.
 	Operands []string
+	// FedText is the literal text fed to its standard input (a here-string
+	// or here-document, or the file a redirect reads): an sftp or ftp batch
+	// names the file it puts there (GAP-0775).
+	FedText string
 }
 
 // SendReading is the shared sender reader's answer for one call.
@@ -217,7 +221,7 @@ func readProjectedSenders(facts Facts, reading *SendReading, depth int) {
 		args := commandWords(command)
 		if network := uploads[command.ID]; len(network) > 0 {
 			sender := SenderFact{CommandID: command.ID, Program: prog, Origin: SenderProjected, Network: network,
-				Operands: staticOperands(args)}
+				Operands: senderOperandWords(prog, args), FedText: command.LiteralStdin}
 			for _, n := range network {
 				host := n.NormalizedHost
 				if host == "" {
@@ -238,7 +242,7 @@ func readProjectedSenders(facts Facts, reading *SendReading, depth int) {
 				reading.Senders = append(reading.Senders, SenderFact{
 					CommandID: command.ID, Program: prog, Origin: SenderRemoteCopy,
 					Hosts: hosts, DestinationUnknown: unknown || !command.ArgvComplete,
-					Operands: staticOperands(args),
+					Operands: senderOperandWords(prog, args), FedText: command.LiteralStdin,
 				})
 			}
 		}
@@ -398,7 +402,9 @@ func readUnprojectedSenders(facts Facts, reading *SendReading) {
 		case len(source.argv) > 0:
 			name, args := unwrapSenderWords(source.argv, nil)
 			if name == "" {
-				reading.Unreadable = true
+				if unknownProgramMaySend(source.argv, false) {
+					reading.Unreadable = true
+				}
 				continue
 			}
 			occurrences = append(occurrences, senderOccurrence{name: name, args: args})
@@ -449,11 +455,33 @@ func readOccurrence(occurrence senderOccurrence, reading *SendReading, depth int
 	if sends, hosts, _ := readWordSender(occurrence.name, occurrence.args, occurrence.dynamic, occurrence.fed, depth); sends {
 		reading.Senders = append(reading.Senders, SenderFact{
 			Program: occurrence.name, Origin: SenderUnprojected, Hosts: hosts,
-			Operands: staticOperands(occurrence.args),
+			Operands: senderOperandWords(occurrence.name, occurrence.args),
+			FedText:  occurrence.fedText,
 			// a part the projection did not read: where it sends is not proven
 			DestinationUnknown: true,
 		})
 	}
+}
+
+// unknownProgramMaySend reports whether a call whose program the reader
+// cannot name may send data: a standard input fed to it, a word the shell
+// builds (it may be the destination), or a static word that names a remote
+// place (a URL, user@host, host:path, a dotted host). A call with none of
+// these has no destination to send to: a read-only remote command through a
+// program path the shell builds is not a sender (GAP-0774).
+func unknownProgramMaySend(words []string, fed bool) bool {
+	if fed {
+		return true
+	}
+	for i, word := range words {
+		if word == "" && i > 0 {
+			return true
+		}
+		if unprovenRemoteOperand(word) || emailLikeOperand(word) || dottedHostPortOperand(word) || bareHostnameOperand(word) {
+			return true
+		}
+	}
+	return false
 }
 
 // embeddedMaySend reports a find or xargs whose words name a sender program.
@@ -476,6 +504,9 @@ type senderOccurrence struct {
 	// fed is set when the call's standard input is fed: a pipe into it, a
 	// file redirect or a here-document.
 	fed bool
+	// fedText is the literal text of a here-string or here-document fed to
+	// it, or the file a redirect reads.
+	fedText string
 }
 
 type syntaxSenderResult struct {
@@ -535,6 +566,7 @@ func statementsBeforeSyntaxError(command string) (stmts []*syntax.Stmt, unknown 
 // the shell (eval, trap, a shell's -c body) are read again as shell text.
 func syntaxSenderNode(root syntax.Node, depth int, res *syntaxSenderResult) {
 	fed := map[*syntax.CallExpr]bool{}
+	fedText := map[*syntax.CallExpr]string{}
 	syntax.Walk(root, func(n syntax.Node) bool {
 		switch t := n.(type) {
 		case *syntax.Stmt:
@@ -545,6 +577,15 @@ func syntaxSenderNode(root syntax.Node, depth int, res *syntaxSenderResult) {
 					switch redirect.Op {
 					case syntax.RdrIn, syntax.Hdoc, syntax.DashHdoc, syntax.WordHdoc, syntax.RdrInOut:
 						fed[call] = true
+						body := redirect.Word
+						if redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc {
+							body = redirect.Hdoc
+						}
+						if body != nil {
+							if text, ok := literalShellWord(body); ok {
+								fedText[call] += text + "\n"
+							}
+						}
 					}
 				}
 			}
@@ -572,8 +613,13 @@ func syntaxSenderNode(root syntax.Node, depth int, res *syntaxSenderResult) {
 		}
 		name, args := unwrapSenderWords(words, dynamic)
 		if name == "" {
-			// the program is a word the shell builds: what runs is unknown
-			res.unknown = true
+			// the program is a word the shell builds: what runs is unknown.
+			// It is the unknown tier only when the call may send: a fed
+			// standard input, a word the shell builds, or a word that names
+			// a remote place (GAP-0774).
+			if unknownProgramMaySend(words, fed[call]) {
+				res.unknown = true
+			}
 			return true
 		}
 		argDynamic := shiftDynamic(dynamic, len(words)-len(args))
@@ -598,7 +644,7 @@ func syntaxSenderNode(root syntax.Node, depth int, res *syntaxSenderResult) {
 			res.hitCap(bounded.Items)
 			return true
 		}
-		occurrence := senderOccurrence{name: name, args: args, fed: fed[call]}
+		occurrence := senderOccurrence{name: name, args: args, fed: fed[call], fedText: fedText[call]}
 		if len(argDynamic) > 0 {
 			occurrence.dynamic = argDynamic
 		}
