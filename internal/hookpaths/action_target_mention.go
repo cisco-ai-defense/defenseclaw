@@ -1572,7 +1572,13 @@ func actionLiteralWrapperChild(args []*syntax.Word, home string) int {
 	for i, word := range args {
 		values[i], static[i] = StaticWord(word, home)
 	}
-	return actionfacts.WrapperChildIndex(values, static)
+	next := actionfacts.WrapperChildIndex(values, static)
+	if next <= 0 || next >= len(values) || !static[next] || strings.HasPrefix(values[next], "-") {
+		// No program word: flock FILE -c TEXT runs a shell string, an
+		// option the reader does not know ends the reading.
+		return -1
+	}
+	return next
 }
 
 // actionLiteralWrapperOption reports how many words an option of sudo, doas,

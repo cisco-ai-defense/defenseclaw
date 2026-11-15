@@ -38,7 +38,7 @@ var actionRoleKnownWriters = strings.Fields(`rm rmdir unlink shred mkdir mkfifo 
 // lists or one of actionRoleKnownWriters.
 func actionRoleKnownProgram(base string) bool {
 	base = strings.ToLower(base)
-	return slices.Contains(actionRoleKnownWriters, base) ||
+	return slices.Contains(actionCommandRunners, base) || slices.Contains(actionRoleKnownWriters, base) ||
 		slices.Contains(linkPrograms, base) || slices.Contains(copyPrograms, base) ||
 		slices.Contains(renamePrograms, base) || slices.Contains(cdPrograms, base) ||
 		slices.Contains(multicallPrograms, base) || slices.Contains(archivePrograms, base) ||
@@ -46,6 +46,14 @@ func actionRoleKnownProgram(base string) bool {
 		slices.Contains(knownWordPrograms, base) || slices.Contains(readOnlyLinkWordPrograms, base) ||
 		slices.Contains(hiddenDirectoryPrograms, base) || slices.Contains(lateTextPrograms, base)
 }
+
+// actionCommandRunners are the wrappers that run a command of their own words
+// (flock FILE -c TEXT, nsenter -a -t PID PROGRAM, chroot, xargs ...). One the
+// scan cannot look through to a program (actionLiteralCommandWords) runs
+// something it does not read, never data of unknown role: its words keep
+// their reading, so a protected write behind it keeps its block
+// (rel-1-0-10:GAP-0925, GAP-0910).
+var actionCommandRunners = strings.Fields("flock nsenter chroot unbuffer taskset xargs chrt caffeinate setsid stdbuf ionice nice nohup timeout time env sudo doas command builtin exec runuser su")
 
 // actionScriptInterpreters run a script file; actionInterpreterCodeFlags are the
 // options after which the next word is program text (or a module), not a script.
