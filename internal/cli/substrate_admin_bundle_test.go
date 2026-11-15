@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,7 +52,7 @@ func TestSubstrate_Admin_BundleStageAndRollback(t *testing.T) {
 		}
 	})
 	t.Run("rollback needs a stage", func(t *testing.T) {
-		if _, _, err := runSubAdmin(newSubstrateBundleCmd(), "rollback"); err == nil || commandExitCode(err) != 2 {
+		if _, _, err := runSubAdmin(newSubstrateBundleCmd(), "rollback"); err == nil || cliusage.ExitCode(err) != 2 {
 			t.Fatalf("err %v", err)
 		}
 	})

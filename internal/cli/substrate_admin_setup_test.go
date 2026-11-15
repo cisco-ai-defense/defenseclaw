@@ -19,6 +19,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -245,8 +246,8 @@ func TestSubstrate_Admin_SetupRefusals(t *testing.T) {
 			install := tc.install
 			file := subAdminWrite(t, dir, "install.yaml", install)
 			_, _, err := runSubAdmin(newSubstrateSetupCmd(), append([]string{"--install-file", file, "--yes"}, tc.args...)...)
-			if err == nil || commandExitCode(err) != tc.exit {
-				t.Fatalf("err %v (exit %d), want exit %d", err, commandExitCode(err), tc.exit)
+			if err == nil || cliusage.ExitCode(err) != tc.exit {
+				t.Fatalf("err %v (exit %d), want exit %d", err, cliusage.ExitCode(err), tc.exit)
 			}
 			for _, w := range tc.want {
 				if !strings.Contains(err.Error(), w) {
@@ -287,8 +288,8 @@ func TestSubstrate_Admin_SetupRemove(t *testing.T) {
 		t.Errorf("%v\n%s", err, out)
 	}
 	_, _, err = runSubAdmin(newSubstrateSetupCmd(), "--install-file", filepath.Join(dir, "none.yaml"), "--remove")
-	if err == nil || commandExitCode(err) != 2 || !strings.Contains(err.Error(), "nothing to remove") {
-		t.Errorf("remove of a missing file: %v (exit %d)", err, commandExitCode(err))
+	if err == nil || cliusage.ExitCode(err) != 2 || !strings.Contains(err.Error(), "nothing to remove") {
+		t.Errorf("remove of a missing file: %v (exit %d)", err, cliusage.ExitCode(err))
 	}
 }
 
@@ -310,8 +311,8 @@ func TestSubstrate_Admin_SetupJSON(t *testing.T) {
 
 func TestSubstrate_Admin_SetupNeedsAFile(t *testing.T) {
 	_, _, err := runSubAdmin(newSubstrateSetupCmd())
-	if err == nil || commandExitCode(err) != 2 || !strings.Contains(err.Error(), "--install-file") {
-		t.Fatalf("err %v (exit %d)", err, commandExitCode(err))
+	if err == nil || cliusage.ExitCode(err) != 2 || !strings.Contains(err.Error(), "--install-file") {
+		t.Fatalf("err %v (exit %d)", err, cliusage.ExitCode(err))
 	}
 }
 
@@ -353,10 +354,10 @@ func TestSubstrate_Admin_SetupPrintAccessPolicies(t *testing.T) {
 		t.Errorf("json: %v\n%s", err, out)
 	}
 
-	if _, _, err = runSubAdmin(newSubstrateSetupCmd(), "--print-access-policies"); err == nil || commandExitCode(err) != 2 {
-		t.Errorf("no --plan: %v (exit %d)", err, commandExitCode(err))
+	if _, _, err = runSubAdmin(newSubstrateSetupCmd(), "--print-access-policies"); err == nil || cliusage.ExitCode(err) != 2 {
+		t.Errorf("no --plan: %v (exit %d)", err, cliusage.ExitCode(err))
 	}
-	if _, _, err = runSubAdmin(newSubstrateSetupCmd(), "--print-access-policies", "--plan", filepath.Join(t.TempDir(), "none.json")); err == nil || commandExitCode(err) != 2 {
-		t.Errorf("missing plan: %v (exit %d)", err, commandExitCode(err))
+	if _, _, err = runSubAdmin(newSubstrateSetupCmd(), "--print-access-policies", "--plan", filepath.Join(t.TempDir(), "none.json")); err == nil || cliusage.ExitCode(err) != 2 {
+		t.Errorf("missing plan: %v (exit %d)", err, cliusage.ExitCode(err))
 	}
 }

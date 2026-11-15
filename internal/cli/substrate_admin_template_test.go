@@ -18,6 +18,7 @@ package cli
 
 import (
 	"context"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"os"
 	"path/filepath"
@@ -122,8 +123,8 @@ func TestSubstrate_Admin_TemplateExitCodes(t *testing.T) {
 		calls := subAdminTemplateStub(t, code, "NOT ADMITTED: x\n")
 		root := newSubstrateTemplateCmd()
 		out, errText, err := runSubAdmin(root, "verify", "img", "--anchors", "a.pub")
-		if err == nil || commandExitCode(err) != code {
-			t.Fatalf("code %d: err %v (exit %d)", code, err, commandExitCode(err))
+		if err == nil || cliusage.ExitCode(err) != code {
+			t.Fatalf("code %d: err %v (exit %d)", code, err, cliusage.ExitCode(err))
 		}
 		if len(*calls) != 1 || out != "NOT ADMITTED: x\n" {
 			t.Errorf("calls %v output %q", *calls, out)
@@ -210,8 +211,8 @@ func TestSubstrate_Admin_TemplateWithTheRealRunner(t *testing.T) {
 		}
 	}
 	_, errText, err := runSubAdmin(newSubstrateTemplateCmd(), "verify")
-	if commandExitCode(err) != 2 || !strings.Contains(errText, "verify needs an image and --anchors") {
-		t.Errorf("exit %d, stderr %q", commandExitCode(err), errText)
+	if cliusage.ExitCode(err) != 2 || !strings.Contains(errText, "verify needs an image and --anchors") {
+		t.Errorf("exit %d, stderr %q", cliusage.ExitCode(err), errText)
 	}
 }
 

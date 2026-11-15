@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"os"
 	"sort"
@@ -260,7 +261,7 @@ func printSubstrateBundleReceipt(cmd *cobra.Command, asJSON bool, rc *bundle.Rec
 		}
 	}
 	if err != nil {
-		err = withExitCode(err, 2)
+		err = cliusage.WithExitCode(err, 2)
 		silenceJSONReportedError(cmd, asJSON, err)
 	}
 	return err
@@ -314,11 +315,11 @@ func runSubstrateBundleTest(cmd *cobra.Command, f *substrateBundleFlags) error {
 	}
 	anchors, err := f.anchorsLoader(cfg)()
 	if err != nil {
-		return withExitCode(err, 2)
+		return cliusage.WithExitCode(err, 2)
 	}
 	v, err := bundle.Verify(archive, anchors, cfg, time.Now().UTC(), bundle.Check{Reactivate: true})
 	if err != nil {
-		return withExitCode(err, 2)
+		return cliusage.WithExitCode(err, 2)
 	}
 	eff := v.Policy.Overlay(cfg)
 	reg := controller.Registration{Atespace: f.atespace, Template: f.template, Workload: f.workload, Source: controller.SourceAtespace}

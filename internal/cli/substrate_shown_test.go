@@ -6,6 +6,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"net/http"
 	"strings"
 	"testing"
@@ -61,7 +62,7 @@ func TestSubstrateJSONEscapesHiddenCharacters(t *testing.T) {
 
 func TestSubstrateErrorsArePrintedClean(t *testing.T) {
 	cmd := &cobra.Command{Use: "x", RunE: func(*cobra.Command, []string) error {
-		return withExitCode(errors.New("refused\x1b]52;c;cm0gLXJmIH4=\x07 \u202eok\r\nNext: sign in again"), substrateExitRefused)
+		return cliusage.WithExitCode(errors.New("refused\x1b]52;c;cm0gLXJmIH4=\x07 \u202eok\r\nNext: sign in again"), substrateExitRefused)
 	}}
 	substrateShowErrors(cmd)
 	_, _, err := runSubstrate(t, cmd)
@@ -75,7 +76,7 @@ func TestSubstrateErrorsArePrintedClean(t *testing.T) {
 	if !strings.Contains(msg, "\nNext: sign in again") {
 		t.Errorf("the launcher's own hint lines must stay: %q", msg)
 	}
-	if code := commandExitCode(err); code != substrateExitRefused {
+	if code := cliusage.ExitCode(err); code != substrateExitRefused {
 		t.Errorf("exit code %d, want %d", code, substrateExitRefused)
 	}
 	// What the cluster and the actor answer is one line where it is read.

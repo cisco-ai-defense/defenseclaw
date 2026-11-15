@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"os"
 	"sort"
@@ -212,7 +213,7 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cluster {
 				if len(args) > 0 || batch != "" {
-					return withExitCode(errors.New("--cluster shows the whole cluster; leave the name and --batch out"), 2)
+					return cliusage.WithExitCode(errors.New("--cluster shows the whole cluster; leave the name and --batch out"), 2)
 				}
 				return runSubstrateFleet(cmd, "status", &out, &cf)
 			}
@@ -945,7 +946,7 @@ agent as ATESPACE/NAME. The reset is recorded in the audit log under your own na
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref := strings.TrimSpace(args[0])
 			if at, name, ok := strings.Cut(ref, "/"); !ok || at == "" || name == "" || strings.Contains(name, "/") {
-				return withExitCode(errors.New("name the agent as ATESPACE/NAME (list agents with: defenseclaw substrate list --all)"), 2)
+				return cliusage.WithExitCode(errors.New("name the agent as ATESPACE/NAME (list agents with: defenseclaw substrate list --all)"), 2)
 			}
 			s, err := substrateOpen(cmd, &com)
 			if err != nil {
@@ -965,7 +966,7 @@ agent as ATESPACE/NAME. The reset is recorded in the audit log under your own na
 			defer stop()
 			if _, err := s.Client.PolicyReset(ctx, ref, reason); err != nil {
 				if e, ok := api.AsError(err); ok && e.Status == 403 {
-					return withExitCode(errors.New("only administrators may reset a policy conflict"), substrateExitRefused)
+					return cliusage.WithExitCode(errors.New("only administrators may reset a policy conflict"), substrateExitRefused)
 				}
 				return substrateFail(err)
 			}

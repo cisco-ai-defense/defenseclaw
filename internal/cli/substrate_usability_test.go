@@ -5,6 +5,7 @@ package cli
 
 import (
 	"encoding/json"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -69,8 +70,8 @@ func TestSubstrateLoginReadsTheSignInServerFromTheCluster(t *testing.T) {
 		info, status = tc.info, tc.status
 		c := auth.Context{AdminURL: srv.URL}
 		err := substrateLoginInfo(ctx, &c, io.Discard)
-		if err == nil || !strings.Contains(err.Error(), tc.want) || commandExitCode(err) != tc.code {
-			t.Errorf("%s: err = %v (exit %d), want %q (exit %d)", tc.name, err, commandExitCode(err), tc.want, tc.code)
+		if err == nil || !strings.Contains(err.Error(), tc.want) || cliusage.ExitCode(err) != tc.code {
+			t.Errorf("%s: err = %v (exit %d), want %q (exit %d)", tc.name, err, cliusage.ExitCode(err), tc.want, tc.code)
 		}
 	}
 }

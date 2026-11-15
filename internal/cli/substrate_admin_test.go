@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"net"
 	"net/http"
@@ -290,7 +291,7 @@ func TestSubstrate_Admin_Doctor(t *testing.T) {
 				return f.session(t, c), nil
 			}, tc.storeErr)
 			out, _, err := runSubAdmin(newSubstrateDoctorCmd(), tc.args...)
-			if got := commandExitCode(err); (err == nil && tc.wantExit != 0) || (err != nil && got != tc.wantExit) {
+			if got := cliusage.ExitCode(err); (err == nil && tc.wantExit != 0) || (err != nil && got != tc.wantExit) {
 				t.Fatalf("exit %d (err %v), want %d\n%s", got, err, tc.wantExit, out)
 			}
 			for _, w := range tc.want {
@@ -323,8 +324,8 @@ func TestSubstrate_Admin_DoctorJSON(t *testing.T) {
 	c := f.context()
 	subAdminSeams(t, func() (*substrateSession, error) { return f.session(t, c), nil }, nil)
 	out, errText, err := runSubAdmin(newSubstrateDoctorCmd(), "--json")
-	if commandExitCode(err) != 1 {
-		t.Fatalf("exit %d, want 1 with --json too (err %v)", commandExitCode(err), err)
+	if cliusage.ExitCode(err) != 1 {
+		t.Fatalf("exit %d, want 1 with --json too (err %v)", cliusage.ExitCode(err), err)
 	}
 	if errText != "" {
 		t.Errorf("the failure is printed on stderr as well: %q", errText)
@@ -479,8 +480,8 @@ func TestSubstrate_Admin_BundleApply(t *testing.T) {
 			f := newSubAdminFake(t)
 			subAdminSeams(t, func() (*substrateSession, error) { return f.session(t, f.context()), nil }, nil)
 			_, _, err := runSubAdmin(newSubstrateBundleCmd(), "apply", tc.file)
-			if err == nil || !strings.Contains(err.Error(), tc.want) || commandExitCode(err) != 2 {
-				t.Fatalf("err %v (exit %d), want %q and exit 2", err, commandExitCode(err), tc.want)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || cliusage.ExitCode(err) != 2 {
+				t.Fatalf("err %v (exit %d), want %q and exit 2", err, cliusage.ExitCode(err), tc.want)
 			}
 			if f.bundleCalls != 0 {
 				t.Error("the cluster was called")
@@ -502,8 +503,8 @@ func TestSubstrate_Admin_BundleApply(t *testing.T) {
 			f.bundleStatus = tc.status
 			subAdminSeams(t, func() (*substrateSession, error) { return f.session(t, f.context()), nil }, nil)
 			_, _, err := runSubAdmin(newSubstrateBundleCmd(), "apply", bundle)
-			if err == nil || !strings.Contains(strings.ToLower(err.Error()), tc.want) || commandExitCode(err) != tc.wantExit {
-				t.Fatalf("err %v (exit %d), want %q and exit %d", err, commandExitCode(err), tc.want, tc.wantExit)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), tc.want) || cliusage.ExitCode(err) != tc.wantExit {
+				t.Fatalf("err %v (exit %d), want %q and exit %d", err, cliusage.ExitCode(err), tc.want, tc.wantExit)
 			}
 		})
 	}
@@ -547,8 +548,8 @@ func TestSubstrate_Admin_BundleStatus(t *testing.T) {
 			f.statusStatus = status
 			subAdminSeams(t, func() (*substrateSession, error) { return f.session(t, f.context()), nil }, nil)
 			_, _, err := runSubAdmin(newSubstrateBundleCmd(), "status")
-			if err == nil || !strings.Contains(err.Error(), "does not accept bundles yet") || commandExitCode(err) != substrateExitRefused {
-				t.Fatalf("err %v (exit %d)", err, commandExitCode(err))
+			if err == nil || !strings.Contains(err.Error(), "does not accept bundles yet") || cliusage.ExitCode(err) != substrateExitRefused {
+				t.Fatalf("err %v (exit %d)", err, cliusage.ExitCode(err))
 			}
 		})
 	}
@@ -557,8 +558,8 @@ func TestSubstrate_Admin_BundleStatus(t *testing.T) {
 		f.statusStatus = 403
 		subAdminSeams(t, func() (*substrateSession, error) { return f.session(t, f.context()), nil }, nil)
 		_, _, err := runSubAdmin(newSubstrateBundleCmd(), "status")
-		if err == nil || commandExitCode(err) != substrateExitRefused {
-			t.Fatalf("err %v (exit %d)", err, commandExitCode(err))
+		if err == nil || cliusage.ExitCode(err) != substrateExitRefused {
+			t.Fatalf("err %v (exit %d)", err, cliusage.ExitCode(err))
 		}
 	})
 }

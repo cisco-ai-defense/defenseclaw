@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"os"
 	"path/filepath"
@@ -125,7 +126,7 @@ func substrateCapabilities(values []string) (setup.Capabilities, bool, error) {
 		case substrateCapRouteTimeouts:
 			caps.Settings[setup.KeyRouteTimeout] = true
 		default:
-			return caps, false, withExitCode(fmt.Errorf("--capability %q is not known; use %s or %s", v, substrateCapBodyMode, substrateCapRouteTimeouts), 2)
+			return caps, false, cliusage.WithExitCode(fmt.Errorf("--capability %q is not known; use %s or %s", v, substrateCapBodyMode, substrateCapRouteTimeouts), 2)
 		}
 	}
 	return caps, bodyMode, nil
@@ -140,11 +141,11 @@ func runSubstrateSetup(cmd *cobra.Command, o *substrateSetupOptions) error {
 
 	if o.printPolicy {
 		if o.plan == "" {
-			return withExitCode(errors.New("--print-access-policies needs --plan FILE (the chart's plan.json)"), 2)
+			return cliusage.WithExitCode(errors.New("--print-access-policies needs --plan FILE (the chart's plan.json)"), 2)
 		}
 		plan, err := setup.LoadPlan(o.plan)
 		if err != nil {
-			return withExitCode(err, 2)
+			return cliusage.WithExitCode(err, 2)
 		}
 		text, err := setup.PrintAccessPolicies(plan)
 		if err != nil {
@@ -158,7 +159,7 @@ func runSubstrateSetup(cmd *cobra.Command, o *substrateSetupOptions) error {
 	}
 
 	if o.installFile == "" {
-		return withExitCode(errors.New("give the SubstrateInstall document with --install-file FILE"), 2)
+		return cliusage.WithExitCode(errors.New("give the SubstrateInstall document with --install-file FILE"), 2)
 	}
 	caps, bodyMode, err := substrateCapabilities(o.capabilities)
 	if err != nil {
@@ -171,9 +172,9 @@ func runSubstrateSetup(cmd *cobra.Command, o *substrateSetupOptions) error {
 	case errors.Is(err, os.ErrNotExist) && !o.remove:
 		existing, isNew = nil, true
 	case errors.Is(err, os.ErrNotExist):
-		return withExitCode(fmt.Errorf("the install file %s does not exist, so there is nothing to remove", o.installFile), 2)
+		return cliusage.WithExitCode(fmt.Errorf("the install file %s does not exist, so there is nothing to remove", o.installFile), 2)
 	default:
-		return withExitCode(fmt.Errorf("the install file cannot be read: %w", err), 2)
+		return cliusage.WithExitCode(fmt.Errorf("the install file cannot be read: %w", err), 2)
 	}
 
 	opts := setup.OverlayOptions{
@@ -196,11 +197,11 @@ func runSubstrateSetup(cmd *cobra.Command, o *substrateSetupOptions) error {
 		var taken *setup.ErrCalloutTaken
 		switch {
 		case errors.As(err, &taken):
-			return withExitCode(fmt.Errorf("not changed. %w", err), substrateExitRefused)
+			return cliusage.WithExitCode(fmt.Errorf("not changed. %w", err), substrateExitRefused)
 		case errors.Is(err, setup.ErrDataplane):
-			return withExitCode(fmt.Errorf("not changed. %w; change the dataplane or run without the DefenseClaw egress callout (substrate.extproc.enabled: false)", err), substrateExitRefused)
+			return cliusage.WithExitCode(fmt.Errorf("not changed. %w; change the dataplane or run without the DefenseClaw egress callout (substrate.extproc.enabled: false)", err), substrateExitRefused)
 		}
-		return withExitCode(err, 2)
+		return cliusage.WithExitCode(err, 2)
 	}
 
 	res := substrateSetupResult{InstallFile: o.installFile, Action: action, DryRun: o.dryRun, Changes: report.Changes, Notes: report.Notes}

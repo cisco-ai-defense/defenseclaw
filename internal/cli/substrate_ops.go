@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"os"
 	"sort"
 	"strings"
@@ -134,7 +135,7 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 		}
 	}
 	if modes > 1 {
-		return withExitCode(errors.New("choose one of --apply, --branch NAME or --patch-out FILE"), 2)
+		return cliusage.WithExitCode(errors.New("choose one of --apply, --branch NAME or --patch-out FILE"), 2)
 	}
 	s, err := substrateOpen(cmd, &f.com)
 	if err != nil {
@@ -238,7 +239,7 @@ func substrateApply(cmd *cobra.Command, dataDir, name string, mode workspace.App
 	if err != nil {
 		var sens *workspace.SensitiveError
 		if errors.As(err, &sens) {
-			return withExitCode(fmt.Errorf("%w; choose --branch NAME or --patch-out FILE to look at them first", err), substrateExitRefused)
+			return cliusage.WithExitCode(fmt.Errorf("%w; choose --branch NAME or --patch-out FILE to look at them first", err), substrateExitRefused)
 		}
 		return err
 	}
@@ -262,7 +263,7 @@ func runSubstrateCheckpoint(cmd *cobra.Command, out *substrateOutput, com *subst
 		return err
 	}
 	if every < 0 || (every > 0 && every < time.Minute) {
-		return withExitCode(errors.New("--every must be at least 1m, for example --every 1h"), 2)
+		return cliusage.WithExitCode(errors.New("--every must be at least 1m, for example --every 1h"), 2)
 	}
 	s, err := substrateOpen(cmd, com)
 	if err != nil {

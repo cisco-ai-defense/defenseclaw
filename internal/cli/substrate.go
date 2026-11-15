@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"io"
 	"os"
@@ -145,10 +146,10 @@ type substrateSession struct {
 var substrateOpen = func(cmd *cobra.Command, c *substrateCommon) (*substrateSession, error) {
 	name, actx, err := auth.ResolveContext(c.context)
 	if err != nil {
-		return nil, withExitCode(err, substrateExitSignedOut)
+		return nil, cliusage.WithExitCode(err, substrateExitSignedOut)
 	}
 	if err := actx.Validate(false); err != nil {
-		return nil, withExitCode(err, substrateExitRefused)
+		return nil, cliusage.WithExitCode(err, substrateExitRefused)
 	}
 	// A kube context signs in with the kubeconfig, a workload with the
 	// pipeline's token: neither keeps a secret, so neither needs a keychain.
@@ -168,7 +169,7 @@ var substrateOpen = func(cmd *cobra.Command, c *substrateCommon) (*substrateSess
 	src := auth.NewSource(name, actx, store, opts)
 	cl, err := api.New(api.Options{Base: actx.AdminURL, CAFile: actx.AdminCAFile, Token: src.Token})
 	if err != nil {
-		return nil, withExitCode(err, substrateExitRefused)
+		return nil, cliusage.WithExitCode(err, substrateExitRefused)
 	}
 	return &substrateSession{Name: name, Ctx: actx, Source: src, Bearer: src.Token, Client: cl}, nil
 }
@@ -206,15 +207,15 @@ func substrateFail(err error) error {
 		return nil
 	}
 	if errors.Is(err, auth.ErrNotSignedIn) || errors.Is(err, attach.ErrNotSignedIn) {
-		return withExitCode(err, substrateExitSignedOut)
+		return cliusage.WithExitCode(err, substrateExitSignedOut)
 	}
 	for _, refused := range []error{attach.ErrNotAllowed, attach.ErrNoActor, attach.ErrNotOffered, attach.ErrAttachOff} {
 		if errors.Is(err, refused) {
-			return withExitCode(err, substrateExitRefused)
+			return cliusage.WithExitCode(err, substrateExitRefused)
 		}
 	}
 	if e, ok := api.AsError(err); ok {
-		return withExitCode(errors.New(substrateAPIMessage(e)), substrateAPIExit(e))
+		return cliusage.WithExitCode(errors.New(substrateAPIMessage(e)), substrateAPIExit(e))
 	}
 	return err
 }

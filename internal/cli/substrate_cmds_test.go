@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -177,7 +178,7 @@ func TestSubstrateRefusalsAreInPlainWords(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("err = %v, want text %q", err, c.want)
 			}
-			if got := commandExitCode(err); got != c.wantCode {
+			if got := cliusage.ExitCode(err); got != c.wantCode {
 				t.Errorf("exit code = %d, want %d", got, c.wantCode)
 			}
 			if strings.Contains(err.Error(), "Bearer") {

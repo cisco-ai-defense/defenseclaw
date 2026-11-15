@@ -6,6 +6,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"testing"
 	"time"
 )
@@ -14,7 +15,7 @@ import (
 // finished task frees its own about a minute after it ends) instead of
 // failing at once; a pool that stays full still says so, in bounded time.
 func TestSubstrateBatchWaitsForAWorker(t *testing.T) {
-	full := withExitCode(substrateNoWorkerError{"the cluster has no free worker"}, 1)
+	full := cliusage.WithExitCode(substrateNoWorkerError{"the cluster has no free worker"}, 1)
 	tries, notes := 0, 0
 	code, err := substrateWaitForWorker(context.Background(), time.Second, 10*time.Millisecond, func() (int, error) {
 		tries++

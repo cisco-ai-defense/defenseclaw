@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"os"
 	"path/filepath"
@@ -294,11 +295,11 @@ type substrateRunTarget struct {
 func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent string) (substrateRunTarget, error) {
 	spec, err := sandboxcli.ResolveHarness(agent)
 	if err != nil {
-		return substrateRunTarget{}, withExitCode(err, 2)
+		return substrateRunTarget{}, cliusage.WithExitCode(err, 2)
 	}
 	note, proven := substrateProven[spec.Name]
 	if spec.Verification().Status == harness.Unverified && !proven {
-		return substrateRunTarget{}, withExitCode(fmt.Errorf("%s is not verified yet, so it does not run (%s)", spec.DisplayName, spec.Verification().Note), substrateExitRefused)
+		return substrateRunTarget{}, cliusage.WithExitCode(fmt.Errorf("%s is not verified yet, so it does not run (%s)", spec.DisplayName, spec.Verification().Note), substrateExitRefused)
 	}
 	t := substrateRunTarget{spec: spec, connName: spec.Name, note: note}
 	// No profile named: the cluster gives the person the profile their
@@ -396,7 +397,7 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	a, err = s.Client.Create(ctx, req)
 	if err != nil {
 		if e, ok := api.AsError(err); ok && e.Status == 503 && e.Reason == "no_free_worker" {
-			return a, withExitCode(substrateNoWorkerError{substrateNoWorkerMessage(ctx, s)}, substrateAPIExit(e))
+			return a, cliusage.WithExitCode(substrateNoWorkerError{substrateNoWorkerMessage(ctx, s)}, substrateAPIExit(e))
 		}
 		return a, substrateFail(err)
 	}
@@ -445,7 +446,7 @@ func substrateCloneInActor(ctx context.Context, cmd *cobra.Command, s *substrate
 	fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s in the agent...\n", safetext.Line(f.clone))
 	res, err := workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref)
 	if err != nil {
-		return withExitCode(err, 1)
+		return cliusage.WithExitCode(err, 1)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "Cloned into %s.\n", safetext.Line(res.Dir))
 	if res.Note != "" {
@@ -461,22 +462,22 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 	}
 	switch {
 	case f.task != "" && f.batch != "":
-		return withExitCode(errors.New("use --task for one task or --batch for a file of tasks, not both"), 2)
+		return cliusage.WithExitCode(errors.New("use --task for one task or --batch for a file of tasks, not both"), 2)
 	case f.detach && f.task == "" && f.batch == "":
-		return withExitCode(errors.New("--detach needs --task or --batch; to leave a running session press Ctrl-] instead"), 2)
+		return cliusage.WithExitCode(errors.New("--detach needs --task or --batch; to leave a running session press Ctrl-] instead"), 2)
 	case f.parallel != 0 && f.batch == "":
-		return withExitCode(errors.New("--parallel goes with --batch"), 2)
+		return cliusage.WithExitCode(errors.New("--parallel goes with --batch"), 2)
 	case f.clone != "" && f.noUpload:
-		return withExitCode(errors.New("--clone and --no-upload both say what the agent starts with; use one"), 2)
+		return cliusage.WithExitCode(errors.New("--clone and --no-upload both say what the agent starts with; use one"), 2)
 	case f.clone != "" && workspace.CheckCloneURL(f.clone) != nil:
-		return withExitCode(workspace.CheckCloneURL(f.clone), 2)
+		return cliusage.WithExitCode(workspace.CheckCloneURL(f.clone), 2)
 	case workspace.CheckCloneRef(f.ref) != nil:
-		return withExitCode(workspace.CheckCloneRef(f.ref), 2)
+		return cliusage.WithExitCode(workspace.CheckCloneRef(f.ref), 2)
 	case f.ref != "" && f.clone == "":
-		return withExitCode(errors.New("--ref goes with --clone URL"), 2)
+		return cliusage.WithExitCode(errors.New("--ref goes with --clone URL"), 2)
 	}
 	if _, err := substrateTransport(f.transport); err != nil {
-		return withExitCode(err, 2)
+		return cliusage.WithExitCode(err, 2)
 	}
 	s, err := substrateOpen(cmd, &f.com)
 	if err != nil {
@@ -526,7 +527,7 @@ func substrateCheckProject(dir string) error {
 	home, _ := os.UserHomeDir()
 	clean := filepath.Clean(dir)
 	if clean == filepath.VolumeName(clean)+string(filepath.Separator) || (home != "" && clean == filepath.Clean(home)) {
-		return withExitCode(fmt.Errorf("%s is not a project folder (it is your home or the top of a disk); change to a project folder, or use --clone URL or --no-upload", dir), 2)
+		return cliusage.WithExitCode(fmt.Errorf("%s is not a project folder (it is your home or the top of a disk); change to a project folder, or use --clone URL or --no-upload", dir), 2)
 	}
 	return nil
 }
@@ -585,11 +586,11 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	// with exit 0; it did not finish (GAP-0194).
 	if msg, refused := substrateTokenRefusal(ctx, s, started); refused {
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s\nReview it with: defenseclaw substrate logs %s\n", msg, a.Name)
-		return 1, withExitCode(errors.New("the task did not run: the cluster refused its calls"), 1)
+		return 1, cliusage.WithExitCode(errors.New("the task did not run: the cluster refused its calls"), 1)
 	}
 	if code != 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "The task ended with exit code %d. Review it with: defenseclaw substrate logs %s; bring changes home with: defenseclaw substrate pull %s\n", code, a.Name, a.Name)
-		return code, withExitCode(fmt.Errorf("the task failed (exit %d)", code), 1)
+		return code, cliusage.WithExitCode(fmt.Errorf("the task failed (exit %d)", code), 1)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "The task finished. Bring changes home with: defenseclaw substrate pull %s\n", a.Name)
 	return code, nil
@@ -635,11 +636,11 @@ func writeSubstrateJSONLine(w io.Writer, v any) error {
 func runSubstrateBatch(ctx context.Context, cmd *cobra.Command, s *substrateSession, t substrateRunTarget, f *substrateRunFlags, project string, agentArgs []string, asJSON bool) error {
 	data, err := os.ReadFile(f.batch)
 	if err != nil {
-		return withExitCode(fmt.Errorf("cannot read the batch file: %w", err), 2)
+		return cliusage.WithExitCode(fmt.Errorf("cannot read the batch file: %w", err), 2)
 	}
 	tasks, err := parseSubstrateBatch(data)
 	if err != nil {
-		return withExitCode(err, 2)
+		return cliusage.WithExitCode(err, 2)
 	}
 	par := f.parallel
 	if par <= 0 {
@@ -726,7 +727,7 @@ func runSubstrateBatch(ctx context.Context, cmd *cobra.Command, s *substrateSess
 		fmt.Fprintf(out, "\nSee them with: defenseclaw substrate status --batch %s\nBring the changes home with: defenseclaw substrate pull NAME (list the names with: defenseclaw substrate list --batch %s)\n", batchID, batchID)
 	}
 	if failed > 0 {
-		return withExitCode(fmt.Errorf("%d of %d task(s) did not finish well", failed, len(results)), 1)
+		return cliusage.WithExitCode(fmt.Errorf("%d of %d task(s) did not finish well", failed, len(results)), 1)
 	}
 	return nil
 }

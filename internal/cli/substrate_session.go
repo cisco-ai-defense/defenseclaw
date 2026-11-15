@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"os"
 	"strings"
@@ -109,15 +110,15 @@ pipeline's own identity, with a GitHub Actions token or a projected Kubernetes t
 // the command or the person to ask instead.
 func substrateLoginInfo(ctx context.Context, c *auth.Context, w io.Writer) error {
 	if err := c.Validate(false); err != nil {
-		return withExitCode(err, substrateExitRefused)
+		return cliusage.WithExitCode(err, substrateExitRefused)
 	}
 	cl, err := api.New(api.Options{Base: c.AdminURL, CAFile: c.AdminCAFile, Token: func(context.Context) (string, error) { return "", nil }})
 	if err != nil {
-		return withExitCode(err, substrateExitRefused)
+		return cliusage.WithExitCode(err, substrateExitRefused)
 	}
 	info, err := cl.Info(ctx)
 	if e, ok := api.AsError(err); ok && (e.Status == 404 || e.NotImplemented()) {
-		return withExitCode(errors.New("this cluster does not say how to sign in; give --issuer URL and --client-id ID too (your administrator has them)"), 2)
+		return cliusage.WithExitCode(errors.New("this cluster does not say how to sign in; give --issuer URL and --client-id ID too (your administrator has them)"), 2)
 	}
 	if err != nil {
 		return substrateFail(err)
@@ -131,14 +132,14 @@ func substrateLoginInfo(ctx context.Context, c *auth.Context, w io.Writer) error
 			c.ClientID = info.ClientID
 		}
 		if c.Issuer == "" || c.ClientID == "" {
-			return withExitCode(errors.New("the cluster does not name its whole sign-in server; give --issuer URL and --client-id ID (your administrator has them)"), 2)
+			return cliusage.WithExitCode(errors.New("the cluster does not name its whole sign-in server; give --issuer URL and --client-id ID (your administrator has them)"), 2)
 		}
 		fmt.Fprintf(w, "This cluster signs you in with %s.\n", safetext.Line(c.Issuer))
 		return nil
 	case "kubernetes":
-		return withExitCode(fmt.Errorf("this cluster signs you in with your Kubernetes identity. Run: defenseclaw substrate login --kube --admin-url %s", safetext.Line(c.AdminURL)), 2)
+		return cliusage.WithExitCode(fmt.Errorf("this cluster signs you in with your Kubernetes identity. Run: defenseclaw substrate login --kube --admin-url %s", safetext.Line(c.AdminURL)), 2)
 	}
-	return withExitCode(errors.New("this cluster has no sign-in set up yet; ask your administrator to set up substrate.identity.oidc"), substrateExitRefused)
+	return cliusage.WithExitCode(errors.New("this cluster has no sign-in set up yet; ask your administrator to set up substrate.identity.oidc"), substrateExitRefused)
 }
 
 func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
@@ -185,12 +186,12 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	set("kube-namespace", &c.KubeNamespace, f.kubeNS)
 	set("kube-service-account", &c.KubeServiceAccount, f.kubeSA)
 	if c.Kube && (f.workload || f.noBrowser || fl.Changed("issuer") || fl.Changed("client-id")) {
-		return withExitCode(errors.New("--kube signs in with your kubeconfig; leave --workload, --issuer, --client-id and --no-browser out"), 2)
+		return cliusage.WithExitCode(errors.New("--kube signs in with your kubeconfig; leave --workload, --issuer, --client-id and --no-browser out"), 2)
 	}
 	kube := c.Kube
 	workload := !kube && (f.workload || substrateWorkloadFromEnv(cmd) != nil)
 	if c.AdminURL == "" {
-		return withExitCode(errors.New("give the cluster address the first time: defenseclaw substrate login --admin-url https://HOST:PORT (your administrator has it)"), 2)
+		return cliusage.WithExitCode(errors.New("give the cluster address the first time: defenseclaw substrate login --admin-url https://HOST:PORT (your administrator has it)"), 2)
 	}
 	if !workload && !kube && (c.Issuer == "" || c.ClientID == "") {
 		if err := substrateLoginInfo(ctx, &c, cmd.ErrOrStderr()); err != nil {
@@ -198,7 +199,7 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 		}
 	}
 	if err := c.Validate(!workload && !kube); err != nil {
-		return withExitCode(err, substrateExitRefused)
+		return cliusage.WithExitCode(err, substrateExitRefused)
 	}
 	persist := !workload && !kube
 	var store auth.Store
@@ -216,7 +217,7 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 		if pin, err = auth.KubeVerifyEndpoint(ctx, c.KubeOptions(), c.AdminURL, c.KubeNamespace); err != nil {
 			var found *auth.KubeNamespaceFound
 			if errors.As(err, &found) {
-				return withExitCode(fmt.Errorf("%s: %s", err.Error(), substrateLoginAgainWith(fl, "kube-namespace", found.Namespace)), 2)
+				return cliusage.WithExitCode(fmt.Errorf("%s: %s", err.Error(), substrateLoginAgainWith(fl, "kube-namespace", found.Namespace)), 2)
 			}
 			return substrateFail(err)
 		}
@@ -290,7 +291,7 @@ func newSubstrateLogoutCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			name, c, err := auth.ResolveContext(com.context)
 			if err != nil {
-				return withExitCode(err, substrateExitSignedOut)
+				return cliusage.WithExitCode(err, substrateExitSignedOut)
 			}
 			store, err := auth.OpenStore()
 			if err != nil {
@@ -335,7 +336,7 @@ func newSubstrateWhoamiCmd() *cobra.Command {
 				return substrateFail(err)
 			}
 			if tok == nil {
-				return withExitCode(auth.ErrNotSignedIn, substrateExitSignedOut)
+				return cliusage.WithExitCode(auth.ErrNotSignedIn, substrateExitSignedOut)
 			}
 			w := cmd.OutOrStdout()
 			if asJSON {

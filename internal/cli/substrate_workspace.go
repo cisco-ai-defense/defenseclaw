@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -81,7 +82,7 @@ func substrateUploadFolder(ctx context.Context, cmd *cobra.Command, s *substrate
 	if err != nil {
 		var big *workspace.TooLargeError
 		if errors.As(err, &big) {
-			return withExitCode(big, substrateExitRefused)
+			return cliusage.WithExitCode(big, substrateExitRefused)
 		}
 		return fmt.Errorf("could not copy the folder into the agent: %w", err)
 	}

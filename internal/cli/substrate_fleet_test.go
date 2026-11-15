@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -143,7 +144,7 @@ func TestSubstrateVerifyExitCodes(t *testing.T) {
 		fakeKubectl(t, nil)
 		bad := writeInstall(t, strings.Replace(fleetInstallOK, "atenet.egress.additionalExtprocService: defenseclaw-system/defenseclaw-callout:9443\n", "atenet.egress.additionalExtprocService: other/callout:1\n", 1))
 		out, _, err := runSubstrate(t, newSubstrateVerifyCmd(), "--install-file", bad, "--json")
-		if err == nil || commandExitCode(err) != 1 {
+		if err == nil || cliusage.ExitCode(err) != 1 {
 			t.Fatalf("err = %v, want exit 1", err)
 		}
 		var doc fleet.VerifyDocument
@@ -154,20 +155,20 @@ func TestSubstrateVerifyExitCodes(t *testing.T) {
 	t.Run("an unreachable cluster is exit 75 with no document", func(t *testing.T) {
 		fakeKubectl(t, errors.New("the connection to the server was refused"))
 		out, _, err := runSubstrate(t, newSubstrateVerifyCmd(), "--install-file", install, "--json")
-		if err == nil || commandExitCode(err) != substrateExitUnreachable || strings.TrimSpace(out) != "" {
-			t.Fatalf("err = %v, code %d, out %q", err, commandExitCode(err), out)
+		if err == nil || cliusage.ExitCode(err) != substrateExitUnreachable || strings.TrimSpace(out) != "" {
+			t.Fatalf("err = %v, code %d, out %q", err, cliusage.ExitCode(err), out)
 		}
 	})
 	t.Run("a missing install file is a usage error", func(t *testing.T) {
 		fakeKubectl(t, nil)
 		_, _, err := runSubstrate(t, newSubstrateVerifyCmd())
-		if err == nil || commandExitCode(err) != 2 || !strings.Contains(err.Error(), "--install-file") {
+		if err == nil || cliusage.ExitCode(err) != 2 || !strings.Contains(err.Error(), "--install-file") {
 			t.Fatalf("err = %v", err)
 		}
 	})
 	t.Run("a bad output format is a usage error", func(t *testing.T) {
 		_, _, err := runSubstrate(t, newSubstrateVerifyCmd(), "--output", "xml")
-		if err == nil || commandExitCode(err) != 2 {
+		if err == nil || cliusage.ExitCode(err) != 2 {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -191,7 +192,7 @@ func TestSubstrateStatusClusterPrintsTheHealthDocument(t *testing.T) {
 	if doc.Atespaces == nil || doc.Checks == nil {
 		t.Errorf("lists must not be null: %s", out)
 	}
-	if _, _, err := runSubstrate(t, newSubstrateStatusCmd(), "--cluster", "somename"); err == nil || commandExitCode(err) != 2 {
+	if _, _, err := runSubstrate(t, newSubstrateStatusCmd(), "--cluster", "somename"); err == nil || cliusage.ExitCode(err) != 2 {
 		t.Errorf("--cluster with a name must be a usage error, got %v", err)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"net"
 	"net/http"
@@ -196,7 +197,7 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 	if !rep.OK {
 		// The report already says what failed.
 		cmd.SilenceErrors = true
-		return withExitCode(fmt.Errorf("%d check(s) failed", rep.Problems), 1)
+		return cliusage.WithExitCode(fmt.Errorf("%d check(s) failed", rep.Problems), 1)
 	}
 	return nil
 }

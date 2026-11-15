@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"net/url"
 	"os"
@@ -153,15 +154,15 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	var o fleet.Observed
 	var r fleet.Report
 	if f.installFile == "" {
-		return o, r, withExitCode(errors.New("give the SubstrateInstall file you gave ate-setup with --install-file FILE: the callout and router settings are read from it"), 2)
+		return o, r, cliusage.WithExitCode(errors.New("give the SubstrateInstall file you gave ate-setup with --install-file FILE: the callout and router settings are read from it"), 2)
 	}
 	install, err := os.ReadFile(f.installFile)
 	if err != nil {
-		return o, r, withExitCode(fmt.Errorf("cannot read the install file: %w", err), 2)
+		return o, r, cliusage.WithExitCode(fmt.Errorf("cannot read the install file: %w", err), 2)
 	}
 	settings, err := setup.InstallSettings(install)
 	if err != nil {
-		return o, r, withExitCode(err, 2)
+		return o, r, cliusage.WithExitCode(err, 2)
 	}
 	cctx, cancel := context.WithTimeout(ctx, f.timeout)
 	defer cancel()
@@ -250,7 +251,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	if f.configFile != "" {
 		b, err := os.ReadFile(f.configFile)
 		if err != nil {
-			return o, r, withExitCode(fmt.Errorf("cannot read the config file: %w", err), 2)
+			return o, r, cliusage.WithExitCode(fmt.Errorf("cannot read the config file: %w", err), 2)
 		}
 		cfgText = string(b)
 	} else {
@@ -486,7 +487,7 @@ could not be reached; there is no document, retry later. With --json it prints t
 func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf *substrateClusterFlags) error {
 	asJSON, err := out.wantJSON()
 	if err != nil {
-		return withExitCode(err, 2)
+		return cliusage.WithExitCode(err, 2)
 	}
 	ctx, stop := substrateContext(cmd)
 	defer stop()
@@ -498,7 +499,7 @@ func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf
 	if err != nil {
 		var un *errClusterUnreachable
 		if errors.As(err, &un) {
-			return withExitCode(err, substrateExitUnreachable)
+			return cliusage.WithExitCode(err, substrateExitUnreachable)
 		}
 		return err
 	}
@@ -518,7 +519,7 @@ func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf
 		printSubstrateFleet(w, kind, header, doc, checks, ok, r.InventoryNote)
 	}
 	if kind == "verify" && !ok {
-		return withExitCode(errors.New("a cluster check failed"), 1)
+		return cliusage.WithExitCode(errors.New("a cluster check failed"), 1)
 	}
 	return nil
 }

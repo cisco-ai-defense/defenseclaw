@@ -25,6 +25,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,7 +71,7 @@ empty, and sends nothing. Needs an administrator sign-in.`,
 			path := args[0]
 			f, size, err := openSubstrateBundle(path)
 			if err != nil {
-				return withExitCode(err, 2)
+				return cliusage.WithExitCode(err, 2)
 			}
 			defer f.Close()
 			name := filepath.Base(path)
@@ -189,10 +190,10 @@ func atespaceWords(atespaces []string) string {
 // no bundle routes yet.
 func substrateBundleFail(err error) error {
 	if e, ok := api.AsError(err); ok && (e.NotImplemented() || e.Status == 404) {
-		return withExitCode(errors.New("this cluster does not accept bundles yet; ask your administrator to upgrade DefenseClaw on it"), substrateExitRefused)
+		return cliusage.WithExitCode(errors.New("this cluster does not accept bundles yet; ask your administrator to upgrade DefenseClaw on it"), substrateExitRefused)
 	}
 	if errors.Is(err, api.ErrBundleTooLarge) {
-		return withExitCode(err, 2)
+		return cliusage.WithExitCode(err, 2)
 	}
 	return substrateFail(err)
 }

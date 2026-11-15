@@ -19,6 +19,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -44,7 +45,7 @@ sign-in.`,
 				return err
 			}
 			if strings.TrimSpace(stage) == "" {
-				return withExitCode(errors.New("name the stage to roll back with --stage (see: defenseclaw substrate bundle status)"), 2)
+				return cliusage.WithExitCode(errors.New("name the stage to roll back with --stage (see: defenseclaw substrate bundle status)"), 2)
 			}
 			s, err := substrateOpen(cmd, &com)
 			if err != nil {

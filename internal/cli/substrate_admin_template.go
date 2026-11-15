@@ -19,6 +19,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"strings"
 
@@ -214,7 +215,7 @@ func newSubstrateTemplatePassthrough(name, short, long, example string) *cobra.C
 			}
 			// templatecli already printed what went wrong.
 			cmd.SilenceErrors = true
-			return withExitCode(fmt.Errorf("template %s ended with code %d", name, code), code)
+			return cliusage.WithExitCode(fmt.Errorf("template %s ended with code %d", name, code), code)
 		},
 	}
 }
