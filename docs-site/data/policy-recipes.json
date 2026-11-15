@@ -5566,6 +5566,35 @@
       ]
     },
     {
+      "id": "RECIPE-PAGE-SCRIPT-SESSION-EGRESS",
+      "title": "Browser page script sends session state to another host",
+      "kind": "rule:command",
+      "body": {
+        "id": "PAGE-SCRIPT-SESSION-EGRESS",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Browser page script sends session state to another host",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "exfiltration",
+          "browser",
+          "session",
+          "mcp"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "exfiltration",
+        "browser",
+        "session",
+        "mcp"
+      ]
+    },
+    {
       "id": "RECIPE-ENT-BULK-SSN",
       "title": "US Social Security Number",
       "kind": "rule:enterprise-data",

@@ -202,6 +202,7 @@ var defaultRuleCategories = sync.OnceValue(func() []ruleCategory {
 				{ID: "MCP-SEND-COLLECTOR", Pattern: regexp.MustCompile("a^"), ToolCallOnly: true, Title: "Tool call sends to a paste, file-drop or webhook-catcher host", Severity: "HIGH", Confidence: 0.85, Tags: []string{"exfiltration", "network", "mcp"}},
 				{ID: "MCP-SETTING-DOWNGRADE", Pattern: regexp.MustCompile("a^"), ToolCallOnly: true, Title: "Tool call turns a security control off", Severity: "HIGH", Confidence: 0.8, Tags: []string{"defense-evasion", "configuration", "mcp"}},
 				{ID: "MCP-CODE-DECODE-EXEC", Pattern: regexp.MustCompile("a^"), ToolCallOnly: true, Title: "Code tool runs decoded text", Severity: "HIGH", Confidence: 0.85, Tags: []string{"execution", "obfuscation", "mcp"}},
+				{ID: "PAGE-SCRIPT-SESSION-EGRESS", Pattern: regexp.MustCompile("a^"), ToolCallOnly: true, Title: "Browser page script sends session state to another host", Severity: "HIGH", Confidence: 0.8, Tags: []string{"exfiltration", "browser", "session", "mcp"}},
 			},
 		},
 		{

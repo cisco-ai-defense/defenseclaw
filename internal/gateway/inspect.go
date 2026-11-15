@@ -939,6 +939,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		LegacyText:         string(req.Args),
 		Connector:          req.Connector,
 		EnforcementCapable: true,
+		sessionID:          req.SessionID,
 		sendDestination:    req.sendDestination,
 	}
 	dialectHint := a.agentHookWindowsDialectHint(ctx)

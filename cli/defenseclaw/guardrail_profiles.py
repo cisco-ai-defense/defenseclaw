@@ -133,6 +133,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/partjoin-pf-rel 54d074e01f x int/r110-b11d3 664a7caa8c): the pjb11 packs with
             # the delta-3 g596 self-protection rules.
             "d04b477b9e8776d7cd94385cccfebb18fa498091719fab8357f2a0491ce1526b",
+            # 1.0.10 (s7/browserjs merged with int/r110-b11d3 a35d0653ef): PAGE-SCRIPT-SESSION-EGRESS (alert only).
+            "1c75c960dc15577086448f319605479c553acbcbd600dfa5102ed2ecdbe0936b",
         }
     ),
     "permissive": frozenset(
@@ -222,6 +224,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/partjoin-pf-rel 54d074e01f x int/r110-b11d3 664a7caa8c): the pjb11 packs with
             # the delta-3 g596 self-protection rules.
             "41971070bc6c01d5dedd83191c6a098b61125447a23d0d409ff5545cad5fc6ea",
+            # 1.0.10 (s7/browserjs merged with int/r110-b11d3 a35d0653ef): PAGE-SCRIPT-SESSION-EGRESS (alert only).
+            "4cd86a37760c2ae72de899e9b8df0080ba2bbd96b89dab0e735b11aa6e907c29",
         }
     ),
     "strict": frozenset(
@@ -310,6 +314,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/partjoin-pf-rel 54d074e01f x int/r110-b11d3 664a7caa8c): the pjb11 packs with
             # the delta-3 g596 self-protection rules.
             "b8448b37aaa68a8fe573804ed2ce53cc0bb6c7e25e6c47c9096af26b14899ce1",
+            # 1.0.10 (s7/browserjs merged with int/r110-b11d3 a35d0653ef): PAGE-SCRIPT-SESSION-EGRESS (alert only).
+            "3c02f7c449076e385af4548ec6019d7ca821847b888a432a254be88bab3796fe",
         }
     ),
 }

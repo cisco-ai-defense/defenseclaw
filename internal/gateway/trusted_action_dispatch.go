@@ -161,6 +161,9 @@ type trustedActionRequest struct {
 	EnforcementCapable bool
 	// StrictPolicy grades an unverifiable extra argument as a block.
 	StrictPolicy bool
+	// sessionID is the connector's session of the call, for the checks that
+	// follow a session across calls (the page a browser tool has open).
+	sessionID string
 	// ManagedInstall is set for a call judged by a managed enterprise install:
 	// content the rules could not prove is judged as the strict tier judges it,
 	// because a managed device fails closed.
