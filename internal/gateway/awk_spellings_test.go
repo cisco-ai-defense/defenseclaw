@@ -131,6 +131,14 @@ func awkSpellings() []awkSpelling {
 		{id: "P-envprefix-I", cmd: `LC_ALL=C awk '` + awkTouchLink + `' ordinary/a.txt`, want: "block"},
 		{id: "T-envprefix-F", cmd: `LC_ALL=C awk -f benign.awk ordinary/a.txt`, files: map[string]string{"benign.awk": `{print $1}`}, want: "allow"},
 		{id: "T-nice-F", cmd: `nice awk -f benign.awk ordinary/a.txt`, files: map[string]string{"benign.awk": `{print $1}`}, want: "allow"},
+		// GAP-0734: a program file between the 16 KiB script read and the
+		// 64 KiB awk bound is read, and a command at the start of a file past
+		// the awk bound is judged as the direct command (the rest is the unknown
+		// tier, never a refusal of the whole file).
+		{id: "R30000", cmd: `awk -f big30.awk ordinary/a.txt`, files: map[string]string{"big30.awk": `{print $1}` + strings.Repeat(" ", 30000)}, want: "allow"},
+		{id: "R63000", cmd: `awk -f big63.awk ordinary/a.txt`, files: map[string]string{"big63.awk": `{print $1}` + strings.Repeat(" ", 63000)}, want: "allow"},
+		{id: "Q06", cmd: `awk -f big200.awk`, files: map[string]string{"big200.awk": awkTouchLink + strings.Repeat(" ", 200000)}, want: "block"},
+		{id: "Q06-mid", cmd: `awk -f big40.awk`, files: map[string]string{"big40.awk": awkTouchLink + strings.Repeat(" ", 40000)}, want: "block"},
 	}
 	return rows
 }

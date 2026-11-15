@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
@@ -84,9 +85,13 @@ const TruncatedKey = "\x00truncated"
 const AwkFilesKey = "\x00awk-files"
 
 // ReadProgramFile reads the program file of an awk call as the hook client
-// does: the file the system opens for the name, as the user, up to the size
-// bound of a script body.
-func ReadProgramFile(name, cwd string) (string, bool) { return readActionScript(name, cwd) }
+// does: the file the system opens for the name, as the user. A file past the
+// awk program bound (awkprog.MaxProgramBytes) is read to that bound and one
+// byte more, so the reading judges what the start of the program holds and
+// reports the rest as truncated (rel-1-0-10:GAP-0734).
+func ReadProgramFile(name, cwd string) (string, bool) {
+	return readActionScriptWith(name, cwd, indirectRead{limit: awkprog.MaxProgramBytes, prefix: true})
+}
 
 // PatchCompleteKey is positive hook-side proof that every apply_patch (or
 // Hermes V4A patch) directive was parsed and each target was resolved in the
@@ -2244,7 +2249,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					// that reading, and behind ProtectHome reads its targets
 					// only from this map (GAP-0499).
 					awkTwin := actionfacts.AwkCommandTwinFiles(command, func(name string) (string, bool) {
-						return readActionScript(name, cwd)
+						return ReadProgramFile(name, cwd)
 					})
 					// An awk call that is the whole command and starts one touch -h of
 					// a link itself is as safe as the plain call: the plain call lists
