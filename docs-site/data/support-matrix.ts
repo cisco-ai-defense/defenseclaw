@@ -82,6 +82,7 @@ export const generated: GeneratedStatus = {
     judge: { oss: 'SSP', enterprise: 'PPP' },
     redaction: { oss: 'SSP', enterprise: 'NNN' },
     sandboxes: { oss: 'PPU', enterprise: 'SSU' },
+    substrate: { oss: 'PPP', enterprise: 'PPP' },
     acp: { oss: 'PSP', enterprise: 'NNN' },
     'ai-discovery': { oss: 'SSS', enterprise: 'SSP' },
     'runtime-discovery': { oss: 'SSS', enterprise: 'SSP' },
@@ -394,6 +395,13 @@ const featureSources: FeatureSource[] = [
     href: '/docs/sandboxes',
     group: 'Protect',
     note: 'Linux and macOS only. A standalone managed install runs sandboxes under the policy of the person’s directory group; Windows is refused. See Sandboxes on managed computers.',
+  },
+  {
+    id: 'substrate',
+    label: 'Agent Substrate (cloud sandboxes)',
+    href: '/docs/substrate',
+    group: 'Protect',
+    note: 'Runs the agent in a Kubernetes cluster; only the launcher runs on your computer. Preview until the live runs in the Substrate test plan pass on every launcher OS.',
   },
   {
     id: 'acp',

@@ -113,17 +113,17 @@ func ProfileMeetMembers(name string) ([]string, bool) {
 }
 
 // meetSandboxFloor is SandboxFloor for the meet of members: openshell.admin
-// tightened by every member's sandbox section (TightenOpenShellAdmin, whose
+// tightened by every member's sandbox section (TightenSandboxAdmin, whose
 // rules are a meet: false wins, unions of blocks, intersections of allows).
 // Where no sandbox satisfies every member (a contradiction, or two members
 // that require different packs), the strictest floor applies: no sandbox is
 // allowed, and an agent a member requires in a sandbox does not run on the
 // host either (closedMeetSandboxFloor). The contact text stays
 // openshell.admin's, so no member's text is shown to the caller.
-func (c *Config) meetSandboxFloor(members []string) (OpenShellAdminConfig, string, error) {
-	f, err := TightenOpenShellAdmin(c.OpenShell.Admin, nil)
+func (c *Config) meetSandboxFloor(members []string) (SandboxAdminConfig, string, error) {
+	f, err := TightenSandboxAdmin(c.OpenShell.Admin, nil)
 	if err != nil {
-		return OpenShellAdminConfig{}, "", err
+		return SandboxAdminConfig{}, "", err
 	}
 	pack := ""
 	closed := false
@@ -133,7 +133,7 @@ func (c *Config) meetSandboxFloor(members []string) (OpenShellAdminConfig, strin
 		}
 		p, ok := c.Guardrail.Profiles[member]
 		if !ok {
-			return OpenShellAdminConfig{}, "", fmt.Errorf("guardrail profile %q is not defined", member)
+			return SandboxAdminConfig{}, "", fmt.Errorf("guardrail profile %q is not defined", member)
 		}
 		if p.Sandbox == nil {
 			continue
@@ -144,7 +144,7 @@ func (c *Config) meetSandboxFloor(members []string) (OpenShellAdminConfig, strin
 			}
 			pack = required
 		}
-		next, tightenErr := TightenOpenShellAdmin(f, p.Sandbox)
+		next, tightenErr := TightenSandboxAdmin(f, p.Sandbox)
 		if tightenErr != nil {
 			closed = true
 			f = closedMeetSandboxFloor(f, p.Sandbox)
@@ -158,7 +158,7 @@ func (c *Config) meetSandboxFloor(members []string) (OpenShellAdminConfig, strin
 	f.RequestAccess = c.OpenShell.Admin.RequestAccess
 	digest, err := sandboxFloorDigest(f, c.OpenShell.PackDir)
 	if err != nil {
-		return OpenShellAdminConfig{}, "", err
+		return SandboxAdminConfig{}, "", err
 	}
 	return f, digest, nil
 }
@@ -166,9 +166,9 @@ func (c *Config) meetSandboxFloor(members []string) (OpenShellAdminConfig, strin
 // closedMeetSandboxFloor is f with no sandbox allowed: the strictest floor,
 // keeping the agents f and overlay require in a sandbox, which then run
 // nowhere.
-func closedMeetSandboxFloor(f OpenShellAdminConfig, overlay *OpenShellAdminConfig) OpenShellAdminConfig {
+func closedMeetSandboxFloor(f SandboxAdminConfig, overlay *SandboxAdminConfig) SandboxAdminConfig {
 	off := false
-	out := cloneOpenShellAdmin(f)
+	out := cloneSandboxAdmin(f)
 	if overlay != nil {
 		out.RequiredFor = unionStrings(out.RequiredFor, overlay.RequiredFor, NormalizeConnectorName)
 		out.EgressBlock = unionStrings(out.EgressBlock, overlay.EgressBlock, NormalizeOpenShellEgressPattern)

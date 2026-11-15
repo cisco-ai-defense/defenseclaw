@@ -149,3 +149,31 @@ func TestHardcodedCredentialRuleStandInBesideRandomPiece(t *testing.T) {
 		})
 	}
 }
+
+// A secret that happens to start with words stays a finding: the placeholder
+// rule reads a value as a stand-in only when every piece is letters or one
+// repeated character. A random suffix with digits, a hex run and a base64 run
+// after the same hyphenated prefix are real-shaped secrets (GAP-0935).
+func TestHardcodedCredentialRuleKeepsRealShapedPrefixedSecrets(t *testing.T) {
+	credential := credentialRule(t)
+	const prefix = "codeguard-private-value-"
+	for _, tc := range []struct {
+		name, value string
+		fires       bool
+	}{
+		{"mixed case and digits", prefix + "Kq7vZ3mX9bTn4RwP2sLd8HcY", true},
+		{"mixed case digits after a short prefix", "k-Kq7vZ3mX9bTn4RwP2sLd8HcY", true},
+		{"hex run", prefix + "9f8e7d6c5b4a39281706f5e4d3c2b1a0", true},
+		{"long hex run", prefix + "3b7e1c9a5d2f48608e1b4c7a9d3f5e2160b8c4a7", true},
+		{"base64 run", prefix + "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7d", true},
+		{"base64 run with symbols", prefix + "aB3d+E5fG/7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7d==", true},
+		{"repeated character is a stand-in", prefix + "qqqqqqqqqqqqqqqqqqqqqqqq", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "api_key = \"" + tc.value + "\""
+			if got := credential.matches(line); got != tc.fires {
+				t.Fatalf("matches(%q) = %t, want %t", line, got, tc.fires)
+			}
+		})
+	}
+}

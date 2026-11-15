@@ -125,7 +125,7 @@ func (c *KiroConnector) SandboxArtifacts(target SandboxRenderTarget) (SandboxArt
 		SandboxFile{Path: KiroSandboxAgentPath, Mode: 0o644, Owner: SandboxOwnerRoot, Data: agent},
 		SandboxFile{Path: KiroSandboxSettingsPath, Mode: 0o644, Owner: SandboxOwnerUser, Data: append(settings, '\n')},
 	)
-	return finalizeSandboxArtifacts(SandboxArtifacts{
+	return finalizeSandboxArtifactsFor(rt, SandboxArtifacts{
 		Connector:    c.Name(),
 		HookContract: rt.contract.ContractID,
 		TamperTier:   SandboxTamperTierUser,

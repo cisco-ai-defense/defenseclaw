@@ -1807,7 +1807,7 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 	var allFindings []string
 	var allReasons []string
 	totalEntityCount := 0
-	allFailed := true
+	allFailed, anyFailed := true, false
 	findingSeverity := map[string]string{}
 
 	for _, v := range verdicts {
@@ -1826,12 +1826,15 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 		}
 		if !v.JudgeFailed {
 			allFailed = false
+		} else {
+			anyFailed = true
 		}
 	}
 
 	if best.Action == "allow" && len(allFindings) == 0 {
 		v := allowVerdict("llm-judge")
 		v.JudgeFailed = allFailed
+		v.judgeDegraded = anyFailed
 		return v
 	}
 
@@ -1843,6 +1846,7 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 		EntityCount:     totalEntityCount,
 		Scanner:         "llm-judge",
 		findingSeverity: findingSeverity,
+		judgeDegraded:   anyFailed,
 	}
 }
 
@@ -2387,13 +2391,46 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	return sampleText
 }
 
+// judgeIntentStores, when set (a gateway replica on Agent Substrate), gives
+// each judge its session context store by role in place of a process-local
+// one, so every replica judges an actor's call with the same intent.
+var judgeIntentStores atomic.Pointer[func(role string) intentstore.Store]
+
+// Judge roles for judgeIntentStores: the guardrail judge and the hook lane's
+// decision-only judge keep separate contexts, as they do on a host.
+const (
+	judgeIntentRoleJudge    = "judge"
+	judgeIntentRoleDecision = "decision"
+)
+
+// setJudgeIntentStores sets (nil clears) the store of judges that have none
+// yet.
+func setJudgeIntentStores(stores func(role string) intentstore.Store) {
+	if stores == nil {
+		judgeIntentStores.Store(nil)
+		return
+	}
+	judgeIntentStores.Store(&stores)
+}
+
 // intentStore is the judge's session context store: the one SetIntentStore
-// gave it, else a process-local store made on first use (a judge built as a
-// struct literal works too).
+// gave it, else the shared one for its role (judgeIntentStores), else a
+// process-local store made on first use (a judge built as a struct literal
+// works too).
 func (j *LLMJudge) intentStore() intentstore.Store {
 	j.intentsMu.Lock()
 	defer j.intentsMu.Unlock()
 	if j.intents == nil {
+		if stores := judgeIntentStores.Load(); stores != nil {
+			role := judgeIntentRoleJudge
+			if j.decisionOnly {
+				role = judgeIntentRoleDecision
+			}
+			if store := (*stores)(role); store != nil {
+				j.intents = store
+				return j.intents
+			}
+		}
 		j.intents = intentstore.NewProcess(intentstore.Limits{
 			MaxSessions: maxToolJudgeContextSessions,
 			MaxPrior:    maxToolJudgePriorEvents,

@@ -4123,6 +4123,20 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
         decisions.insert(min(int(held.get("index") or 0), len(decisions)), value)
         taken.add(name)
         returned.append(held)
+    # Substrate profile assignments set aside whole (upgrade_shim.NEWER_ITEM_KEYS) go back to
+    # their places in their original order: the lowest index first, each where it was.
+    held_assignments = record.get("assignments") if isinstance(record.get("assignments"), list) else []
+    assignments = config_value(current, "guardrail.profile_assignments")
+    assignments = list(assignments) if isinstance(assignments, list) else []
+    returned_assignments: list[dict] = []
+    kept_assignments: list[dict] = []
+    for held in sorted(
+        (a for a in held_assignments if isinstance(a, dict) and isinstance(a.get("value"), dict)),
+        key=lambda a: int(a.get("index") or 0),
+    ):
+        if held["value"] not in assignments:
+            assignments.insert(min(int(held.get("index") or 0), len(assignments)), held["value"])
+        returned_assignments.append(held)
     # rel-1-0-10:GAP-0769: routing the downgrade switched off for the older release (it could not
     # run the in-process classifier) is switched back on with that classifier.
     switched = record.get("switched") if isinstance(record.get("switched"), dict) else {}
@@ -4176,18 +4190,44 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
                     f"Could not put back the routing decision {held['value'].get('name')} ({plain_error(exc)}). "
                     f"It is kept in {path}: {json.dumps(held['value'], sort_keys=True)}"
                 )
+    if returned_assignments:
+        # Apart from the rest, as the decisions: an assignment whose profile is gone is refused
+        # alone and kept in the record with its value.
+        try:
+            apply(
+                [Change("guardrail.profile_assignments", assignments)],
+                ACTOR_MIGRATION,
+                f"put back Substrate profile assignments after the downgrade to {record.get('for') or 'an older release'}",
+                path=config_path,
+            )
+            ux.ok(
+                "Put back the Substrate profile assignments of "
+                + ", ".join(str(a.get("profile")) for a in returned_assignments),
+                indent="    ",
+            )
+        except Exception as exc:  # noqa: BLE001 - kept in the record, named with its value
+            kept_assignments += returned_assignments
+            for held in returned_assignments:
+                ux.warn(
+                    f"Could not put back the Substrate profile assignment of {held.get('profile')} "
+                    f"({plain_error(exc)}). It is kept in {path}: {json.dumps(held['value'], sort_keys=True)}"
+                )
     later = {key: value for key, value in keys.items() if newer_config_key(key) is None or key in moved}
     try:
-        if later or kept_decisions:
+        if later or kept_decisions or kept_assignments:
             from defenseclaw.upgrade_shim import _write_private_json
 
-            kept = {key: value for key, value in record.items() if key not in ("items", "decisions", "switched")}
+            kept = {
+                key: value for key, value in record.items() if key not in ("items", "decisions", "assignments", "switched")
+            }
             kept["keys"] = later
             later_items = {item: name for item, name in items.items() if any(k.startswith(item + ".") for k in later)}
             if later_items:
                 kept["items"] = later_items
             if kept_decisions:
                 kept["decisions"] = kept_decisions
+            if kept_assignments:
+                kept["assignments"] = kept_assignments
             _write_private_json(path, kept)
         else:
             os.remove(path)

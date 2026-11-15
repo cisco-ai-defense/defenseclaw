@@ -586,19 +586,3 @@ func ollamaPieces(body []byte, withTools bool) []responsePiece {
 	}
 	return out
 }
-
-// passthroughStreamEventData is the event payload of one stream line: the
-// data of an SSE data line (with or without the space after the colon), or
-// an NDJSON line whole. ok is false for a line that carries no event.
-func passthroughStreamEventData(line string, ndjson bool) (string, bool) {
-	line = strings.TrimSpace(line)
-	if ndjson {
-		return line, line != ""
-	}
-	data, ok := strings.CutPrefix(line, "data:")
-	if !ok {
-		return "", false
-	}
-	data = strings.TrimSpace(data)
-	return data, data != "" && data != "[DONE]"
-}

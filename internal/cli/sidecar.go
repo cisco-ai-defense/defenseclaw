@@ -135,6 +135,10 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("sidecar: init: %w", err)
 	}
+	if sidecarSubstrateBuild != nil {
+		// serve --substrate (substrate_serve.go).
+		sc.SetSubstrate(sidecarSubstrateBuild)
+	}
 
 	// Deferred-config health-surface wiring. Only under managed_enterprise: mark the daemon-side of
 	// the collapsing rule loaded (we reached this point AFTER

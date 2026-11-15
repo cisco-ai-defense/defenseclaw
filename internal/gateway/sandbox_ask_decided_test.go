@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
 func TestManagedAskDecisionsWithoutGatewayRouteCountOnce(t *testing.T) {
@@ -128,7 +129,7 @@ func TestManagedSandboxAskDecidedRecords(t *testing.T) {
 		want []string
 	}{
 		"host port session allow": {
-			req: sandboxrelay.DecisionRequest{Registration: reg.ID, Kind: sandboxrelay.DecisionEgressAllow, Host: sandboxHostAlias,
+			req: sandboxrelay.DecisionRequest{Registration: reg.ID, Kind: sandboxrelay.DecisionEgressAllow, Host: sandboxruntime.OpenShellHostAlias,
 				Scope: sandboxrelay.DecisionScopeSession, ApprovalID: "ap_0e0ba4fe7acaf1f0", Port: 25432},
 			want: []string{`"defenseclaw.approval.result":"approved"`, `"defenseclaw.sandbox.approval.kind":"host_port"`,
 				`"defenseclaw.sandbox.approval.scope":"sandbox"`, `"defenseclaw.sandbox.decision.stored":false`, `"server.port":25432`,
@@ -201,7 +202,7 @@ func TestSandboxAuthorityDecisionsAreRecorded(t *testing.T) {
 	resp := f.live(sbxAlice, 1)
 	decide := func(kind, scope string, port int) int {
 		return f.do(sbxAlice, http.MethodPost, sandboxrelay.PathDecisions, sandboxrelay.DecisionRequest{
-			V: 1, Registration: resp.Registration.ID, Kind: kind, Host: sandboxHostAlias, Scope: scope, ApprovalID: "ap_0e0ba4fe7acaf1f0", Port: port,
+			V: 1, Registration: resp.Registration.ID, Kind: kind, Host: sandboxruntime.OpenShellHostAlias, Scope: scope, ApprovalID: "ap_0e0ba4fe7acaf1f0", Port: port,
 		}, nil).Code
 	}
 	if code := decide(sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeSession, 25432); code != http.StatusOK {

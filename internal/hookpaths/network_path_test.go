@@ -140,11 +140,12 @@ func TestLocalPathCostsNoNetworkProbe(t *testing.T) {
 	}
 }
 
-// A burst of ordinary commands that spell a URL (read as a UNC path by the
-// target scan) gets its decisions inside the answer wait while the named
-// host does not answer, the same decisions as when nothing is slow, and a
-// write to the user's authorized_keys in the same burst is still a
-// protected target (rel-1-0-6 GAP-0127, GAP-0129 burst shape).
+// A burst of ordinary commands that spell a URL gets its decisions at once
+// while the named host does not answer, the same decisions as when nothing
+// is slow, and a write to the user's authorized_keys in the same burst is
+// still a protected target (rel-1-0-6 GAP-0127, GAP-0129 burst shape). The
+// target scan reads no URL as a UNC path, so the host is never asked
+// (rel-1-0-10:GAP-0920).
 func TestURLWordsDoNotWaitForTheNamedHostInABurst(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
@@ -199,7 +200,9 @@ func TestURLWordsDoNotWaitForTheNamedHostInABurst(t *testing.T) {
 	if took > 2*time.Second {
 		t.Fatalf("32 calls naming a host that does not answer took %v, want about the 200ms answer wait", took)
 	}
-	if probes.Load() != 1 {
-		t.Fatalf("the share was asked %d times, want once", probes.Load())
+	// A URL is no share path: its host is never asked, so the burst does
+	// not wait on it at all (rel-1-0-10:GAP-0920; it was asked once).
+	if probes.Load() != 0 {
+		t.Fatalf("the URL host was asked as a share %d times, want never", probes.Load())
 	}
 }

@@ -1,0 +1,61 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+# Alerts for the DefenseClaw Substrate components. The availability rules use
+# kube-state-metrics; the others the DefenseClaw metrics (docs/SUBSTRATE.md,
+# telemetry reference). Metrics never carry identity labels.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: defenseclaw-substrate
+  labels:
+    {{- include "dc.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+  - name: defenseclaw-substrate.availability
+    rules:
+    - alert: DefenseClawGatewayUnavailable
+      expr: kube_deployment_status_replicas_available{namespace="{{ .Release.Namespace }}",deployment="defenseclaw-gateway"} < 1
+      for: 2m
+      labels: {severity: critical}
+      annotations:
+        summary: No DefenseClaw gateway replica is available; hooks follow the fail mode and model calls fail.
+    - alert: DefenseClawLeaderUnavailable
+      expr: kube_deployment_status_replicas_available{namespace="{{ .Release.Namespace }}",deployment="defenseclaw-gateway-leader"} < 1
+      for: 2m
+      labels: {severity: critical}
+      annotations:
+        summary: The DefenseClaw gateway leader is down; stateful steps (tool chains, asks) follow the fail mode.
+    - alert: DefenseClawCalloutUnavailable
+      expr: kube_deployment_status_replicas_available{namespace="{{ .Release.Namespace }}",deployment="defenseclaw-callout"} < 1
+      for: 1m
+      labels: {severity: critical}
+      annotations:
+        summary: No egress callout replica is available; egress through the callout fails closed.
+    - alert: DefenseClawControllerUnavailable
+      expr: kube_deployment_status_replicas_available{namespace="{{ .Release.Namespace }}",deployment="defenseclaw-controller"} < 1
+      for: 5m
+      labels: {severity: warning}
+      annotations:
+        summary: The DefenseClaw controller is down; new actors get no network and idle suspend pauses.
+  - name: defenseclaw-substrate.policy
+    rules:
+    - alert: DefenseClawPolicyLagHigh
+      expr: histogram_quantile(0.99, sum by (le) (rate(defenseclaw_substrate_policy_lag_seconds_bucket{namespace="{{ .Release.Namespace }}"}[5m]))) > 10
+      for: 10m
+      labels: {severity: warning}
+      annotations:
+        summary: Egress policies reach new actors more than 10 s after create (p99).
+    - alert: DefenseClawPolicyConflict
+      expr: increase(defenseclaw_substrate_policy_conflicts_total{namespace="{{ .Release.Namespace }}"}[10m]) > 0
+      labels: {severity: warning}
+      annotations:
+        summary: An actor's egress policy is reverted by another writer (policy_conflict); the controller stopped reverting it.
+    - alert: DefenseClawUnattestedTemplates
+      expr: defenseclaw_substrate_unattested_templates{namespace="{{ .Release.Namespace }}"} > 0
+      for: 15m
+      labels: {severity: info}
+      annotations:
+        summary: Actors run from templates without a valid attestation; they have no network.
+{{- end }}
