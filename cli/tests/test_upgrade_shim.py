@@ -2012,6 +2012,41 @@ def test_a_mixed_profile_assignment_list_keeps_its_order_through_a_downgrade(
     assert restored["guardrail"]["profile_assignments"] == original
 
 
+def _valid_for_1_0_9(config: dict) -> bool:
+    """config.yaml as 1.0.9's own validator reads it: the schema 1.0.9 published (a byte copy)."""
+    import jsonschema
+
+    schema = json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8"))
+    return jsonschema.validators.validator_for(schema)(schema).is_valid(config)
+
+
+@pytest.mark.parametrize(
+    "assignments",
+    [[_CI_ONLY], [_OPS_SUBSTRATE_AND_GROUPS], [_CI_ONLY, _ENG_GROUPS, _OPS_SUBSTRATE_AND_GROUPS, _ENG_USERS]],
+    ids=["substrate-only", "substrate-and-groups", "mixed"],
+)
+def test_1_0_9_accepts_the_downgraded_profile_assignments_and_refuses_the_others(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, assignments: list[dict]
+) -> None:
+    import yaml
+
+    before = yaml.safe_load(_assignments_config(assignments))
+    # The validator bites: 1.0.9 refuses the config as 1.0.10 wrote it (a substrate match
+    # key), and the match a key-only set-aside would leave on a substrate-only item ({}).
+    assert not _valid_for_1_0_9(before)
+    emptied = yaml.safe_load(_assignments_config([{"profile": "ci", "match": {}}]))
+    assert not _valid_for_1_0_9(emptied)
+    assert _valid_for_1_0_9(yaml.safe_load(_assignments_config([_ENG_GROUPS])))
+
+    downgraded, _record, restored = _downgrade_and_restore(home, tmp_path, monkeypatch, assignments)
+
+    assert _valid_for_1_0_9(downgraded)
+    left = (downgraded.get("guardrail") or {}).get("profile_assignments") or []
+    assert all("substrate" not in a["match"] for a in left)
+    assert [a for a in assignments if "substrate" not in a["match"]] == left
+    assert restored["guardrail"]["profile_assignments"] == assignments
+
+
 def test_an_upgrade_to_1_0_10_keeps_substrate_profile_assignments(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
