@@ -279,7 +279,7 @@ func budgetMetricBatchFor(
 			// huge spend: that is the only signal, and it counts as exceeded.
 			snap.Exceeded = max(snap.Exceeded, 1)
 		}
-		if !marker && !(storeOn && b.Scope != config.RoutingBudgetScopeUser) {
+		if !marker && (!storeOn || b.Scope == config.RoutingBudgetScopeUser) {
 			total, peak := snap.Total, snap.Peak
 			items = append(items,
 				item(observability.TelemetryInstrumentDefenseClawBudgetSpend,

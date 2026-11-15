@@ -496,7 +496,7 @@ func TestRouteOnlyDecisionMetricFollowsTheFinalRouteChoice(t *testing.T) {
 		t.Fatalf("decision metrics = %d, want 2 (an unrouted request records none)", len(got))
 	}
 	results := []string{fmt.Sprint(got[0].Attributes()["defenseclaw.metric.result"]), fmt.Sprint(got[1].Attributes()["defenseclaw.metric.result"])}
-	if !(results[0] == "fallback" && results[1] == "applied") && !(results[0] == "applied" && results[1] == "fallback") {
+	if (results[0] != "fallback" || results[1] != "applied") && (results[0] != "applied" || results[1] != "fallback") {
 		t.Fatalf("results = %v", results)
 	}
 }
