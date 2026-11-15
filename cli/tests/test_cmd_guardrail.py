@@ -2308,6 +2308,7 @@ class CommandRegistrationTests(unittest.TestCase):
         # gateway may reach (guardrail.allow_private_upstreams). profile
         # lists and explains the identity-based guardrail profiles. rule and
         # suppress edit guardrail.rules (enable/disable/severity, suppressions).
+        # cascade explains the effective guardrail cascade (guardrail.cascade).
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
@@ -2320,6 +2321,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "hilt",
                 "block-message",
                 "block-at",
+                "cascade",
                 "alert-at",
                 "allow-private-upstream",
                 "judge",

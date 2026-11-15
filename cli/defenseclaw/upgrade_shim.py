@@ -92,6 +92,9 @@ NEWER_CONFIG_KEYS = (
     ("guardrail.effects_rules_tier", (1, 0, 10)),
     ("decision_model.block_risk_score", (1, 0, 10)),
     ("decision_model.escalate_rule_flagged", (1, 0, 10)),
+    ("decision_model.flow_guard", (1, 0, 10)),
+    ("decision_model.history_tool_results", (1, 0, 10)),
+    ("decision_model.history_turns", (1, 0, 10)),
     ("decision_model.protocol", (1, 0, 10)),
     ("observability.local.keep_rejected_records", (1, 0, 10)),
     ("observability.local.rejected_records_max_rows", (1, 0, 10)),
@@ -574,6 +577,69 @@ def _active_config_path() -> str:
     return os.path.expanduser(override) if override else os.path.join(_data_home(), "config.yaml")
 
 
+# More keys added after 1.0.9, read like NEWER_CONFIG_KEYS, where a "*"
+# segment is one entry of a map of named entries (a connector, a profile).
+# 1.0.9 refuses a cascade block under any scope, as it refuses
+# guardrail.cascade itself (GAP-0544, GAP-0583); a downgrade sets each
+# entry's block aside under its own dotted key. The decision_model keys are
+# System One's (s7/sysone); a profile's routing block is the router's.
+NEWER_CONFIG_SUBTREES = (
+    ("guardrail.connectors.*.cascade", (1, 0, 10)),
+    ("guardrail.profiles.*.cascade", (1, 0, 10)),
+    ("guardrail.profiles.*.connectors.*.cascade", (1, 0, 10)),
+    ("application_protection.guardrail.cascade", (1, 0, 10)),
+    ("application_protection.connectors.*.guardrail.cascade", (1, 0, 10)),
+    ("decision_model.flow_guard", (1, 0, 10)),
+    ("decision_model.history_tool_results", (1, 0, 10)),
+    ("decision_model.history_turns", (1, 0, 10)),
+    ("guardrail.profiles.*.routing", (1, 0, 10)),
+)
+
+
+def _expand_dotted(node: object, parts: list[str], prefix: tuple[str, ...] = ()):
+    """Yield (dotted key, value) for each key ``parts`` names in ``node``; "*" is every entry."""
+
+    if not parts:
+        yield ".".join(prefix), node
+        return
+    if not isinstance(node, dict):
+        return
+    head, rest = parts[0], parts[1:]
+    if head != "*":
+        if head in node:
+            yield from _expand_dotted(node[head], rest, (*prefix, head))
+        return
+    for name in sorted(k for k in node if isinstance(k, str)):
+        # Connector and profile names have no dots (the schema), so the
+        # dotted key of an entry is never ambiguous.
+        if name and "." not in name:
+            yield from _expand_dotted(node[name], rest, (*prefix, name))
+
+
+def newer_config_values(raw: object, target: tuple[int, int, int]) -> dict[str, object]:
+    """The keys of config ``raw`` that release ``target`` does not have, by dotted key."""
+
+    found: dict[str, object] = {}
+    for dotted, since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
+        if target >= since:
+            continue
+        for key, node in _expand_dotted(raw, dotted.split(".")):
+            if node not in (None, ""):
+                found[key] = node
+    return found
+
+
+def is_newer_config_key(key: str) -> bool:
+    """Whether ``key`` (a dotted key a downgrade set aside) is one this release has."""
+
+    parts = key.split(".")
+    for dotted, _since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
+        pattern = dotted.split(".")
+        if len(pattern) == len(parts) and all(p in ("*", k) for p, k in zip(pattern, parts)):
+            return True
+    return False
+
+
 def _set_aside_newer_keys(version: str) -> None:
     """Take the keys DefenseClaw ``version`` does not have out of config.yaml.
 
@@ -593,15 +659,7 @@ def _set_aside_newer_keys(version: str) -> None:
             raw = yaml.safe_load(stream)
     except Exception:  # noqa: BLE001 - no config or one that does not parse: the installer's check names it
         return
-    found: dict[str, object] = {}
-    for dotted, since in NEWER_CONFIG_KEYS:
-        if target >= since:
-            continue
-        node: object = raw
-        for part in dotted.split("."):
-            node = node.get(part) if isinstance(node, dict) else None
-        if node not in (None, ""):
-            found[dotted] = node
+    found = newer_config_values(raw, target)
     if not found:
         return
     names = ", ".join(found)

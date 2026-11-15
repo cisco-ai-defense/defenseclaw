@@ -683,8 +683,16 @@ func readInPlaceEdits(command, cwd, home string, user KnownUser, edit func(name 
 // perlInPlaceFiles lists the file operands of perl -i (-pi -e CODE FILE,
 // -i.bak -ne CODE FILE). Without -e the first operand is the script.
 func perlInPlaceFiles(words []string) []string {
-	inPlace, script := false, false
-	var files []string
+	files, _, _ := perlInPlace(words)
+	return files
+}
+
+// perlInPlace reads a perl command line: the file operands -i edits in place
+// and its backup suffix ("" for none). perl -i takes the rest of its own
+// word as the suffix (-i.bak, -pi.bak, never the next word); the last -i
+// wins. Each "*" of the suffix is the operand as typed (starBackupName).
+func perlInPlace(words []string) (files []string, suffix string, inPlace bool) {
+	script := false
 	for i := 1; i < len(words); i++ {
 		word := words[i]
 		switch {
@@ -696,15 +704,20 @@ func perlInPlaceFiles(words []string) []string {
 			for j := 0; j < len(cluster); j++ {
 				switch string(cluster[j]) {
 				case "i":
-					inPlace = true
-					j = len(cluster) // the rest is the backup suffix
+					inPlace, suffix = true, cluster[j+1:] // the rest is the backup suffix
+					j = len(cluster)
 				case "e", "E":
 					script = true
 					if j == len(cluster)-1 {
 						i++
 					}
 					j = len(cluster)
-				case "I", "M", "m", "x", "C", "d", "D", "F", "0":
+				case "0":
+					// -0 takes the octal digits that follow (-0777pi).
+					for j+1 < len(cluster) && cluster[j+1] >= '0' && cluster[j+1] <= '7' {
+						j++
+					}
+				case "I", "M", "m", "x", "C", "d", "D", "F":
 					j = len(cluster) // takes the rest of the word
 				}
 			}
@@ -717,9 +730,19 @@ func perlInPlaceFiles(words []string) []string {
 		}
 	}
 	if !inPlace {
-		return nil
+		return nil, "", false
 	}
-	return files
+	return files, suffix, true
+}
+
+// starBackupName is the backup GNU sed -i and perl -i write for file with a
+// suffix: file as typed (directory part included) replaces each "*", and a
+// suffix with none is appended.
+func starBackupName(file, suffix string) string {
+	if strings.Contains(suffix, "*") {
+		return strings.ReplaceAll(suffix, "*", file)
+	}
+	return file + suffix
 }
 
 // sedInPlaceFiles lists the file operands of a sed -i call as GNU sed reads
@@ -869,12 +892,8 @@ func sedGNUWrites(words []string) (writes []string) {
 			continue // sed fails on an empty file name and writes nothing
 		}
 		writes = append(writes, file)
-		switch {
-		case suffix == "":
-		case strings.Contains(suffix, "*"):
-			writes = append(writes, strings.ReplaceAll(suffix, "*", file))
-		default:
-			writes = append(writes, file+suffix)
+		if suffix != "" {
+			writes = append(writes, starBackupName(file, suffix))
 		}
 	}
 	return writes

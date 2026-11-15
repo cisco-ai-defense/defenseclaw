@@ -255,6 +255,10 @@ type layoutReader struct {
 	documents []layoutDocument
 	commands  []string
 	grouped   bool
+	// visit, when set, is given each statement's words (and the text they
+	// are offsets of) as the statement ends, in the text and in the
+	// command substitutions the reading follows.
+	visit func(text string, words []layoutWord)
 }
 
 // readCommandLayout reads the layout of a command text; false when the text
@@ -268,8 +272,14 @@ func readCommandLayout(text string) (commandLayout, bool) {
 const maxLayoutDepth = 4
 
 func readLayoutAt(text string, depth int) (commandLayout, bool) {
+	return readLayoutVisit(text, depth, nil)
+}
+
+// readLayoutVisit is readLayoutAt that also gives each statement to visit.
+func readLayoutVisit(text string, depth int, visit func(text string, words []layoutWord)) (commandLayout, bool) {
 	r := &layoutReader{
 		text:  text,
+		visit: visit,
 		depth: depth,
 		layout: commandLayout{
 			straight: map[int]bool{}, sequential: true, parsed: true, braced: map[int]bool{},
@@ -439,6 +449,9 @@ func (r *layoutReader) endStatement(term string) {
 		return
 	}
 	r.before = term
+	if r.visit != nil {
+		r.visit(r.text, words)
+	}
 	first := 0
 	for first < len(words) && words[first].assign {
 		first++
@@ -663,7 +676,7 @@ func (r *layoutReader) readSubstitution(span textSpan) {
 		r.layout.raw = append(r.layout.raw, span)
 		return
 	}
-	inside, ok := readLayoutAt(r.text[start:span.end-1], r.depth+1)
+	inside, ok := readLayoutVisit(r.text[start:span.end-1], r.depth+1, r.visit)
 	if !ok {
 		r.layout.raw = append(r.layout.raw, span)
 		return

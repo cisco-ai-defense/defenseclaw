@@ -189,14 +189,19 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 		}
 		return ""
 	}
-	reachable := false
+	reachable, reachChecked := false, false
 	called := calledFunctions(file, home)
 	reachText := command
 	if strings.Contains(command, "()") || strings.Contains(command, "function ") {
 		reachText = reachableShellWords(file, called, home)
 	}
+	// The answer depends only on the text, the working directory and the home,
+	// so it is read once for the call, not once for each statement that asks
+	// (a "no" was read again for every command of a long script: 100 lines
+	// cost 446,000 lstat calls, 27 s on a Windows host, rel-1-0-10:GAP-0766).
 	checkReach := func() bool {
-		if !reachable {
+		if !reachChecked {
+			reachChecked = true
 			reachable = samePathName(cwd, home) || samePathName(cwd, filepath.Join(home, ".ssh")) ||
 				protectedReachFromText(reachText, cwd, home)
 		}
@@ -1886,6 +1891,13 @@ func protectedReachPathWith(path string, protected protectedFiles, ssh string, m
 	if !ok {
 		return false
 	}
+	return protectedReachResolved(resolved, protected, ssh)
+}
+
+// protectedReachResolved is protectedReachPathWith for a path already resolved
+// (resolveWriteTarget): a caller that asks about many protected sets resolves
+// each path once, not once for every set.
+func protectedReachResolved(resolved string, protected protectedFiles, ssh string) bool {
 	if protected.has(resolved) || samePathName(resolved, ssh) {
 		return true
 	}
