@@ -842,7 +842,7 @@ def test_the_locked_package_install_is_retried_with_backoff() -> None:
     # The DefenseClaw wheel install hit the same hold, so both uv pip steps
     # go through the retry helper.
     start = _text().index("function New-Venv")
-    body = _text()[start : _text().index("function Invoke-UvPipInstall")]
+    body = _text()[start : _text().index("function Repair-DamagedPackages")]
     assert body.count("Invoke-UvPipInstall") == 2
     assert "Invoke-Native $Uv @(\"pip\"" not in body
     # GAP-1941: on a busy host one retry hit the same hold on the next
