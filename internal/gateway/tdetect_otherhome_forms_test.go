@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -17,6 +19,9 @@ import (
 // exec route. The strict pack blocks the SSH key in every spelling.
 func TestOtherHomeCredentialFileSpellingsFiveTiers(t *testing.T) {
 	t.Setenv("HOME", "/home/alice")
+	// A working folder that exists on the host, and ../ up to the root from it.
+	realCwd := t.TempDir()
+	up := strings.Repeat("../", strings.Count(strings.Trim(filepath.ToSlash(realCwd), "/"), "/")+1)
 	for _, p := range gap0437Packs {
 		hookServer := gap0437Server(t, p, "claudecode", "action")
 		inspectServer := gap0437Server(t, p, "openclaw", "action")
@@ -25,6 +30,7 @@ func TestOtherHomeCredentialFileSpellingsFiveTiers(t *testing.T) {
 				{"tilde-user", "/home/alice/proj", "cat ~x/" + file, "/home/x/" + file},
 				{"tilde-root", "/home/alice/proj", "cat ~root/" + file, "/root/" + file},
 				{"dotdot", "/home/alice/proj", "cat ../../x/" + file, "/home/x/" + file},
+				{"dotdot-real", realCwd, "cat " + up + "home/x/" + file, "/home/x/" + file},
 				{"cwd-in-home", "/home/x", "cat " + file, "/home/x/" + file},
 				{"cwd-below-home", "/home/x/proj", "cat ../" + file, "/home/x/" + file},
 				{"cwd-in-root", "/root", "cat " + file, "/root/" + file},
@@ -33,7 +39,7 @@ func TestOtherHomeCredentialFileSpellingsFiveTiers(t *testing.T) {
 				// folder that exists on the host; these homes do not, so the
 				// relative spellings are judged on the /inspect/tool route here
 				// and at the owner (TestOtherHomeCredentialOwnersReadResolvedSpellings).
-				relative := tc.name == "dotdot" || tc.name[:3] == "cwd"
+				relative := tc.name == "dotdot" || strings.HasPrefix(tc.name, "cwd")
 				oracle := gap0437Hook(t, hookServer, "/home/alice/proj", p.name+"-or-"+tc.name+file, "cat "+tc.oracle)["action"]
 				if file == ".ssh/id_rsa" && p.pack == "strict" && oracle != "block" {
 					t.Errorf("%s %s: the absolute spelling of the key is %v, want block", p.name, tc.name, oracle)
