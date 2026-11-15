@@ -605,16 +605,23 @@ read:
 		select {
 		case rd = <-reads:
 		case <-holdTimer.wait(deadline, time.Now()):
-			if relN > 0 {
-				stopped = !checkHeld()
-			} else if len(queue) == 0 && unread() > 0 && !stallReported {
-				stopped = !truncateStalled()
+			select {
+			case rd = <-reads:
+				// A read is waiting: the upstream is not quiet, the proxy
+				// was busy (a long event, a slow check). The read goes
+				// first; a due hold is checked with it.
+			default:
+				if relN > 0 {
+					stopped = !checkHeld()
+				} else if len(queue) == 0 && unread() > 0 && !stallReported {
+					stopped = !truncateStalled()
+				}
+				if stopped {
+					break read
+				}
+				reportRead()
+				continue
 			}
-			if stopped {
-				break read
-			}
-			reportRead()
-			continue
 		case <-ctx.Done():
 			// The agent is gone: nothing more is sent.
 			stopped = true
