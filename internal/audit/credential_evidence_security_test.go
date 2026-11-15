@@ -261,7 +261,10 @@ func TestLogScanRedactsBuiltInCodeGuardCredentialFinding(t *testing.T) {
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
 	logger.SetRuntimeV8Emitter(runtime)
 
-	credential := "codeguard-private-value-" + strings.Repeat("q", 24)
+	// A fixed, fake, random-looking suffix: a run of one repeated character
+	// reads as a placeholder to the CodeGuard placeholder-by-shape rule and
+	// yields no finding (GAP-0935).
+	credential := "codeguard-private-value-Kq7vZ3mX9bTn4RwP2sLd8HcY"
 	line := `api_key = "` + credential + `"`
 	findings := scanner.NewCodeGuardScanner("").ScanContent("app.py", line)
 	if len(findings) != 1 || findings[0].RuleID != "CG-CRED-001" ||
