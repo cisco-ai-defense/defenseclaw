@@ -1210,6 +1210,13 @@ def _print_agents(
                     f"                {dim_text}{degraded}",
                     18,
                 )
+    # A connector with no tool-result block form says so (GAP-0605).
+    from defenseclaw.commands.cmd_doctor import tool_result_injection_limit
+
+    for conn in actives:
+        limit = tool_result_injection_limit(conn) if _is_enabled(conn) else ""
+        if limit:
+            _echo_wrapped(" " * 16 + ux.dim(f"{limit}: the output reaches the model; see defenseclaw alerts"), 16)
 
 
 class _PublicForegroundHealth(dict):

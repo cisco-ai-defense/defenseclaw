@@ -288,8 +288,11 @@ def test_windows_upgrade_says_it_is_cleaning_up_before_the_long_deletes() -> Non
 def test_installer_never_uses_retired_asset_names() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
-    for retired in (".dcwheel", ".dcgateway", "upgrade-manifest.json", "release-provenance.json", "defenseclaw_"):
+    for retired in (".dcwheel", ".dcgateway", "upgrade-manifest.json", "release-provenance.json"):
         assert retired not in text
+    # The retired wheel names began with defenseclaw_; the Codex route-only provider table
+    # defenseclaw_route (route_only_left, GAP-0602) is a config key, not an asset name.
+    assert re.search(r"defenseclaw_(?!route\b)", text) is None
 
 
 def test_intel_macos_is_refused_before_changes() -> None:
