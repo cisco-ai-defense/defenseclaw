@@ -581,6 +581,11 @@ var callObjectOwn = keySet("name", "tool_name", "function", "arguments", "input"
 // and reads the rest of its strings as text.
 func (w *textWalker) callObject(n *jnode, key string) {
 	if n.kind == 'o' {
+		// The call is the object its fields sit in: mediaValue reads a
+		// field's position from it (the result of an image_generation_call).
+		prevCur, prevKey := w.cur, w.curKey
+		w.cur, w.curKey = n, key
+		defer func() { w.cur, w.curKey = prevCur, prevKey }()
 		for i, k := range n.keys {
 			if nk := normKey(k); !callObjectOwn[nk] && !walkSkipSubtree[nk] {
 				w.walk(n.kids[i], k, 2)

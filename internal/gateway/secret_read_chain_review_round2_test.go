@@ -5,14 +5,12 @@ package gateway
 
 import (
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
@@ -89,46 +87,46 @@ func srd2Round2Flows(cwd, other string) []srd2Round2Flow {
 	}
 }
 
-func srd2Round2Run(t *testing.T, label, cwd string, flows []srd2Round2Flow, packs []string) {
+func srd2Round2Run(t *testing.T, label, cwd string, flows []srd2Round2Flow, tiers []srdTier) {
+	t.Helper()
 	policiesRoot := guardrailPoliciesRoot(t)
-	for _, pack := range packs {
-		installDefaultProfileConnector(t, "claudecode")
-		store, logger := testStoreAndV8Logger(t)
-		cfg := &config.Config{}
-		cfg.Guardrail.Mode = "action"
-		cfg.Guardrail.Connector = "claudecode"
-		cfg.Guardrail.RulePackDir = filepath.Join(policiesRoot, pack)
-		api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
-		handler := http.HandlerFunc(api.handleAgentHook("claudecode"))
+	for _, tier := range tiers {
+		handler := srdHookHandler(t, policiesRoot, tier)
 		for i, flow := range flows {
-			session := fmt.Sprintf("srd2rev2-%s-%s-%d", label, pack, i)
+			session := fmt.Sprintf("srd2rev2-%s-%s-%d", label, tier.name, i)
 			read := claudeToolEvent("PreToolUse", session, "read", flow.read)
 			result := claudeToolResult("PostToolUse", session, "read")
 			read["cwd"] = cwd
 			result["cwd"] = cwd
-			rgot := callAgentHookForTest(t, handler, read)
+			callAgentHookForTest(t, handler, read)
 			callAgentHookForTest(t, handler, result)
 			send := claudeToolEvent("PreToolUse", session, "send", flow.send)
 			send["cwd"] = cwd
 			got := callAgentHookForTest(t, handler, send)
 			chain := slices.Contains(got.RuleIDs, guardrail.ToolChainSecretReadThenEgress)
-			_ = rgot
 			if want := srd2Round2Chain[flow.id]; chain != want && (!chain || !srdConservativeJoin(label == "local")) {
-				t.Errorf("%s %s probe %s: chain = %t, want %t", label, pack, flow.id, chain, want)
+				t.Errorf("%s %s probe %s: chain = %t, want %t", label, tier.name, flow.id, chain, want)
 			}
-			if chain && got.Action != "alert" {
-				t.Errorf("%s %s probe %s: a chain on a host is an alert, got %s", label, pack, flow.id, got.Action)
+			if action := srdChainAction(tier, srd2Round2StrictBlock[flow.id]); chain && got.Action != action {
+				t.Errorf("%s %s probe %s: a chain on a host takes %s here, got %s (rules %v)", label, tier.name, flow.id, action, got.Action, got.RuleIDs)
 			}
 		}
 	}
 }
+
+// srd2Round2StrictBlock are the round 2 probes whose chain blocks in the
+// strict tiers (GAP-0595): an exact read of .env and a complete upload of the
+// same file (F6b by its absolute path, F6c by the relative one in a proven
+// call). Every other chain of the round 2 and round 3 tables joins a read or
+// an upload that names no one file, and alerts in every tier.
+var srd2Round2StrictBlock = map[string]bool{"F6b": true, "F6c": true}
 
 // Review round 2 probe table (s7-srd2rev2, cases by id), hook path with a
 // reported cwd that does not exist on the host, default and strict.
 func TestSecretReadChainReviewRound2Probes(t *testing.T) {
 	installCorrelationHMACForTest()
 	srdPOSIXHost(t)
-	srd2Round2Run(t, "nocwd", "/work/f5proj", srd2Round2Flows("/work/f5proj", "/tmp/q9"), []string{"default", "strict"})
+	srd2Round2Run(t, "nocwd", "/work/f5proj", srd2Round2Flows("/work/f5proj", "/tmp/q9"), srdTiersNamed(t, "default", "strict"))
 }
 
 // The same probes with a reported cwd that exists on the host.
@@ -140,7 +138,7 @@ func TestSecretReadChainReviewRound2ProbesLocalCwd(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(other, ".env"), []byte("K=1\n"), 0o600)
 	_ = os.WriteFile(filepath.Join(cwd, ".env"), []byte("K=2\n"), 0o600)
 	_ = os.WriteFile(filepath.Join(other, "s.sh"), []byte("cd "+srdShellPath(other)+"\n"), 0o600)
-	srd2Round2Run(t, "local", cwd, srd2Round2Flows(srdShellPath(cwd), srdShellPath(other)), []string{"default"})
+	srd2Round2Run(t, "local", cwd, srd2Round2Flows(srdShellPath(cwd), srdShellPath(other)), srdTiersNamed(t, "default"))
 }
 
 // srd2Round2Chain is the verdict of each round 2 probe id. True rows join.
@@ -222,7 +220,7 @@ func srd2DerivedUploadFlows(cwd, other string) []srd2Round2Flow {
 func TestSecretReadChainReviewDerivedUploadInTheUploadCall(t *testing.T) {
 	installCorrelationHMACForTest()
 	srdPOSIXHost(t)
-	srd2Round2Run(t, "nocwd", "/work/f5proj", srd2DerivedUploadFlows("/work/f5proj", "/tmp/q9"), []string{"default", "strict"})
+	srd2Round2Run(t, "nocwd", "/work/f5proj", srd2DerivedUploadFlows("/work/f5proj", "/tmp/q9"), srdTiersNamed(t, "default", "strict"))
 }
 
 func TestSecretReadChainReviewDerivedUploadInTheUploadCallLocalCwd(t *testing.T) {
@@ -234,7 +232,7 @@ func TestSecretReadChainReviewDerivedUploadInTheUploadCallLocalCwd(t *testing.T)
 	_ = os.WriteFile(filepath.Join(cwd, "payload.json"), []byte("{}\n"), 0o600)
 	_ = os.MkdirAll(filepath.Join(cwd, "dist"), 0o700)
 	_ = os.WriteFile(filepath.Join(cwd, "dist", "app.tgz"), []byte("x"), 0o600)
-	srd2Round2Run(t, "local", cwd, srd2DerivedUploadFlows(srdShellPath(cwd), srdShellPath(other)), []string{"default", "strict"})
+	srd2Round2Run(t, "local", cwd, srd2DerivedUploadFlows(srdShellPath(cwd), srdShellPath(other)), srdTiersNamed(t, "default", "strict"))
 }
 
 // A redirect of stderr, to the null device or to another descriptor writes

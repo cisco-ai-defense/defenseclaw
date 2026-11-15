@@ -192,6 +192,12 @@ func codexOutputForProfile(event, action, rawAction, reason, additional string) 
 					"additionalContext": additional,
 				}
 			}
+			// Codex shows the user only systemMessage (GAP-0605).
+			if event == "PostToolUse" {
+				if notice := ToolResultUserNotice(action, reason, additional); notice != "" {
+					out["systemMessage"] = notice
+				}
+			}
 			return out
 		}
 	}
@@ -216,12 +222,20 @@ func codexOutputForProfile(event, action, rawAction, reason, additional string) 
 	case "SessionStart":
 		return map[string]interface{}{"systemMessage": additional}
 	case "UserPromptSubmit", "PostToolUse":
-		return map[string]interface{}{
+		out := map[string]interface{}{
 			"hookSpecificOutput": map[string]interface{}{
 				"hookEventName":     event,
 				"additionalContext": additional,
 			},
 		}
+		// additionalContext reaches the model only; a result finding also
+		// shows the user a line (GAP-0605).
+		if event == "PostToolUse" {
+			if notice := ToolResultUserNotice(action, reason, additional); notice != "" {
+				out["systemMessage"] = notice
+			}
+		}
+		return out
 	case "PreToolUse":
 		return map[string]interface{}{"systemMessage": additional}
 	default:

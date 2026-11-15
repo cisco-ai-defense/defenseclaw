@@ -240,7 +240,7 @@ func TestPassthroughCoverageBedrockStreamProperty(t *testing.T) {
 					up.set("application/vnd.amazon.eventstream", "", frames(pfx+covMarker), split)
 					rec := covPost(proxy, up, s.path, req, nil)
 					dec := newBedrockEventStreamText()
-					text := dec.Feed(rec.Body.Bytes())
+					text := responsePiecesText(dec.Feed(rec.Body.Bytes()))
 					if !insp.saw("completion") {
 						t.Errorf("the marker never reached the guardrail")
 					}
@@ -590,7 +590,7 @@ func TestPassthroughBedrockStreamCutInsideAFrame(t *testing.T) {
 					return
 				}
 				dec := newBedrockEventStreamText()
-				text := dec.Feed(rec.Body.Bytes())
+				text := responsePiecesText(dec.Feed(rec.Body.Bytes()))
 				if dec.Broken() || dec.PartialLen() != 0 || !strings.Contains(strings.ToLower(text), "defenseclaw") {
 					t.Errorf("managed: the agent did not get whole frames ending in a block: %q (broken=%v, %d pending)", text, dec.Broken(), dec.PartialLen())
 				}

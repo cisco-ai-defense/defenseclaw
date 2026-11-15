@@ -368,7 +368,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 156 test-only variables">
+<Accordion title="Show the 157 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -496,6 +496,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_TEST_REAL_GATEWAY_ADDR_FILE`<br/>Default: `unset`<br/>Values: `absolute temporary file path`, `unset`<br/>Managed host: `ignore` | Names the file in which the test gateway process started by the daemon writes the address of its listener, so the recorded-gateway hook tests can read it back.<br/>**Read by:** `internal/gateway/connector/hookexec/gateway_record_written_by_gateway_linux_test.go` |
 | `DEFENSECLAW_TEST_RESTRICTED_ENTERPRISE_STAGING`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marker the Windows enterprise-payload restricted-environment staging test sets in a re-execed helper so the helper knows it is running inside a simulated restricted-user posture and applies the matching payload-staging path.<br/>**Read by:** `internal/cli/windows_enterprise_payload_test.go` |
 | `DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.<br/>**Read by:** `internal/cli/sidecar_priority_windows_test.go` |
+| `DEFENSECLAW_TEST_TIMEOUT_SCALE`<br/>Default: `unset`<br/>Values: `number >= 1`, `unset`<br/>Managed host: `ignore` | Fixes the host slowdown factor that wall-clock-bounded Go tests multiply their windows by (internal/testenv HostSlowdown), instead of measuring it: a number of at least 1, for example 4 on a CI runner known to run about four times slower than an idle host.<br/>**Read by:** `internal/testenv/hostslowdown.go` |
 | `DEFENSECLAW_TEST_WAIT_PROCESS_EXIT`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Activate the short-lived helper subprocess used to verify that native Windows daemon shutdown waits on the original process handle.<br/>**Read by:** `internal/daemon/proc_windows_flags_test.go` |
 | `DEFENSECLAW_TEST_WATCHDOG_WAIT_EXIT`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Selects the native watchdog original-handle wait fixture.<br/>**Read by:** `internal/cli/watchdog_pidfile_windows_test.go` |
 | `DEFENSECLAW_TEST_WATCHDOG_WAIT_READY`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries the readiness marker used by the native watchdog original-handle wait fixture.<br/>**Read by:** `internal/cli/watchdog_pidfile_windows_test.go` |

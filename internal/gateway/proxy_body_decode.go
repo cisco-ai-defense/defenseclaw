@@ -299,6 +299,11 @@ type sseEvent struct {
 	Data string
 	// HasData reports a data field in the event.
 	HasData bool
+	// Unread marks Raw as bytes of an event over sseEventMax, in stream
+	// order: the framer does not hold or read such an event, it hands its
+	// bytes on as they come and frames again after it (UnreadStart marks
+	// the first piece).
+	Unread, UnreadStart bool
 }
 
 // sseFramer frames an event stream as the WHATWG specification does: lines
@@ -320,30 +325,46 @@ type sseFramer struct {
 	// DataEvents counts events that carried data.
 	DataEvents int
 	broken     bool
+	// ndjson frames newline-delimited JSON (a native Ollama stream): every
+	// line is one event, its data the line (GAP-0370).
+	ndjson bool
+	// skipping: the event in progress is over sseEventMax; its bytes are
+	// passed on (skipped) until the blank line that ends it. lineStart, cr
+	// and end are where the skip is in the line grammar.
+	skipping, skipLineStart, skipCR, skipEnd bool
+	skipped                                  []byte
 }
 
-// Broken reports an event larger than sseEventMax.
+// Broken reports that an event was larger than sseEventMax.
 func (f *sseFramer) Broken() bool { return f.broken }
 
 // Held returns the bytes the framer has read and not yet dispatched in an
-// event. A fail mode that forwards the rest of the stream raw sends them
-// first, so the agent gets every byte (GAP-0241).
+// event (none while an event over sseEventMax is passed on).
 func (f *sseFramer) Held() []byte { return f.buf }
 
-// Write adds bytes to the stream and returns the events they complete. With
-// final set, an unterminated last event is returned as well.
+// Write adds bytes to the stream and returns the events they complete, in
+// stream order. With final set, an unterminated last event is returned as
+// well. The bytes of an event over sseEventMax come back as Unread pieces.
 func (f *sseFramer) Write(chunk []byte, final bool) []sseEvent {
+	var out []sseEvent
+	if f.skipping {
+		rest, done := f.skip(chunk, final)
+		out = f.takeSkipped(out, false)
+		if !done {
+			return out
+		}
+		chunk = rest
+	}
 	f.buf = append(f.buf, chunk...)
 	if !f.started && len(f.buf) > 0 {
 		if len(f.buf) < 3 && bytes.HasPrefix([]byte{0xEF, 0xBB, 0xBF}, f.buf) && !final {
-			return nil
+			return out
 		}
 		f.started = true
 		if bytes.HasPrefix(f.buf, []byte{0xEF, 0xBB, 0xBF}) {
 			f.pos = 3
 		}
 	}
-	var out []sseEvent
 	for {
 		from := max(f.pos, f.scan)
 		i := bytes.IndexAny(f.buf[from:], "\r\n")
@@ -365,6 +386,11 @@ func (f *sseFramer) Write(chunk []byte, final bool) []sseEvent {
 		line := f.buf[f.pos:i]
 		f.pos = next
 		f.scan = 0
+		if f.ndjson {
+			f.ndjsonLine(line)
+			out = append(out, f.dispatch())
+			continue
+		}
 		if len(line) == 0 {
 			out = append(out, f.dispatch())
 			continue
@@ -373,14 +399,81 @@ func (f *sseFramer) Write(chunk []byte, final bool) []sseEvent {
 	}
 	if final && len(f.buf) > 0 {
 		if f.pos < len(f.buf) {
-			f.field(f.buf[f.pos:])
+			if f.ndjson {
+				f.ndjsonLine(f.buf[f.pos:])
+			} else {
+				f.field(f.buf[f.pos:])
+			}
 			f.pos = len(f.buf)
 		}
 		out = append(out, f.dispatch())
 	}
-	if len(f.buf) > sseEventMax {
+	if !final && len(f.buf) > sseEventMax {
+		// The event in progress cannot be held: from here its bytes are
+		// passed on, not read, until it ends.
 		f.broken = true
+		f.skipping, f.skipLineStart, f.skipCR, f.skipEnd = true, true, false, false
+		f.skipped = append([]byte(nil), f.buf[:f.pos]...)
+		f.skip(f.buf[f.pos:], false) // the line in progress: no line end but a trailing CR
+		f.buf, f.pos, f.scan = nil, 0, 0
+		f.data.Reset()
+		f.hasData = false
+		out = f.takeSkipped(out, true)
 	}
+	return out
+}
+
+// skip passes on the bytes of b that belong to the event being skipped and
+// reports whether the event ended (at a blank line, or with the stream);
+// rest is what follows it.
+func (f *sseFramer) skip(b []byte, final bool) (rest []byte, done bool) {
+	i := 0
+	for i < len(b) && !done {
+		c := b[i]
+		switch {
+		case f.skipCR && c == '\n':
+			// The LF of a CRLF line end.
+			f.skipCR = false
+			i++
+			done = f.skipEnd
+		case f.skipEnd:
+			// The blank line ended with a bare CR.
+			done = true
+		case c == '\r' || c == '\n':
+			i++
+			f.skipCR = c == '\r'
+			if f.skipLineStart || f.ndjson {
+				// A blank line ends an SSE event; any line end ends an
+				// NDJSON one.
+				f.skipEnd = true
+				done = c == '\n'
+			}
+			f.skipLineStart = true
+		default:
+			f.skipCR, f.skipLineStart = false, false
+			if k := bytes.IndexAny(b[i:], "\r\n"); k < 0 {
+				i = len(b)
+			} else {
+				i += k
+			}
+		}
+	}
+	f.skipped = append(f.skipped, b[:i]...)
+	if done || final {
+		f.skipping = false
+		return b[i:], true
+	}
+	return nil, false
+}
+
+// takeSkipped appends the skipped bytes not handed on yet as an Unread
+// piece (the first one of the event when start is set).
+func (f *sseFramer) takeSkipped(out []sseEvent, start bool) []sseEvent {
+	if len(f.skipped) == 0 && !start {
+		return out
+	}
+	out = append(out, sseEvent{Raw: f.skipped, Unread: true, UnreadStart: start})
+	f.skipped = nil
 	return out
 }
 
@@ -398,6 +491,14 @@ func (f *sseFramer) dispatch() sseEvent {
 	f.data.Reset()
 	f.hasData = false
 	return ev
+}
+
+// ndjsonLine reads one NDJSON line: the line is the event's data.
+func (f *sseFramer) ndjsonLine(line []byte) {
+	if t := bytes.TrimSpace(line); len(t) > 0 {
+		f.data.Write(t)
+		f.hasData = true
+	}
 }
 
 func (f *sseFramer) field(line []byte) {

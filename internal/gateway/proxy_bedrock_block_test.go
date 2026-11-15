@@ -389,7 +389,7 @@ func TestBlockedBedrockInvokeForAnthropicModels(t *testing.T) {
 	}
 	// The gateway's own stream reader (response inspection) sees the text.
 	s := newBedrockEventStreamText()
-	if got := s.Feed(rec.Body.Bytes()); !strings.Contains(got, msg) || s.Broken() {
+	if got := responsePiecesText(s.Feed(rec.Body.Bytes())); !strings.Contains(got, msg) || s.Broken() {
 		t.Fatalf("inspector read %q broken=%v", got, s.Broken())
 	}
 	// Non-streaming invoke: an Anthropic Message.

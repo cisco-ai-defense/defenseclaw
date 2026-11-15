@@ -8597,6 +8597,26 @@
       "since": "1.0.7"
     },
     {
+      "name": "DEFENSECLAW_TEST_TIMEOUT_SCALE",
+      "category": "test_fixture",
+      "purpose": "Fixes the host slowdown factor that wall-clock-bounded Go tests multiply their windows by (internal/testenv HostSlowdown), instead of measuring it: a number of at least 1, for example 4 on a CI runner known to run about four times slower than an idle host. It changes only how long a test waits, never the verdict a test asserts.",
+      "default": "unset",
+      "accepted_values": [
+        "number >= 1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/testenv/hostslowdown.go",
+          "description": "HostSlowdown returns the value (capped at MaxHostSlowdown) when it is set; the GAP-0558 hook tests stretch their windows by it"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_ACTOR_MODE",
       "category": "hook_internal",
       "purpose": "Run mode of an Agent Substrate actor's hooks. The actor relay sets it to unattended for a --task run, so every DefenseClaw hook of that run fails closed when the gateway does not answer (D8). Any other value, or none, is interactive: the variable can only make a run stricter. The gateway's answer names the mode authoritatively from the actor's registration.",

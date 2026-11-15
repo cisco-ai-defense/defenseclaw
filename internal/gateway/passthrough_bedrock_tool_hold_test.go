@@ -101,7 +101,7 @@ func covBedrockCheckRefused(t *testing.T, s covBedrockStream, out []byte, ctx st
 		}
 	}
 	dec := newBedrockEventStreamText()
-	text := dec.Feed(out)
+	text := responsePiecesText(dec.Feed(out))
 	if dec.Broken() || dec.PartialLen() != 0 {
 		t.Fatalf("%s: the agent did not get whole frames (broken=%v, %d bytes pending)", ctx, dec.Broken(), dec.PartialLen())
 	}

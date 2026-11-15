@@ -1229,7 +1229,10 @@ func TestTextPredictionProjectionNeverIncludesFindingValues(t *testing.T) {
 		t.Fatalf("prediction serialization is not value-free or omitted alert state: %s", serialized)
 	}
 	for _, ruleID := range predictions[0].RuleIDs {
-		if strings.Contains(ruleID, value) || strings.Contains(strings.ToLower(ruleID), "password") {
+		// SEC-PASSWORD-ASSIGN is the pack rule that names the password key;
+		// any other rule ID holding the payload's key or value is derived
+		// from the payload.
+		if strings.Contains(ruleID, value) || ruleID != "SEC-PASSWORD-ASSIGN" && strings.Contains(strings.ToLower(ruleID), "password") {
 			t.Fatalf("value-bearing rule ID escaped projection: %q", ruleID)
 		}
 	}

@@ -99,7 +99,7 @@ func TestJudgeIntentIsSharedThroughTheLeader(t *testing.T) {
 	if sample := decision.toolJudgeContextSample(ctx, "Bash", "{}"); strings.Contains(sample, "deploy the web app") {
 		t.Fatalf("the decision judge shares the guardrail judge's context:\n%s", sample)
 	}
-	replica1.ResetToolJudgeSession(ctx, sandboxSessionStateKey(ctx, "s1"))
+	replica1.ResetToolJudgeSession(ctx, judgeSessionKeyFor(ctx, "s1"))
 	if sample := replica2.toolJudgeContextSample(ctx, "Bash", "{}"); strings.Contains(sample, "deploy the web app") {
 		t.Fatalf("reset did not reach the leader:\n%s", sample)
 	}

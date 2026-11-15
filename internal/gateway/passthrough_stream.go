@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -34,6 +35,14 @@ import (
 //     frames. Its tool calls are assembled from the input parts and held in
 //     the same way (GAP-0098); a refused stream ends with a block the agent
 //     can show, in the model's own stream shape.
+//   - The tail hold (rel-1-0-10:GAP-0212, proxy_stream_tail.go) sits on top
+//     of the tool-call hold: in action mode an event the tool-call hold lets
+//     out still waits until a mid-stream check has read its text, and the
+//     final check is enforced, so a block withholds the events still held.
+//     Its bounds (streamHoldMaxAge, streamHoldMaxBytes, the unfinished-event
+//     bounds) apply only to the events the tool-call hold has let out: while
+//     a call is held, it waits for its verdict, capped by the call's own
+//     1 MiB fail mode and the request context.
 type passthroughStream struct {
 	p              *GuardrailProxy
 	w              http.ResponseWriter
@@ -49,6 +58,8 @@ type passthroughStream struct {
 	promptID       string
 	telemetry      ChatRequest
 	bedrock        *bedrockEventStreamText
+	// ndjson: a native Ollama stream, one JSON event per line (GAP-0370).
+	ndjson bool
 }
 
 // snapshotEvent reports an event whose content repeats what earlier events
@@ -63,10 +74,12 @@ func snapshotEvent(typ string) bool {
 }
 
 // eventContent feeds one event to the tool-call state machine and adds its
-// text to the accumulated reply.
+// text to the accumulated reply: the typed fields of the provider, each in
+// its lane (streamEventPieces, GAP-0370), and every other string the walker
+// reads (withWalkerPieces).
 // It returns why the event can be read two ways (a repeated or differently
 // spelled key), "" when it cannot.
-func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *strings.Builder, model *string) string {
+func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *responseText, model *string) string {
 	if !ev.HasData {
 		return ""
 	}
@@ -78,20 +91,26 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 	if *model == "" {
 		*model = responseModelFromRawJSON([]byte(data))
 	}
+	typed := streamEventPieces(data, s.provider)
 	sc, err := scanReplyJSON([]byte(data), true, s.p.maxBodyValues())
 	if err != nil {
 		// Not JSON: the text itself is the content.
-		acc.WriteString(data)
+		acc.AddAll(withWalkerPieces(typed, []string{data}))
 		return ""
 	}
 	calls.AddCalls(sc.Calls)
-	snapshot := snapshotEvent(sc.Type)
-	for _, seg := range sc.Segments {
-		if snapshot && strings.Contains(acc.String(), seg) {
-			continue
+	segs := sc.Segments
+	if snapshotEvent(sc.Type) {
+		// A snapshot repeats what earlier events carried.
+		kept := segs[:0:0]
+		for _, seg := range segs {
+			if !strings.Contains(acc.String(), seg) {
+				kept = append(kept, seg)
+			}
 		}
-		acc.WriteString(seg)
+		segs = kept
 	}
+	acc.AddAll(withWalkerPieces(typed, segs))
 	return sc.Ambiguous
 }
 
@@ -128,6 +147,14 @@ func (s *passthroughStream) copyRest(src io.Reader) {
 	}
 }
 
+// streamRead is one read of the upstream reply on the reader goroutine; a
+// panic in Read is handed back to the handler goroutine.
+type streamRead struct {
+	b     []byte
+	err   error
+	panic any
+}
+
 func (s *passthroughStream) run() {
 	p, w, r, resp, mode, label := s.p, s.w, s.r, s.resp, s.mode, s.label
 	ctx := r.Context()
@@ -155,6 +182,7 @@ func (s *passthroughStream) run() {
 			s.copyRest(resp.Body)
 			return
 		}
+		// Deferred first, so it runs after the reader goroutine has ended.
 		defer closeFn()
 		src = dec
 		resp.Header.Del("Content-Encoding")
@@ -163,7 +191,7 @@ func (s *passthroughStream) run() {
 	s.copyHeaders()
 
 	flusher, _ := w.(http.Flusher)
-	var accumulated strings.Builder
+	var accumulated responseText
 	streamResponseModel := ""
 	lastScanLen := 0
 	const scanInterval = 500
@@ -177,20 +205,34 @@ func (s *passthroughStream) run() {
 	if s.bedrock == nil {
 		sseCalls = newSSEToolCalls(p.maxBodyValues())
 	}
-	framer := &sseFramer{}
-	var queue [][]byte // events read and not yet sent
+	framer := &sseFramer{ndjson: s.ndjson}
+	var bedrockPending []byte // the start of a Bedrock frame whose end has not come
+	var queue [][]byte        // events read and not yet sent
+	var queueAt []time.Time   // when each event of the queue was read
 	queueBytes := 0
-	relN := 0      // the first relN events of the queue may go out
+	relN := 0      // the first relN events of the queue are not held behind an open tool call
 	heldBytes := 0 // bytes of the events held behind an open tool call
-	holding := false
+	callHold := false
 	holdOff := false // the call cannot be held (too large): fail mode applied
+	// The tail hold (GAP-0212): in action mode the first relN events are
+	// sent only by a check that has read their text.
+	tailHold := mode == "action"
+	var holdTimer streamHoldTimer
+	defer holdTimer.stop()
+	var lastRead time.Time // when the upstream last sent a byte
+	// stallReported: the event in progress passed the stall bound and its
+	// TRUNCATED alert is recorded; it stays held (GAP-0316).
+	stallReported := false
+	// overText: the event being handled carried more than streamLineMaxText
+	// bytes of text (GAP-0624).
+	overText := false
+	released := 0 // bytes sent to the agent
 	sseBlockMsg := ""
 	brokenReported := false
 	framerReported := false
 	ambiguousReported := false
 	streamEnded := false
 	initialFlushed := mode != "action"
-	preblocked := false // an SSE completion block before the first flush: nothing was sent
 
 	writeQueue := func() {
 		if relN == 0 {
@@ -199,14 +241,56 @@ func (s *passthroughStream) run() {
 		for _, ev := range queue[:relN] {
 			_, _ = w.Write(ev)
 			queueBytes -= len(ev)
+			released += len(ev)
 		}
-		queue = queue[relN:]
+		queue, queueAt = queue[relN:], queueAt[relN:]
 		if len(queue) == 0 {
-			queue = nil
+			queue, queueAt = nil, nil
 		}
 		relN = 0
 		if flusher != nil {
 			flusher.Flush()
+		}
+	}
+	sendRaw := func(b []byte) {
+		if len(b) == 0 {
+			return
+		}
+		_, _ = w.Write(b)
+		released += len(b)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	// unread is the bytes of the event in progress (an SSE event or a
+	// Bedrock frame that has not ended): no event to the agent yet, and
+	// never sent before it ends and is read.
+	unread := func() int {
+		if s.bedrock != nil {
+			return len(bedrockPending)
+		}
+		return len(framer.Held())
+	}
+	// endBlock ends a refused stream: the whole block reply when nothing was
+	// sent yet, else the block as the last assistant text of the stream
+	// under way. Held events are dropped.
+	endBlock := func() {
+		switch {
+		case released == 0:
+			blockedReply(sseBlockMsg)
+		case sseCalls != nil:
+			sseCalls.writeSSEBlockTail(w, s.model, sseBlockMsg)
+		default:
+			hw := &headersSentWriter{ResponseWriter: w}
+			s.bedrock.writeBlockTail(hw, sseBlockMsg)
+			hw.Flush()
+		}
+	}
+	// completionBlock records the shape of a completion block: the agent of
+	// a Bedrock stream reads the block, an SSE stream ends where it is.
+	completionBlock := func(reason string) {
+		if s.bedrock != nil {
+			sseBlockMsg = blockMessage(s.customBlockMsg, "completion", reason)
 		}
 	}
 
@@ -219,7 +303,7 @@ func (s *passthroughStream) run() {
 				sseBlockMsg = blockMessage(s.customBlockMsg, "tool_call", "the provider reply could not be inspected")
 				return true
 			}
-			holdOff, holding = true, false
+			holdOff, callHold = true, false
 		}
 		var calls json.RawMessage
 		if sseCalls != nil {
@@ -245,11 +329,97 @@ func (s *passthroughStream) run() {
 		return true
 	}
 
-	flushInitial := func() bool {
-		if initialFlushed || relN == 0 {
+	// scanText runs the mid-stream check over the whole text when text
+	// arrived since the last one. False: it blocked.
+	scanText := func() bool {
+		if accumulated.Len() <= lastScanLen {
 			return true
 		}
-		if accumulated.Len() > 0 {
+		midVerdict := p.inspector.InspectMidStream(ctx, "completion", accumulated.String(),
+			[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
+		p.resolveConfirm(ctx, r, midVerdict, "completion", label, mode)
+		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
+			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client, %d held back)\n",
+				midVerdict.Severity, logDisplayReason(midVerdict.Reason), released, queueBytes+unread())
+			p.recordTelemetry(ctx, "completion", label, midVerdict, 0, mode, true)
+			completionBlock(midVerdict.Reason)
+			return false
+		}
+		lastScanLen = accumulated.Len()
+		return true
+	}
+	// checkHeld sends the events the tool-call hold lets out, once a check
+	// has read their text. False: the check blocked and nothing is sent.
+	checkHeld := func() bool {
+		if !scanText() {
+			return false
+		}
+		writeQueue()
+		return true
+	}
+	// boundHit is the verdict of a hold bound: TRUNCATED, the unknown tier
+	// of the request's pack. The caller has checked the text read before the
+	// bound. False: the stream is cut.
+	boundHit := func(c bounded.Cap, why string) bool {
+		tv := p.streamTailTruncatedVerdict(ctx, c, why)
+		p.recordTelemetry(ctx, "completion", label, tv, 0, mode, tv.Action == "block")
+		if tv.Action == "block" {
+			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK %s (%d bytes already forwarded to client, %d held back)\n",
+				logDisplayReason(tv.Reason), released, queueBytes+unread())
+			completionBlock(tv.Reason)
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-TRUNCATED %s: forwarded with an alert\n", logDisplayReason(tv.Reason))
+		return true
+	}
+	// truncateOverText decides an event with more than streamLineMaxText
+	// bytes of text before any of it is sent (GAP-0624): its whole text is
+	// checked, then the unknown tier decides.
+	truncateOverText := func() bool {
+		overText = false
+		return scanText() && boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame with over %d bytes of text", streamLineMaxText))
+	}
+	// truncateStalled is the stall bound of an event in progress that got no
+	// new byte for streamHoldMaxPartialAge: the events before it are checked
+	// and sent, then the unknown tier decides, once per event. A block ends
+	// the stream. An alert keeps the event held (GAP-0316): its bytes are not
+	// read, and it may be the first event of a tool call the hold has not
+	// seen yet, so they go out only once it ends and is read (the tool-call
+	// rules decide first), or never, when the request or the upstream ends.
+	// Only called with nothing queued.
+	truncateStalled := func() bool {
+		if !checkHeld() || !boundHit(bounded.Time, fmt.Sprintf("a reply stream line or frame unfinished, no new byte for %s", streamHoldMaxPartialAge)) {
+			return false
+		}
+		stallReported = true
+		return true
+	}
+	// sseOversize decides an SSE event over the framer's bound (sseEventMax,
+	// the one bound of an unfinished event): it can never be read whole. The
+	// text read before it is checked, then the bound rule decides (TRUNCATED,
+	// the unknown tier of the pack), then the fail mode (a managed or strict
+	// install refuses); whichever refuses wins. True: that event alone is
+	// passed on unread, after the alerts (GAP-0241); the events after it are
+	// held and checked as before, and the final check is still enforced
+	// (GAP-0313).
+	sseOversize := func() bool {
+		if tailHold && (!scanText() || !boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame unfinished at %d bytes", sseEventMax))) {
+			return false
+		}
+		if p.uninspectableReply(ctx, label, mode, "the event stream could not be framed") {
+			sseBlockMsg = uninspectableMsg
+			return false
+		}
+		return true
+	}
+
+	// flushInitial checks the initial buffer and sends it; at the end of the
+	// stream it only checks it: its events wait for the final check.
+	flushInitial := func(atEnd bool) bool {
+		if initialFlushed || (relN == 0 && !atEnd) {
+			return true
+		}
+		if accumulated.Len() > lastScanLen {
 			initVerdict := p.inspector.InspectMidStream(ctx, "completion", accumulated.String(),
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
 			p.resolveConfirm(ctx, r, initVerdict, "completion", label, mode)
@@ -257,24 +427,55 @@ func (s *passthroughStream) run() {
 				fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
 					initVerdict.Severity, logDisplayReason(initVerdict.Reason))
 				p.recordTelemetry(ctx, "completion", label, initVerdict, 0, mode, true)
-				if s.bedrock != nil {
-					// The agent reads the block, not an empty stream.
-					sseBlockMsg = blockMessage(s.customBlockMsg, "completion", initVerdict.Reason)
-				} else {
-					preblocked = true
-				}
+				// The agent of a Bedrock stream reads the block, not an empty stream.
+				completionBlock(initVerdict.Reason)
 				return false
 			}
 		}
 		lastScanLen = accumulated.Len()
-		writeQueue()
 		initialFlushed = true
+		if !atEnd {
+			writeQueue()
+		}
 		return true
+	}
+
+	// unreadEvent passes on a piece of an SSE event over sseEventMax. At its
+	// first piece the event is decided (sseOversize); the events before it
+	// go out first, checked. An open tool call cannot be held past it: the
+	// call takes its fail mode, as one over the hold cap does.
+	unreadEvent := func(ev sseEvent) bool {
+		if ev.UnreadStart {
+			if callHold && !holdOff {
+				if !brokenReported {
+					brokenReported = true
+					if p.uninspectableReply(ctx, label, mode, "a streamed tool call could not be inspected") {
+						sseBlockMsg = blockMessage(s.customBlockMsg, "tool_call", "the provider reply could not be inspected")
+						return true
+					}
+				}
+				holdOff, callHold = true, false
+			}
+			relN, heldBytes = len(queue), 0
+			if !sseOversize() {
+				return true
+			}
+			// sseOversize checked every byte of text read so far.
+			initialFlushed = true
+			writeQueue()
+		}
+		sendRaw(ev.Raw)
+		return false
 	}
 
 	// handle takes one event; true stops the stream.
 	handle := func(ev sseEvent) bool {
+		stallReported = false
+		if ev.Unread {
+			return unreadEvent(ev)
+		}
 		if sseCalls != nil {
+			textBefore := accumulated.Len()
 			if why := s.eventContent(ev, sseCalls, &accumulated, &streamResponseModel); why != "" && !ambiguousReported {
 				ambiguousReported = true
 				if p.uninspectableReply(ctx, label, mode, why) {
@@ -282,19 +483,23 @@ func (s *passthroughStream) run() {
 					return true
 				}
 			}
+			if accumulated.Len()-textBefore > streamLineMaxText {
+				overText = true
+			}
 		}
 		queue = append(queue, ev.Raw)
+		queueAt = append(queueAt, lastRead)
 		queueBytes += len(ev.Raw)
 		if sseCalls != nil && mode == "action" && !holdOff {
 			if sseCalls.Open() {
-				if !holding {
-					holding = true
+				if !callHold {
+					callHold = true
 					relN = len(queue) - 1
 					heldBytes = 0
 				}
 				heldBytes += len(ev.Raw)
 			} else {
-				holding = false
+				callHold = false
 			}
 		}
 		if sseRefused() {
@@ -304,17 +509,17 @@ func (s *passthroughStream) run() {
 			// The tool calls of a Bedrock stream: the bytes of an open call
 			// are held until the rules decide, also across the initial buffer (GAP-0098).
 			if s.bedrock.Holding() {
-				if !holding {
-					holding = true
+				if !callHold {
+					callHold = true
 					relN = len(queue) - 1
 					heldBytes = 0
 				}
 				heldBytes += len(ev.Raw)
 			} else {
-				holding = false
+				callHold = false
 			}
 		}
-		if holding && heldBytes > maxInitialBufBytes && !holdOff {
+		if callHold && heldBytes > maxInitialBufBytes && !holdOff {
 			// More is held behind the call than the proxy holds: the call
 			// is not released, it takes the fail mode.
 			if !brokenReported {
@@ -324,54 +529,132 @@ func (s *passthroughStream) run() {
 					return true
 				}
 			}
-			holdOff, holding = true, false
+			holdOff, callHold = true, false
 		}
-		if !holding {
+		if !callHold {
 			relN = len(queue)
 			heldBytes = 0
 		}
+		// An event over the text bound is decided before any of it is sent.
+		if overText && tailHold && !truncateOverText() {
+			return true
+		}
+		overText = false
 		if !initialFlushed {
-			if (!holding && accumulated.Len() >= streamBufferSize) || queueBytes-heldBytes > maxInitialBufBytes {
-				if !flushInitial() {
+			if (!callHold && accumulated.Len() >= streamBufferSize) || queueBytes-heldBytes > maxInitialBufBytes {
+				if !flushInitial(false) {
 					return true
 				}
 			}
-			return false
-		}
-		writeQueue()
-		if accumulated.Len()-lastScanLen >= scanInterval && mode == "action" {
-			midVerdict := p.inspector.InspectMidStream(ctx, "completion", accumulated.String(),
-				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
-			p.resolveConfirm(ctx, r, midVerdict, "completion", label, mode)
-			if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
-				fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: stream already forwarded to client)\n",
-					midVerdict.Severity, logDisplayReason(midVerdict.Reason))
-				p.recordTelemetry(ctx, "completion", label, midVerdict, 0, mode, true)
-				if s.bedrock != nil {
-					// The agent ends on a block it can show, not a cut stream.
-					sseBlockMsg = blockMessage(s.customBlockMsg, "completion", midVerdict.Reason)
-				}
-				return true
-			}
-			lastScanLen = accumulated.Len()
 		}
 		return false
 	}
 
+	// The upstream is read on its own goroutine, so that a held event is
+	// checked and sent on time while the upstream is quiet. On return the
+	// body is closed, which ends a Read that waits, and the goroutine is
+	// waited for before the decoder is closed.
+	reads := make(chan streamRead)
+	readsDone := make(chan struct{})
+	readerExited := make(chan struct{})
+	go func() {
+		defer close(readerExited)
+		for {
+			var rd streamRead
+			func() {
+				defer func() {
+					if v := recover(); v != nil {
+						rd = streamRead{err: io.ErrUnexpectedEOF, panic: v}
+					}
+				}()
+				b := make([]byte, 4096)
+				n, err := src.Read(b)
+				rd = streamRead{b: b[:n], err: err}
+			}()
+			select {
+			case reads <- rd:
+			case <-readsDone:
+				return
+			}
+			if rd.err != nil {
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(readsDone)
+		_ = resp.Body.Close()
+		<-readerExited
+	}()
+
 	stopped := false
-	rawTail := false          // the fail mode forwards what is left without inspection
-	var bedrockPending []byte // the start of a Bedrock frame whose end has not come
-	buf := make([]byte, 4096)
 	readTotal := 0
+	// reportRead tells a test that every byte read so far is handled: sent,
+	// or held by the initial buffer or the tool-call hold. Events the
+	// tool-call hold let out are handled once the tail hold has sent them.
+	reportRead := func() {
+		if p.streamReadForTest != nil && (!tailHold || !initialFlushed || relN == 0) {
+			p.streamReadForTest(readTotal)
+		}
+	}
 read:
 	for {
-		n, readErr := src.Read(buf)
+		// The hold's time bounds, on the events the tool-call hold lets out:
+		// the oldest of them waits at most streamHoldMaxAge for a check; an
+		// event in progress, with nothing queued, is reported once
+		// streamHoldMaxPartialAge after the last byte.
+		var deadline time.Time
+		if tailHold && initialFlushed {
+			if relN > 0 {
+				deadline = queueAt[0].Add(streamHoldMaxAge)
+			} else if len(queue) == 0 && unread() > 0 && !stallReported {
+				deadline = lastRead.Add(streamHoldMaxPartialAge)
+			}
+		}
+		var rd streamRead
+		select {
+		case rd = <-reads:
+		case <-holdTimer.wait(deadline, time.Now()):
+			select {
+			case rd = <-reads:
+				// A read is waiting: the upstream is not quiet, the proxy
+				// was busy (a long event, a slow check). The read goes
+				// first; a due hold is checked with it.
+			default:
+				if relN > 0 {
+					stopped = !checkHeld()
+				} else if len(queue) == 0 && unread() > 0 && !stallReported {
+					stopped = !truncateStalled()
+				}
+				if stopped {
+					break read
+				}
+				reportRead()
+				continue
+			}
+		case <-ctx.Done():
+			// The agent is gone: nothing more is sent.
+			stopped = true
+			break read
+		}
+		if rd.panic != nil {
+			panic(rd.panic)
+		}
+		n, readErr := len(rd.b), rd.err
+		wasFlushed := initialFlushed
 		if n > 0 {
 			readTotal += n
-			chunk := buf[:n]
+			lastRead = time.Now()
+			chunk := rd.b
 			var events []sseEvent
 			if s.bedrock != nil {
-				accumulated.WriteString(s.bedrock.Feed(chunk))
+				textBefore := accumulated.Len()
+				accumulated.AddAll(s.bedrock.Feed(chunk))
+				if accumulated.Len()-textBefore > streamLineMaxText {
+					// One read completes at most the frame in progress plus
+					// 4 KiB of others, so the text it adds is that frame's.
+					overText = true
+				}
 				if streamResponseModel == "" {
 					streamResponseModel = s.bedrock.Model()
 				}
@@ -385,7 +668,7 @@ read:
 						break read
 					}
 					// Forwarded with an alert: nothing is held any more.
-					holdOff, holding = true, false
+					holdOff, callHold = true, false
 				}
 				// Whole frames only (GAP-0225): the start of a frame that is cut
 				// at the end of this read waits for the rest of it, so the agent
@@ -406,15 +689,6 @@ read:
 				bedrockPending = append([]byte(nil), bedrockPending[len(bedrockPending)-keep:]...)
 			} else {
 				events = framer.Write(chunk, false)
-				if framer.Broken() && !framerReported {
-					framerReported = true
-					if p.uninspectableReply(ctx, label, mode, "the event stream could not be framed") {
-						sseBlockMsg = uninspectableMsg
-						stopped = true
-						break read
-					}
-					rawTail = true
-				}
 			}
 			for _, ev := range events {
 				if handle(ev) {
@@ -422,15 +696,9 @@ read:
 					break read
 				}
 			}
-			if rawTail {
-				break read
-			}
-			if p.streamReadForTest != nil {
-				p.streamReadForTest(readTotal)
-			}
 		}
 		if readErr != nil {
-			if encoded && readErr != io.EOF && r.Context().Err() == nil {
+			if encoded && readErr != io.EOF && ctx.Err() == nil {
 				// A corrupt or oversized encoded stream cannot be read to its end.
 				if p.uninspectableReply(ctx, label, mode, "the encoded stream could not be decoded") {
 					sseBlockMsg = uninspectableMsg
@@ -444,7 +712,7 @@ read:
 				// be read, so the stream takes the fail mode. A managed install
 				// refuses it (the agent reads a block); otherwise what was sent
 				// is forwarded as it is, after the alert.
-				if r.Context().Err() == nil && p.uninspectableReply(ctx, label, mode, "the stream ended inside a frame") {
+				if ctx.Err() == nil && p.uninspectableReply(ctx, label, mode, "the stream ended inside a frame") {
 					sseBlockMsg = uninspectableMsg
 					stopped = true
 					break read
@@ -464,31 +732,26 @@ read:
 					}
 				}
 			}
+			// At the end the final check reads the tail.
 			break read
+		}
+		if n > 0 && wasFlushed {
+			now := time.Now()
+			if !tailHold {
+				writeQueue()
+			} else if accumulated.Len()-lastScanLen >= scanInterval || queueBytes-heldBytes >= streamHoldMaxBytes ||
+				(relN > 0 && !now.Before(queueAt[0].Add(streamHoldMaxAge))) {
+				if !checkHeld() {
+					stopped = true
+					break read
+				}
+			}
+		}
+		if n > 0 {
+			reportRead()
 		}
 	}
 
-	if rawTail {
-		// Let the agent have what was read, then the rest as it comes.
-		relN = len(queue)
-		if !initialFlushed {
-			initialFlushed = true
-		}
-		writeQueue()
-		// The bytes of the event the framer could not hold come first: the
-		// agent gets every byte of the stream (GAP-0241).
-		if held := framer.Held(); len(held) > 0 {
-			_, _ = w.Write(held)
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-		s.copyRest(src)
-		return
-	}
-	if preblocked {
-		return
-	}
 	if sseBlockMsg == "" && streamEnded && !stopped {
 		// The stream ended (or broke) inside a call: what is finished now is
 		// checked before the held events go out.
@@ -506,37 +769,32 @@ read:
 		}
 	}
 	if sseBlockMsg != "" {
-		// A refused tool call (or unreadable stream) never reaches the
-		// agent: the whole block reply when nothing was sent yet, else the
-		// block as the last assistant text of the stream under way. Held
-		// events are dropped.
-		if !initialFlushed {
-			blockedReply(sseBlockMsg)
-		} else if sseCalls != nil {
-			sseCalls.writeSSEBlockTail(w, s.model, sseBlockMsg)
-		} else {
-			hw := &headersSentWriter{ResponseWriter: w}
-			s.bedrock.writeBlockTail(hw, sseBlockMsg)
-			hw.Flush()
-		}
+		// A refused tool call, an unreadable stream or a completion block of
+		// a Bedrock stream never reaches the agent.
+		endBlock()
 		return
 	}
 	if !streamEnded || stopped {
-		return // a mid-stream block: what is queued is dropped
+		return // a block of an SSE stream: what is queued is dropped
 	}
 	relN = len(queue)
-	if !initialFlushed {
-		if !flushInitial() {
-			if sseBlockMsg != "" {
-				blockedReply(sseBlockMsg)
-			}
-			return
+	heldBytes = 0
+	if !flushInitial(true) || (tailHold && !scanText()) {
+		// The initial buffer, or the tail, got the mid-stream check every
+		// byte before it got, and it blocked.
+		if sseBlockMsg != "" {
+			endBlock()
 		}
-	} else {
+		return
+	}
+	if !tailHold {
+		// Observe mode holds nothing: the final check only records.
 		writeQueue()
 	}
 
-	// Final post-stream inspection on the full accumulated content.
+	// Final post-stream inspection on the full accumulated content, enforced
+	// in action mode: a block withholds the events still held and ends the
+	// stream as a mid-stream block does (GAP-0212).
 	// Use a detached context: the request context may be cancelled after streaming.
 	if accumulated.Len() > 0 {
 		content := accumulated.String()
@@ -548,9 +806,6 @@ read:
 		p.emitLLMResponseEventV8(ctx, responseMeta, content, content, nil)
 
 		postCtx, postCancel := p.postCallContext(ctx)
-		// PORT-GAP0212 TODO: rel 8f41735a55 removed proxyGuardrailWithoutEnforcement; the
-		// port makes this final check enforced in action mode (rel's tail hold) and
-		// withholds the held events on a block. Until then it only reports.
 		t0 := time.Now()
 		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
 		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
@@ -558,10 +813,21 @@ read:
 		p.resolveConfirm(ctx, r, verdict, "completion", label, mode)
 		elapsed := time.Since(t0)
 		p.logPostCall(label, content, verdict, elapsed, nil)
-		p.recordTelemetry(ctx, "completion", label, verdict, elapsed, mode, false)
+		enforced := tailHold && verdict.Action == "block"
+		p.recordTelemetry(ctx, "completion", label, verdict, elapsed, mode, enforced)
+		if enforced {
+			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (final check: %d bytes already forwarded to client, %d held back)\n",
+				verdict.Severity, logDisplayReason(verdict.Reason), released, queueBytes)
+			completionBlock(verdict.Reason)
+			if sseBlockMsg != "" {
+				endBlock()
+			}
+			return
+		}
 		if verdict.Action == "block" {
-			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-VIOLATION severity=%s %s (stream already delivered %d bytes to client — cannot retract)\n",
+			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-VIOLATION severity=%s %s (observe mode: stream delivered %d bytes to client)\n",
 				verdict.Severity, verdict.Reason, accumulated.Len())
 		}
 	}
+	writeQueue()
 }
