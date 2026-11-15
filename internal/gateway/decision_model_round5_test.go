@@ -53,16 +53,20 @@ func TestFlowGuardAloneNeverConfirmsOrBlocks(t *testing.T) {
 	}
 }
 
-// TestDecisionHistoryHoldsPaddedPrompts (GAP-0459): 100 short prompts padded
-// with 1 MiB of spaces each are stored as copies, so the store stays under
-// its byte cap instead of pinning 100 MiB of request bodies.
+// TestDecisionHistoryHoldsPaddedPrompts (GAP-0459): 48 short prompts padded
+// with 128 KiB of spaces on each side are stored as copies, so the stores stay
+// under the 8 MiB bound instead of pinning the 12 MiB of request bodies. The
+// rows are sized so pinning them all exceeds the bound by half again, and no
+// more: every prompt goes through the scope scan in full (rel-1-0-10:GAP-0861,
+// 100 rows of 2 MiB took 47 s plain and 434 s under -race).
 func TestDecisionHistoryHoldsPaddedPrompts(t *testing.T) {
+	const rows = 48
 	j, _ := historyJudge(t, 25, false)
-	pad := strings.Repeat(" ", 1<<20)
+	pad := strings.Repeat(" ", 128<<10)
 	runtime.GC()
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
-	for i := range 100 {
+	for i := range rows {
 		ctx := ContextWithSessionID(context.Background(), "padded-"+string(rune('a'+i%26))+string(rune('a'+i/26)))
 		j.ObserveSessionPrompt(ctx, pad+"run the tests"+pad)
 	}
@@ -70,7 +74,7 @@ func TestDecisionHistoryHoldsPaddedPrompts(t *testing.T) {
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
 	if grown := int64(after.HeapAlloc) - int64(before.HeapAlloc); grown > 8<<20 {
-		t.Fatalf("100 padded prompts keep %d MiB of heap; the history and the judge context must hold copies", grown>>20)
+		t.Fatalf("%d padded prompts keep %d MiB of heap; the history and the judge context must hold copies", rows, grown>>20)
 	}
 	runtime.KeepAlive(j)
 }

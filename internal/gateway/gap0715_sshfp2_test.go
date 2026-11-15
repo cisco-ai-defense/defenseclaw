@@ -137,6 +137,10 @@ func TestGAP0716NamedSourceCheckoutKeepsTheHookFinding(t *testing.T) {
 		{"E91 restore --staged --worktree .", hooked3, "git restore --staged --worktree .", sshfp2Hook, sshfp2Warn},
 		{"E73 checkout -- . of a tracked deleted settings file", gone, "git checkout -- .", sshfp2Hook, sshfp2Warn},
 		{"E92 restore . of a tracked deleted settings file", gone, "git restore .", sshfp2Hook, sshfp2Warn},
+		// The index-stage spellings read the same index (rel-1-0-10:GAP-0875 reconcile).
+		{"E83i checkout --theirs -- . of a tracked deleted settings file", gone, "git checkout --theirs -- .", sshfp2Hook, sshfp2Warn},
+		{"E84i checkout --ours -- . of a tracked deleted settings file", gone, "git checkout --ours -- .", sshfp2Hook, sshfp2Warn},
+		{"E85i checkout -m -- . of a tracked deleted settings file", gone, "git checkout -m -- .", sshfp2Hook, sshfp2Warn},
 		// What stays named: the settings file or its folder.
 		{"E70 checkout ref -- .claude", hooked2, "git checkout other -- .claude", sshfp2Hook, sshfp2Warn},
 		{"E75 checkout ref -- .claude (no folder on disk)", hooked3, "git checkout other -- .claude", sshfp2Hook, sshfp2Warn},
@@ -146,6 +150,8 @@ func TestGAP0716NamedSourceCheckoutKeepsTheHookFinding(t *testing.T) {
 		{"E93 restore . (no index file)", hooked3, "git restore .", "", sshfp2Allow},
 		{"E94 checkout -- . (index tracks other files)", other, "git checkout -- .", "", sshfp2Allow},
 		{"E95 restore . (index tracks other files)", other, "git restore .", "", sshfp2Allow},
+		{"E96 checkout --theirs -- . (index tracks other files)", other, "git checkout --theirs -- .", "", sshfp2Allow},
+		{"E97 checkout -m -- . (index tracks other files)", other, "git checkout -m -- .", "", sshfp2Allow},
 	}
 	sshfp2Run(t, home, rows)
 	_ = cwd
