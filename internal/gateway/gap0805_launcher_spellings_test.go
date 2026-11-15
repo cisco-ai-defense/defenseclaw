@@ -303,8 +303,10 @@ func TestGAP0806NestedLaunchersKeepTheProvenBlock(t *testing.T) {
 
 // An argv launcher whose tool arguments are past the decode bound
 // (maxArgvDecodeBytes) is read by nothing: TRUNCATED at the unknown tier of
-// the pack, at MEDIUM severity, never CRITICAL from the bound alone, for an
-// ordinary script and the fixture alike (rel-1-0-10:GAP-0858).
+// the pack with the limit finding, for an ordinary script and the fixture
+// alike (rel-1-0-10:GAP-0858). The severity label of a bound-only row is
+// GAP-0851's (T-BOUNDS): on delta 4 another argv cut adds this row's limit
+// finding first, with that label.
 func TestGAP0858ArgvPastTheDecodeBoundIsTruncated(t *testing.T) {
 	gap0589WindowsHost(t)
 	cwd := filepath.Join(t.TempDir(), "project")
@@ -329,9 +331,6 @@ func TestGAP0858ArgvPastTheDecodeBoundIsTruncated(t *testing.T) {
 				})
 				if boundedParse(resp.Action) < floor || !containsString(resp.RuleIDs, evaluationLimitRuleID) {
 					t.Errorf("%s/%s/%v: action %s rules %v, want at least %s with %s", tier.name, row.id, argv[0], resp.Action, resp.RuleIDs, floor, evaluationLimitRuleID)
-				}
-				if row.id == "benign-git" && strings.EqualFold(resp.Severity, "CRITICAL") {
-					t.Errorf("%s/%s/%v: severity %s from the bound alone, want below CRITICAL", tier.name, row.id, argv[0], resp.Severity)
 				}
 			}
 		}
