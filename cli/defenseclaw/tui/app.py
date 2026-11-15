@@ -189,6 +189,7 @@ from defenseclaw.tui.services.read_repository import (
 )
 from defenseclaw.tui.services.routing_state import RoutingPanelModel, routing_help_rows
 from defenseclaw.tui.services.setup_state import credential_reload_summary, validate_config_field
+from defenseclaw.tui.services.table_fit import fit_table
 from defenseclaw.tui.services.tui_state import TUIState, TUIStateStore
 from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, severity_color, state_color
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
@@ -5287,8 +5288,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             return self.body_text
         if self.active_panel == "alerts":
             self._sync_signal_connector_filters()
-            self._table_columns = self.alerts_model.data_table_columns()
-            self._table_rows = self.alerts_model.data_table_rows()
+            self._table_columns, self._table_rows = self._fit_to_screen(
+                self.alerts_model.data_table_columns(), self.alerts_model.data_table_rows()
+            )
             empty = self.alerts_model.empty_state()
             suffix = f"\n\n{empty}" if empty else ""
             self.body_text = self._connector_chip_text() + self.alerts_model.summary_text() + suffix
@@ -5320,8 +5322,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             self.body_text = self._inventory_body_text() + suffix
             return self.body_text
         if self.active_panel == "ai":
-            self._table_columns = self.ai_discovery_model.data_table_columns()
-            self._table_rows = self.ai_discovery_model.data_table_rows()
+            self._table_columns, self._table_rows = self._fit_to_screen(
+                self.ai_discovery_model.data_table_columns(),
+                self.ai_discovery_model.data_table_rows(),
+                drop=("Detectors", "Vendor", "Identity", "Version", "Categories"),
+            )
             empty = self.ai_discovery_model.empty_state()
             # "active=0" -> "active 0": the header is for people, not a log line.
             header = " · ".join(
@@ -5393,8 +5398,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             return self.body_text
         if self.active_panel == "audit":
             self._sync_signal_connector_filters()
-            self._table_columns = self.audit_model.data_table_columns()
-            self._table_rows = self.audit_model.data_table_rows()
+            self._table_columns, self._table_rows = self._fit_to_screen(
+                self.audit_model.data_table_columns(), self.audit_model.data_table_rows(), drop=("RUN",)
+            )
             self.body_text = self._connector_chip_text() + self._audit_body_text()
             return self.body_text
         self.body_text = (
@@ -11275,6 +11281,22 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
             # wide layout's column widths (GAP-1166).
             return (view, model.active_section, int(getattr(self.size, "width", 0) or 0))
         return view
+
+    def _fit_to_screen(
+        self,
+        columns: tuple[str, ...],
+        rows: tuple[tuple[str, ...], ...],
+        *,
+        drop: tuple[str, ...] = (),
+    ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+        """Columns and rows that fit the body, so no column is clipped at the edge (GAP-0908).
+
+        The table spans the body less its borders, padding and the vertical
+        scrollbar a long list shows (9 cells, GAP-2624).
+        """
+
+        width = int(getattr(self.size, "width", 0) or 0)
+        return fit_table(columns, rows, max(0, width - 9), drop=drop) if width else (columns, rows)
 
     def _render_panel_table(self) -> None:
         table = self.query_one("#panel-table", DataTable)
