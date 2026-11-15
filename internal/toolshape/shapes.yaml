@@ -193,8 +193,8 @@ path_rules:
   - {id: source.git_config_exec, access: [write, append], re: "(?i)(?:^|/)[.]git/config$"}
   - {id: PATH-ETC-PASSWD, access: [write, append, delete], re: "^/etc/passwd$", text_re: ":[^:[:space:]]*:0:0:"}
   # A unit or launch file in an account's own scheduler folders runs at its next login or start, as a cron entry does: a systemd user unit, an XDG
-  # autostart entry, a launchd agent, in any home (/home/bob, /mnt/home/alice, /Users/carol, /root). The system-wide unit and launchd folders (/etc/systemd/system, /Library/LaunchDaemons) are not here: a root-owned unit there is routine administration (24 benign admin tasks in the s3 corpus wrote one), and the rule keeps its reading of the account's own folders.
-  - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "(?i)^(?:/root|/(?:[^/]+/)*(?:home|homes|users)/[^/]+)/(?:[.]config/systemd/user/[^/]+[.](?:service|timer|socket|path|target)|[.]config/autostart/[^/]+[.]desktop|Library/LaunchAgents/[^/]+[.]plist)$"}
+  # autostart entry, a launchd agent, in any home (/home/bob, /mnt/home/alice, /Users/carol, /root), and the system unit and launchd folders.
+  - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "(?i)^(?:/root|/(?:[^/]+/)*(?:home|homes|users)/[^/]+)/(?:[.]config/systemd/user/[^/]+[.](?:service|timer|socket|path|target)|[.]config/autostart/[^/]+[.]desktop|Library/LaunchAgents/[^/]+[.]plist)$|^/etc/systemd/system/[^/]+[.](?:service|timer|socket|path|target)$|^/Library/Launch(?:Agents|Daemons)/[^/]+[.]plist$"}
   - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "^/etc/(cron[.](d|daily|hourly|weekly|monthly)/|crontab$|sudoers[.]d/)|^/var/spool/cron/", text_re: "(?i)(^|[^a-z])root[[:space:]]+([^[:space:]]+[[:space:]]+)*(/home/|/tmp/|/var/tmp/|/dev/shm/|~/)"}
 command_rules:
   - {id: CMD-SECRET-REVEAL, any_argv: ["--show-secrets", "--reveal"]}
@@ -206,4 +206,4 @@ command_rules:
 text_rules:
   - {id: CMD-PRIV-PATH-HIJACK, re: "(?i)(^|[;&|][[:space:]]*)PATH=(/tmp|/var/tmp|/dev/shm)[^[:space:]:]*:[$][{]?PATH[}]?[[:space:]]+(sudo|pkexec|su|doas)([[:space:]]|$)"}
 # A shell text without one of these words is not parsed again for the rules above.
-shell_triggers: ["path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".git-credentials", ".netrc", "_netrc", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron", ".config/systemd", ".config/autostart", "launchagents", ".git/config", "/.git", "cd .git", "pushd .git"]
+shell_triggers: ["path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".git-credentials", ".netrc", "_netrc", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron", ".config/systemd", ".config/autostart", "launchagents", "launchdaemons", "/systemd/system", ".git/config", "/.git", "cd .git", "pushd .git"]
