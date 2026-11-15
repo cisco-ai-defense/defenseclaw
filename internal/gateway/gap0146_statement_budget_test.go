@@ -166,6 +166,13 @@ func TestGAP0146BoundedMapOverflowIsTheBudget(t *testing.T) {
 			if row == 0 && managed {
 				return gap0146Want{"block", "ACTION-COMPOUND-LIMIT", "persistence.ssh_authorized_keys_command"}
 			}
+			if row == 0 {
+				// 600 redirects pass the action analysis node bound, the
+				// unknown tier of the pack for any call (rel-1-0-10:GAP-0688):
+				// this strict fixture blocks it per-user too, by the budget
+				// finding, never as a keys mutation.
+				return gap0146Want{"block", "ACTION-COMPOUND-LIMIT", "persistence.ssh_authorized_keys_command"}
+			}
 			return allow
 		},
 		[]string{"600 redirects", "600 touch operands", "3000-line heredoc"})
