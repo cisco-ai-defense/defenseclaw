@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -121,12 +122,19 @@ func (s *CodeGuardScanner) ScanContentWithProvenance(filename, content string) C
 	rules := s.allRules()
 
 	lines := strings.Split(content, "\n")
+	var fc *codeFileContext
+	if needsFileContext(ext, rules) {
+		fc = newCodeFileContext()
+		for _, line := range lines {
+			fc.learn(line)
+		}
+	}
 	for lineNum, line := range lines {
 		for _, r := range rules {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
-			if r.matches(line) {
+			if r.matchesIn(line, fc) {
 				ln := lineNum + 1
 				findings = append(findings, Finding{
 					ID:                  r.id,
@@ -299,14 +307,44 @@ type rule struct {
 	// rule drops text that only mentions what it looks for (GAP-1226,
 	// GAP-1227).
 	view func(line string) string
+	// fileView is a view that also reads what the file says about its own
+	// names (codeFileContext), for a rule that must tell a pattern match
+	// from a command by the receiver the file binds.
+	fileView func(line string, fc *codeFileContext) string
 }
 
 // matches reports whether the rule fires on line.
 func (r rule) matches(line string) bool {
+	return r.matchesIn(line, nil)
+}
+
+// matchesIn reports whether the rule fires on line of a file whose names
+// are read into fc (nil when the file was not read for names).
+func (r rule) matchesIn(line string, fc *codeFileContext) bool {
 	if r.view != nil {
 		line = r.view(line)
 	}
+	if r.fileView != nil {
+		line = r.fileView(line, fc)
+	}
 	return r.pattern.MatchString(line)
+}
+
+// codeFileContextExts are the files whose names are read for fileView rules.
+var codeFileContextExts = []string{".js", ".ts"}
+
+// needsFileContext reports whether a scan of a file with this extension reads
+// the file's names first: a rule that applies to it has a fileView.
+func needsFileContext(ext string, rules []rule) bool {
+	if !extMatch(ext, codeFileContextExts) {
+		return false
+	}
+	for _, r := range rules {
+		if r.fileView != nil && (len(r.extensions) == 0 || extMatch(ext, r.extensions)) {
+			return true
+		}
+	}
+	return false
 }
 
 // pathTraversalModuleSpecifier is the quoted module path of an import,
@@ -359,6 +397,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		pattern:     lazyregexp.New(`(?i)(os\.system|subprocess\.call|exec\(|child_process\.exec|eval\(|system\()`),
 		remediation: "Use parameterized execution or an allowlist of commands",
 		extensions:  []string{".py", ".js", ".ts", ".rb", ".php"},
+		fileView:    execMethodView,
 	},
 	{
 		id:          "CG-EXEC-002",
@@ -443,6 +482,22 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 	// scanner-invisible. Raise the buffer to 8 MiB which is well
 	// above any realistic source-line length.
 	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	var fc *codeFileContext
+	if needsFileContext(ext, rules) {
+		// First read: the names the file binds to a regular expression.
+		fc = newCodeFileContext()
+		for sc.Scan() {
+			fc.learn(sc.Text())
+		}
+		if err := sc.Err(); err != nil {
+			return nil, err
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		sc = bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	}
 	lineNum := 0
 	for sc.Scan() {
 		lineNum++
@@ -452,7 +507,7 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
-			if r.matches(line) {
+			if r.matchesIn(line, fc) {
 				ln := lineNum
 				findings = append(findings, Finding{
 					ID:                  r.id,
