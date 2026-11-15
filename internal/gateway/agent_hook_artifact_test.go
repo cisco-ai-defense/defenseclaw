@@ -1048,8 +1048,6 @@ func TestPromotedArtifactInCompoundCommandIsEnforced(t *testing.T) {
 		{fmt.Sprintf("false && bash %q", path), true},
 		{fmt.Sprintf("true || bash %q", path), true},
 		{fmt.Sprintf("cd /tmp && bash %q", path), true},
-		// After a cd the relative name may be another file.
-		{"cd /tmp && bash heredoc.sh", false},
 	} {
 		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: test.command, CWD: dir})
 		findings := promotedArtifactFindings(t.Context(), agentHookRequest{
@@ -1063,6 +1061,14 @@ func TestPromotedArtifactInCompoundCommandIsEnforced(t *testing.T) {
 		if got := matched.contributesToEnforcement(); got != test.want {
 			t.Errorf("%q: enforced=%t, want %t", test.command, got, test.want)
 		}
+	}
+	// After a cd the relative name is the file of the folder the cd moved the
+	// call to (the working-folder tracking of the facts, GAP-0327): bash reads
+	// /tmp/heredoc.sh, not the artifact of the call's own folder, so the
+	// artifact is not what runs.
+	moved := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: "cd /tmp && bash heredoc.sh", CWD: dir})
+	if findings := promotedArtifactFindings(t.Context(), agentHookRequest{ConnectorName: connectorName}, moved, true, nil); findingWithID(findings, "ACME-OWN-MARKER") != nil {
+		t.Errorf("cd /tmp && bash heredoc.sh names /tmp/heredoc.sh, not the artifact: %v", FindingStrings(findings))
 	}
 }
 
