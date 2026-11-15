@@ -78,6 +78,10 @@ var nativeFileShapes = map[string]nativeFileShape{
 	"edit_file": {tool: "Edit", args: map[string]nativeFileRole{
 		"path": nativeFilePath, "old_str": nativeFileOld, "new_str": nativeFileNew, "replace_all": nativeFileReplaceAll,
 	}},
+	// Copilot CLI view {path, view_range}: a file or directory read.
+	"view": {tool: "Read", args: map[string]nativeFileRole{
+		"path": nativeFilePath, "view_range": nativeFileList,
+	}},
 }
 
 // NativeFileToolView maps a native file write, edit or read tool call onto
@@ -180,4 +184,30 @@ func NativeFileToolView(toolName string, args json.RawMessage) (tool string, pro
 		return toolName, args, false
 	}
 	return shape.tool, encoded, true
+}
+
+// CursorTrustedReadArgs projects Cursor's beforeReadFile payload ({file_path,
+// content, and the session fields every Cursor hook carries}) onto Claude
+// Code's Read {file_path}. The event names no tool, so the whole payload was
+// judged as an unknown tool's arguments: a read of an SSH private key took
+// the MCP-argument path and alerted where Cursor's own preToolUse Read and
+// Claude Code block (rel-1-0-10:GAP-0781). Refused (ok false) for any other
+// event or a payload without a non-blank string file_path.
+func CursorTrustedReadArgs(event string, payload json.RawMessage) (projected json.RawMessage, ok bool) {
+	if canonicalHookEvent(event) != "beforereadfile" || antigravityValidateUniqueJSON(payload) != nil {
+		return payload, false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil || fields == nil {
+		return payload, false
+	}
+	var path string
+	if raw, present := fields["file_path"]; !present || json.Unmarshal(raw, &path) != nil || strings.TrimSpace(path) == "" {
+		return payload, false
+	}
+	out, err := MarshalToolArgs(map[string]string{"file_path": path})
+	if err != nil {
+		return payload, false
+	}
+	return out, true
 }

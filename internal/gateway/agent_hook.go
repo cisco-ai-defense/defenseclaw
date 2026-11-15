@@ -4129,6 +4129,10 @@ func (a *APIServer) inspectAgentHookToolCall(
 		// command (see connector.CursorTrustedShellArgs).
 		if args, dir, ok := connector.CursorTrustedShellArgs(req.HookEventName, req.ToolArgs); ok {
 			actionTool, trustedArgs, toolCWD = "shell", args, dir
+		} else if args, ok := connector.CursorTrustedReadArgs(req.HookEventName, req.ToolArgs); ok {
+			// beforeReadFile names no tool either: its payload names the
+			// file read (rel-1-0-10:GAP-0781).
+			actionTool, trustedArgs = "Read", args
 		}
 	}
 	var hermesWriteViews []connector.HermesWriteView
