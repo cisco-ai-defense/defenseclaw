@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -215,6 +216,48 @@ func TestPosixDataWordRecordIsNotACap(t *testing.T) {
 			if got := boundedParse(action); got != want {
 				t.Errorf("%s/%s: %s, want %s (%v)", tier.name, r.id, got, want, findings)
 			}
+		}
+	}
+}
+
+// The bound-rule lane of the POSIX byte bounds (TestBoundRuleEveryLaneCap),
+// registered here so it stays with this lane when the property test is split.
+func init() {
+	registerBoundedLane(
+		// The byte bounds of the analysis (a word past 4 KiB, the call past
+		// 64 KiB, the arguments past 256 KiB) end the POSIX analysis with
+		// limit_exceeded/input_limit and no command: the call is truncated,
+		// never a clean allow (rel-1-0-10:GAP-0382).
+		boundedLaneCap{lane: "shell-parse input bytes", cap: bounded.Bytes, limit: analysisLimit(boundedOneWord, 1<<20),
+			gen:  boundedShellLane(boundedOneWord, boundedWordThenStatements),
+			seen: boundedShellSeenCall},
+	)
+}
+
+// boundedOneWord is one literal word of size bytes.
+func boundedOneWord(size int) string { return "eval " + strings.Repeat("a", size) }
+
+// boundedWordThenStatements is the multi-cap shape of the input bytes lane:
+// the oversize word comes first, because the analysis stops at the first
+// limit it meets (behind a list of statements past its fact limit it never
+// reaches the word), then a list of statements past the statement budget.
+func boundedWordThenStatements(size int) string {
+	return boundedOneWord(size) + "; " + gap0568Assignments(2*boundedShellStatements)
+}
+
+// analysisLimit is the largest size up to max for which the analysis of the
+// call of fill reads it to the end (no limit status).
+func analysisLimit(fill func(int) string, max int) int {
+	for low, high := 1, max; ; {
+		if low >= high {
+			return low
+		}
+		mid := (low + high + 1) / 2
+		args, _ := json.Marshal(map[string]string{"command": fill(mid)})
+		if actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Args: args}).Parse.Status != actionfacts.StatusLimitExceeded {
+			low = mid
+		} else {
+			high = mid - 1
 		}
 	}
 }
