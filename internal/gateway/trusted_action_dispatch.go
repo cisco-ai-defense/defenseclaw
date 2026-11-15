@@ -161,6 +161,9 @@ type trustedActionRequest struct {
 	EnforcementCapable bool
 	// StrictPolicy grades an unverifiable extra argument as a block.
 	StrictPolicy bool
+	// sessionID is the connector's session of the call, for the checks that
+	// follow a session across calls (the page a browser tool has open).
+	sessionID string
 	// ManagedInstall is set for a call judged by a managed enterprise install:
 	// content the rules could not prove is judged as the strict tier judges it,
 	// because a managed device fails closed.
@@ -280,6 +283,11 @@ type trustedActionRequest struct {
 	// (rel-1-0-10:GAP-0013). The operand is empty when no one operand was
 	// at fault (a directory walk or a pattern the shell expands).
 	unprovenTarget *unprovenWrite
+	// nonWriteMention, when set, is told that the target scan held the call
+	// only on words of statements that read a protected file, in a per-user
+	// default or permissive install (ActionMentionsNoWriteRole): the finding
+	// alerts, it does not block (rel-1-0-10:GAP-0018).
+	nonWriteMention *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -310,6 +318,9 @@ type trustedActionRequest struct {
 	windowsPowerShellReading *windowsHintedReading
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
+	// launcherDepth is the number of shell launchers whose body this request
+	// reads (launcherBodyTwinRequest), bounded by maxLauncherBodyDepth.
+	launcherDepth int
 	// generation is the rule generation the call is judged with; nil: the
 	// request profile's (snapshotRulePackGenerationFor). A caller that
 	// combines several dispatches of one request judges each with each
@@ -626,6 +637,15 @@ func dispatchTrustedAction(
 					withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
 						posixParseTruncation(request, facts), request)))
 		}
+		if awkCommandDynamic(facts) && !awkDynamicBoundBySimpleCommands(request, facts) {
+			// An awk command built at run time has no text to judge
+			// (GAP-0499): the call is unknown, never an allow. A word built
+			// only from a literal the call assigns before it is not: the
+			// simple-command pass judges the awk call on its bound text.
+			defer func() {
+				findings = withAwkDynamicCommand(findings, request.EnforcementCapable)
+			}()
+		}
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
@@ -636,7 +656,25 @@ func dispatchTrustedAction(
 			// (GAP-0693).
 			defer func() { findings = withPowerShellCapPieces(parent, request, findings) }()
 		}
-		if cut := trustedReadingCut(request.Input, facts); cut.Any() {
+		launcher := launcherBodyTwinRequest(request, facts)
+		if launcher.read {
+			// The script of an argv shell launcher (powershell.exe -Command,
+			// cmd /c) is judged as the string command the same script is
+			// (rel-1-0-10:GAP-0711, GAP-0712): its findings count, the
+			// TRUNCATED floor of its own cap among them.
+			defer func() {
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcher.twin))
+			}()
+		}
+		if launcher.depthCut {
+			// A launcher nested past maxLauncherBodyDepth is not read: TRUNCATED
+			// at the depth cap (the one bound rule, rel-1-0-10:GAP-0806).
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Depth), request) }()
+		}
+		// A script past the input bound is not read in full, so the bound of the argv
+		// call still cuts it (rel-1-0-10:GAP-0712), and so do the words a POSIX -c
+		// script runs as its arguments and long wrapper words (rel-1-0-10:GAP-0803).
+		if cut := trustedReadingCut(request.Input, facts, launcher.read && launcher.fully && len(launcher.twin.Input.Command) <= actionfacts.MaxCommandBytes); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
 			// statement budget: the call is TRUNCATED (the one bound rule),
 			// never judged below the unknown tier of its pack, and what was
@@ -716,6 +754,31 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// The commands an awk program starts through system(), print | and
+	// | getline, written as string literals, are run by the shell as the
+	// hook would run them directly (GAP-0499): that reading is judged too,
+	// and only its block counts.
+	twin, awkReading, awkTwin := awkCommandTwinRequest(request)
+	awkCaps := awkReading.Truncated
+	if awkTwin {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	if awkProgramFilesUnknown(request, awkReading) {
+		// A program file the call runs could not be read, or starts a command
+		// built at run time: the call is unknown (GAP-0499, GAP-0652).
+		defer func() {
+			findings = withAwkDynamicCommand(findings, request.EnforcementCapable)
+		}()
+	}
+	if awkCaps.Any() {
+		// An awk program in shell STRINGs nested past the bound is not read:
+		// the call is truncated (bound rule, cap depth).
+		defer func() {
+			findings = withBoundedTruncation(findings, awkCaps, request)
+		}()
+	}
 
 	if !analyzed {
 		facts = analyzeWithPatchHeaderAnswers(&request)
@@ -749,6 +812,16 @@ func dispatchTrustedAction(
 	// upload) is the unknown tier of the one bound rule: the profile decides,
 	// an alert in the default and permissive packs, a block in strict
 	// (GAP-0595).
+	// A cap the sender reader hit (its nesting depth, its reading bounds) is
+	// TRUNCATED, whatever it read before the cap still judged: at least the
+	// unknown tier of the pack (the one bound rule, GAP-0721).
+	var senderCaps bounded.Truncated
+	actionfacts.ReadSenders(facts).Bound(&senderCaps)
+	if set := senderCaps.Set(); set.Any() {
+		defer func() {
+			findings = withBoundedTruncation(findings, set, request)
+		}()
+	}
 	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
 		defer func() {
 			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
@@ -796,6 +869,11 @@ func dispatchTrustedAction(
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// An operand in a folder the call does not give: the unknown tier when
+	// it may be a protected file there (rel-1-0-10:GAP-0871).
+	defer func() {
+		findings = withUnresolvedFolderTier(findings, request, facts, false)
+	}()
 	if twin, ok := overLimitCommandBoundedTwinRequest(request, facts); ok {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
@@ -1023,6 +1101,13 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
+				if simple.UnresolvedFolder {
+					// The walk does not know the folder this statement runs
+					// in (cd "$X", cd "$(...)"): the unknown tier when an
+					// operand may be a named protected file there
+					// (rel-1-0-10:GAP-0871).
+					childFindings = withUnresolvedFolderTier(childFindings, child, actionfacts.Analyze(child.Input), true)
+				}
 				if simple.LoginGuess {
 					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
 						return !loginGuessProvedFinding(f)
@@ -3867,7 +3952,9 @@ func managedLinkWalkView(request trustedActionRequest) (actionfacts.Facts, trust
 	}
 	placed := request
 	placed.Input.CWD = cwd
-	return actionfacts.Analyze(placed.Input), placed, true
+	// The link-walk facts are keyed by the client walk (the hook folder
+	// reading of each path, Facts.AtHookFolder).
+	return actionfacts.Analyze(placed.Input).AtHookFolder(), placed, true
 }
 
 // protectedHomeClientDirectory is the directory a managed hook call runs in
@@ -4595,7 +4682,10 @@ func protectedHomePlacedReading(facts actionfacts.Facts, request trustedActionRe
 		return facts, request
 	}
 	request.Input.CWD = client
-	return actionfacts.Analyze(request.Input), request
+	// The client keyed its link facts by its own walk of the call, which
+	// places a command by the hook folder: read the paths there too, or a
+	// write the gateway places after a cd misses its keys (GAP-0426).
+	return actionfacts.Analyze(request.Input).AtHookFolder(), request
 }
 
 // placedLinkedStateWrite reads each top-level statement in the directory
@@ -7349,6 +7439,7 @@ func finalizeTrustedActionFindings(
 		protectedLocalFileRead: request.CopilotSharedLocalFile && request.Input.Tool == "read_file",
 		sendDestination:        request.sendDestination,
 	})
+	findings = withProvenScopeFindings(generation, request, facts, findings)
 	if !request.StrictPolicy {
 		findings = trustedActionOrdinaryCredentialCopyFindings(facts, findings)
 	}
@@ -9799,17 +9890,28 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 //     found but allowed in every pack (rel-1-0-10:GAP-0589). The statements
 //     of a capped PowerShell reading are read again in runs under the cap
 //     (actionfacts.PowerShellCappedRuns).
+//   - An argv command that no launcher script covers (trustedArgvReadingCut):
+//     a word over 4 KiB, over 64 KiB in all, or more than 256 words
+//     (rel-1-0-10:GAP-0712). bodyRead is set when the script of the launcher
+//     is read on its own (launcherBodyTwinRequest): a word over the argv
+//     bounds is then not a cut of the reading, and the script's own cuts are
+//     the ones that count.
 //
 // A POSIX reading is not truncated by its command cap: its per-statement
 // split (SimpleCommands) reads every statement up to the statement budget
 // (ShellStatementsOverBudget), and each is judged.
-func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
+func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts, bodyRead bool) bounded.CapSet {
 	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 		return bounded.CapSet{}
 	}
 	if command, known := trustedBashCommandInput(input); known && len(command) > actionfacts.MaxCommandBytes &&
 		trustedShellCommandTool(input.Tool) {
 		return bounded.Of(bounded.Bytes)
+	}
+	if !bodyRead {
+		if cut := trustedArgvReadingCut(input, facts); cut.Any() {
+			return cut
+		}
 	}
 	if facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell {
 		return bounded.Of(bounded.Items)
@@ -10126,6 +10228,10 @@ func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bo
 	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
 }
 
+// credentialFileExternalUploadRuleID is the exact credential-file upload rule
+// (semantic owner exfil.credential_file_external_upload).
+const credentialFileExternalUploadRuleID = "exfil.credential_file_external_upload"
+
 // withCredentialSenderFinding adds the unknown-tier verdict of a call that
 // hands credential material to a sender whose destination is not read in
 // full. It is the evaluation-limit finding the profile decides, with the
@@ -10137,6 +10243,16 @@ func withCredentialSenderFinding(
 ) []RuleFinding {
 	for _, finding := range findings {
 		if finding.RuleID == "ACTION-COMPOUND-LIMIT" {
+			return findings
+		}
+		if reason == actionfacts.CredentialSenderFile && finding.RuleID == credentialFileExternalUploadRuleID {
+			// The exact credential-file upload rule already proved this
+			// upload from the same file (curl -T, scp, rsync, wget, any
+			// upload option, GAP-0768) and decides it in every tier, an
+			// alert in default and permissive and a block in strict
+			// (GAP-0595): a part of the call the exact rule does not need
+			// (a stdout redirect to ~/out.txt or out-*.txt) does not make
+			// the same file an unread destination.
 			return findings
 		}
 	}

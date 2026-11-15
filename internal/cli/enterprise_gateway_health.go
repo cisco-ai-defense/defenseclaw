@@ -77,6 +77,15 @@ func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body, stat
 			result.AddWarning(code, warning)
 		}
 	}
+	// Managed hook calls that ran out of their answer budget: /health
+	// carries it to an administrator, /status always (S8 DESIGN 18).
+	capacity := status
+	if capacity == nil {
+		capacity = body
+	}
+	if message, over := enterprisestatus.HookCapacityWarning(capacity); over {
+		result.AddWarning(enterprisestatus.CodeHookOverCapacity, message)
+	}
 	// A rejected judge key made every judge call fail while status and
 	// verify said the scanners and judge were ready (GAP-1026).
 	if g := health.Guardrail; g != nil {

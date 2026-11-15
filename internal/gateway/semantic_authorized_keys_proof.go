@@ -1132,7 +1132,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					// simple commands where the client keyed its evidence.
 					if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; !filepath.IsAbs(moveInput.CWD) && filepath.IsAbs(cwd) {
 						moveInput.CWD = filepath.Clean(cwd)
-						moveFacts = actionfacts.Analyze(moveInput)
+						moveFacts = actionfacts.Analyze(moveInput).AtHookFolder()
 					}
 					plainMoves = hookpaths.PlainMoveDestinationsWithStatements(moveInput, moveFacts)
 				}
@@ -1488,6 +1488,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
 	if decision != "" {
+		if request.nonWriteMention != nil && !request.StrictPolicy && !request.ManagedInstall && !request.ProtectedHomeHook &&
+			trustedShellCommandInput(request.Input) &&
+			hookpaths.ActionMentionsNoWriteRole(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) {
+			*request.nonWriteMention = true
+		}
 		return confirmed()
 	}
 	if !cannotResolveLocally && trustedPOSIXShellCall(input, facts) &&

@@ -1075,10 +1075,10 @@ type CommandFact struct {
 	// `cd X && a && b` (b runs only after the cd succeeded) from
 	// `cd X && a; b` (b also runs after a failed cd).
 	ShortCircuitListID int64 `json:"-"`
-	// workFolder is the chain of cd targets the shell had run before this
-	// command (working_folder.go); the path facts of the command are
-	// resolved against the folder it moves the call to.
-	workFolder   workFolder
+	// workFolders are the folders the command may run in after the cd,
+	// pushd and popd calls before it (working_folder.go); its path facts are
+	// read in each of them.
+	workFolders  workFolders
 	Kind         CommandKind
 	Dialect      Dialect
 	Effect       CommandEffect
@@ -1154,6 +1154,14 @@ type ArgumentFact struct {
 	// escaped a leading "~" (an unquoted one is an expansion), and kept on
 	// the argv a wrapper passes on. Such a word names "./~", not the home.
 	literalTilde bool
+	// staticPrefix is, for a word that expands, the text it starts with
+	// before its first expansion (or its whole static text when only a glob
+	// expands). Only the awk reading uses it, to tell a computed option value
+	// from a computed program.
+	staticPrefix string
+	// holeText is, for a word that expands, its static text with awkprog.Hole
+	// in the place of each expansion. Only the awk reading uses it.
+	holeText string
 	// homeSpelling is a word whose only expansion is a plain $HOME or
 	// ${HOME} at its start (or after the = of a leading --option=), written
 	// with "~" for it ("$HOME/.dotfiles" -> "~/.dotfiles"). It is empty when
@@ -1248,6 +1256,21 @@ type PathFact struct {
 	// tracking, so a link operation they cannot place never turns a write
 	// after a cd into an unproven link write.
 	atHook *pathAtHook
+	// otherFolder marks the reading of an operand in another folder its
+	// command may run in (working_folder.go): `cd X; cat f` reads f in the
+	// hook's folder (the fact) and in X (this one), as the cd may fail. It is
+	// a path the call may reach, judged by every path rule, and not a further
+	// operand (OperandPaths leaves it out).
+	otherFolder bool
+	// unresolvedFolder marks an operand of a command that may run in a
+	// folder the call does not give (cd "$X", cd "$(...)", popd, a loop that
+	// moves on each pass): the fact keeps its reading in the hook's folder,
+	// and the gateway gives a relative operand there the unknown tier.
+	unresolvedFolder bool
+	// parsedFlavor is the flavor the parser gave the operand, before the
+	// normalization replaced it: a reading in other folders starts from it
+	// (Facts.withWorkFoldersOf).
+	parsedFlavor PathFlavor
 	// LinkedFrom is, for a Linked fact, the resolved spelling of the operand
 	// whose link reaches this file. A proof that reads the text one write
 	// puts into a file judges it only against the files that write reaches,
@@ -1270,7 +1293,7 @@ type pathAtHook struct {
 func (f Facts) AtHookFolder() Facts {
 	moved := false
 	for _, path := range f.Paths {
-		if path.atHook != nil {
+		if path.atHook != nil || path.otherFolder {
 			moved = true
 			break
 		}
@@ -1278,24 +1301,36 @@ func (f Facts) AtHookFolder() Facts {
 	if !moved {
 		return f
 	}
-	paths := make([]PathFact, len(f.Paths))
-	copy(paths, f.Paths)
-	for index := range paths {
-		if reading := paths[index].atHook; reading != nil {
-			paths[index].Normalized, paths[index].Absolute, paths[index].Resolved = reading.normalized, reading.absolute, reading.resolved
-			paths[index].atHook = nil
+	paths := make([]PathFact, 0, len(f.Paths))
+	for _, path := range f.Paths {
+		if path.otherFolder {
+			continue
 		}
+		if reading := path.atHook; reading != nil {
+			path.Normalized, path.Absolute, path.Resolved = reading.normalized, reading.absolute, reading.resolved
+			path.atHook = nil
+		}
+		paths = append(paths, path)
 	}
 	f.Paths = paths
 	return f
 }
 
+// OtherFolderReading reports the reading of an operand in another folder its
+// command may run in (PathFact.otherFolder).
+func (p PathFact) OtherFolderReading() bool { return p.otherFolder }
+
+// UnresolvedFolder reports an operand of a command that may run in a folder
+// the call does not give (PathFact.unresolvedFolder).
+func (p PathFact) UnresolvedFolder() bool { return p.unresolvedFolder }
+
 // OperandPaths returns the path facts that are operands of the call: every
-// fact except those added for the file a link reaches.
+// fact except those added for the file a link reaches and the readings of an
+// operand in another folder its command may run in.
 func (f Facts) OperandPaths() []PathFact {
 	operands := make([]PathFact, 0, len(f.Paths))
 	for _, candidate := range f.Paths {
-		if !candidate.Linked {
+		if !candidate.Linked && !candidate.otherFolder {
 			operands = append(operands, candidate)
 		}
 	}

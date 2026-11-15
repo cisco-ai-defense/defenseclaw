@@ -33,6 +33,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
@@ -70,12 +71,12 @@ func withManagedRecord(t *testing.T, argv0 string, present bool, trust error) {
 			t.Fatal(err)
 		}
 	}
-	restorePath, restoreTrust, restoreArgv0 := managedHostDescriptorPath, managedHostRecordTrusted, launcherArgv0
-	managedHostDescriptorPath = func() string { return descriptor }
-	managedHostRecordTrusted = func(string) error { return trust }
+	restorePath, restoreTrust, restoreArgv0 := hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostRecordTrusted, launcherArgv0
+	hookcli.ManagedHostDescriptorPath = func() string { return descriptor }
+	hookcli.ManagedHostRecordTrusted = func(string) error { return trust }
 	launcherArgv0 = func() string { return argv0 }
 	t.Cleanup(func() {
-		managedHostDescriptorPath, managedHostRecordTrusted, launcherArgv0 = restorePath, restoreTrust, restoreArgv0
+		hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostRecordTrusted, launcherArgv0 = restorePath, restoreTrust, restoreArgv0
 	})
 }
 

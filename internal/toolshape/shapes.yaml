@@ -131,6 +131,25 @@ code_keys: [code, script, source_code, snippet, python, javascript, js, expressi
 # Name tokens that make a tool a code-execution tool.
 code_tool_tokens: [exec, execute, run, eval, evaluate, code, python, script, repl, interpreter, notebook, cell]
 
+# Browser-automation tools by their schema (Puppeteer, Playwright, Chrome
+# DevTools MCP): the tool name (normalised) and the argument that carries the
+# page script or the URL. A generic tool name also needs one of the servers
+# tokens in its server segment or its name. The script is read for a flow of
+# session state to the network (PAGE-SCRIPT-SESSION-EGRESS, GAP-0560).
+page_script:
+  tools:
+    - {names: [browser_evaluate], keys: [function]}
+    - {names: [browser_run_code, browser_run_code_unsafe], keys: [code]}
+    - {names: [evaluate_script], keys: [function]}
+    - {names: [puppeteer_evaluate, playwright_evaluate], keys: [script]}
+    - {names: [evaluate, evaluate_javascript, execute_javascript, page_evaluate, run_javascript], keys: [script, code, expression, javascript, function], servers: [puppeteer, playwright, browser, chrome, devtools, selenium, page, cdp, webdriver]}
+  navigate:
+    - {names: [browser_navigate, puppeteer_navigate, playwright_navigate, navigate_page], keys: [url]}
+    - {names: [navigate, new_page, goto, open_url], keys: [url], servers: [puppeteer, playwright, browser, chrome, devtools, selenium, page, cdp, webdriver]}
+  leave:
+    - {names: [browser_navigate_back, browser_tabs, browser_close, select_page, close_page]}
+  leave_types: [back, forward]
+
 # Security-setting changes. key: normalised argument name (lower-case, - and
 # camelCase become _). when: the value that makes it a downgrade.
 settings:
@@ -174,8 +193,8 @@ path_rules:
   - {id: source.git_config_exec, access: [write, append], re: "(?i)(?:^|/)[.]git/config$"}
   - {id: PATH-ETC-PASSWD, access: [write, append, delete], re: "^/etc/passwd$", text_re: ":[^:[:space:]]*:0:0:"}
   # A unit or launch file in an account's own scheduler folders runs at its next login or start, as a cron entry does: a systemd user unit, an XDG
-  # autostart entry, a launchd agent, in any home (/home/bob, /mnt/home/alice, /Users/carol, /root). The system-wide unit and launchd folders (/etc/systemd/system, /Library/LaunchDaemons) are not here: a root-owned unit there is routine administration (24 benign admin tasks in the s3 corpus wrote one), and the rule keeps its reading of the account's own folders.
-  - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "(?i)^(?:/root|/(?:[^/]+/)*(?:home|homes|users)/[^/]+)/(?:[.]config/systemd/user/[^/]+[.](?:service|timer|socket|path|target)|[.]config/autostart/[^/]+[.]desktop|Library/LaunchAgents/[^/]+[.]plist)$"}
+  # autostart entry, a launchd agent, in any home (/home/bob, /mnt/home/alice, /Users/carol, /root), and the system unit and launchd folders.
+  - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "(?i)^(?:/root|/(?:[^/]+/)*(?:home|homes|users)/[^/]+)/(?:[.]config/systemd/user/[^/]+[.](?:service|timer|socket|path|target)|[.]config/autostart/[^/]+[.]desktop|Library/LaunchAgents/[^/]+[.]plist)$|^/etc/systemd/system/[^/]+[.](?:service|timer|socket|path|target)$|^/Library/Launch(?:Agents|Daemons)/[^/]+[.]plist$"}
   - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "^/etc/(cron[.](d|daily|hourly|weekly|monthly)/|crontab$|sudoers[.]d/)|^/var/spool/cron/", text_re: "(?i)(^|[^a-z])root[[:space:]]+([^[:space:]]+[[:space:]]+)*(/home/|/tmp/|/var/tmp/|/dev/shm/|~/)"}
 # Rules of this table that never block: an account made or a host taken down from a call is the setup of a container task or a test host as
 # often as it is an attack, so the finding is an alert in every tier (the strict packs included).
@@ -207,4 +226,4 @@ command_rules:
 text_rules:
   - {id: CMD-PRIV-PATH-HIJACK, re: "(?i)(^|[;&|][[:space:]]*)PATH=(/tmp|/var/tmp|/dev/shm)[^[:space:]:]*:[$][{]?PATH[}]?[[:space:]]+(sudo|pkexec|su|doas)([[:space:]]|$)"}
 # A shell text without one of these words is not parsed again for the rules above.
-shell_triggers: ["rm ", "-name", "-iname", "-path", "-ipath", "-wholename", "useradd", "adduser", "newusers", "chpasswd", "usermod", "--stdin", "dscl", "sysadminctl", "/add", "localuser", "aduser", "shutdown", "poweroff", "halt", "reboot", "restart-computer", "stop-computer", "init 0", "init 6", "telinit", "histsize=0", "histfilesize=0", "histfile=", "+o history", "path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".git-credentials", ".netrc", "_netrc", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron", ".config/systemd", ".config/autostart", "launchagents", ".git/config", "/.git", "cd .git", "pushd .git"]
+shell_triggers: ["rm ", "-name", "-iname", "-path", "-ipath", "-wholename", "useradd", "adduser", "newusers", "chpasswd", "usermod", "--stdin", "dscl", "sysadminctl", "/add", "localuser", "aduser", "shutdown", "poweroff", "halt", "reboot", "restart-computer", "stop-computer", "init 0", "init 6", "telinit", "histsize=0", "histfilesize=0", "histfile=", "+o history", "path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".git-credentials", ".netrc", "_netrc", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron", ".config/systemd", ".config/autostart", "launchagents", "launchdaemons", "/systemd/system", ".git/config", "/.git", "cd .git", "pushd .git"]

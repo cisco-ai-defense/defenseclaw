@@ -161,9 +161,12 @@ func windowsCodexAnsweringBridgeHookCommand(event, contractID, hookBinary string
 
 // windowsCodexPerUserHookCommands are the per-user Codex commands of launcher
 // for event and contract that this release and its upgrade sources write:
-// the bridge of 1.0.1 to 1.0.4 (windowsNativePowerShellHookCommandForCodexEvent),
-// the direct start of 1.0.5 to 1.0.8 (GAP-1908), and this release's guarded
-// start and answering bridge. Setup rewrites them and teardown removes them;
+// the bridge with the 1.0.8 fallback end (windowsNativePowerShellHookCommandForCodexEvent;
+// 1.0.8 for a launcher path the direct form cannot carry, and the rollback
+// converters of 1.0.9), the direct start of 1.0.5 to 1.0.8 (GAP-1908), and
+// the guarded start and answering bridge of this release. The bridge of 1.0.0
+// to 1.0.4 (its earlier fallback end) is owned through
+// legacyWindowsAwaitedHookCommand (nativeHookExactCommands). Setup rewrites them and teardown removes them;
 // the guarded form is listed whether or not the guard program is still there.
 func windowsCodexPerUserHookCommands(event, contractID, launcher string) []string {
 	commands := []string{

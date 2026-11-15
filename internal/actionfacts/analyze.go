@@ -390,11 +390,14 @@ func senderSourcesOf(input Input, extracted extractedInput, argv []string) []sen
 		if text == "" || seen[text] || len(sources) >= maxSendSources {
 			return
 		}
-		if dialect, _ := chooseRawCommandDialect(input.Tool, input.DialectHint, text); dialect != DialectPOSIX {
+		dialect, _ := chooseRawCommandDialect(input.Tool, input.DialectHint, text)
+		switch dialect {
+		case DialectPOSIX, DialectPowerShell, DialectCMD:
+		default:
 			return
 		}
 		seen[text] = true
-		sources = append(sources, sendSource{text: text})
+		sources = append(sources, sendSource{text: text, dialect: dialect})
 	}
 	addArgv := func(words []string) {
 		if len(words) == 0 || len(sources) >= maxSendSources {

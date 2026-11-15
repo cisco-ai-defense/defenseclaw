@@ -123,7 +123,7 @@ func TestToolJudgeSamplesDifferPerCall(t *testing.T) {
 	}
 	// a call with no session is structured the same way
 	bare := (*LLMJudge)(nil).toolJudgeContextSample(context.Background(), "Bash", `{"command":"ls"}`)
-	if n, c := sectionNonceCount(bare); !toolJudgeNonceShape.MatchString(n) || c != 2 {
+	if n, c := sectionNonceCount(bare); !toolJudgeNonceShape.MatchString(n) || c-packetSectionTags(bare) != 2 {
 		t.Fatalf("a sessionless sample needs one CURRENT_TOOL_CALL section with the nonce: %q", bare)
 	}
 }

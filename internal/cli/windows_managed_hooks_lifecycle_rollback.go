@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // windowsManagedHooksLifecycleFirstInstall reports whether the pending
@@ -107,7 +108,7 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 	); err != nil {
 		note("per-user enrollments: %v", err)
 	}
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		note("Copilot and OpenCode machine policy and the Claude Code version floor: %v", err)
 	} else {

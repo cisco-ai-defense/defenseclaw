@@ -4,7 +4,6 @@
 package assetfacts
 
 import (
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -712,7 +711,7 @@ func (s *entryScan) entries(dir string) listing {
 	}
 	var l listing
 	if filepath.IsAbs(dir) && readableTarget(dir) {
-		if f, err := os.Open(dir); err == nil {
+		if f, err := fsOpen(dir); err == nil {
 			names, _ := f.Readdirnames(maxListedEntries + 1)
 			f.Close()
 			l = listing{names: names, complete: len(names) <= maxListedEntries}
@@ -832,7 +831,7 @@ func (s *entryScan) namedFolders(word, cwd string) []string {
 	var out []string
 	for _, dir := range []string{filepath.Clean(path), filepath.Dir(filepath.Clean(path))} {
 		if readableTarget(dir) {
-			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			if info, err := fsStat(dir); err == nil && info.IsDir() {
 				out = append(out, dir)
 			}
 		}

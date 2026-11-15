@@ -146,6 +146,9 @@ func (j *LLMJudge) ObserveSessionPromptScope(ctx context.Context, content, scope
 		j.warnIntentStore("ObservePrompt", "the user's intent is not recorded for the session's next tool calls", err)
 	}
 	j.scopeSessions().observe(sessionID, task, scopeText, time.Now())
+	// A new turn starts a new tool chain: its target history goes with the
+	// prior calls.
+	j.judgeTargets().reset(sessionID)
 	// The decision model's history keeps the prompt as a turn and is not
 	// cleared by it. A blocked prompt comes here as "" (observeUserTurn), so
 	// it never enters the history.
@@ -181,8 +184,9 @@ func (j *LLMJudge) sessionScopeTargets(sessionID string) []string {
 }
 
 // inheritToolJudgeContext hands the judge a config or rule-pack change
-// replaces over to its successor: the successor uses the same intent store and
-// scope table, so live sessions keep their task, recent calls and targets
+// replaces over to its successor: the successor uses the same intent store,
+// scope table and target history, so live sessions keep their task, recent
+// calls and targets
 // across the rebuild instead of being judged with none until their next
 // prompt. A store or table the successor already has is kept.
 func (j *LLMJudge) inheritToolJudgeContext(from *LLMJudge) {
@@ -196,4 +200,5 @@ func (j *LLMJudge) inheritToolJudgeContext(from *LLMJudge) {
 	}
 	j.intentsMu.Unlock()
 	j.scope.CompareAndSwap(nil, from.scopeSessions())
+	j.targets.CompareAndSwap(nil, from.judgeTargets())
 }

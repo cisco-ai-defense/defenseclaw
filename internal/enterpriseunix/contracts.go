@@ -631,14 +631,58 @@ func (l *lifecycle) awaitGuardianCatchUp(ctx context.Context, deadline, since ti
 	}
 }
 
+// guardianVerifiedHook reports, for an unprotected-agents entry, whether the
+// managed hook of its connector is verified for its account: a connector the
+// last transaction put in vendor machine policy (record.MachinePolicyConnectors,
+// which status and verify check again in describeMachinePolicy; on Linux and
+// macOS such a connector has no per-user target), or a per-user target the
+// root-only credential attestation of the current authorization ledger names
+// current and the guardian state does not report failed or pending. Without
+// a bound attestation (a non-root status, a guardian that never reconciled)
+// no per-user target is verified.
+func (l *lifecycle) guardianVerifiedHook(record *Deployment) func(enterprisehooks.UnprotectedAgent) bool {
+	machine := map[string]bool{}
+	if record != nil {
+		for _, name := range record.MachinePolicyConnectors {
+			machine[strings.ToLower(strings.TrimSpace(name))] = true
+		}
+	}
+	type target struct{ user, connector string }
+	current := map[target]int{}
+	if results, attested := l.attestedGuardianResults(); attested {
+		if attestation, err := l.env.readAttestation(); err == nil {
+			for _, row := range attestation.Targets {
+				if row.State == enterprisehooks.CredentialTargetCurrent {
+					current[target{strings.TrimSpace(row.User), strings.ToLower(strings.TrimSpace(row.Connector))}] = row.UID
+				}
+			}
+		}
+		for _, row := range results {
+			if !row.OK || row.Pending {
+				delete(current, target{strings.TrimSpace(row.User), strings.ToLower(strings.TrimSpace(row.Connector))})
+			}
+		}
+	}
+	return func(agent enterprisehooks.UnprotectedAgent) bool {
+		connector := strings.ToLower(strings.TrimSpace(agent.Connector))
+		if machine[connector] {
+			return true
+		}
+		uid, ok := current[target{strings.TrimSpace(agent.User), connector}]
+		return ok && (agent.UID == nil || uid < 0 || *agent.UID == uid)
+	}
+}
+
 // describeUnprotectedAgents reports the agents the enumerator found
 // uncovered (its unprotected-agents record next to the
 // manifest) and marks the deployment security-incomplete. Each is one
 // account's agent, so it is a warning for that account, verify included; an
 // unreadable record hides which agents they are, so verify fails on it, as
 // on an app or extension surface enterprise.enrollment.unverified_versions:
-// refuse could not refuse.
-func (l *lifecycle) describeUnprotectedAgents() {
+// refuse could not refuse. A gap of the bounded install scan of an account
+// whose managed hook is verified (guardianVerifiedHook) is a warning only
+// (rel-1-0-10 GAP-0802).
+func (l *lifecycle) describeUnprotectedAgents(record *Deployment) {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)), enterprisehooks.UnprotectedAgentsMaxBytes)
 	if errors.Is(err, os.ErrNotExist) {
@@ -692,7 +736,12 @@ func (l *lifecycle) describeUnprotectedAgents() {
 	for _, line := range sharedLines {
 		r.AddWarning(line.Code, line.Message())
 	}
+	hookVerified := l.guardianVerifiedHook(record)
 	for _, agent := range agents {
+		if enterprisehooks.InstallScanGapCovered(agent, hookVerified) {
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanPartial, agent.InstallScanPartialMessage())
+			continue
+		}
 		if enterprisehooks.UnprotectedCodeLeavesCoverageIncomplete(agent.Code) {
 			// The deployment does not cover it: no contract, an incomplete
 			// install scan, a CLI path or IDE without hooks (GAP-0151), or
@@ -722,7 +771,9 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		}
 	}
 	for _, agent := range agents {
-		r.MarkSecurityIncomplete(agent.Code)
+		if !enterprisehooks.InstallScanGapCovered(agent, hookVerified) {
+			r.MarkSecurityIncomplete(agent.Code)
+		}
 	}
 }
 

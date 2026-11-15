@@ -2706,3 +2706,39 @@ def test_refresh_agent_refuses_a_link_and_a_managed_enrollment(tmp_path, monkeyp
             assert json.loads(lock_path.read_text()) == lock
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+def test_status_and_doctor_say_an_agent_that_runs_its_own_tools_is_not_refused(tmp_path, monkeypatch):
+    """GAP-0619: Hermes runs its tools itself, so the guard reports them and
+    cannot refuse them; status and doctor say so, and say nothing of Kiro."""
+    _require_private_temp_folders(tmp_path)
+    from defenseclaw.commands.cmd_doctor import _check_acp_bindings, _DoctorResult
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    try:
+        for agent in ("kiro", "hermes"):
+            binary = _binary(tmp_path / f"{agent}-bin")
+            with patch("defenseclaw.commands.cmd_acp._agent_version", return_value="probe"):
+                created = CliRunner().invoke(
+                    acp_cmd,
+                    ["setup", "--client", "zed", "--agent", agent, "--guard-binary", guard, "--agent-binary", binary],
+                    obj=app,
+                )
+            assert created.exit_code == 0, created.output
+        status = json.loads(CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app).output)["bindings"]
+        assert "notice" not in status["zed/kiro"] and "tool_calls_refused" not in status["zed/kiro"]
+        assert status["zed/hermes"]["tool_calls_refused"] is False
+        assert "does not refuse them" in status["zed/hermes"]["notice"]
+        assert "defenseclaw setup hermes --mode action" in status["zed/hermes"]["notice"]
+        human = CliRunner().invoke(acp_cmd, ["status"], obj=app).output
+        assert human.count("runs its own tools") == 1 and "Hermes Agent runs its own tools" in human
+        result = _DoctorResult()
+        _check_acp_bindings(app.cfg, result)
+        rows = {row["label"]: row for row in result.checks}
+        assert rows["ACP binding [zed/hermes]"]["status"] == "pass"
+        assert "runs its own tools" in rows["ACP binding [zed/hermes]"]["detail"]
+        assert "runs its own tools" not in rows["ACP binding [zed/kiro]"]["detail"]
+    finally:
+        cleanup_app(app, db_path, data_dir)

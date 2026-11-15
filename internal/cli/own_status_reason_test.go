@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -78,5 +79,30 @@ func TestOwnStateTextJoinsStateReasonAndNextStep(t *testing.T) {
 				t.Fatalf("ownStateText(%+v) = %q, want %q", tc.row, got, tc.want)
 			}
 		})
+	}
+}
+
+// GAP-0574: defenseclaw status names routing and the budget nearest its
+// limit, and prints nothing for a gateway that does not send the member.
+func TestOwnRoutingLines(t *testing.T) {
+	if ownRoutingLines(nil) != nil {
+		t.Fatal("an older gateway printed a routing row")
+	}
+	off := ownRoutingLines(&ownRoutingView{})
+	if len(off) != 1 || !strings.Contains(off[0], "Routing") || !strings.HasSuffix(off[0], "off") {
+		t.Fatalf("off = %q", off)
+	}
+	var view ownRoutingView
+	raw := `{"enabled":true,"route_only":["claudecode","codex"],"budget":{"id":"daily","period":"day","limit_usd":20,"percent_used":85.4,"on_exceed":"warn","exceeded":false}}`
+	if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		t.Fatal(err)
+	}
+	lines := ownRoutingLines(&view)
+	if len(lines) != 2 || !strings.HasSuffix(lines[0], "on (claudecode, codex routed)") || !strings.HasSuffix(lines[1], "daily 85% of 20.00 USD per day") {
+		t.Fatalf("lines = %q", lines)
+	}
+	view.Budget.Exceeded, view.Budget.PercentUsed = true, 120
+	if got := ownRoutingLines(&view)[1]; !strings.HasSuffix(got, "120% of 20.00 USD per day, used up (warn)") {
+		t.Fatalf("exceeded = %q", got)
 	}
 }

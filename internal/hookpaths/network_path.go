@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
@@ -162,7 +163,7 @@ type statAnswer struct {
 // is the same file for the whole decision (rel-1-0-10:GAP-0766). A caller
 // that reads a path again to see whether it changed uses pathStat.
 func callStat(name string) (os.FileInfo, error) {
-	call := currentHookCall()
+	call := memoHookCall()
 	if call == nil {
 		return pathStat(name)
 	}
@@ -216,6 +217,26 @@ func HookCall() (end func()) {
 		delete(hookCalls.calls, id)
 		hookCalls.mu.Unlock()
 	}
+}
+
+// memoReads turns on the file system memory of a hook call (callStat,
+// ResolveWriteTarget, newProtectedFiles). It pays where a read is dear: on
+// Windows each stat asks the share check and the file system, 446,000 reads
+// for 100 PowerShell lines, 27 s (rel-1-0-10:GAP-0766). On a POSIX host a
+// stat costs about a microsecond, while finding the call costs a traceback of
+// the calling goroutine's stack (goroutineID) on every read: the memory made a
+// decision 1.3 to 4.4 times slower than none (rel-1-0-10:GAP-0844). The
+// answers are the same with it or without it (the file system of one decision
+// is the same file system). Tests set it to read the memory on every host.
+var memoReads = runtime.GOOS == "windows"
+
+// memoHookCall is the hook call whose file system memory a read uses: the
+// call the goroutine runs where memoReads is on, nil elsewhere.
+func memoHookCall() *hookCall {
+	if !memoReads {
+		return nil
+	}
+	return currentHookCall()
 }
 
 // currentHookCall is the hook call the calling goroutine runs (nil: none).
@@ -468,7 +489,7 @@ func pathStat(name string) (os.FileInfo, error) {
 	if networkPathUnanswered(name) {
 		return nil, networkShareError("stat", name)
 	}
-	return os.Stat(name)
+	return os.Stat(fixturefs.Map(name))
 }
 
 // pathStatPinned is pathStat with the file identity read at once, for a
@@ -477,21 +498,21 @@ func pathStatPinned(name string) (os.FileInfo, error) {
 	if networkPathUnanswered(name) {
 		return nil, networkShareError("stat", name)
 	}
-	return pathidentity.StatPinned(name)
+	return pathidentity.StatPinned(fixturefs.Map(name))
 }
 
 func pathLstat(name string) (os.FileInfo, error) {
 	if linkUnanswered(name) {
 		return nil, networkShareError("lstat", name)
 	}
-	return os.Lstat(name)
+	return os.Lstat(fixturefs.Map(name))
 }
 
 func pathOpen(name string) (*os.File, error) {
 	if networkPathUnanswered(name) {
 		return nil, networkShareError("open", name)
 	}
-	return os.Open(name)
+	return os.Open(fixturefs.Map(name))
 }
 
 // pathOpenRoot is os.OpenRoot with the root read as pathOpen reads it.
@@ -501,7 +522,7 @@ func pathOpenRoot(name string) (*os.Root, error) {
 		noteBodyCut(cut)
 		return nil, networkShareError("openroot", name)
 	}
-	root, err := os.OpenRoot(name)
+	root, err := os.OpenRoot(fixturefs.Map(name))
 	noteBodyLinkLimit(err)
 	return root, err
 }
@@ -559,21 +580,23 @@ func pathReadDir(name string) ([]os.DirEntry, error) {
 	if networkPathUnanswered(name) {
 		return nil, networkShareError("readdir", name)
 	}
-	return os.ReadDir(name)
+	return os.ReadDir(fixturefs.Map(name))
 }
 
 func pathReadlink(name string) (string, error) {
 	if linkUnanswered(name) {
 		return "", networkShareError("readlink", name)
 	}
-	return os.Readlink(name)
+	target, err := os.Readlink(fixturefs.Map(name))
+	return fixturefs.Unmap(target), err
 }
 
 func pathEvalSymlinks(name string) (string, error) {
 	if networkPathUnanswered(name) {
 		return "", networkShareError("evalsymlinks", name)
 	}
-	return filepath.EvalSymlinks(name)
+	resolved, err := filepath.EvalSymlinks(fixturefs.Map(name))
+	return fixturefs.Unmap(resolved), err
 }
 
 // pathWalkDir is filepath.WalkDir with its root read as pathLstat reads
@@ -587,7 +610,9 @@ func pathWalkDir(root string, fn fs.WalkDirFunc) error {
 		}
 		return err
 	}
-	return filepath.WalkDir(root, fn)
+	return filepath.WalkDir(fixturefs.Map(root), func(path string, d fs.DirEntry, err error) error {
+		return fn(fixturefs.Unmap(path), d, err)
+	})
 }
 
 // Every read of a path that a hook call names, in this package and in the
@@ -601,6 +626,10 @@ func Lstat(name string) (os.FileInfo, error) { return pathLstat(name) }
 
 // Stat is os.Stat for a path a hook call names, read as pathStat reads it.
 func Stat(name string) (os.FileInfo, error) { return pathStat(name) }
+
+// EvalSymlinks is filepath.EvalSymlinks bounded like the other readers: the
+// gateway reads a link chain of a path a hook call names through it.
+func EvalSymlinks(name string) (string, error) { return pathEvalSymlinks(name) }
 
 // ReadDir is os.ReadDir for a directory a hook call names, read as pathReadDir reads it.
 func ReadDir(name string) ([]os.DirEntry, error) { return pathReadDir(name) }

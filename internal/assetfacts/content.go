@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"io"
 	"io/fs"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -126,17 +125,17 @@ func ReadContent(kind, name, dir string) (Content, bool) {
 	if !readableTarget(dir) {
 		return Content{}, false
 	}
-	info, err := os.Lstat(dir)
+	info, err := fsLstat(dir)
 	if err != nil {
 		return Content{}, false
 	}
 	if info.Mode()&fs.ModeSymlink != 0 {
-		real, err := filepath.EvalSymlinks(dir)
+		real, err := fsEvalSymlinks(dir)
 		if err != nil {
 			return Content{}, false
 		}
 		dir = real
-		if info, err = os.Stat(dir); err != nil {
+		if info, err = fsStat(dir); err != nil {
 			return Content{}, false
 		}
 	}
@@ -173,7 +172,7 @@ func ReadContent(kind, name, dir string) (Content, bool) {
 				out.Truncated = true
 				return nil
 			}
-			target, statErr := os.Stat(p)
+			target, statErr := fsStat(p)
 			switch {
 			case statErr != nil || !target.Mode().IsRegular():
 				out.Truncated = true
@@ -240,11 +239,11 @@ func readPrefix(p string, limit int) (data []byte, truncated bool) {
 	if !readableTarget(p) {
 		return nil, false
 	}
-	info, err := os.Stat(p)
+	info, err := fsStat(p)
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, false
 	}
-	file, err := os.Open(p)
+	file, err := fsOpen(p)
 	if err != nil {
 		return nil, false
 	}

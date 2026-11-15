@@ -75,6 +75,19 @@ const (
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
+// AwkFilesKey is the hook client's answer for an awk call that names a
+// program file (-f, --file, -E, --exec, -W exec): "1" when it read every file
+// as the user and every command they start is known, listed in this map and
+// judged like the command typed directly; "0" when one is not. A managed
+// gateway behind ProtectHome cannot open the user's files, so it answers the
+// call at the unknown tier unless this key is "1" (rel-1-0-10:GAP-0652).
+const AwkFilesKey = "\x00awk-files"
+
+// ReadProgramFile reads the program file of an awk call as the hook client
+// does: the file the system opens for the name, as the user, up to the size
+// bound of a script body.
+func ReadProgramFile(name, cwd string) (string, bool) { return readActionScript(name, cwd) }
+
 // PatchCompleteKey is positive hook-side proof that every apply_patch (or
 // Hermes V4A patch) directive was parsed and each target was resolved in the
 // user's filesystem view. The gateway may be unable to repeat that walk
@@ -552,6 +565,58 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 		}
 	}
 	return called
+}
+
+// awkTwinTouchesNoLink reports an awk reading that is one touch -h whose
+// operands are links that are not themselves protected: the call changes no
+// protected file, as the plain no-dereference touch (noDereferenceTouchStatus).
+func awkTwinTouchesNoLink(twin actionfacts.AwkTwin, cwd, home string) bool {
+	if len(twin.Bodies) != 1 || twin.Text != twin.Bodies[0] || !NoDereferenceTouchShape(twin.Text, cwd, home) {
+		return false
+	}
+	safe, protectedTarget := noDereferenceTouchStatus(twin.Text, cwd, home)
+	return safe && !protectedTarget
+}
+
+// clientProtectedDecision is the protected-target decision the hook client
+// reaches for a plain shell command (the one an awk program starts too): a concrete write to a protected file, a
+// variable write a per-user gateway resolves through the user's links, a loop
+// copy destination that is protected, or a no-dereference touch that is not
+// safe.
+func clientProtectedDecision(command, cwd, home string) bool {
+	var concrete actionConcreteOperands
+	decision := actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concrete)
+	if decision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
+		decision = false
+	}
+	if !decision && actionClientVariableWriteCandidate(command, home) {
+		decision = ActionCommandDecision(command, cwd, home) != "" &&
+			!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
+			!actionClientProvedOverwrittenRedirect(command, cwd, home)
+	}
+	if !decision {
+		decision = actionClientLoopCopyDestinationProtected(command, cwd, home)
+	}
+	if !decision && NoDereferenceTouchShape(command, cwd, home) {
+		_, decision = noDereferenceTouchStatus(command, cwd, home)
+	}
+	return decision
+}
+
+// mergeFacts is the facts of both maps; an entry of first stays.
+func mergeFacts(first, second map[string]string) map[string]string {
+	if len(second) == 0 {
+		return first
+	}
+	if first == nil {
+		first = make(map[string]string, len(second))
+	}
+	for key, value := range second {
+		if _, found := first[key]; !found {
+			first[key] = value
+		}
+	}
+	return first
 }
 
 // OperandPath is actionfacts.OperandPath: the client keys its path answers by
@@ -1373,7 +1438,7 @@ func ResolveWriteTarget(path string) (string, bool) {
 	// The reach scans of a shell call ask for every word of it again for each
 	// statement, 446,000 file system reads for 100 PowerShell lines, 27 s on a
 	// Windows host (rel-1-0-10:GAP-0766).
-	if call := currentHookCall(); call != nil {
+	if call := memoHookCall(); call != nil {
 		return call.targets().resolveWriteTarget(path)
 	}
 	return resolveWritePath(path, 0)
@@ -1440,7 +1505,7 @@ func newProtectedFiles(home string) protectedFiles {
 	// shell call ask for it for every statement, and each read walks every key
 	// file path and reads each file (rel-1-0-10:GAP-0766). The files are the
 	// same files for the whole decision.
-	if call := currentHookCall(); call != nil {
+	if call := memoHookCall(); call != nil {
 		return call.targets().protectedFiles(home)
 	}
 	return newProtectedFilesWith(home, nil)
@@ -1847,7 +1912,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
-	facts := actionfacts.Analyze(input)
+	facts := actionfacts.Analyze(input).AtHookFolder()
 	if view, ok := overLimitBoundedTwinFacts(input, facts); ok {
 		// A command over the limit only by the white space and comments that
 		// pad it is judged by the gateway as the command without them, so the
@@ -1888,6 +1953,8 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	var safeRedirects []RedirectOccurrence
 	opaqueFacts := map[string]string{}
 	var globFacts, walkFacts map[string]string
+	var twinReadings []string
+	var awkFiles string
 	var unprovenReason string
 	var backupUnresolved bool
 	protectedDecision := hermesV4AProtected
@@ -2046,9 +2113,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
-				fallbackFacts := actionfacts.Analyze(fallback)
+				fallbackFacts := actionfacts.Analyze(fallback).AtHookFolder()
 				if twin, ok := actionfacts.OverLimitCommandBoundedTwin(fallback, fallbackFacts); ok {
-					fallback, fallbackFacts = twin, actionfacts.Analyze(twin)
+					fallback, fallbackFacts = twin, actionfacts.Analyze(twin).AtHookFolder()
 				}
 				// One per-command reading serves the move and the child
 				// readings below.
@@ -2128,19 +2195,86 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// the map also lists the targets of that reading (GAP-2563).
 				if !isApplyPatchToolName(tool) {
 					readings := []string{command}
-					if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(command); isTwin && wrapped != command {
-						readings = append(readings, wrapped)
+					// addReading lists the targets of a second reading of the
+					// command that the gateway judges too; full adds every
+					// operand reading the command itself gets.
+					addReading := func(reading string, full bool) {
+						readings = append(readings, reading)
+						if full {
+							twinReadings = append(twinReadings, reading)
+						}
 						twinInput := fallback
-						twinInput.Command = wrapped
-						twinFacts := actionfacts.Analyze(twinInput)
+						twinInput.Command = reading
+						twinFacts := actionfacts.Analyze(twinInput).AtHookFolder()
 						facts.Paths = append(facts.Paths, twinFacts.Paths...)
 						truncated = truncated || twinFacts.Parse.Status == actionfacts.StatusLimitExceeded
-						twinOperands, _, _ := ShellWriteOperands(wrapped, cwd, home)
+						twinOperands, _, _ := ShellWriteOperands(reading, cwd, home)
 						operands = append(operands, twinOperands...)
-						literalOperands = append(literalOperands, LiteralWriteOperands(wrapped, cwd, home)...)
-						twinDirectories, twinUnknown := ShellDirectoryWriteOperands(wrapped, cwd, home, sourceFacts, true, false)
+						literalOperands = append(literalOperands, LiteralWriteOperands(reading, cwd, home)...)
+						twinDirectories, twinUnknown := ShellDirectoryWriteOperands(reading, cwd, home, sourceFacts, true, false)
 						directoryOperands = append(directoryOperands, twinDirectories...)
 						truncated = truncated || twinUnknown
+						if !full {
+							return
+						}
+						if strings.Contains(reading, ">") {
+							assignedOperands = append(assignedOperands, AdjacentAssignedWriteOperands(reading, cwd, home)...)
+							assignedOperands = append(assignedOperands, DeclaredRedirectWriteOperands(reading, cwd, home)...)
+							boundedTwin, _ := BoundedShellWriteOperands(reading, cwd, home)
+							literalOperands = append(literalOperands, boundedTwin...)
+						}
+						literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(reading, cwd, home)...)
+						literalOperands = append(literalOperands, quotedGlobNameWriteOperands(reading, cwd, home, twinFacts.Paths)...)
+						literalOperands = append(literalOperands, BoundedLoopCopyDestinations(reading, cwd, home)...)
+						literalOperands = append(literalOperands, CopySourceGlobDestinations(reading, cwd, home, nil)...)
+						literalOperands = append(literalOperands, BoundedGlobLoopCopyDestinations(reading, cwd, home, nil)...)
+						// A link text the reading cannot place leaves its map
+						// incomplete, as it does for the command itself.
+						if inner := commandLinksWithFacts(reading, cwd, home, sourceFacts, true); inner.opaque {
+							truncated = true
+						}
+					}
+					if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(command); isTwin && wrapped != command {
+						addReading(wrapped, false)
+					}
+					// The commands an awk program starts through system(),
+					// print | and | getline, written as string literals, run
+					// as the hook would run them directly; the gateway judges
+					// that reading, and behind ProtectHome reads its targets
+					// only from this map (GAP-0499).
+					awkTwin := actionfacts.AwkCommandTwinFiles(command, func(name string) (string, bool) {
+						return readActionScript(name, cwd)
+					})
+					// An awk call that is the whole command and starts one touch -h of
+					// a link itself is as safe as the plain call: the plain call lists
+					// its entry and the safe mark, and a gateway that reads the awk
+					// text as written would read the entry alone, so the reading is
+					// not listed (GAP-0499).
+					if awkTwin.Text != "" && awkTwin.Text != command && !awkTwinTouchesNoLink(awkTwin, cwd, home) {
+						addReading(awkTwin.Text, true)
+						// A runner, an assignment, a time or a function in front
+						// of or around the awk call changes where the sh call
+						// that stands for the commands sits in the text, not
+						// what each command is: awk starts it in a shell of its
+						// own, as the hook would run it directly. Each command
+						// is listed as that plain reading too, so the targets
+						// are the same behind every spelling (GAP-0731). The
+						// gateway cannot read a program file behind ProtectHome
+						// and reads these targets only from this map.
+						for _, body := range awkTwin.Bodies {
+							addReading(body, true)
+							protectedDecision = protectedDecision || clientProtectedDecision(body, cwd, home)
+						}
+					}
+					// A program file the client cannot read is code the map does
+					// not list: the map is incomplete (the one bound rule).
+					truncated = truncated || awkTwin.Truncated.Any() || awkTwin.FilesUnknown
+					if awkTwin.ProgramFiles {
+						if awkTwin.FilesUnknown || awkFiles == "0" {
+							awkFiles = "0"
+						} else {
+							awkFiles = "1"
+						}
 					}
 					// A cp, mv, install, ln, dd or tee call with a
 					// runtime-expanded operand word ($(true), `true`, $SRC)
@@ -2206,9 +2340,18 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					}
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
 					globFacts = actionGlobFacts(command, cwd, home)
+					// The reading of an awk program's commands is judged by the
+					// gateway too: the pattern and link walk facts of its text
+					// are listed beside those of the command.
+					for _, reading := range twinReadings {
+						globFacts = mergeFacts(globFacts, actionGlobFacts(reading, cwd, home))
+					}
 					// Where each link-walk spelling of the command lies, for a
 					// gateway that cannot walk the home itself (GAP-2569).
 					walkFacts = LinkWalkFacts(command, cwd, home)
+					for _, reading := range twinReadings {
+						walkFacts = mergeFacts(walkFacts, LinkWalkFacts(reading, cwd, home))
+					}
 					// An unresolved program word alone does not make a
 					// concrete write operand or its link walk incomplete.
 					truncated = truncated || links.opaque
@@ -2632,7 +2775,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	for _, reading := range dynamicReadings {
 		readingInput := input
 		readingInput.Tool, readingInput.Args, readingInput.Command = "Bash", nil, reading
-		readingFacts := actionfacts.Analyze(readingInput)
+		readingFacts := actionfacts.Analyze(readingInput).AtHookFolder()
 		truncated = truncated || readingFacts.Parse.Status == actionfacts.StatusLimitExceeded
 		readingPaths, _, _ := ShellWriteOperands(reading, cwd, home)
 		readingPaths = append(readingPaths, LiteralWriteOperands(reading, cwd, home)...)
@@ -2749,6 +2892,16 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		targets[InstructionIdentityKey] = identity
 		size += entry
 	}
+	if awkFiles != "" {
+		entry := len(jsonString(AwkFilesKey)) + 1 + len(jsonString(awkFiles)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+4 {
+			// A gateway that cannot read the files cannot place them.
+			truncated = true
+		} else {
+			targets[AwkFilesKey] = awkFiles
+			size += entry
+		}
+	}
 	if len(fileIdentities) > 0 {
 		value := strings.Join(fileIdentities, ",")
 		entry := len(jsonString(FileIdentitiesKey)) + 1 + len(jsonString(value)) + 1
@@ -2841,7 +2994,7 @@ func overLimitBoundedTwinFacts(input actionfacts.Input, facts actionfacts.Facts)
 	if !ok {
 		return actionfacts.Facts{}, false
 	}
-	return actionfacts.Analyze(twin), true
+	return actionfacts.Analyze(twin).AtHookFolder(), true
 }
 
 // movedDirectorySightingPath names a directory a complete, plain move may
@@ -4226,7 +4379,7 @@ func straightLineReadings(input actionfacts.Input, command string) []actionfacts
 		return nil
 	}
 	input.LoopBindsStraightLine = true
-	return actionfacts.SimpleCommands(input, actionfacts.Analyze(input))
+	return actionfacts.SimpleCommands(input, actionfacts.Analyze(input).AtHookFolder())
 }
 
 // readingReachesLink reports a reading with a write operand that lies behind a
@@ -4339,6 +4492,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	// the command changes directory first.
 	changesDirectory := tactics.RunsProgram(command, cdPrograms...)
 	sequential := sequentialListCalls(file)
+	pipedCalls := pipedInputCalls(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
 		if !isCall || len(call.Args) == 0 {
@@ -4448,6 +4602,10 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			})
 		}
 		if opaqueProgram(program) {
+			if program == "new-item" && !powerShellNewItemMayMakeLink(words[1:], static[1:], pipedCalls[call]) {
+				// A file or a folder: New-Item makes no link (GAP-0801).
+				return true
+			}
 			links.unknown(true)
 			return true
 		}
@@ -4519,6 +4677,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				placedLinkCalls[call] = true
 			}
 		case slices.Contains(copyPrograms, program):
+			words, static := copyGlobOperandsAsNames(args, words, static)
 			_, topLevelPlaced := linkDirs[call]
 			_, nestedPlaced := nestedCopyDirs[call]
 			var globDestinations []string
@@ -7566,9 +7725,11 @@ func (l *shellLinks) record(source, name string, literal, symbolic bool, cwd str
 			text = relative
 		}
 	}
-	l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	if !linkPointsIntoItself(name, target) {
+		l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	}
 	if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
-		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
+		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name && !linkPointsIntoItself(resolved, target) {
 			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target, text: text})
 		}
 	}
@@ -8684,4 +8845,20 @@ func stepFollows(parts []string) bool {
 		}
 	}
 	return false
+}
+
+// pipedInputCalls are the calls that read the output of the pipeline stage
+// before them (every stage after the first): a PowerShell parameter can bind
+// from that input (rel-1-0-10:GAP-0849).
+func pipedInputCalls(file *syntax.File) map[*syntax.CallExpr]bool {
+	piped := make(map[*syntax.CallExpr]bool)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if pipe, ok := node.(*syntax.BinaryCmd); ok && (pipe.Op == syntax.Pipe || pipe.Op == syntax.PipeAll) && pipe.Y != nil {
+			if call, isCall := pipe.Y.Cmd.(*syntax.CallExpr); isCall {
+				piped[call] = true
+			}
+		}
+		return true
+	})
+	return piped
 }

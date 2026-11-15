@@ -1759,17 +1759,51 @@ if [[ -n "${PREV_VERSION}" && -n "$(gateway_pid || true)" ]] \
 fi
 
 info "Building the Python environment (a first install can take several minutes)"
-make_venv() {
+# install_venv_packages VENV [UV_ARGS...] installs the locked packages and the
+# DefenseClaw wheel into VENV. The requirements file is the complete hashed
+# lock, so nothing resolves. --compile-bytecode: uv skips compiling by
+# default, which moves that cost to the first start of the CLI and the scanners.
+install_venv_packages() {
     local venv="$1"
+    shift
+    uv pip install --quiet --compile-bytecode "$@" --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
+        && uv pip install --quiet --compile-bytecode "$@" --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
+}
+make_venv() {
+    local venv="$1" site damaged rc name
+    local -a again=()
     rm -rf "${venv}"
     uv venv "${venv}" --quiet --python 3.12 2>/dev/null \
         || uv venv "${venv}" --quiet --python '>=3.11,<3.14' \
         || return 1
-    # The requirements file is the complete hashed lock, so nothing resolves.
-    # --compile-bytecode: uv skips compiling by default, which moves that cost
-    # to the first start of the CLI and the scanners.
-    uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
-        && uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
+    install_venv_packages "${venv}" || return 1
+    # uv hard-links each package from its long-lived cache (Linux), so a write
+    # into an installed file in any environment built from that cache changes
+    # the cached copy, and uv puts it into every later environment without
+    # reading it again: an upgrade got the files of an older LiteLLM wheel
+    # and the MCP scanner no longer imported (rel-1-0-10 GAP-0006). Compare
+    # every package with its wheel RECORD; a damaged one leaves the cache and
+    # is downloaded again.
+    site=$("${venv}/bin/python" -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))') || return 1
+    rc=0
+    damaged=$("${venv}/bin/python" -I "${site}/defenseclaw/venv_integrity.py" "${site}") || rc=$?
+    [[ ${rc} -eq 0 ]] && return 0
+    if [[ ${rc} -ne 3 || -z "${damaged}" ]]; then
+        err "Could not check the Python packages in ${venv} against their wheels"
+        return 1
+    fi
+    warn "The installed files of $(printf '%s\n' "${damaged}" | tr '\n' ' ')in ${venv} differ from their wheels (the uv cache they come from was changed); downloading them again"
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        again+=(--reinstall-package "${name}")
+        uv cache clean "${name}" >/dev/null 2>&1 || true
+    done <<<"${damaged}"
+    install_venv_packages "${venv}" "${again[@]}" || return 1
+    rc=0
+    damaged=$("${venv}/bin/python" -I "${site}/defenseclaw/venv_integrity.py" "${site}") || rc=$?
+    [[ ${rc} -eq 0 ]] && return 0
+    err "The Python packages $(printf '%s\n' "${damaged}" | tr '\n' ' ')in ${venv} still differ from their wheels after a fresh download; delete the uv cache ${UV_CACHE_DIR:-${DEFENSECLAW_HOME}/.uv/cache} and run the installer again"
+    return 1
 }
 if ! make_venv "${STAGING}/venv"; then
     # Leave nothing of a failed build behind, and name what stays (GAP-1438).

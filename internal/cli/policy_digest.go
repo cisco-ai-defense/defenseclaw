@@ -27,10 +27,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 func init() {
@@ -194,12 +196,12 @@ gateway applied this configuration.`,
 	Args:              cobra.NoArgs,
 	PersistentPreRunE: policyConfigOnlyPreRunE,
 	PersistentPostRun: policyConfigOnlyPostRun,
-	Annotations:       map[string]string{secureClientAbsentAnnotation: "true"},
+	Annotations:       map[string]string{hookcli.SecureClientAbsentAnnotation: "true"},
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		if cfg != nil && cfg.SecureClientIntegration() {
 			// main has no policy digest: Secure Client answers as it did
 			// (issue #1092).
-			return usageError(policyCmd, fmt.Errorf("unknown command %q for %q", "digest", policyCmd.CommandPath()))
+			return cliusage.UsageError(policyCmd, fmt.Errorf("unknown command %q for %q", "digest", policyCmd.CommandPath()))
 		}
 		out := cmd.OutOrStdout()
 		asJSON, _ := cmd.Flags().GetBool("json")

@@ -1529,9 +1529,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		return kept
 	}
 	commandText := strings.ToLower(input.Command)
-	overBudget, unresolved, resolvedTarget := false, false, false
+	overBudget, unresolved, resolvedTarget, nonWriteMention := false, false, false, false
 	var unprovenTarget unprovenWrite
 	evidence := request
+	evidence.nonWriteMention = &nonWriteMention
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
 	evidence.resolvedTarget = &resolvedTarget
@@ -1607,7 +1608,28 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			if unprovenOnly {
 				enforcement = findingEnforcementAlertOnly
 			}
-			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
+			// A command held as a key write only because words of statements
+			// that read the keys file name it, in a per-user default or
+			// permissive install, alerts: reading the file is not writing it
+			// (S7 lead 2026-11-13, rel-1-0-10:GAP-0018). Strict and managed
+			// installs keep the block.
+			readsOnly := nonWriteMention && !unprovenOnly && named.ID == rule.ID
+			if readsOnly {
+				enforcement = findingEnforcementAlertOnly
+			}
+			// A copy of the user's own SSH folder content to a private place of the
+			// same home, with nothing else written, alerts in every pack: it is
+			// no mutation of the keys the user's ssh reads (rel-1-0-10:GAP-0018).
+			ownFolderCopy := !unprovenOnly && !readsOnly && named.ID == rule.ID &&
+				trustedActionOwnSSHFolderCopy(request, input)
+			if ownFolderCopy {
+				enforcement = findingEnforcementAlertOnly
+			}
+			if ownFolderCopy {
+				title = ownSSHFolderCopyTitle
+			} else if readsOnly {
+				title = nonWriteKeyMentionTitle
+			} else if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
 			} else if unprovenOnly && !unresolved {
 				title = hookpaths.UnprovenWriteTitle(unprovenTarget.class) + unprovenWriteGuidance
@@ -1958,6 +1980,10 @@ func trustedAwkOutputAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	}
 	return false
 }
+
+// nonWriteKeyMentionTitle is the title of the alert for a command whose only
+// statements naming the keys file read it.
+const nonWriteKeyMentionTitle = "A command names an SSH key file only as a read or as data of an unknown program"
 
 // unresolvedWriteTargetTitle is the title of the authorized-keys block of a
 // write whose target neither the managed hook client nor the gateway could
@@ -3565,7 +3591,8 @@ func findAttachedPathOption(word string) bool {
 func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfacts.PathFact, lineStaysOff func() bool, clientTargets map[string]string) bool {
 	command, ok := integrityCommandByID(facts, candidate.CommandID)
 	if !ok || !strings.EqualFold(command.Program, "find") ||
-		candidate.Flavor != "" && candidate.Flavor != actionfacts.PathFlavorPOSIX || facts.ActiveHome == "" {
+		candidate.Flavor != "" && candidate.Flavor != actionfacts.PathFlavorPOSIX || facts.ActiveHome == "" ||
+		!findStartingPoint(command, candidate) {
 		return false
 	}
 	acted := command
@@ -3614,6 +3641,26 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 		return false
 	}
 	return true
+}
+
+// findStartingPoint reports a path fact that names one of the starting points
+// of the find: a word before its first expression primary. A path of an
+// -exec program (the folder find -exec mv {} / moves into) is no starting
+// point, so it cannot make the find reach the state root from above
+// (rel-1-0-10:GAP-0018).
+func findStartingPoint(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	if len(command.Argv) < 2 {
+		return false
+	}
+	end := min(findExpressionStart(command.Argv), len(command.Argv))
+	for _, word := range command.Argv[1:end] {
+		// The argv holds the word as the shell expands it (~ is the home),
+		// the path fact holds it as written and as resolved.
+		if word != "" && (word == candidate.Value || word == candidate.Normalized || word == candidate.Resolved) {
+			return true
+		}
+	}
+	return false
 }
 
 // findPatternMatchesNoStateName reports a -name/-iname pattern that

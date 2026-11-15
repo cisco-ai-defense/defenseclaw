@@ -343,6 +343,13 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		if previous, err := codexPreviousSetupRoot(opts.DataDir); err != nil {
 			return err
 		} else if previous != "" {
+			// Moving the hooks tears down the earlier home before the policy
+			// check of setupLocked refuses a Codex that updated in place.
+			// Refuse it first, so the refusal still changed nothing and a
+			// gateway start keeps the earlier hooks (GAP-0249).
+			if err := refuseChangedCodexExecutable(opts); err != nil {
+				return err
+			}
 			selected := codexHomeDir()
 			if err := os.Setenv("CODEX_HOME", previous); err != nil {
 				return err
@@ -367,6 +374,19 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 		return c.setupLocked(ctx, opts)
 	})
+}
+
+// refuseChangedCodexExecutable returns the refusal setupLocked would give a
+// Windows Codex whose executable no longer matches the evidence setup sealed,
+// and nil for anything else (setupLocked reports that itself).
+func refuseChangedCodexExecutable(opts SetupOpts) error {
+	if runtime.GOOS != "windows" || strings.TrimSpace(opts.AgentExecutable) == "" {
+		return nil
+	}
+	if _, err := validateCodexPolicyExecutable(opts); AgentExecutableChangedBeforeChange(err) {
+		return fmt.Errorf("inspect effective Codex managed requirements: %w", err)
+	}
+	return nil
 }
 
 // checkAgentSettings refuses, before Setup changes anything, a per-user

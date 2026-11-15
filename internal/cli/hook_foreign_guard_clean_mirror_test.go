@@ -17,6 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -64,7 +65,7 @@ func TestForeignGuardCleanSessionOutageHookTime(t *testing.T) {
 				fixture := newCleanOutageFixture(t, id, tc)
 				event := tc.event
 				if event == "" {
-					event = outageGuardCallFor(id).event
+					event = outageGuardCallFor(id).Event
 				}
 				if id == "opencode" && tc.event == "sessionStart" {
 					event = "session.start"
@@ -72,7 +73,7 @@ func TestForeignGuardCleanSessionOutageHookTime(t *testing.T) {
 				payload := cleanOutagePayload(t, fixture, event)
 				opts := hookexec.Options{Connector: id, Event: event, ManagedEnterprise: true, FailMode: "open",
 					Home: filepath.Join(fixture.home, "managed-data"), Stdin: bytes.NewReader(payload), Stderr: &bytes.Buffer{}}
-				applyEnterpriseForeignHookGuard(&opts)
+				hookcli.ApplyEnterpriseForeignHookGuard(&opts)
 				if id == "opencode" && event != "tool.execute.before" {
 					return // the plugin's lifecycle events are not guarded at hook time
 				}
@@ -96,16 +97,16 @@ func TestForeignGuardCleanSessionOutageCheck(t *testing.T) {
 				fixture := newCleanOutageFixture(t, id, tc)
 				event := tc.event
 				if event == "" {
-					event = outageGuardCallFor(id).event
+					event = outageGuardCallFor(id).Event
 				}
 				if tc.event == "sessionStart" {
 					event = map[string]string{"opencode": "session.start", "hermes": "on_session_start", "amp": "defenseclaw.plugin.loaded"}[id]
 				}
 				var out bytes.Buffer
-				if code := runForeignHookCheck(id, bytes.NewReader(cleanOutagePayload(t, fixture, event)), &out); code != 0 {
+				if code := hookcli.RunForeignHookCheck(id, bytes.NewReader(cleanOutagePayload(t, fixture, event)), &out); code != 0 {
 					t.Fatalf("exit %d", code)
 				}
-				var result foreignHookCheckResult
+				var result hookcli.ForeignHookCheckResult
 				if err := json.Unmarshal(out.Bytes(), &result); err != nil {
 					t.Fatalf("%v: %q", err, out.String())
 				}
@@ -158,12 +159,12 @@ func newCleanOutageFixture(t *testing.T, id string, tc cleanOutageCase) *foreign
 	fixture.summary = &summary
 	fixture.process = tc.process
 	fixture.cleanMirror = tc.cleanMirror
-	previousGOOS := hookForeignGuardGOOS
-	hookForeignGuardGOOS = tc.goos
-	t.Cleanup(func() { hookForeignGuardGOOS = previousGOOS })
-	hookForeignGuardOutageFailsOpen = func(string, string) bool { return tc.failsOpen }
+	previousGOOS := hookcli.HookForeignGuardGOOS
+	hookcli.HookForeignGuardGOOS = tc.goos
+	t.Cleanup(func() { hookcli.HookForeignGuardGOOS = previousGOOS })
+	hookcli.HookForeignGuardOutageFailsOpen = func(string, string) bool { return tc.failsOpen }
 	err := tc.err
-	hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	hookcli.HookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 		return enterprisepolicy.GuardDecision{}, err
 	}
 	if tc.unapproved {

@@ -31,10 +31,13 @@ type Ledger struct {
 	// price covers (UnknownTTL).
 	unknown map[string]time.Time
 	// seeded holds the budget ids whose remote spend has been read once.
-	seeded    map[string]bool
-	syncErr   string
-	pushErr   string
-	lastSync  time.Time
+	seeded   map[string]bool
+	syncErr  string
+	pushErr  string
+	lastSync time.Time
+	// lastFleet is when the fleet counter last answered (a fallback to this
+	// device's own store does not count), for the store gauges.
+	lastFleet time.Time
 	lastPrune int32
 	now       func() time.Time
 }
@@ -128,33 +131,8 @@ func (l *Ledger) Spend(key, period string, now time.Time) (float64, bool) {
 // SpendPrefix sums the spend of every key that starts with prefix
 // (<scope>:<id>: gives all subjects of one budget, for administrators).
 func (l *Ledger) SpendPrefix(prefix, period string, now time.Time) (float64, bool) {
-	if l == nil {
-		return 0, false
-	}
-	today, from := dayNumber(now), windowStart(period, now)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !l.seeded[budgetIDOfKey(prefix)] {
-		return 0, false
-	}
-	keys := map[string]bool{}
-	for _, m := range []map[string]map[int32]float64{l.local, l.remote} {
-		for k := range m {
-			if strings.HasPrefix(k, prefix) {
-				keys[k] = true
-			}
-		}
-	}
-	sorted := make([]string, 0, len(keys))
-	for k := range keys {
-		sorted = append(sorted, k)
-	}
-	sort.Strings(sorted)
-	var total float64
-	for _, k := range sorted {
-		total += l.windowLocked(k, from, today)
-	}
-	return total, true
+	snap, ok := l.Snapshot(prefix, period, 0, now)
+	return snap.Total, ok
 }
 
 // windowLocked sums in day order, so the same state gives the same total.
@@ -377,4 +355,80 @@ func NextReset(period string, now time.Time) time.Time {
 	default:
 		return time.Date(u.Year(), u.Month(), u.Day()+1, 0, 0, 0, 0, time.UTC)
 	}
+}
+
+// BudgetSnapshot is the spend of every subject of one budget in its current
+// window, for the budget gauges: Total is every subject added, Peak the
+// highest single subject, Exceeded how many subjects are at or over the limit.
+type BudgetSnapshot struct {
+	Total, Peak float64
+	Subjects    int
+	Exceeded    int
+}
+
+// Snapshot summarises the spend of every key that starts with prefix
+// (<scope>:<id>:). The second result is false while the budget's remote spend
+// is still loading, so an absent spend is never reported as 0.
+func (l *Ledger) Snapshot(prefix, period string, limit float64, now time.Time) (BudgetSnapshot, bool) {
+	var snap BudgetSnapshot
+	if l == nil {
+		return snap, false
+	}
+	today, from := dayNumber(now), windowStart(period, now)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.seeded[budgetIDOfKey(prefix)] {
+		return snap, false
+	}
+	keys := map[string]bool{}
+	for _, m := range []map[string]map[int32]float64{l.local, l.remote} {
+		for k := range m {
+			if strings.HasPrefix(k, prefix) {
+				keys[k] = true
+			}
+		}
+	}
+	sorted := make([]string, 0, len(keys))
+	for k := range keys {
+		sorted = append(sorted, k)
+	}
+	sort.Strings(sorted)
+	for _, k := range sorted {
+		v := l.windowLocked(k, from, today)
+		snap.Total += v
+		snap.Subjects++
+		if v > snap.Peak {
+			snap.Peak = v
+		}
+		if limit > 0 && v >= limit {
+			snap.Exceeded++
+		}
+	}
+	return snap, true
+}
+
+// MarkFleetRead records that the fleet counter answered at the given time.
+func (l *Ledger) MarkFleetRead(at time.Time) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.lastFleet = at
+	l.mu.Unlock()
+}
+
+// StoreStatus is the state of the fleet counter for the store gauges: how
+// long ago the fleet counter last answered (synced false: it never has) and
+// whether the last sync and the last push both worked.
+func (l *Ledger) StoreStatus(now time.Time) (age time.Duration, synced, healthy bool) {
+	if l == nil {
+		return 0, false, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	healthy = l.syncErr == "" && l.pushErr == ""
+	if l.lastFleet.IsZero() {
+		return 0, false, healthy
+	}
+	return now.Sub(l.lastFleet), true, healthy
 }

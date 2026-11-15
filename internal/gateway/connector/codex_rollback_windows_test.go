@@ -96,7 +96,7 @@ func TestCodexPerUserRollbackLeavesTheBridgeTheEarlierReleaseOwns(t *testing.T) 
 			t.Fatalf("%s: %d owned handlers, %v; want 1", group.eventType, len(locations), err)
 		}
 		location := locations[0]
-		want := windowsNativePowerShellHookCommandForCodexEvent(group.eventType, contracts[group.eventType], launcher)
+		want := legacyCodexBridgeForTest(t, group.eventType, contracts[group.eventType], launcher)
 		if location.handler["command"] != want || location.handler["command_windows"] != want {
 			t.Fatalf("%s handler is not the 1.0.4 bridge: %v", group.eventType, location.handler)
 		}

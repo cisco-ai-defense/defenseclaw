@@ -1240,6 +1240,11 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	deltas := compareSnapshots(baseline, currentSnap)
 
 	scan, reason := shouldRescan(baseline, currentSnap, fingerprint, w.cfg.Watch.RescanContentGated)
+	if !scan && !w.secureClientActive() && w.hermesBaselineOwesAdmission(evt, baseline, currentSnap) {
+		// Vendor content is decided on each read, and a bytecode cache write
+		// leaves the content hash as it was (rel-1-0-10:GAP-0808).
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
+	}
 	if !scan && (w.allowRuleReleases(ctx, evt) || w.policyHoldReleases(evt)) {
 		fmt.Fprintf(os.Stderr, "[rescan] %s %s is allowed by a rule and still blocked; running install admission\n", evt.Type, evt.Name)
 		w.notifyAdmission(w.runAdmission(ctx, evt))

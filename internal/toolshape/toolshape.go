@@ -80,6 +80,10 @@ const (
 	KindNetSend  Kind = "net_send"
 	KindSQL      Kind = "sql"
 	KindSetting  Kind = "setting"
+	// KindPageScript is a script a browser-automation tool runs inside the page
+	// the session has open (Code holds it). It is also code to execute: the rules
+	// of KindExec apply to it as well.
+	KindPageScript Kind = "page_script"
 )
 
 // Role of a destination of a send.
@@ -125,6 +129,10 @@ type Mapping struct {
 	// Content is the text the call writes (values under content-style keys,
 	// nested ones included), for the rules that read what is written.
 	Content string
+	// Page is what the call does to the browser page of the session: it
+	// navigates (PageURL) or leaves the page's URL unknown (PageLeaves).
+	PageURL    string
+	PageLeaves bool
 }
 
 type table struct {
@@ -161,6 +169,7 @@ type table struct {
 	OperationKeys []string            `yaml:"operation_keys"`
 	ProxyArgKeys  []string            `yaml:"proxy_arg_keys"`
 	CallbackKeys  []string            `yaml:"callback_keys"`
+	PageScript    pageScriptTable     `yaml:"page_script"`
 	TextTools     struct {
 		Families       []string `yaml:"families"`
 		Tokens         []string `yaml:"tokens"`
@@ -192,6 +201,45 @@ type table struct {
 	textToken     map[string]bool
 	textExcept    map[string]bool
 	textData      map[string]bool
+}
+
+// pageScriptTable names the browser-automation tools by their schema: the tool
+// name and the argument that carries the script (or the URL).
+type pageScriptTable struct {
+	Tools    []pageToolEntry `yaml:"tools"`
+	Navigate []pageToolEntry `yaml:"navigate"`
+	// Leave are tool names that change the page without naming a URL (back, a
+	// tab switch, a closed page): the page's URL is unknown after them.
+	Leave []pageToolEntry `yaml:"leave"`
+	// LeaveTypes are the values of a navigation tool's type argument that do
+	// the same (back, forward).
+	LeaveTypes []string `yaml:"leave_types"`
+}
+
+// pageToolEntry is one tool schema: names (normalised tool names) and keys.
+// Servers, when set, are name tokens of the server or of the tool name, one of
+// which must be present (for a generic name such as evaluate).
+type pageToolEntry struct {
+	Names   []string `yaml:"names"`
+	Keys    []string `yaml:"keys"`
+	Servers []string `yaml:"servers"`
+}
+
+// match reports that the call's tool (normalised name, tokens of the name and
+// of the server) is the entry's, and returns the entry's keys.
+func (e pageToolEntry) match(name string, toks, srvToks []string) bool {
+	if !containsStr(e.Names, name) {
+		return false
+	}
+	if len(e.Servers) == 0 {
+		return true
+	}
+	for _, want := range e.Servers {
+		if containsStr(toks, want) || containsStr(srvToks, want) {
+			return true
+		}
+	}
+	return false
 }
 
 type compiledSetting struct {
@@ -384,6 +432,25 @@ func Map(tool string, args json.RawMessage, server string) (Mapping, error) {
 			w.searchTool = true
 		}
 	}
+	name = strings.TrimSpace(name)
+	norm := normKey(name)
+	for _, e := range t.PageScript.Tools {
+		if e.match(norm, toks, srvToks) {
+			if w.pageKeys == nil {
+				w.pageKeys = map[string]bool{}
+			}
+			for _, k := range e.Keys {
+				w.pageKeys[k] = true
+			}
+		}
+	}
+	navTool, leaveTool := false, false
+	for _, e := range t.PageScript.Navigate {
+		navTool = navTool || e.match(norm, toks, srvToks)
+	}
+	for _, e := range t.PageScript.Leave {
+		leaveTool = leaveTool || e.match(norm, toks, srvToks)
+	}
 	w.effects = bounded.NewCounter(&w.trunc, bounded.Effects, maxEffects)
 	w.nodes = bounded.NewCounter(&w.trunc, bounded.Nodes, maxNodes)
 	if verbs, ok := t.KnownRoles[server]; ok && m.Verb != "" {
@@ -397,13 +464,41 @@ func Map(tool string, args json.RawMessage, server string) (Mapping, error) {
 		if root, ok := decodeLenient(args); ok {
 			w.proxyVerb(root)
 			w.value("", root, 0)
+			if obj, isObj := root.(map[string]any); isObj && (navTool || leaveTool) {
+				m.PageURL, m.PageLeaves = pageNavigation(t, obj, navTool)
+			}
 		} else if jsonDocument(string(args)) {
 			w.trunc.Hit(bounded.Nodes) // a document the reader could not parse: unread, not clean
 		}
 	}
+	if leaveTool {
+		m.PageLeaves = true
+	}
 	m.Truncated = w.trunc.Set(&w.effects, &w.nodes)
 	m.Content = w.content.String()
 	return m, nil
+}
+
+// pageNavigation reads a navigation or page-change call: the URL it goes to, or
+// that the page's URL is unknown after it (a back or forward, a tab switch).
+func pageNavigation(t *table, obj map[string]any, nav bool) (pageURL string, leaves bool) {
+	if !nav {
+		return "", true
+	}
+	if typ, ok := obj["type"].(string); ok && containsStr(t.PageScript.LeaveTypes, strings.ToLower(strings.TrimSpace(typ))) {
+		return "", true
+	}
+	for _, e := range t.PageScript.Navigate {
+		for _, k := range e.Keys {
+			if v, ok := obj[k].(string); ok {
+				if v = strings.TrimSpace(v); looksURL(v) && len(v) <= 4096 {
+					return v, false
+				}
+			}
+		}
+	}
+	// A navigation that names no URL (a reload) leaves the page's URL as it was.
+	return "", false
 }
 
 // proxyVerb takes the verb of a proxy tool from the tool name its arguments
@@ -514,6 +609,7 @@ type walker struct {
 	proxy        bool // the call has the shape of a proxy tool: a tool name beside its arguments
 	textTool     bool // the call sends, posts or writes text (table text_tools): its free text is data
 	nested       int
+	pageKeys     map[string]bool // argument names that carry a page script (the table's page_script)
 	contentBytes int
 	dests        map[string]bool
 }
@@ -674,6 +770,11 @@ func (w *walker) str(key, val string) {
 		w.destination(key, val, RoleURL)
 	}
 
+	if w.pageKeys[key] {
+		// A script for the page: judged as page code, and as code to execute.
+		w.add(Effect{Kind: KindPageScript, Arg: key, Code: val})
+		return
+	}
 	switch {
 	case t.sqlKey[key] || (t.sqlGenericKey[key] && w.genericSQL(val)):
 		if classes := ClassifySQL(val); len(classes) > 0 {

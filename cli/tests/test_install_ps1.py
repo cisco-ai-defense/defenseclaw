@@ -739,7 +739,7 @@ def test_an_unknown_argument_stops_with_exit_2(tmp_path: Path, argument: str, me
 
 
 def test_hook_state_matches_what_the_hook_reads() -> None:
-    # internal/cli/hook_trusted_state_windows.go accepts a PowerShell install's
+    # internal/hookcli/hook_trusted_state_windows.go accepts a PowerShell install's
     # state only with these values; anything else makes the hook fall back to
     # the profile's .defenseclaw and ignore a custom DEFENSECLAW_HOME.
     body = re.search(r"function Write-HookState \{(.*?)\n\}", _text(), re.S)
@@ -748,8 +748,8 @@ def test_hook_state_matches_what_the_hook_reads() -> None:
         assert field in body.group(1)
     for field in ("install_root = $root", "command_dir = $root", "data_root = "):
         assert field in body.group(1)
-    go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text(encoding="utf-8")
-    assert 'powerShellHookStateName = "defenseclaw-hook-state.json"' in go
+    go = (ROOT / "internal" / "hookcli" / "hook_trusted_state_windows.go").read_text(encoding="utf-8")
+    assert 'PowerShellHookStateName = "defenseclaw-hook-state.json"' in go
     assert re.search(r'\$HookState = "defenseclaw-hook-state.json"', _text())
 
 
@@ -842,7 +842,7 @@ def test_the_locked_package_install_is_retried_with_backoff() -> None:
     # The DefenseClaw wheel install hit the same hold, so both uv pip steps
     # go through the retry helper.
     start = _text().index("function New-Venv")
-    body = _text()[start : _text().index("function Invoke-UvPipInstall")]
+    body = _text()[start : _text().index("function Repair-DamagedPackages")]
     assert body.count("Invoke-UvPipInstall") == 2
     assert "Invoke-Native $Uv @(\"pip\"" not in body
     # GAP-1941: on a busy host one retry hit the same hold on the next

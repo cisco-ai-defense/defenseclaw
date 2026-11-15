@@ -46,8 +46,12 @@ func TestFileRedirectsOfADescriptorOperatorCountTowardTheOperandBound(t *testing
 		{"attached", "echo x" + strings.Repeat(">&f", 1500), false, "alert", true},
 		{"both streams, strict", "echo x" + strings.Repeat(" >&f", 1500), true, "block", true},
 		{"stdout, strict", "echo x" + strings.Repeat(" 1>&f", 1500), true, "block", true},
-		{"descriptor copies", "echo x" + strings.Repeat(" 2>&1", 1500), false, "allow", false},
-		{"descriptor copies, strict", "echo x" + strings.Repeat(" >&2", 1500), true, "allow", false},
+		// Descriptor copies name no file, so they never reach the operand
+		// bound (no operand-bound alert); 1500 of them pass the action
+		// analysis node bound, which is the unknown tier of the pack for any
+		// call (rel-1-0-10:GAP-0688): an alert in default, a block in strict.
+		{"descriptor copies", "echo x" + strings.Repeat(" 2>&1", 1500), false, "alert", false},
+		{"descriptor copies, strict", "echo x" + strings.Repeat(" >&2", 1500), true, "block", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer hookpaths.HookCall()()

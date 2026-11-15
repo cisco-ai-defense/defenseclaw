@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -176,7 +177,7 @@ func healWindowsStandaloneApprovedConfigSource(result *enterprisestatus.Result) 
 // ensure or a no-op ensure and the next Repair over a hand edit was refused
 // (GAP-0854).
 func windowsStandaloneLifecycleLockPath() (string, error) {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return "", fmt.Errorf("resolve the lifecycle lock folder: %w", err)
 	}
@@ -357,7 +358,7 @@ func windowsBundleTakeOverPendingCommit(ctx context.Context, opts *windowsEnterp
 	if err != nil {
 		return false
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return false
 	}
@@ -456,7 +457,7 @@ func windowsEnterpriseHotConfigApply(
 	if config.NeedsMigrationV9(next) {
 		return unavailable("the staged config needs a config_version migration")
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return unavailable("cannot resolve the trusted enterprise roots: " + err.Error())
 	}
@@ -1786,7 +1787,7 @@ type windowsEnterpriseFreshRewrite struct {
 // trusted again, a transaction is pending (its recovery restores its own
 // preimage), or the lock is busy (the transaction then refuses the file).
 func rewriteWindowsEnterpriseDriftedFile(layout managed.StandaloneLayout, rewrite windowsEnterpriseFreshRewrite) (windowsEnterpriseReplacedFile, error) {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return windowsEnterpriseReplacedFile{}, nil
 	}
@@ -1881,7 +1882,7 @@ func installWindowsEnterpriseSuppliedConfigOverRefused(configPath string) (windo
 			sddl: windowsConfigFileSDDL(service.String()), approved: next,
 		})
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return windowsEnterpriseReplacedFile{}, nil
 	}

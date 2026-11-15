@@ -1513,6 +1513,72 @@ def test_downgrade_sets_aside_the_keys_the_older_release_lacks(
         assert _set_aside(home).stat().st_mode & 0o777 == 0o600
 
 
+# rel-1-0-10:GAP-0644: 1.0.9 refuses a 1.0.10 key inside a routing model or a
+# profile too, so a downgrade sets aside each one (with the model's name).
+_NESTED_CONFIG = """config_version: 9
+routing:
+  models:
+    - name: fast
+      provider: openai
+      model: gpt-5-mini
+    - name: deep
+      provider: bedrock
+      model: anthropic.claude-sonnet-5
+      apis: [converse]
+      bedrock:
+        region: us-east-1
+      credential: ROUTE_KEY
+guardrail:
+  profiles:
+    dev:
+      mode: observe
+      routing:
+        allowed_aliases: [fast]
+    ops:
+      mode: action
+"""
+
+
+def test_downgrade_to_1_0_9_sets_aside_keys_inside_models_and_profiles(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_NESTED_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    assert len(execs) == 1
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert config["routing"]["models"] == [
+        {"name": "fast", "provider": "openai", "model": "gpt-5-mini"},
+        {"name": "deep", "provider": "bedrock", "model": "anthropic.claude-sonnet-5"},
+    ]
+    assert config["guardrail"]["profiles"] == {"dev": {"mode": "observe"}, "ops": {"mode": "action"}}
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record == {
+        "version": 1,
+        "for": "1.0.9",
+        "keys": {
+            "routing.models[1].apis": ["converse"],
+            "routing.models[1].bedrock": {"region": "us-east-1"},
+            "routing.models[1].credential": "ROUTE_KEY",
+            "guardrail.profiles.dev.routing": {"allowed_aliases": ["fast"]},
+        },
+        "items": {"routing.models[1]": "deep"},
+    }
+
+
+def test_a_newer_key_pattern_names_concrete_keys_only() -> None:
+    assert upgrade_shim.newer_config_key("routing.models[3].bedrock") == ("routing.models[].bedrock", (1, 0, 10))
+    assert upgrade_shim.newer_config_key("guardrail.profiles.dev.routing") == ("guardrail.profiles.*.routing", (1, 0, 10))
+    assert upgrade_shim.newer_config_key("routing.models[].bedrock") is None
+    assert upgrade_shim.newer_config_key("routing.models[0].name") is None
+    assert upgrade_shim.newer_config_key("guardrail.secret_flow") == ("guardrail.secret_flow", (1, 0, 10))
+
+
 # guardrail.chains (1.0.6, root-scope chains, issue #1391): 1.0.5 and 1.0.4
 # refuse the block itself, so a downgrade sets it aside whole.
 @pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
@@ -1688,7 +1754,9 @@ _CONFIG_KEYS_1_0_9 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.9
 
 
 def _schema_key_paths(schema: dict) -> set[str]:
-    """Every dotted key the v8 config schema names (properties, through $ref and *Of)."""
+    """Every key the v8 config schema names (properties, through $ref and *Of), also inside list
+    items (``routing.models[].bedrock``) and map values (``guardrail.profiles.*.routing``):
+    1.0.9 refuses a 1.0.10 key there too (rel-1-0-10:GAP-0644)."""
 
     defs = schema.get("$defs", {})
     out: set[str] = set()
@@ -1708,6 +1776,11 @@ def _schema_key_paths(schema: dict) -> set[str]:
             dotted = f"{prefix}.{key}" if prefix else key
             out.add(dotted)
             walk(child, dotted, refs)
+        if isinstance(node.get("items"), dict):
+            walk(node["items"], f"{prefix}[]", refs)
+        for value in [node.get("additionalProperties"), *(node.get("patternProperties") or {}).values()]:
+            if isinstance(value, dict):
+                walk(value, f"{prefix}.*", refs)
 
     walk(schema, "", ())
     return out
@@ -1722,7 +1795,7 @@ def _missing_from_newer_config_keys(new_paths: set[str], old_paths: set[str]) ->
     listed = [
         key
         for key, since in (*upgrade_shim.NEWER_CONFIG_KEYS, *upgrade_shim.NEWER_CONFIG_SUBTREES)
-        if since > (1, 0, 9) and "*" not in key
+        if since > (1, 0, 9)
     ]
     return sorted(
         path
@@ -1757,6 +1830,123 @@ def test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade() -> None:
     assert missing == [], f"add these to upgrade_shim.NEWER_CONFIG_KEYS: {missing}"
 
 
+def _schema_enum_values(schema: dict) -> dict[str, set]:
+    """The enum values of every key path (_schema_key_paths naming) that has an enum."""
+
+    defs = schema.get("$defs", {})
+    out: dict[str, set] = {}
+
+    def walk(node: object, prefix: str, refs: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            return
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/") and ref.count("/") == 2:
+            name = ref.rsplit("/", 1)[-1]
+            if name not in refs:
+                walk(defs.get(name), prefix, (*refs, name))
+        if prefix and isinstance(node.get("enum"), list):
+            out.setdefault(prefix, set()).update(json.dumps(v) for v in node["enum"])
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            for branch in node.get(keyword, []):
+                walk(branch, prefix, refs)
+        for key, child in node.get("properties", {}).items():
+            walk(child, f"{prefix}.{key}" if prefix else key, refs)
+        if isinstance(node.get("items"), dict):
+            walk(node["items"], f"{prefix}[]", refs)
+        for value in [node.get("additionalProperties"), *(node.get("patternProperties") or {}).values()]:
+            if isinstance(value, dict):
+                walk(value, f"{prefix}.*", refs)
+
+    walk(schema, "", ())
+    return out
+
+
+# Keys both releases have whose allowed values 1.0.10 widens, and what a downgrade does with a
+# value 1.0.9 refuses (rel-1-0-10:GAP-0767): the decision is set aside whole.
+_WIDENED_SINCE_1_0_9 = {"routing.decisions[].conditions[].type": "decision set aside"}
+
+
+def test_every_value_new_since_1_0_9_is_handled_on_a_downgrade() -> None:
+    # A value 1.0.9 refuses under a key it has is the same failure as a new key (1.0.9 refuses
+    # config.yaml), so every widened enum must be handled by the set-aside.
+    old = _schema_enum_values(json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8")))
+    new = _schema_enum_values(
+        json.loads((_REPO_ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json").read_text(encoding="utf-8"))
+    )
+    widened = sorted(path for path in set(old) & set(new) if new[path] - old[path])
+    assert widened == sorted(_WIDENED_SINCE_1_0_9), f"handle these in upgrade_shim and list them here: {widened}"
+    assert {json.dumps(t) for t in upgrade_shim.OLDER_DECISION_CONDITION_TYPES} | {'"KEYWORD"'} == old[
+        "routing.decisions[].conditions[].type"
+    ]
+
+
+_DECISION_AND_CLASSIFIER_CONFIG = """config_version: 9
+routing:
+  enabled: true
+  classifier: rules
+  models:
+    - name: fast
+      provider: openai
+      model: gpt-5-mini
+  signals:
+    keywords:
+      - name: quick
+        keywords: [quick question]
+  decisions:
+    - name: quick
+      conditions: [{type: keyword, name: quick}]
+      model_refs: [fast]
+    - name: codex-fast
+      conditions: [{type: connector, name: codex}]
+      model_refs: [fast]
+    - name: last
+      conditions: [{type: KEYWORD, name: quick}]
+      model_refs: [fast]
+"""
+
+
+def test_downgrade_to_1_0_9_sets_aside_a_newer_decision_and_switches_routing_off(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_DECISION_AND_CLASSIFIER_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert [d["name"] for d in config["routing"]["decisions"]] == ["quick", "last"]
+    assert config["routing"]["enabled"] is False and "classifier" not in config["routing"]
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record["keys"] == {"routing.classifier": "rules"}
+    assert record["decisions"] == [
+        {"index": 1, "value": {"name": "codex-fast", "conditions": [{"type": "connector", "name": "codex"}], "model_refs": ["fast"]}}
+    ]
+    assert record["switched"] == {"routing.enabled": True}
+    out = capsys.readouterr().out
+    assert "routing decision codex-fast" in out and "Routing is switched off for 1.0.9" in out
+
+
+def test_downgrade_keeps_routing_on_with_the_vllm_classifier(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    body = _DECISION_AND_CLASSIFIER_CONFIG.replace("  classifier: rules\n", "").replace(
+        "    - name: codex-fast\n      conditions: [{type: connector, name: codex}]\n      model_refs: [fast]\n", ""
+    )
+    (home / "config.yaml").write_text(body, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    assert yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["routing"]["enabled"] is True
+    assert not _set_aside(home).exists()
+
+
 def test_the_downgrade_guard_fails_on_a_key_the_list_does_not_cover() -> None:
     # The guard above would pass on an empty diff; prove it bites: a key that is in the
     # 1.0.10 schema, not in the frozen 1.0.9 list and not in NEWER_CONFIG_KEYS is reported,
@@ -1765,6 +1955,10 @@ def test_the_downgrade_guard_fails_on_a_key_the_list_does_not_cover() -> None:
     new = set(old) | {"guardrail.brand_new_switch", "guardrail.secret_flow.sink_action.default"}
     assert _missing_from_newer_config_keys(new, old) == ["guardrail.brand_new_switch"]
     assert _missing_from_newer_config_keys(old, old) == []
+    # It sees keys inside list items and map values too (rel-1-0-10:GAP-0644).
+    assert "routing.models[].name" in old and "guardrail.profiles.*.block_at" in old
+    nested = set(old) | {"routing.models[].brand_new", "guardrail.profiles.*.brand_new", "routing.models[].bedrock.region"}
+    assert _missing_from_newer_config_keys(nested, old) == ["guardrail.profiles.*.brand_new", "routing.models[].brand_new"]
 
 
 @pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
