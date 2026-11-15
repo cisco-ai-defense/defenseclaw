@@ -240,7 +240,7 @@ func sshPrivateKeyContentReadBy(
 			}
 			return true
 		// These readers return file content, including SSH private key data.
-		case "sed", "gsed", "awk", "gawk", "mawk", "nawk",
+		case "sed", "gsed", "awk", "gawk", "mawk", "nawk", "jq", "gojq", "yq",
 			"cat", "base64", "cp", "copy", "copy-item", "cpi",
 			"get-content", "gc", "type", "read", "readfile", "read_file", "read-file",
 			"fsread", "fs_read", "fs-read", "fs.read", "fs.read_file",

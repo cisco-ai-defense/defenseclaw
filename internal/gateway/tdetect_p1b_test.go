@@ -9,8 +9,7 @@ import "testing"
 // "account change", "shutdown" and "history clearing" of rel-1-0-10 T-DETECT.
 // A call that makes a local account or sets a password from a script, takes the
 // host down, or switches the shell history off is a finding in every tier: an
-// alert (MEDIUM findings, power, history and the credential sweep, are recorded and allowed in the
-// permissive pack, as in rel), and a block where the pack blocks enforceable findings (strict,
+// alert, and a block where the pack blocks enforceable findings (strict,
 // managed-strict). Reads of the same names, a group change (the privileged-group
 // rule keeps those), ordinary history settings and text that only names the
 // commands stay allowed. Letters: default, strict, permissive, managed,
@@ -80,5 +79,32 @@ func TestCredentialFileSweepFiveTiers(t *testing.T) {
 		{"td-sweep-text", `echo find / -name id_rsa`, "AAAAA"},
 		{"td-sweep-grep", `grep -rn "find / -name id_rsa" docs/`, "AAAAA"},
 		{"td-sweep-pub", `find / -name id_rsa.pub`, "AAAAA"},
+	})
+}
+
+// TestDataToolFileReadsGetTheVerdictOfCat (substrate-1:GAP-0233): jq and yq read the file they name, so a credential file read that way is
+// judged as `cat` of it is, in every tier. The cat form is the oracle.
+func TestDataToolFileReadsGetTheVerdictOfCat(t *testing.T) {
+	pairs := [][2]string{
+		{`cat ~/.aws/credentials`, `jq -R . ~/.aws/credentials`},
+		{`cat ~/.docker/config.json`, `jq . ~/.docker/config.json`},
+		{`cat ~/.kube/config`, `yq e . ~/.kube/config`},
+		{`cat ~/.ssh/id_rsa`, `jq -R . ~/.ssh/id_rsa`},
+	}
+	letter := map[string]string{"allow": "A", "alert": "L", "block": "B"}
+	for _, p := range gap0437Packs {
+		a := gap0437Server(t, p, "openclaw", "action")
+		for _, pair := range pairs {
+			oracle, _ := tdetectVerdict(t, a, pair[0])
+			got, out := tdetectVerdict(t, a, pair[1])
+			if got != oracle {
+				t.Errorf("%s: %q is %s, %q is %s: %v", p.name, pair[1], letter[got], pair[0], letter[oracle], out)
+			}
+		}
+	}
+	tdetectRunRows(t, []tdetectRow{
+		{"td-jq-project", `jq . package.json`, "AAAAA"},
+		{"td-jq-stdin", `jq -n '1+1'`, "AAAAA"},
+		{"td-xargs-plain", `xargs -a list.txt echo`, "AAAAA"},
 	})
 }

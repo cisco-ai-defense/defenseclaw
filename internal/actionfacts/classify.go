@@ -332,6 +332,15 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "cat":
 		addOperation(command, OperationRead)
 		addPathOperands(out, command, PathAccessRead, optionValues())
+	case "jq", "gojq", "yq":
+		// A JSON or YAML reader: the operands after the filter are files it
+		// reads, so a credentials file read through it is judged as cat of
+		// it is (substrate-1:GAP-0233). An option or a word the reader does
+		// not know keeps the call partial as before.
+		if !classifyJSONQueryReads(out, command, program) {
+			classifyUnknownOutputOperand(out, command)
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	case "apply_patch":
 		classifyPOSIXApplyPatchStdin(out, command)
 	case "head", "tail":
@@ -795,6 +804,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		// command source.
 	default:
 		classifyUnknownOutputOperand(out, command)
+		classifyXargsArgFileReads(out, command, program)
 		if posixVersionedPythonProgram(program) {
 			classifyPOSIXStdinScriptInterpreter(out, command)
 			break
@@ -13482,4 +13492,126 @@ func posixStdinCodeTarget(argv []string) bool {
 // (their options and assignments): the command they start.
 func POSIXExecWrapperTarget(argv []string) []string {
 	return posixStdinCodeUnwrap(argv)
+}
+
+// classifyXargsArgFileReads records the file xargs -a FILE (--arg-file) reads
+// its words from. The call stays partial (the program xargs runs is read on
+// its own words), so this only adds the read path (substrate-1:GAP-0233).
+func classifyXargsArgFileReads(out *parseOutput, command *CommandFact, program string) {
+	if command == nil || command.Dialect != DialectPOSIX || program != "xargs" {
+		return
+	}
+	var files []string
+	for index := 1; index < len(command.Argv); index++ {
+		argument := command.Argv[index]
+		switch {
+		case argument == "--":
+			index = len(command.Argv)
+		case !strings.HasPrefix(argument, "-") || argument == "-":
+			index = len(command.Argv) // the program xargs runs: its words are not xargs options
+		case argument == "-a" || argument == "--arg-file":
+			if index+1 < len(command.Argv) {
+				files = append(files, command.Argv[index+1])
+				index++
+			}
+		case strings.HasPrefix(argument, "--arg-file="):
+			files = append(files, strings.TrimPrefix(argument, "--arg-file="))
+		case strings.HasPrefix(argument, "-a") && len(argument) > 2 && !strings.HasPrefix(argument, "--"):
+			files = append(files, argument[2:])
+		}
+	}
+	if len(files) == 0 {
+		return
+	}
+	addOperation(command, OperationRead)
+	for _, file := range files {
+		appendCommandPath(out, command, PathAccessRead, file)
+	}
+}
+
+// classifyJSONQueryReads reads the whole grammar of jq, gojq and yq: options
+// that take no value, options with one or two values, the filter and the files.
+// It reports false (and records nothing) when a word is not known or the argv
+// is dynamic, or the call writes in place (yq -i), so the caller keeps the call
+// partial.
+func classifyJSONQueryReads(out *parseOutput, command *CommandFact, program string) bool {
+	if command == nil || command.Dialect != DialectPOSIX || !command.ArgvComplete {
+		return false
+	}
+	argv := command.Argv
+	noValue := map[string]bool{"-n": true, "-r": true, "-j": true, "-a": true, "-s": true, "-c": true, "-C": true, "-M": true,
+		"-S": true, "-e": true, "-R": true, "--null-input": true, "--raw-output": true, "--join-output": true,
+		"--ascii-output": true, "--slurp": true, "--compact-output": true, "--color-output": true,
+		"--monochrome-output": true, "--sort-keys": true, "--exit-status": true, "--raw-input": true, "--tab": true,
+		"--seq": true, "--stream": true, "--unbuffered": true}
+	oneValue := map[string]bool{"--indent": true, "-L": true}
+	letters := "nrjascCMSeR"
+	if program == "yq" {
+		for _, flag := range []string{"-P", "--prettyPrint", "-N", "--no-doc", "-y", "-Y", "-x", "--xml-output", "-v", "--verbose"} {
+			noValue[flag] = true
+		}
+		for _, flag := range []string{"-I", "--indent", "-o", "--output-format", "-p", "--input-format"} {
+			oneValue[flag] = true
+		}
+		letters += "PNyYxv"
+	}
+	index := 1
+	if program == "yq" && index < len(argv) {
+		switch argv[index] {
+		case "e", "eval", "ea", "eval-all":
+			index++
+		}
+	}
+	var operands, files []string
+	fromFile := false
+	for ; index < len(argv); index++ {
+		argument := argv[index]
+		switch {
+		case argument == "--":
+			operands = append(operands, argv[index+1:]...)
+			index = len(argv)
+		case !strings.HasPrefix(argument, "-") || argument == "-":
+			operands = append(operands, argument)
+		case noValue[argument]:
+		case oneValue[argument]:
+			index++
+		case argument == "--arg" || argument == "--argjson":
+			index += 2
+		case argument == "--slurpfile" || argument == "--rawfile":
+			if index+2 >= len(argv) {
+				return false
+			}
+			files = append(files, argv[index+2])
+			index += 2
+		case argument == "-f" || argument == "--from-file":
+			if index+1 >= len(argv) {
+				return false
+			}
+			fromFile = true
+			files = append(files, argv[index+1])
+			index++
+		case argument == "--args" || argument == "--jsonargs":
+			// The words after are data for the filter, not files.
+			if !fromFile && len(operands) > 0 {
+				operands = operands[1:]
+			}
+			files = append(files, operands...)
+			operands = nil
+			index = len(argv)
+			fromFile = true
+		case !strings.HasPrefix(argument, "--") && len(argument) > 2 && strings.Trim(argument[1:], letters) == "":
+			// a cluster of switches (-nr)
+		default:
+			return false
+		}
+	}
+	if !fromFile && len(operands) > 0 {
+		operands = operands[1:] // the filter
+	}
+	files = append(files, operands...)
+	addOperation(command, OperationRead)
+	for _, file := range files {
+		appendCommandPath(out, command, PathAccessRead, file)
+	}
+	return true
 }

@@ -425,7 +425,7 @@ func credentialFileSweep(c actionfacts.CommandFact, activeHome string) bool {
 	broad := false
 	for _, root := range roots {
 		// The shell expands ~ and $HOME to the active home before the facts see them.
-		if home := strings.TrimRight(activeHome, "/"); home != "" && strings.TrimRight(root, "/") == home {
+		if home := normalizeSweepRoot(activeHome); home != "" && normalizeSweepRoot(root) == home {
 			broad = true
 		}
 		switch strings.TrimRight(root, "/") {
@@ -446,4 +446,11 @@ func credentialFileSweep(c actionfacts.CommandFact, activeHome string) bool {
 		}
 	}
 	return false
+}
+
+// normalizeSweepRoot compares a folder spelled with either separator and any
+// case (the active home of a Windows host is C:\Users\alice, the facts spell
+// the expanded ~ with a slash).
+func normalizeSweepRoot(value string) string {
+	return strings.ToLower(strings.TrimRight(strings.ReplaceAll(value, `\`, "/"), "/"))
 }
