@@ -38,11 +38,19 @@ type WindowsHookConfigFile struct {
 
 // WindowsManagedHookConfigFiles lists, for every enabled target of the
 // guardian's manifest, the agent config paths its connector's hooks live in
-// (connector.HookPolicyWatchPathsForConnector, the set the guardian watches),
-// resolved for that account's home. GAP-0751 prune and retire read them for
-// references to a launch folder. A target whose home no longer exists is
-// skipped (its configs went with it); any other problem is returned, which
-// makes the caller's scan incomplete.
+// (connector.HookPolicyWatchPathsForConnector, the set the guardian watches)
+// and the files its managed install writes beside them that name the hook
+// (connector.ManagedAccountHookCompanionPaths), resolved for that account's
+// home. GAP-0751 prune and retire read them for references to a launch
+// folder. The manifest is the standalone guardian's, so every standalone
+// connector is known here whatever profile the calling shell carries: retire
+// and prune run in an administrator's or SYSTEM shell without the service
+// pins, and a registry built from that process's profile knew only Codex,
+// Claude Code, Cursor and Copilot, so retire never read a Hermes, Kiro,
+// OpenCode, Antigravity, Devin or Amp account's configs and ended ok over
+// them (rel-1-0-10 GAP-0880). A target whose home no longer exists is skipped
+// (its configs went with it); a connector this release does not know, and
+// any other problem, is returned, which makes the caller's scan incomplete.
 func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile, []string) {
 	manifest, err := LoadManifest(manifestPath)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -51,7 +59,7 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 	if err != nil {
 		return nil, []string{fmt.Sprintf("%s: %v", manifestPath, err)}
 	}
-	registry := newWindowsEnterpriseConnectorRegistry()
+	registry := newWindowsStandaloneHookConfigRegistry()
 	var files []WindowsHookConfigFile
 	var problems []string
 	for _, target := range manifest.Targets {
@@ -68,6 +76,7 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 		}
 		conn, ok := registry.Get(name)
 		if !ok {
+			problems = append(problems, fmt.Sprintf("%s (%s): not a connector this release knows, so its agent configs were not read", home, name))
 			continue
 		}
 		dataDir, err := resolveWindowsEnterpriseDataDir(home, target.DataDir)
@@ -78,7 +87,8 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 		setup := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
 		var paths []string
 		if err := connector.WithUserHomeDir(home, func() error {
-			paths = connector.HookPolicyWatchPathsForConnector(conn, setup)
+			paths = append(connector.HookPolicyWatchPathsForConnector(conn, setup),
+				connector.ManagedAccountHookCompanionPaths(conn, setup)...)
 			return nil
 		}); err != nil {
 			problems = append(problems, fmt.Sprintf("%s (%s): %v", home, name, err))
@@ -93,4 +103,15 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 		}
 	}
 	return files, problems
+}
+
+// newWindowsStandaloneHookConfigRegistry is every connector the standalone
+// guardian installs, independent of this process's profile.
+func newWindowsStandaloneHookConfigRegistry() *connector.Registry {
+	registry := connector.NewRegistry()
+	registry.RegisterBuiltin(connector.NewCodexConnector())
+	registry.RegisterBuiltin(connector.NewClaudeCodeConnector())
+	registry.RegisterBuiltin(connector.NewCursorConnector())
+	registerWindowsStandalonePerUserConnectors(registry)
+	return registry
 }

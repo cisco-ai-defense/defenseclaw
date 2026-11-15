@@ -249,10 +249,10 @@ func hookRegistrationSetupCase(t *testing.T, conn Connector, scope string) (hook
 		t.Fatalf("%s %s Setup wrote none of its hook config paths %v", conn.Name(), scope, paths)
 	}
 	if conn.Name() == "hermes" {
-		allowlist := filepath.Join(filepath.Dir(hermesConfigPath(opts)), hermesAllowlistFileName)
+		allowlist := filepath.Join(filepath.Dir(hermesConfigPath(opts)), HermesAllowlistFileName)
 		data, err := os.ReadFile(allowlist)
 		if err != nil {
-			t.Fatalf("hermes %s Setup wrote no %s: %v", scope, hermesAllowlistFileName, err)
+			t.Fatalf("hermes %s Setup wrote no %s: %v", scope, HermesAllowlistFileName, err)
 		}
 		c.AgentFiles = append(c.AgentFiles, hookRegistrationFile{
 			Path:    hookRegistrationTemplate(allowlist, home, dataDir),

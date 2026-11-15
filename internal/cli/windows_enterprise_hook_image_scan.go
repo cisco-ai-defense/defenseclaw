@@ -248,13 +248,29 @@ type windowsHookImageConfigScan struct {
 	// any entry here proves nothing about the folders: prune removes none
 	// and retire stays pending.
 	Incomplete []string
-	// Skipped lists "<file>: <error>" for each account file that was a
-	// link, had a link at or below its account home (link_in_account_path),
-	// was not a regular file, too large, unreadable or did not answer in
-	// time. It is reported (skipped_unsafe) and does not void the scan: a
-	// folder it might name is still kept while it is current, the replaced
-	// one or replaced less than hookImageRetainAfterSupersede ago.
-	Skipped []string
+	// Unverified are the account files that were a link, had a link at or
+	// below their account home (link_in_account_path), were not a regular
+	// file, too large, unreadable or did not answer in time. They do not
+	// void the scan: prune notes them (skipped_unsafe) and still keeps a
+	// folder they might name while it is current, the replaced one or
+	// replaced less than hookImageRetainAfterSupersede ago. Retire cannot
+	// tell whether they name a launch folder, so it names each in
+	// still_named (unreadable) and never ends ok over one (rel-1-0-10
+	// GAP-0882: an Administrator's retire was denied an account's .codex
+	// folder and ended ok without reading its config).
+	Unverified []windowsHookImageUnverifiedFile
+}
+
+// windowsHookImageUnverifiedFile is an account file the scan could not read
+// or vouch for, and Err why.
+type windowsHookImageUnverifiedFile struct {
+	File windowsHookImageConfigFile
+	Err  string
+}
+
+// Line is the "<file>: <error>" line of u.
+func (u windowsHookImageUnverifiedFile) Line() string {
+	return u.File.line(errors.New(u.Err))
 }
 
 // errWindowsHookImageScanUnsafe is a scanned path that is a link, a folder
@@ -294,10 +310,10 @@ func readWindowsHookImageRetryingBusy(read func() ([]byte, error), busy func(err
 // expandWindowsHookImageConfigFiles turns the watched paths into the regular
 // files to read: a folder (Claude Code's managed-settings.d) becomes its
 // regular files, a missing path is dropped, a link or other non-regular entry
-// is refused (machine: incomplete; account: skipped). A machine path is
+// is refused (machine: incomplete; account: unverified). A machine path is
 // looked at with lstat and readDir; an account path only through viewAccount
 // (windowsHookImageAccountView): one with a link at or below its home is
-// skipped (link_in_account_path) and never listed or read, and a watched
+// unverified (link_in_account_path) and never listed or read, and a watched
 // account folder is listed through the handle the view opened. Lock files
 // and temporaries are left out: writers hold them without sharing and they
 // never name a hook.
@@ -306,15 +322,15 @@ func expandWindowsHookImageConfigFiles(
 	lstat func(string) (fs.FileInfo, error),
 	readDir func(string) ([]fs.DirEntry, error),
 	viewAccount func(home, path string) (fs.FileInfo, []fs.DirEntry, error),
-) ([]windowsHookImageConfigFile, []string, []string) {
+) ([]windowsHookImageConfigFile, []string, []windowsHookImageUnverifiedFile) {
 	var files []windowsHookImageConfigFile
-	var incomplete, skipped []string
+	var incomplete []string
+	var unverified []windowsHookImageUnverifiedFile
 	refuse := func(entry windowsHookImageConfigFile, err error) {
-		line := entry.line(err)
 		if entry.User {
-			skipped = append(skipped, line)
+			unverified = append(unverified, windowsHookImageUnverifiedFile{File: entry, Err: err.Error()})
 		} else {
-			incomplete = append(incomplete, line)
+			incomplete = append(incomplete, entry.line(err))
 		}
 	}
 	seen := map[string]bool{}
@@ -385,7 +401,7 @@ func expandWindowsHookImageConfigFiles(
 			}
 		}
 	}
-	return files, incomplete, skipped
+	return files, incomplete, unverified
 }
 
 func windowsHookImageScanSkipsName(path string) bool {
@@ -396,7 +412,7 @@ func windowsHookImageScanSkipsName(path string) bool {
 // scanWindowsHookImageConfigFiles reads each regular file (a missing one is
 // skipped) and records the launch folders of bin it names. A machine file
 // that cannot be read makes the scan incomplete; an account file that
-// cannot be read is skipped (see windowsHookImageConfigScan). read gets the
+// cannot be read is unverified (see windowsHookImageConfigScan). read gets the
 // whole entry: an account file is read only below its Home.
 func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin string, read func(windowsHookImageConfigFile) ([]byte, error)) windowsHookImageConfigScan {
 	scan := windowsHookImageConfigScan{Named: map[string][]string{}, UserFiles: map[string]bool{}, FileSIDs: map[string]string{}}
@@ -412,11 +428,10 @@ func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin str
 			continue
 		}
 		if err != nil {
-			line := file.line(err)
 			if file.User {
-				scan.Skipped = append(scan.Skipped, line)
+				scan.Unverified = append(scan.Unverified, windowsHookImageUnverifiedFile{File: file, Err: err.Error()})
 			} else {
-				scan.Incomplete = append(scan.Incomplete, line)
+				scan.Incomplete = append(scan.Incomplete, file.line(err))
 			}
 			continue
 		}

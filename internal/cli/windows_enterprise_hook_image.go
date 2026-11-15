@@ -716,8 +716,8 @@ func pruneWindowsHookImages(fsys windowsHookImageFS, bin string, keep []string, 
 	for _, note := range policy.Scan.Incomplete {
 		report.Notes = append(report.Notes, "scan_incomplete: "+note)
 	}
-	for _, note := range policy.Scan.Skipped {
-		report.Notes = append(report.Notes, "skipped_unsafe: "+note)
+	for _, file := range policy.Scan.Unverified {
+		report.Notes = append(report.Notes, "skipped_unsafe: "+file.Line())
 	}
 	for _, entry := range entries {
 		name := entry.Name()

@@ -362,11 +362,11 @@ func reconcileWindowsCodexRequirementsForHookImage(gateway string) error {
 // (link_in_account_path otherwise).
 func scanWindowsHookImageConfigs(roots winpath.EnterpriseRoots, bin string) windowsHookImageConfigScan {
 	entries, problems := windowsHookImageConfigFiles(roots)
-	files, incomplete, skipped := expandWindowsHookImageConfigFiles(entries, os.Lstat, os.ReadDir,
+	files, incomplete, unverified := expandWindowsHookImageConfigFiles(entries, os.Lstat, os.ReadDir,
 		windowsHookImageAccountView(viewWindowsHookImageAccountPath))
 	scan := scanWindowsHookImageConfigFiles(files, bin, readWindowsHookImageConfigFile)
 	scan.Incomplete = append(append(problems, incomplete...), scan.Incomplete...)
-	scan.Skipped = append(skipped, scan.Skipped...)
+	scan.Unverified = append(unverified, scan.Unverified...)
 	return scan
 }
 

@@ -66,8 +66,13 @@ type windowsHookImageNamedFile struct {
 	// in that account's Windows session, rewrites it.
 	Account bool `json:"account,omitempty"`
 	// Cause is, for a machine file retire left pending on, the writer error
-	// that kept it from being rewritten (rel-1-0-10 GAP-0856).
+	// that kept it from being rewritten (rel-1-0-10 GAP-0856), and for an
+	// unreadable account file why it could not be read.
 	Cause string `json:"cause,omitempty"`
+	// Unreadable marks an account file retire could not read or vouch for:
+	// it may name a launch folder (Folder is "unknown"), so retire does not
+	// end ok over it (rel-1-0-10 GAP-0882).
+	Unreadable bool `json:"unreadable,omitempty"`
 }
 
 // windowsHookImageSignedOutProfile is an enrolled account whose runtime
@@ -317,7 +322,7 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 	// launch folder (a Copilot hook file it did not write, a tampered Hermes
 	// command), fails that account and so the older Setup (GAP-0794).
 	still := map[string]bool{}
-	accountFiles := 0
+	accountFiles, unreadable := 0, 0
 	skipped := map[string][]windowsHookImageNamedFile{}
 	for folder, files := range after.Named {
 		for _, file := range files {
@@ -335,6 +340,24 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 			report.StillNamed = append(report.StillNamed, named)
 		}
 	}
+	// An account file the scan could not read or vouch for may name a
+	// launch folder: it holds retire back like one that does, and a skip of
+	// its profile covers it (rel-1-0-10 GAP-0882).
+	for _, file := range after.Unverified {
+		key := strings.ToLower(file.File.Path)
+		if still[key] {
+			continue
+		}
+		still[key] = true
+		named := windowsHookImageNamedFile{File: file.File.Path, Folder: windowsHookImageUnknownFolder, Account: true, Unreadable: true,
+			Cause: windowsHookImageUnverifiedCause(file)}
+		if sid := file.File.SID; sid != "" && skip[sid] {
+			skipped[sid] = append(skipped[sid], named)
+			continue
+		}
+		unreadable++
+		report.StillNamed = append(report.StillNamed, named)
+	}
 	// Each skip is audited before it is recorded; one the audit store did
 	// not take blocks retire like any other account file.
 	var auditErrors []string
@@ -344,7 +367,13 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		for sid, failure := range failures {
 			auditErrors = append(auditErrors, fmt.Sprintf("the skip of %s was not recorded: %s", sid, failure))
 			report.StillNamed = append(report.StillNamed, skipped[sid]...)
-			accountFiles += len(skipped[sid])
+			for _, named := range skipped[sid] {
+				if named.Unreadable {
+					unreadable++
+				} else {
+					accountFiles++
+				}
+			}
 		}
 		sort.Strings(auditErrors)
 	}
@@ -354,9 +383,6 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		}
 	}
 	sort.Strings(report.Notes)
-	for _, note := range after.Skipped {
-		report.Notes = append(report.Notes, "skipped_unsafe: "+note)
-	}
 	sort.Slice(report.StillNamed, func(i, j int) bool {
 		if report.StillNamed[i].File != report.StillNamed[j].File {
 			return report.StillNamed[i].File < report.StillNamed[j].File
@@ -403,7 +429,12 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 				"Have each of those accounts sign in (the guardian rewrites its configs within about a minute), or remove the account with its profile, "+
 				"then run retire again", accountFiles, steps.Wait))
 		}
-		if accountFiles > 0 {
+		if unreadable > 0 {
+			parts = append(parts, fmt.Sprintf("%d agent config(s) of enrolled accounts could not be read or verified (still_named entries with unreadable true; "+
+				"each cause says why), so it is not known whether they name a launch folder. An elevated administrator is denied some "+
+				"account folders: run retire as LocalSystem, or fix the cause, then run retire again", unreadable))
+		}
+		if accountFiles > 0 || unreadable > 0 {
 			parts[len(parts)-1] += "; an administrator who accepts that a profile stays unconverted can name it with --skip-profile <SID> (audited, and listed by enterprise windows status and verify until it is converted)"
 		}
 		parts = append(parts, auditErrors...)
@@ -471,10 +502,21 @@ func windowsHookImageBlockCause(file, codexErr, guardianErr string, deselection 
 		"and enterprise windows status, then run retire again", wait)
 }
 
+// windowsHookImageUnverifiedCause is the still_named cause of an account
+// file the scan could not read or vouch for.
+func windowsHookImageUnverifiedCause(file windowsHookImageUnverifiedFile) string {
+	cause := "could not be read or verified, so it may name a launch folder: " + file.Err
+	if file.File.Note != "" {
+		cause += " (" + file.File.Note + ")"
+	}
+	return cause
+}
+
 // windowsHookImageRetireSkipSet checks the --skip-profile SIDs before
 // anything changes: each must be a SID, an enrolled profile of the
 // guardian's manifest, and one whose own agent configs name a launch folder
-// now (before), so it is what holds retire back. There is no blanket skip.
+// now (before), or could not be read, so it is what holds retire back. There
+// is no blanket skip.
 func windowsHookImageRetireSkipSet(steps windowsHookImageRetireSteps, before windowsHookImageConfigScan) (map[string]bool, map[string]windowsHookImageProfile, error) {
 	if len(steps.SkipProfiles) == 0 {
 		return nil, nil, nil
@@ -489,6 +531,11 @@ func windowsHookImageRetireSkipSet(steps windowsHookImageRetireSteps, before win
 	blocking := map[string]bool{}
 	for key := range windowsHookImageBlockingNamedFiles(before, nil) {
 		if sid := before.FileSIDs[key]; sid != "" && before.UserFiles[key] {
+			blocking[strings.ToUpper(sid)] = true
+		}
+	}
+	for _, file := range before.Unverified {
+		if sid := strings.TrimSpace(file.File.SID); sid != "" {
 			blocking[strings.ToUpper(sid)] = true
 		}
 	}
