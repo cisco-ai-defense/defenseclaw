@@ -56,6 +56,11 @@ type LauncherCall struct {
 	// run as code (the positional arguments of bash -c '"$@"' _ ...): they
 	// are not part of Body (rel-1-0-10:GAP-0803).
 	Trailing bool
+	// Redirects are the redirections of the statement a launcher string
+	// runs in (`cmd /c <script> >> <file>`), in their source text: the script
+	// runs with them, so they are part of Body for a CMD or PowerShell
+	// launcher (rel-1-0-10:GAP-0806). Empty for an argv.
+	Redirects string
 }
 
 // ShellLauncherCall reads the launcher an argv runs: argv[0], or the command
@@ -323,9 +328,11 @@ func ShellLauncherCallOfText(text string) (call LauncherCall, words []string, st
 // `start "" powershell -Command '...'`): each statement is split into words as
 // PowerShell splits it (single quotes, in which a doubled quote is one quote,
 // and double quotes, in which a backtick quote or a doubled quote is one
-// quote) up to its statement or redirect operator outside quotes (newline,
-// ; | & < >). A leading call operator & is skipped. words are the words of
-// that statement and statement its index.
+// quote) up to its statement operator outside quotes (newline, ; | &). A
+// redirection (< > >> 2> 2>&1 and its target) is no word: it is kept in
+// LauncherCall.Redirects, since the launcher's script runs with it. A
+// leading call operator & is skipped. words are the words of that statement
+// and statement its index.
 func ShellLauncherCallsOfText(text string) (calls []LauncherCall, words []string, statement int, ok bool) {
 	if text == "" || len(text) > maxLauncherTextBytes {
 		return nil, nil, 0, false
@@ -333,12 +340,21 @@ func ShellLauncherCallsOfText(text string) (calls []LauncherCall, words []string
 	from := 0
 	for statement = 0; statement < maxLauncherTextStatements && from < len(text); statement++ {
 		var next int
-		words, next, ok = launcherTextWords(text, from)
+		var redirects []string
+		words, redirects, next, ok = launcherTextWords(text, from)
 		if next < 0 {
 			return nil, nil, 0, false // unterminated quote
 		}
 		if ok {
 			if calls = ShellLauncherCalls(words); len(calls) > 0 {
+				if len(redirects) > 0 {
+					for i := range calls {
+						if calls[i].Dialect == DialectCMD || calls[i].Dialect == DialectPowerShell {
+							calls[i].Redirects = strings.Join(redirects, " ")
+							calls[i].Body += " " + calls[i].Redirects
+						}
+					}
+				}
 				return calls, words, statement, true
 			}
 		}
@@ -347,11 +363,12 @@ func ShellLauncherCallsOfText(text string) (calls []LauncherCall, words []string
 	return nil, nil, 0, false
 }
 
-func launcherTextWords(text string, from int) ([]string, int, bool) {
+func launcherTextWords(text string, from int) ([]string, []string, int, bool) {
 	var (
-		words []string
-		word  strings.Builder
-		in    bool
+		words     []string
+		redirects []string
+		word      strings.Builder
+		in        bool
 	)
 	flush := func() {
 		if in {
@@ -367,16 +384,32 @@ func launcherTextWords(text string, from int) ([]string, int, bool) {
 		case ' ', '\t':
 			flush()
 			i++
-		case '\n', '\r', ';', '|', '<', '>':
+		case '\n', '\r', ';', '|':
 			flush()
-			return words, launcherStatementEnd(text, i), len(words) > 0
+			return words, redirects, launcherStatementEnd(text, i), len(words) > 0
+		case '<', '>':
+			start := i
+			if in && i > from && text[i-1] >= '0' && text[i-1] <= '9' && strings.Trim(word.String(), "0123456789") == "" {
+				// The descriptor of 2> or 1>> belongs to the redirection.
+				start -= word.Len()
+				word.Reset()
+				in = false
+			} else {
+				flush()
+			}
+			end, ok := launcherRedirectEnd(text, i)
+			if !ok {
+				return nil, nil, -1, false
+			}
+			redirects = append(redirects, text[start:end])
+			i = end
 		case '&':
 			if len(words) == 0 && !in {
 				i++ // the call operator before the program
 				continue
 			}
 			flush()
-			return words, launcherStatementEnd(text, i), len(words) > 0
+			return words, redirects, launcherStatementEnd(text, i), len(words) > 0
 		case '\'':
 			in = true
 			i++
@@ -393,7 +426,7 @@ func launcherTextWords(text string, from int) ([]string, int, bool) {
 				i++
 			}
 			if i >= len(text) {
-				return nil, -1, false // unterminated quote
+				return nil, nil, -1, false // unterminated quote
 			}
 			i++
 		case '"':
@@ -417,7 +450,7 @@ func launcherTextWords(text string, from int) ([]string, int, bool) {
 				i++
 			}
 			if i >= len(text) {
-				return nil, -1, false
+				return nil, nil, -1, false
 			}
 			i++
 		default:
@@ -430,17 +463,52 @@ func launcherTextWords(text string, from int) ([]string, int, bool) {
 	if len(words) >= maxLauncherTextWords {
 		// The statement goes on past the words read: the next one is not
 		// looked for (the call's own reading has it).
-		return words, len(text), len(words) > 0
+		return words, redirects, len(text), len(words) > 0
 	}
-	return words, i, len(words) > 0
+	return words, redirects, i, len(words) > 0
+}
+
+// launcherRedirectEnd is the end of the redirection whose operator starts at
+// text[i]: the run of < and >, then a descriptor (&1, &-) or the target
+// word, quoted as launcherTextWords quotes. ok is false for an unterminated
+// quote.
+func launcherRedirectEnd(text string, i int) (int, bool) {
+	for i < len(text) && (text[i] == '<' || text[i] == '>') {
+		i++
+	}
+	if i < len(text) && text[i] == '&' {
+		j := i + 1
+		for j < len(text) && (text[j] >= '0' && text[j] <= '9' || text[j] == '-') {
+			j++
+		}
+		if j > i+1 {
+			return j, true
+		}
+	}
+	for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+		i++
+	}
+	for i < len(text) {
+		switch c := text[i]; c {
+		case ' ', '\t', '\n', '\r', ';', '|', '&', '<', '>':
+			return i, true
+		case '\'', '"':
+			end := strings.IndexByte(text[i+1:], c)
+			if end < 0 {
+				return 0, false
+			}
+			i += end + 2
+		default:
+			i++
+		}
+	}
+	return i, true
 }
 
 // launcherStatementEnd is the index after the operator at text[i] (a run of
-// ; | & < > and line breaks): the start of the next statement. A redirect
-// target is a word of no launcher, so it is read as a statement that names
-// none.
+// ; | & and line breaks): the start of the next statement.
 func launcherStatementEnd(text string, i int) int {
-	for i < len(text) && strings.IndexByte("\n\r;|&<> \t", text[i]) >= 0 {
+	for i < len(text) && strings.IndexByte("\n\r;|& \t", text[i]) >= 0 {
 		i++
 	}
 	return i

@@ -197,6 +197,51 @@ func TestGAP0803LauncherArgumentsAndDepthAreBounded(t *testing.T) {
 	}
 }
 
+// cmd /c around a cmd /c launcher of the authorized_keys redirect fixture
+// blocks at every depth up to the launcher depth, argv and string, in every
+// tier: the redirect of a launcher string is part of the script it runs, so
+// each nested twin reads it and the proven finding keeps its verdict
+// (rel-1-0-10:GAP-0806). Past the depth the call is TRUNCATED (above). The
+// same nesting of an ordinary command is allowed.
+func TestGAP0806NestedLaunchersKeepTheProvenBlock(t *testing.T) {
+	gap0589WindowsHost(t)
+	cwd := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tier := range boundedTestTiers {
+		api := gap0589TierAPI(t, "codex", tier.posture, tier.managed, tier.tier)
+		decide := func(command interface{}) string {
+			return api.evaluateCodexHook(t.Context(), codexHookRequest{
+				HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+				ToolInput: map[string]interface{}{"command": command},
+			}).Action
+		}
+		for k := 1; k <= maxLauncherBodyDepth; k++ {
+			for _, row := range []struct {
+				id, body string
+				want     bounded.Action
+			}{
+				{"redirect", overLimitWindowsRedirect, bounded.Block},
+				{"benign-listing", `dir C:\Users\alice\project`, bounded.Allow},
+			} {
+				inner := row.body
+				for i := 1; i < k; i++ {
+					inner = "cmd /c " + inner
+				}
+				for form, command := range map[string]interface{}{
+					"argv":   []interface{}{"cmd", "/c", inner},
+					"string": "cmd /c " + inner,
+				} {
+					if got := decide(command); boundedParse(got) != row.want {
+						t.Errorf("%s/depth %d/%s %s: action %s, want %s", tier.name, k, row.id, form, got, row.want)
+					}
+				}
+			}
+		}
+	}
+}
+
 // An argv launcher whose tool arguments are past the decode bound
 // (maxArgvDecodeBytes) is read by nothing: TRUNCATED at the unknown tier of
 // the pack, at MEDIUM severity, never CRITICAL from the bound alone, for an

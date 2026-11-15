@@ -184,6 +184,10 @@ func launcherCallTwin(
 				return trustedActionRequest{}, false, false
 			}
 			line := powerShellLineOfArgv(append([]string{bare}, launcher[1:]...))
+			if call.Redirects != "" {
+				// The redirections of the launcher's statement (rel-1-0-10:GAP-0806).
+				line += " " + call.Redirects
+			}
 			twin.Input.Command, twin.Input.Args, twin.Input.Argv = line, nil, nil
 			// The dialect the Windows hook gives the same text as a string.
 			twin.Input.DialectHint = actionfacts.DialectPowerShell

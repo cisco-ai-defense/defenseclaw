@@ -109,7 +109,13 @@ func TestShellLauncherCallOfTextReadsStatements(t *testing.T) {
 		{"head", `pwsh -c 'dir'`, "dir", 0, true},
 		{"after a pipe", `echo x | xargs pwsh -c 'dir'`, "dir", 1, true},
 		{"after a list", `cd C:\work && cmd /c "dir"`, "dir", 1, true},
-		{"after a redirect", `echo x > out.txt; pwsh -c 'dir'`, "dir", 2, true},
+		{"after a redirect", `echo x > out.txt; pwsh -c 'dir'`, "dir", 1, true},
+		// The redirections of the launcher's statement are part of its script
+		// (rel-1-0-10:GAP-0806).
+		{"cmd with a redirect", `cmd /c dir >> out.txt`, "dir >> out.txt", 0, true},
+		{"cmd with a quoted redirect target", `cmd /c "dir" > "C:\work\out file.txt"`, `dir > "C:\work\out file.txt"`, 0, true},
+		{"nested cmd keeps the redirect", `cmd /c cmd /c dir 2>&1 >> out.txt`, "cmd /c dir 2>&1 >> out.txt", 0, true},
+		{"pwsh with a redirect", `pwsh -c 'dir' 2> err.txt; git status`, "dir 2> err.txt", 0, true},
 		{"start title", `start "" powershell -Command 'dir'`, "dir", 0, true},
 		{"quoted install path", `& 'C:\Program Files\PowerShell\7\pwsh.exe' -Command 'dir'`, "dir", 0, true},
 		{"past the command bound", `pwsh -c '# ` + pad + "\ndir'", "# " + pad + "\ndir", 0, true},
