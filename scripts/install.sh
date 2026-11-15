@@ -1177,8 +1177,11 @@ loaded_plugin_agents() {
     while IFS=$'\t' read -r pid program; do
         [[ "${pid}" =~ ^[0-9]+$ ]] || continue
         # No program path: the process exited after the listing (the listing's
-        # own ps and the subshells of this scan are in it). A process that is
-        # gone cannot hold a plugin, so there is nothing to audit (GAP-0916).
+        # own ps and the subshells of this scan are in it), or it is alive but
+        # its path is unreadable to this account (a privileged or unrelated
+        # process). Neither can be one of the agents this scan looks for, which
+        # all run as this account with a readable path, so there is nothing to
+        # audit (GAP-0916).
         [[ -n "${program}" ]] || continue
         argv=()
         word="${program% (deleted)}"

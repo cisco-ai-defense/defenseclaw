@@ -271,10 +271,12 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 	}
 	sort.Strings(p.sandboxes)
 	// Another account's gateway cannot be asked for this account's sandboxes,
-	// but an account whose daemon keeps no sandbox record has none of its own
-	// to lose: its list is empty, not unknown (GAP-0917). What the other
-	// account runs is never this data dir's to list, stop or delete.
-	ownNone := elsewhere && len(manager.RecordedSandboxes(a.dataDir())) == 0
+	// but an account that holds no sandbox state at all (no record of any
+	// kind, no leftover directory, and every folder readable) has none of its
+	// own to lose: its list is empty, not unknown (GAP-0917). Anything less
+	// certain stays unknown. What the other account runs is never this data
+	// dir's to list, stop or delete.
+	ownNone := elsewhere && manager.NoSandboxState(a.dataDir())
 	p.sandboxesUnknown = !p.daemon && !p.listed && owner != "" && !ownNone
 	p.attached = map[string]int{}
 	for _, name := range p.sandboxes {

@@ -14211,8 +14211,8 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         if routed:
             detail = (
                 "not used: the LLM judge is disabled; "
-                f"{', '.join(routed)} reach their model through route-only routing "
-                "(the Route-only rows check it)"
+                f"{', '.join(routed)} {'reaches its model' if len(routed) == 1 else 'reach their models'} "
+                "through route-only routing (the Route-only rows check it)"
             )
         else:
             detail = "not used: the LLM judge is disabled and no connector routes through the proxy"

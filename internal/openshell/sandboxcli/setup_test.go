@@ -2444,6 +2444,44 @@ func TestTeardownDryRunWithAnotherAccountsGatewayAndNoSandboxRecord(t *testing.T
 		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
 		has(t, ta.output(), "  sandboxes         unknown (neither the sandbox daemon nor the OpenShell gateway listed them)\n")
 	})
+	// Anything short of "no sandbox state at all" stays unknown (clirev P3).
+	unknown := "  sandboxes         unknown (neither the sandbox daemon nor the OpenShell gateway listed them)\n"
+	t.Run("a malformed record", func(t *testing.T) {
+		ta := setup(t)
+		writeFile(t, filepath.Join(ta.Cfg.DataDir, "sandboxes", "manager", "dc-claude-mine.json"), "{not json")
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
+	t.Run("a record that is not a plain file", func(t *testing.T) {
+		ta := setup(t)
+		if err := os.MkdirAll(filepath.Join(ta.Cfg.DataDir, "sandboxes", "manager", "dc-claude-mine.json"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
+	t.Run("an orphaned sandbox folder", func(t *testing.T) {
+		ta := setup(t)
+		writeFile(t, filepath.Join(ta.Cfg.DataDir, "sandboxes", "dc-claude-left", "run-config", "settings.json"), "{}")
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
+	t.Run("an unreadable records folder", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("a folder cannot be made unreadable here")
+		}
+		ta := setup(t)
+		records := filepath.Join(ta.Cfg.DataDir, "sandboxes", "manager")
+		if err := os.MkdirAll(records, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(records, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(records, 0o755) })
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
 	t.Run("sandboxes off without another account's gateway", func(t *testing.T) {
 		ta := setup(t)
 		ta.daemon.status = sandboxapi.Status{Enabled: false}

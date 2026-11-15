@@ -43,6 +43,29 @@ def test_fit_table_drops_only_the_columns_it_is_told_to_when_headers_alone_do_no
     assert all(len(row) == len(fitted_columns) for row in fitted_rows)
 
 
+@pytest.mark.parametrize("width", [71, 91, 111])
+def test_fit_table_never_cuts_sel_severity_or_action(width: int) -> None:
+    # clirev P3: "approval-denied" and "approval-granted" both showed "approva…".
+    columns = ("Sel", "Severity", "Time", "Action", "Target", "Details")
+    rows = tuple(
+        ("*", "CRITICAL", "Nov 15 17:50", action, "skill://google-workspace-calendar-sync-tool", "x" * 70)
+        for action in ("approval-denied", "approval-granted", "guardrail-verdict")
+    )
+    fitted_columns, fitted_rows = fit_table(columns, rows, width)
+    assert fitted_columns == columns
+    for before, after in zip(rows, fitted_rows, strict=True):
+        assert (after[0], after[1], after[3]) == (before[0], before[1], before[3])
+    assert _used(fitted_columns, fitted_rows) <= width
+    audit_columns = ("TIME", "ACTION", "TYPE", "TARGET", "SEVERITY", "RUN", "DETAILS")
+    audit_rows = tuple(
+        ("17:50:10", action, "scan", "skill://google-workspace-calendar-sync-tool", "HIGH", "run-9f3a2c1b77", "x" * 40)
+        for action in ("approval-denied", "approval-granted")
+    )
+    shown_columns, shown_rows = fit_table(audit_columns, audit_rows, width, drop=("RUN",))
+    assert [row[shown_columns.index("ACTION")] for row in shown_rows] == ["approval-denied", "approval-granted"]
+    assert _used(shown_columns, shown_rows) <= width
+
+
 @pytest.mark.parametrize(
     "panel,model_name,columns,row",
     [

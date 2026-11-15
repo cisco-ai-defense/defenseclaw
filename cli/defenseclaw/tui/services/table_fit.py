@@ -30,6 +30,9 @@ ELLIPSIS = "\u2026"
 _MIN_CELLS = 8
 # Textual pads each column by one cell on each side.
 _PAD = 2
+# Columns whose words decide what the row means ("approval-denied" against
+# "approval-granted") are never cut, and never dropped.
+_PROTECTED = frozenset({"sel", "severity", "action"})
 
 
 def _cut(value: str, cells: int) -> str:
@@ -53,7 +56,8 @@ def fit_table(
     """Return columns and rows that fit ``width`` cells (0 = unknown: unchanged).
 
     ``drop`` lists column names in the order they go when even the shortest
-    cells would not fit. Only the cells are cut, never a header.
+    cells would not fit. Only the cells are cut, never a header, and the Sel,
+    Severity and Action columns are never cut (or dropped) at all.
     """
 
     columns = tuple(columns)
@@ -67,6 +71,8 @@ def fit_table(
     keep = list(range(len(columns)))
 
     def floor(i: int) -> int:
+        if columns[i].strip().lower() in _PROTECTED:
+            return 10**6  # the natural width: it never shrinks
         return max(cell_len(columns[i]), _MIN_CELLS)
 
     def floors_total(cols: Sequence[int]) -> int:
@@ -76,7 +82,7 @@ def fit_table(
     for name in drop:
         if floors_total(keep) <= width:
             break
-        if name in columns and columns.index(name) in keep:
+        if name.lower() not in _PROTECTED and name in columns and columns.index(name) in keep:
             keep.remove(columns.index(name))
     natural = dict(zip(keep, widths(keep), strict=True))
     caps = dict(natural)
