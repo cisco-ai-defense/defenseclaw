@@ -192,6 +192,8 @@ func trackWorkFolder(stmt *syntax.Stmt, in workFolder, folders map[*syntax.Stmt]
 		if changed {
 			out = in.lost()
 		}
+	case nil:
+		// A statement with no command (a bare redirect: > file, 2>&1).
 	default:
 		// Anything else (a function body, a time or coproc clause, a
 		// declaration): its statements run in a copy of the shell.

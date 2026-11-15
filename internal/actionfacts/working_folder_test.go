@@ -117,3 +117,23 @@ func TestWindowsWorkingFolderParity(t *testing.T) {
 		})
 	}
 }
+
+// TestWorkingFolderNeverPanics: every shape of statement the grammar allows,
+// including the ones with no command of their own (a bare redirect), gets a
+// reading: a panic in the tracking would be the call's internal parser
+// failure, a block of every call that has such a statement.
+func TestWorkingFolderNeverPanics(t *testing.T) {
+	for _, command := range []string{
+		"> out.txt", ">> out.txt; cd /x; echo y", "2>&1", "cd /x && > f", "{ > f; }", "( > f )", "if true; then > f; fi", "while false; do > f; done",
+		"for i in 1; do > f; done", "case x in x) > f;; esac", "f() { > g; }; f", "time > f", "coproc { cd /x; }", "echo $(> f)", "cat <(> f)",
+		"declare -a x=(1); > f", "let x=1; > f", "[[ -n x ]] && > f", "(( 1 )) || > f", "! > f", "> f &", "cd /x & > f", "cd /x | > f",
+		"cd /x\n\n> f\n#c", "echo a > f <<EOF\nx\nEOF", "cd /x && > /dev/null 2>&1; echo ok",
+	} {
+		facts := Analyze(Input{Tool: "Bash", Command: command, CWD: "/work", ActiveHome: "/home/alice", DialectHint: DialectPOSIX})
+		for _, issue := range facts.Parse.Issues {
+			if issue == IssueInternalParserFailure {
+				t.Errorf("%q: internal parser failure (a panic in the analysis)", command)
+			}
+		}
+	}
+}
