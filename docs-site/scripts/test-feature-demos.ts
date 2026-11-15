@@ -332,7 +332,7 @@ describe('feature demo catalog', () => {
       assert.ok(curl && credential, `${pack} must contain both rule definitions`);
       assert.match(credential.expression ?? '', /OPERATION_KIND_UPLOAD/);
       assert.equal(credential.severity, 'HIGH');
-      assert.ok(credential.tags?.includes('detection-only'));
+      assert.ok(!credential.tags?.includes('detection-only'));
       if (pack === 'strict') {
         assert.match(curl.expression ?? '', /OPERATION_KIND_UPLOAD/);
       } else {

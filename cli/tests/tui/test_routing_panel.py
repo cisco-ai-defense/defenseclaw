@@ -140,3 +140,72 @@ async def test_delete_journey_runs_the_remove_command(tmp_path) -> None:
             await pilot.pause()
         await app.workers.wait_for_complete()
     assert ("defenseclaw", "routing", "models", "remove", "--", "fast") in calls
+
+
+# GAP-0578: a failing routing command shows one plain sentence, never a traceback line.
+TRACEBACK = b"Traceback (most recent call last):\n  File x\nTypeError: NoneType object is not iterable\n"
+
+
+def patch_commands(monkeypatch, status, usage):
+    from defenseclaw.tui import app as app_module
+
+    async def fake(binary, args, **_kw):
+        return status if "status" in args else usage
+
+    monkeypatch.setattr(app_module, "_communicate_captured", fake)
+
+
+async def test_failing_status_command_shows_a_sentence_not_a_traceback(tmp_path, monkeypatch) -> None:
+    patch_commands(monkeypatch, (1, b"", TRACEBACK), (1, b"", TRACEBACK))
+    app = snapshot_app(tmp_path)
+    app.config.routing = SimpleNamespace(enabled=True, admin={})
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("routing")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        model = app.routing_model
+        assert "Traceback" not in model.summary_line() and "run it in a terminal" in model.summary_line(), model.summary_line()
+        assert "Traceback" not in screen_text(app)
+        await pilot.press("u")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert model.usage["error"].startswith("usage is not available"), model.usage
+        assert "Traceback" not in screen_text(app)
+
+
+async def test_empty_config_and_usage_rows_render_at_80x24(tmp_path, monkeypatch) -> None:
+    empty = {"managed": False, "enabled": False, "classifier": "vllm_sr", "default_alias": "", "models": [], "rules": 0,
+             "budgets": 0, "rule_list": [], "budget_list": [], "route_only": [], "locked": [],
+             "health": {"state": "disabled"}, "effective": {"enabled": False, "budgets": [], "recent": []}, "warnings": []}
+    usage = {"enabled": True, "scope": "own", "rows": [{"key": "fast", "calls": 3, "input_tokens": 120,
+                                                          "output_tokens": 40, "cost_usd": 0.5}]}
+    patch_commands(monkeypatch, (0, json.dumps(empty).encode(), b""), (0, json.dumps(usage).encode(), b""))
+    app = snapshot_app(tmp_path)
+    app.config.routing = SimpleNamespace(enabled=True, admin={})
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("routing")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = screen_text(app)
+        assert "Routing off" in text and "No models yet" in text and "Traceback" not in text, text
+        await pilot.press("u")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        model = app.routing_model
+        assert model.usage_rows() and model.data_table_rows(compact=True) == [("fast", "3", "0.5000")]
+        text = screen_text(app)
+        for _ in range(40):  # the table repaints a frame after the summary line
+            if "0.5000" in text:
+                break
+            await pilot.pause(0.05)
+            text = screen_text(app)
+        assert "Usage for the last week (yours)" in text and "0.5000" in text, text
+
+
+def test_usage_disabled_shows_the_gateway_hint() -> None:
+    model = loaded()
+    model.view = VIEW_USAGE
+    model.apply_usage_json(json.dumps({"enabled": False, "hint": "set observability.tokenomics.enabled", "rows": []}))
+    assert "set observability.tokenomics.enabled" in model.empty_state()
+    model.apply_usage_json(json.dumps({"rows": [], "error": "usage is not available"}))
+    assert model.summary_line() == "usage is not available"
