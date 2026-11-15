@@ -21,13 +21,16 @@ import (
 func TestWindowsTruncationIsOneFinding(t *testing.T) {
 	for _, pack := range []string{"default", "strict"} {
 		for name, size := range map[string]int{
-			"word-limit": 6 << 10,
-			// The call past the 64 KiB input bound is not a row here: one long
-			// ordinary statement is left as the readers leave it (GAP-0318), and
-			// the byte floor of 551f865dbb that made it a truncation is reverted
-			// until psf2 returns it scoped to the Windows dialects.
+			"word-limit":  6 << 10,
+			"input-bound": (64 << 10) + (1 << 10), // past actionfacts maxCommandBytes (64 KiB)
 		} {
 			t.Run(pack+"/"+name, func(t *testing.T) {
+				if name == "input-bound" {
+					// One word past the 64 KiB input bound gets no limit finding
+					// on s7/winrecall 289c023bb9 alone either: the bound the
+					// 551f865dbb revert left open (rel-1-0-10:GAP-0748, lane psf2).
+					t.Skip("rel-1-0-10:GAP-0748: a command line past the 64 KiB input bound is not TRUNCATED yet")
+				}
 				big := `Set-Content -Path C:\Users\alice\work\a.txt -Value '` + strings.Repeat("x", size) + `'`
 				findings := windowsBoundsFindings(t, pack, "PowerShell", big, `C:\Users\alice`, pack == "strict")
 				limits := 0
