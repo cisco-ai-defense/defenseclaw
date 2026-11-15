@@ -174,3 +174,149 @@ func TestOwnSSHFolderCopyPrivacyIsThePermissionBits(t *testing.T) {
 		t.Errorf("home hidden from the gateway: %s, want block (%v)", got, FindingStrings(findings))
 	}
 }
+
+// ownSSHFolderCopyTiers are the five tiers a hook-route row is judged in.
+var ownSSHFolderCopyTiers = []struct {
+	posture string
+	managed bool
+}{{"default", false}, {"permissive", false}, {"strict", false}, {"default", true}, {"strict", true}}
+
+// The permission bits are read before the call runs. A statement of the same
+// call that may let a group or other users in (before or after the copy, after
+// && or ; or ||, in a subshell, on the copy, its folder or the home: a chmod
+// or mkdir -m that opens a bit, a mode not read, an owner, group or ACL change,
+// a umask that leaves a bit open) makes them stale: nothing is proven private
+// and every tier keeps the block of rel (rel-1-0-10:GAP-0854). A mode that only
+// takes bits away keeps the alert. The rows are the "mine" row of
+// TestOwnSSHFolderCopyPrivacyIsThePermissionBits with such a statement added.
+func TestOwnSSHFolderCopyAccessOpenedInTheCallKeepsTheBlock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	keepTempDirOffDevice(t)
+	home, cwd := shellProtectedFileHome(t)
+	key := filepath.Join(home, ".ssh", "id_rsa")
+	if err := os.WriteFile(key, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mine := filepath.Join(home, "mine")
+	if err := os.MkdirAll(mine, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copyTo := "cp " + key + " '" + mine + "/'"
+	copyFile := "cp " + key + " '" + mine + "/k'"
+	file := mine + "/k"
+	for _, row := range []struct{ name, command string }{
+		{"chmod copy and folder after", copyFile + " && chmod 644 " + file + " && chmod 755 " + mine},
+		{"chmod folder after", copyTo + " && chmod 755 " + mine},
+		{"chmod folder before", "chmod 755 " + mine + " && " + copyTo},
+		{"chmod after a semicolon", copyFile + " ; chmod 644 " + file},
+		{"chmod after ||", copyFile + " || chmod 644 " + file},
+		{"chmod in a subshell", copyFile + " && (chmod 644 " + file + ")"},
+		{"chmod of a relative name", "cd " + mine + " && " + copyFile + " && chmod 644 k"},
+		{"chmod of the home", copyFile + " && chmod 755 " + home},
+		{"chmod +x", copyFile + " && chmod +x " + file},
+		{"chmod g=u", copyFile + " && chmod g=u " + file},
+		{"chmod --reference", copyFile + " && chmod --reference=" + home + "/project " + file},
+		{"chmod -R go+rX", "cp -r " + home + "/.ssh '" + mine + "/bk' && chmod -R go+rX " + mine},
+		{"chown of the copy", copyFile + " && chown 0 " + file},
+		{"chgrp of the folder", copyTo + " && chgrp 0 " + mine},
+		{"setfacl on the folder", "setfacl -m o::rx " + mine + " && " + copyTo},
+		{"umask 022", "umask 022 && " + copyFile},
+		{"umask 0", "umask 0; " + copyFile},
+		{"umask symbolic", "umask g=rx && " + copyFile},
+		{"mkdir -m 755", "mkdir -m 755 " + mine + "/new && cp " + key + " '" + mine + "/new/'"},
+		{"mkdir --mode=0750", "mkdir --mode=0750 " + mine + "/new && cp " + key + " '" + mine + "/new/'"},
+		{"mkdir -pm 755", "mkdir -pm 755 " + mine + "/a/b && cp " + key + " '" + mine + "/a/b/'"},
+	} {
+		for _, tier := range ownSSHFolderCopyTiers {
+			if got, rules := shellProtectedFileRoute(t, home, cwd, "claudecode", tier.posture, tier.managed, row.command); got != "block" {
+				t.Errorf("%s (%s, managed=%v): %s, want the block of rel (%v)", row.name, tier.posture, tier.managed, got, rules)
+			}
+		}
+	}
+	// Taking bits away, or a copy option that keeps the source's own mode and
+	// owner (the key is 0600 and the user's), opens nothing.
+	for _, row := range []struct{ name, command string }{
+		{"plain copy", copyTo},
+		{"chmod 600 after", copyFile + " && chmod 600 " + file},
+		{"chmod go-rwx after", copyFile + " && chmod -R go-rwx " + mine},
+		{"chmod u+x after", copyFile + " && chmod u+x " + file},
+		{"umask 077", "umask 077 && " + copyFile},
+		{"mkdir -m 700", "mkdir -m 700 " + mine + "/new && cp " + key + " '" + mine + "/new/'"},
+		{"cp -p", "cp -p " + key + " '" + file + "'"},
+	} {
+		if got, rules := shellProtectedFileRoute(t, home, cwd, "claudecode", "default", false, row.command); got != "alert" {
+			t.Errorf("%s: %s, want alert (%v)", row.name, got, rules)
+		}
+	}
+}
+
+func TestPosixModeOpensAccess(t *testing.T) {
+	for mode, want := range map[string]bool{
+		"600": false, "0700": false, "700": false, "4700": false, "644": true, "755": true, "0701": true, "070": true,
+		"u+x": false, "u=rwx,go=": false, "go-rwx": false, "a-w": false, "o-r,g-w": false, "u+s": false, "+t": false,
+		"+x": true, "g+r": true, "o=x": true, "a+r": true, "go+rX": true, "u+x,g+w": true, "g=u": true, "o+g": true,
+		"": true, "u": true, "rwx": true, "u!x": true, "99": true, "77777": true,
+	} {
+		if got := posixModeOpensAccess(mode); got != want {
+			t.Errorf("posixModeOpensAccess(%q) = %v, want %v", mode, got, want)
+		}
+	}
+}
+
+// Only a name that does not exist yet is a part the copy makes. A destination
+// whose stat fails otherwise (a name too long, a folder the user cannot search,
+// a file used as a folder, a link loop) is not proven private, so every tier
+// keeps the block of rel (ONE BOUND RULE, rel-1-0-10:GAP-0855). The rows are
+// the "mine" row of TestOwnSSHFolderCopyPrivacyIsThePermissionBits with such a
+// destination; a missing name below "mine" keeps the alert.
+func TestOwnSSHFolderCopyStatErrorIsNotPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	keepTempDirOffDevice(t)
+	home, cwd := shellProtectedFileHome(t)
+	key := filepath.Join(home, ".ssh", "id_rsa")
+	mine := filepath.Join(home, "mine")
+	for _, dir := range []string{mine, filepath.Join(mine, "locked")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{key: "x\n", filepath.Join(mine, "file"): "x\n"} {
+		if err := os.WriteFile(name, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, link := range [][2]string{{"loop_b", "loop_a"}, {"loop_a", "loop_b"}} {
+		if err := os.Symlink(filepath.Join(mine, link[0]), filepath.Join(mine, link[1])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := map[string]string{
+		"name too long":  strings.Repeat("a", 300) + "/",
+		"file as folder": "file/x/",
+		"link loop":      "loop_a/x/",
+	}
+	if os.Geteuid() != 0 {
+		// The owner of a folder without search permission gets EACCES below it.
+		rows["no search permission"] = "locked/x/"
+		if err := os.Chmod(filepath.Join(mine, "locked"), 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(mine, "locked"), 0o700) })
+	}
+	for name, dest := range rows {
+		command := "cp " + key + " '" + mine + "/" + dest + "'"
+		for _, tier := range ownSSHFolderCopyTiers {
+			if got, rules := shellProtectedFileRoute(t, home, cwd, "claudecode", tier.posture, tier.managed, command); got != "block" {
+				t.Errorf("%s (%s, managed=%v): %s, want the block of rel (%v)", name, tier.posture, tier.managed, got, rules)
+			}
+		}
+	}
+	command := "cp " + key + " '" + mine + "/not/yet/'"
+	if got, rules := shellProtectedFileRoute(t, home, cwd, "claudecode", "default", false, command); got != "alert" {
+		t.Errorf("missing name below an owner-only folder: %s, want alert (%v)", got, rules)
+	}
+}
