@@ -51,6 +51,14 @@ func capFloorLatencyShapes() []struct{ name, connector, command string } {
 // run read at most 1.15 times these values (T2), inside the 1.2 bound. The
 // earlier values came from one box and an unpinned single pass (T5 74.5 where
 // these boxes read 81), so a correct build could go red (rel-1-0-10:GAP-0896).
+//
+// Provenance: rel sha 16f68a06f6 (rel code, this test file copied over it),
+// testctl TST-3302, dcb-bg jobs g896-lat-rlo (dc-s7-gates) and g896-lat-rl2
+// (dc-s7-gates2). The measurement script, the 960 per-run ratios and the
+// medians per shape, GOMAXPROCS and box are in testdata/capfloor_latency/
+// (measure.sh, rel-runs.tsv, rel-medians.tsv); the rows with box "all" are
+// this table. To record again, build rel (16f68a06f6 or 644d23fa3b), never a
+// candidate head.
 var capFloorLatencyRel = map[string]float64{
 	"T1-one-file-write": 1.78, "T2-write-4-targets": 10.21, "T3-codex-git-status": 1.10, "T4-benign-read": 1.17,
 	"T5-compound-1.5KB": 81.0, "L1-and-chain-6KB": 3.59, "L2-redirects600-9.5KB": 110.2, "L3-list-7KB": 10.59,
