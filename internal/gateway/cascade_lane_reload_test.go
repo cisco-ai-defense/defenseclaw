@@ -26,6 +26,11 @@ func TestCascadeLaneHotReloadEveryLane(t *testing.T) {
 		bad              []string
 		good, goodMode   string
 	}{
+		// The tool judge's stages ship on; a reload turns each off (rel-1-0-10:GAP-0845).
+		"judge_read_skip":           {"on", "on", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "off", "off"},
+		"judge_unmodeled_alert":     {"on", "on", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "off", "off"},
+		"judge_tool_result_context": {"on", "on", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "off", "off"},
+
 		"effects":     {"off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null", "Off", "\" Shadow \""}, "shadow", "shadow"},
 		"secret_flow": {"off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null", "Off", "Shadow"}, "shadow", "shadow"},
 		"nonshell":    {"shadow", "shadow", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "on", "on"},
@@ -46,6 +51,10 @@ func TestCascadeLaneHotReloadEveryLane(t *testing.T) {
 				}
 			}
 			mode := func(cfg *config.Config) string {
+				if lane == config.CascadeLaneJudgeReadSkip || lane == config.CascadeLaneJudgeUnmodeledAlert || lane == config.CascadeLaneJudgeToolResultContext {
+					// What the judge decisions read (judgeLaneMode).
+					return judgeLaneMode(cfg, "", lane)
+				}
 				l := cfg.Guardrail.Cascade.Lanes
 				switch lane {
 				case "effects":
