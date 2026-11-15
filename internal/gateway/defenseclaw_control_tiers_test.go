@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // warmDefenseClawControl sends one harmless call until the route answers 200:
@@ -90,10 +92,9 @@ func TestDefenseClawControlFiveTiers(t *testing.T) {
 					t.Errorf("%s: action %q, want %s by tamper.defenseclaw_control_disable: %s", where, action, want, raw)
 				}
 			case "unproven":
-				want := "alert"
-				if p.pack == "strict" {
-					want = "block"
-				}
+				// The unknown tier is the shared reading (ONE BOUND rule): alert in
+				// default, permissive and the managed default pack, block in strict.
+				want := bounded.Unknown(bounded.TierOf(p.pack)).String()
 				if action != want || !strings.Contains(string(raw), "tamper.defenseclaw_control_unproven") {
 					t.Errorf("%s: action %q, want %s by tamper.defenseclaw_control_unproven: %s", where, action, want, raw)
 				}

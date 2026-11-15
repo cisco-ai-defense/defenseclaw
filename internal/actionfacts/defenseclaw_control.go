@@ -169,6 +169,8 @@ func launcherInner(argv []string) []string {
 		for len(rest) > 0 && strings.Contains(rest[0], "=") && !strings.HasPrefix(rest[0], "-") {
 			rest = rest[1:]
 		}
+	case "busybox", "toybox":
+		// busybox APPLET ARGS: the applet is the program (busybox sh -c SCRIPT).
 	case "nohup", "exec", "setsid", "time", "command", "builtin", "chrt", "unbuffer":
 		skipOptions("-a", "-n", "-p")
 	case "flock":
@@ -284,12 +286,34 @@ func shellScript(argv []string) (string, bool) {
 	return "", wantScript
 }
 
+// embeddedShellScript returns the script of a shell that a program of unknown
+// grammar runs as one of its operands (`strace -f sh -c SCRIPT`): the first
+// word after the program that is a POSIX-family shell with a -c script. The
+// program is not itself a shell, the product CLI, or a program the judge
+// reads by name.
+func embeddedShellScript(argv []string, name string) (string, bool) {
+	if len(argv) < 3 || shellProgram(name) || defenseClawProgramName(argv) != "" {
+		return "", false
+	}
+	for index := 1; index+1 < len(argv); index++ {
+		if shellProgram(commandBaseName(argv[index])) {
+			if script, ok := shellScript(argv[index:]); ok && script != "" {
+				return script, true
+			}
+			return "", false
+		}
+	}
+	return "", false
+}
+
 // userSwitchScript returns the command string of su and runuser (-c,
 // --command, a cluster holding c such as -lc), of sudo -s and sudo -i, and of
 // script -c.
 func userSwitchScript(argv []string, name string) (string, bool) {
 	switch name {
-	case "su", "runuser":
+	case "su", "runuser", "sg", "newgrp":
+		// su -c, runuser -c, sg GROUP -c COMMAND and newgrp GROUP -c COMMAND all
+		// hand the command to a shell of the target account or group.
 		for index := 1; index < len(argv); index++ {
 			arg := argv[index]
 			switch {
@@ -322,8 +346,11 @@ func userSwitchScript(argv []string, name string) (string, bool) {
 				index++
 			case strings.HasPrefix(arg, "-"):
 			default:
-				if login {
-					return strings.Join(argv[index:], " "), true
+				// sudo -i and -s hand a lone word to the login shell as a command
+				// line; several words are an argv, which the launcher walk
+				// follows (`sudo -i bash -c SCRIPT`, GAP-0751).
+				if login && index == len(argv)-1 {
+					return argv[index], true
 				}
 				return "", false
 			}
@@ -555,16 +582,31 @@ func commandArgv(command CommandFact, facts Facts) []string {
 	if len(argv) == 0 && command.Executable != "" {
 		argv = []string{command.Executable}
 	}
-	if len(argv) > 0 && argv[0] == "" && len(command.Arguments) > 0 {
-		if spelling := command.Arguments[0].homeSpelling; strings.HasPrefix(spelling, "~") && facts.ActiveHome != "" {
-			argv = slices.Clone(argv)
-			argv[0] = strings.TrimRight(facts.ActiveHome, `/\`) + spelling[1:]
+	if facts.ActiveHome == "" {
+		return argv
+	}
+	// A word spelled with $HOME or ~ is the caller's home, wherever it stands:
+	// the program (`~/bin/x stop`) or the program behind a launcher
+	// (`sudo ~/bin/x stop`, `nohup ~/bin/x stop`, GAP-0754). The launcher
+	// passes the word on already expanded by the calling shell.
+	home := strings.TrimRight(facts.ActiveHome, `/\`)
+	cloned := false
+	for index := range argv {
+		if argv[index] != "" || index >= len(command.Arguments) {
+			continue
+		}
+		if spelling := command.Arguments[index].homeSpelling; strings.HasPrefix(spelling, "~") {
+			if !cloned {
+				argv, cloned = slices.Clone(argv), true
+			}
+			argv[index] = home + spelling[1:]
 		}
 	}
 	return argv
 }
 
 func (r *controlReader) read(facts Facts, text string, depth int) {
+	text = withoutDataHeredocs(text)
 	if !containsFold(text, defenseClawNamespace) {
 		return
 	}
@@ -591,6 +633,19 @@ func (r *controlReader) read(facts Facts, text string, depth int) {
 		// command to judge.
 		unresolved = len(facts.Commands) == 0
 	}
+	// A script handed to a shell or `source` as a process substitution
+	// (`bash <(echo ...)`) is read as the script it is (GAP-0752).
+	if strings.Contains(text, "<(") {
+		scripts, open := procSubstScripts(text)
+		for _, script := range scripts {
+			if containsFold(script, defenseClawNamespace) {
+				r.script(facts, script, depth)
+			}
+		}
+		if open {
+			unresolved = true
+		}
+	}
 	// What a bound cut and the bash parse could not place is the shared cap
 	// floor's reading (internal/gateway cap floor, ONE BOUND rule), not a
 	// second one here.
@@ -600,7 +655,9 @@ func (r *controlReader) read(facts Facts, text string, depth int) {
 		if command.Kind != "" && command.Kind != CommandKindProcess {
 			continue
 		}
-		if argv := commandArgv(command, facts); len(argv) > 0 && argv[0] == "" {
+		// A program or an operand named with ~ or $HOME (`sudo ~/bin/x stop`)
+		// is read on the home-resolved twin of the call.
+		if argv := commandArgv(command, facts); slices.Contains(argv, "") {
 			needTwin = true
 		}
 	}
@@ -717,6 +774,16 @@ func (r *controlReader) command(facts Facts, text string, command CommandFact, a
 		}
 		inner := launcherInner(argv)
 		if inner == nil {
+			// A launcher this reader does not model (nsenter, strace, unshare,
+			// chroot, firejail, ...) that runs a shell with a script: the
+			// script is read whatever precedes the shell. What the launcher
+			// does around it (another namespace, root, a jail) is not known,
+			// so what the script holds is never better than the unknown tier.
+			if script, ok := embeddedShellScript(argv, name); ok {
+				r.remote++
+				defer func() { r.remote-- }()
+				return r.script(facts, script, depth)
+			}
 			break
 		}
 		argv = inner
@@ -834,17 +901,26 @@ func (r *controlReader) judge(facts Facts, text string, command CommandFact, arg
 			}
 			return false
 		}
-		if (shellProgram(name) || name == "at" || name == "batch") && stdinRunner(argv[1:]) {
-			// A shell fed a script on stdin. A here-document or here-string
-			// body is read as the script it is; so is the text of a producer
-			// in the pipeline that names DefenseClaw (echo, printf). A
-			// producer whose output is not in the parse (a file, a download)
-			// leaves the script unresolved only when its own words name the
-			// product.
+		if stdinScriptRunner(name, argv[1:]) {
+			// A shell, at, batch or crontab fed a script on stdin. A here-document
+			// or here-string body that feeds it is read as the script it is; so
+			// is the text of a producer in the pipeline that names DefenseClaw
+			// (echo, printf). A producer whose output is not in the parse (a
+			// file, a download) leaves the script unresolved only when its own
+			// words name the product.
+			read := func(script string) {
+				if name == "crontab" {
+					for _, line := range cronCommandLines(script) {
+						r.script(facts, line, depth)
+					}
+					return
+				}
+				r.script(facts, script, depth)
+			}
 			unresolved := false
 			for _, body := range heredocBodies(text) {
 				if containsFold(body, defenseClawNamespace) {
-					r.script(facts, body, depth)
+					read(body)
 				}
 			}
 			if command.PipelineID != 0 {
@@ -857,7 +933,9 @@ func (r *controlReader) judge(facts Facts, text string, command CommandFact, arg
 					}
 					switch commandBaseName(producer.Argv[0]) {
 					case "echo", "printf":
-						r.script(facts, strings.Join(producer.Argv[1:], " "), depth)
+						for _, candidate := range producerTexts(producer.Argv) {
+							read(candidate)
+						}
 					default:
 						if len(facts.Network) == 0 {
 							unresolved = true
@@ -869,6 +947,82 @@ func (r *controlReader) judge(facts Facts, text string, command CommandFact, arg
 		}
 	}
 	return false
+}
+
+// producerTexts returns the texts an echo or printf command can hand to a
+// reader on its stdout: its operands joined, each operand alone (an option or
+// a format word does not hide the text), and the operands after the format.
+func producerTexts(argv []string) []string {
+	if len(argv) < 2 {
+		return nil
+	}
+	words := argv[1:]
+	texts := []string{strings.Join(words, " ")}
+	if len(words) > 1 {
+		texts = append(texts, strings.Join(words[1:], " "))
+	}
+	for _, word := range words {
+		if strings.ContainsAny(word, " \t") {
+			texts = append(texts, word)
+		}
+	}
+	return texts
+}
+
+// stdinScriptRunner reports a program that reads a script from its stdin: a
+// shell with no script operand, at or batch without a job file, crontab with
+// no file operand or with "-" (GAP-0752).
+func stdinScriptRunner(name string, args []string) bool {
+	switch {
+	case shellProgram(name):
+		return stdinRunner(args)
+	case name == "at" || name == "batch":
+		// at reads the job from stdin unless it is given a job file (-f FILE).
+		for _, arg := range args {
+			if arg == "-f" || arg == "--file" || strings.HasPrefix(arg, "--file=") || strings.HasPrefix(arg, "-f") && !strings.HasPrefix(arg, "--") {
+				return false
+			}
+		}
+		return true
+	case name == "crontab":
+		for index := 0; index < len(args); index++ {
+			switch arg := args[index]; {
+			case arg == "-":
+				return true
+			case arg == "-u":
+				index++
+			case strings.HasPrefix(arg, "-"):
+				// -l lists, -r removes, -e edits: none reads a script from stdin.
+				return false
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// cronCommandLines returns the command part of each crontab line: the text
+// after the five time fields (or after an @keyword). Comments, blank lines
+// and variable assignments hold no command.
+func cronCommandLines(text string) []string {
+	var out []string
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\\n", "\n"), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		skip := 5
+		if strings.HasPrefix(fields[0], "@") {
+			skip = 1
+		}
+		if len(fields) <= skip {
+			continue
+		}
+		out = append(out, strings.Join(fields[skip:], " "))
+	}
+	return out
 }
 
 // stdinRunner reports a shell invocation with no script operand: it reads
@@ -1184,10 +1338,55 @@ var (
 	// discovery or routing does not touch the guardrail. A drift test walks the
 	// registrations.
 	defenseClawGuardGroups = map[string]bool{"guardrail": true}
+	// defenseClawExtensionGroups are the command groups whose `uninstall`
+	// removes an extension (a plugin, a skill, an MCP entry), not the product
+	// or one of its guards. A drift test checks each is a registered group.
+	defenseClawExtensionGroups = map[string]bool{"plugin": true, "skill": true, "mcp": true}
+	// defenseClawGuardConfigRoots are the top-level sections of config.yaml
+	// that the guardrail, its judge, its state, the connectors' hooks or the
+	// managed policy rest on: `config set` or `config unset` of a key under
+	// one is the same effect as a write to config.yaml, which the state rule
+	// blocks. A drift test requires every section of the Config schema to be
+	// listed here or in its reviewed neutral list (observability, webhooks,
+	// notifications, routing, update, ai_discovery), so a new section is
+	// classified when it is added. The config writer checks a key against the
+	// schema before it writes, so a key under no section changes nothing.
+	defenseClawGuardConfigRoots = map[string]bool{
+		"config_version": true, "llm": true, "default_llm_api_key_env": true, "default_llm_model": true,
+		"decision_model": true, "data_dir": true, "audit_db": true, "judge_bodies_db": true,
+		"quarantine_dir": true, "plugin_dir": true, "policy_dir": true, "environment": true,
+		"tenant_id": true, "workspace_id": true, "deployment_mode": true, "discovery_source": true,
+		"claw": true, "agent": true, "acp": true, "inspect_llm": true, "cisco_ai_defense": true,
+		"scanners": true, "openshell": true, "watch": true, "firewall": true, "guardrail": true,
+		"gateway": true, "cloud_auth": true, "asset_policy": true, "registries": true,
+		"claude_code": true, "codex": true, "connector_hooks": true, "application_protection": true,
+		"managed": true, "enterprise": true, "fleet": true, "connectors": true, "admission": true,
+		"llm_providers": true,
+	}
 	// defenseClawWeakValues are the values of a mode option that move a guard to
 	// a weaker state.
 	defenseClawWeakValues = map[string]bool{"observe": true, "open": true}
 )
+
+// configChangeKind judges `config set KEY VALUE` and `config unset KEY`
+// from the section the key lives under (GAP-0753). A key under a guard section
+// is the configuration change; a key under a neutral section (an
+// observability sink, routing, a webhook) is not a guard change; a key the
+// parse left open is a reading the rules cannot prove either way.
+func configChangeKind(operands []string) (DefenseClawControlKind, bool) {
+	if len(operands) == 0 || operands[0] == "" {
+		return "", false
+	}
+	key := strings.ToLower(strings.Trim(operands[0], `"'`))
+	root := key
+	if cut := strings.IndexAny(key, ".["); cut >= 0 {
+		root = key[:cut]
+	}
+	if defenseClawGuardConfigRoots[root] {
+		return DefenseClawControlConfig, true
+	}
+	return "", true
+}
 
 // guardGroupBefore reports a guardrail command group among the words before
 // index (or, with index < 0, among all of them).
@@ -1254,6 +1453,10 @@ func judgeDefenseClawCLI(args []string, program string, dynamic bool) (kind Defe
 	}
 	for index, word := range lower {
 		if found, ok := defenseClawStopVerbs[word]; ok {
+			if found == DefenseClawControlUninstall && index > 0 && defenseClawExtensionGroups[lower[index-1]] {
+				// `plugin uninstall NAME` removes an extension, not the guard.
+				continue
+			}
 			return found, true
 		}
 		switch word {
@@ -1269,7 +1472,7 @@ func judgeDefenseClawCLI(args []string, program string, dynamic bool) (kind Defe
 			if index+1 < len(lower) {
 				switch lower[index+1] {
 				case "set", "unset":
-					return DefenseClawControlConfig, true
+					return configChangeKind(words[index+2:])
 				case "migrate":
 					return "", false
 				}
@@ -1333,14 +1536,22 @@ func tildeProgramText(text, home string) (string, int, bool) {
 		return "", 0, false
 	}
 	var offsets []int
+	programs := 0
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 || len(call.Args[0].Parts) == 0 {
+		if !ok {
 			return true
 		}
-		lit, ok := call.Args[0].Parts[0].(*syntax.Lit)
-		if ok && strings.HasPrefix(lit.Value, "~/") {
-			offsets = append(offsets, int(lit.ValuePos.Offset()))
+		for position, word := range call.Args {
+			if len(word.Parts) == 0 {
+				continue
+			}
+			if lit, isLit := word.Parts[0].(*syntax.Lit); isLit && strings.HasPrefix(lit.Value, "~/") {
+				offsets = append(offsets, int(lit.ValuePos.Offset()))
+				if position == 0 {
+					programs++
+				}
+			}
 		}
 		return true
 	})
@@ -1355,7 +1566,56 @@ func tildeProgramText(text, home string) (string, int, bool) {
 		}
 		text = text[:offset] + home + text[offset+1:]
 	}
-	return text, len(offsets), true
+	return text, programs, true
+}
+
+// procSubstScripts returns the script texts that a shell or `source` receives
+// through a process substitution, for each command of text that runs one
+// (`bash <(echo SCRIPT)`, `source <(printf SCRIPT)`, `. <(...)`): the operands
+// of the echo or printf inside. open is true when a substitution holds anything
+// else (a file, a download, a pipeline): its output is not in the text.
+func procSubstScripts(text string) (scripts []string, open bool) {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
+	if err != nil {
+		return nil, false
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		runsScript := false
+		for _, word := range call.Args {
+			if len(word.Parts) == 1 {
+				if sub, isSub := word.Parts[0].(*syntax.ProcSubst); isSub && sub.Op == syntax.CmdIn && runsScript {
+					for _, stmt := range sub.Stmts {
+						inner, isCall := stmt.Cmd.(*syntax.CallExpr)
+						if !isCall || len(inner.Args) == 0 {
+							open = true
+							continue
+						}
+						argv := make([]string, 0, len(inner.Args))
+						for _, arg := range inner.Args {
+							argv = append(argv, literalWordText(arg))
+						}
+						switch commandBaseName(argv[0]) {
+						case "echo", "printf":
+							scripts = append(scripts, producerTexts(argv)...)
+						default:
+							open = true
+						}
+					}
+					continue
+				}
+			}
+			name := commandBaseName(literalWordText(word))
+			if shellProgram(name) || name == "source" || name == "." {
+				runsScript = true
+			}
+		}
+		return true
+	})
+	return scripts, open
 }
 
 // codeStringLiterals returns the single- and double-quoted string literals of
@@ -1385,48 +1645,163 @@ func codeStringLiterals(code string) []string {
 	return literals
 }
 
-// heredocBodies returns the text of each here-document and here-string of
-// the call, with the parts the shell expands left out.
-func heredocBodies(text string) []string {
+// heredoc is one here-document or here-string of a call: its body, the
+// byte range of the body word in the text, and whether the statement it feeds
+// may run it as a script.
+type heredoc struct {
+	body       string
+	start, end int
+	script     bool
+	// word is a here-string (<<< WORD), whose operator needs a word after it.
+	word bool
+}
+
+// heredocs returns the here-documents and here-strings of text with the
+// consumer each feeds. A here-document that feeds cat, tee or a reader is
+// data, however long and whatever it says about DefenseClaw (GAP-0755); one
+// that feeds a program which runs its stdin as a script (a shell, at, batch,
+// crontab, a launcher or remote shell around one), or one whose program the
+// parse could not resolve, is a script.
+func heredocs(text string) []heredoc {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
 	if err != nil {
 		return nil
 	}
-	var bodies []string
+	// A filter that passes its input on (cat <<EOF | sh) feeds the stage that
+	// reads it: any statement in a pipeline ahead of one that may run a script
+	// counts.
+	upstream := map[*syntax.Stmt]bool{}
 	syntax.Walk(file, func(node syntax.Node) bool {
-		redir, ok := node.(*syntax.Redirect)
+		if pipe, ok := node.(*syntax.BinaryCmd); ok && (pipe.Op == syntax.Pipe || pipe.Op == syntax.PipeAll) {
+			if stdinMayBeScript(pipe.Y) || upstream[pipe.Y] {
+				markPipelineStages(pipe, upstream)
+			}
+		}
+		return true
+	})
+	var out []heredoc
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
 		if !ok {
 			return true
 		}
-		var word *syntax.Word
-		switch redir.Op {
-		case syntax.Hdoc, syntax.DashHdoc:
-			word = redir.Hdoc
-		case syntax.WordHdoc:
-			word = redir.Word
-		}
-		if word == nil {
-			return true
-		}
-		var body strings.Builder
-		for _, part := range word.Parts {
-			switch part := part.(type) {
-			case *syntax.Lit:
-				body.WriteString(part.Value)
-			case *syntax.SglQuoted:
-				body.WriteString(part.Value)
-			case *syntax.DblQuoted:
-				for _, inner := range part.Parts {
-					if lit, ok := inner.(*syntax.Lit); ok {
-						body.WriteString(lit.Value)
+		for _, redir := range stmt.Redirs {
+			var word *syntax.Word
+			switch redir.Op {
+			case syntax.Hdoc, syntax.DashHdoc:
+				word = redir.Hdoc
+			case syntax.WordHdoc:
+				word = redir.Word
+			}
+			if word == nil {
+				continue
+			}
+			var body strings.Builder
+			for _, part := range word.Parts {
+				switch part := part.(type) {
+				case *syntax.Lit:
+					body.WriteString(part.Value)
+				case *syntax.SglQuoted:
+					body.WriteString(part.Value)
+				case *syntax.DblQuoted:
+					for _, inner := range part.Parts {
+						if lit, ok := inner.(*syntax.Lit); ok {
+							body.WriteString(lit.Value)
+						}
 					}
 				}
 			}
+			out = append(out, heredoc{
+				body: body.String(), start: int(word.Pos().Offset()), end: int(word.End().Offset()),
+				script: stdinMayBeScript(stmt) || upstream[stmt], word: redir.Op == syntax.WordHdoc,
+			})
 		}
-		bodies = append(bodies, body.String())
 		return true
 	})
+	return out
+}
+
+// heredocBodies returns the bodies of the here-documents and here-strings of
+// text that may run as a script.
+func heredocBodies(text string) []string {
+	var bodies []string
+	for _, doc := range heredocs(text) {
+		if doc.script {
+			bodies = append(bodies, doc.body)
+		}
+	}
 	return bodies
+}
+
+// withoutDataHeredocs returns text with the bodies of the here-documents and
+// here-strings that only feed data removed: what a note, a brief or a file
+// written through cat says about DefenseClaw is not a command of the call.
+func withoutDataHeredocs(text string) string {
+	if !strings.Contains(text, "<<") {
+		return text
+	}
+	docs := heredocs(text)
+	cut := text
+	for index := len(docs) - 1; index >= 0; index-- {
+		doc := docs[index]
+		if doc.script || doc.start < 0 || doc.end > len(text) || doc.start >= doc.end {
+			continue
+		}
+		replacement := ""
+		if doc.word {
+			replacement = "x"
+		}
+		cut = cut[:doc.start] + replacement + cut[doc.end:]
+	}
+	return cut
+}
+
+// markPipelineStages marks every stage of a pipeline that ends in a statement
+// already marked.
+func markPipelineStages(pipe *syntax.BinaryCmd, marked map[*syntax.Stmt]bool) {
+	marked[pipe.X], marked[pipe.Y] = true, true
+	if inner, ok := pipe.X.Cmd.(*syntax.BinaryCmd); ok {
+		markPipelineStages(inner, marked)
+	}
+}
+
+// stdinMayBeScript reports a statement whose stdin may be run as a script: a
+// command whose program is unresolved, a shell (also behind a launcher or as
+// an operand of one, `docker exec -i c sh`), at, batch, crontab or ssh, or a
+// compound command (a loop or group around a shell). A bare redirection feeds
+// nothing.
+func stdinMayBeScript(stmt *syntax.Stmt) bool {
+	if stmt.Cmd == nil {
+		return false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok {
+		return true
+	}
+	argv := make([]string, 0, len(call.Args))
+	for _, word := range call.Args {
+		argv = append(argv, literalWordText(word))
+	}
+	for hops := 0; hops < maxControlNesting && len(argv) > 0; hops++ {
+		if argv[0] == "" {
+			return true
+		}
+		name := commandBaseName(argv[0])
+		if shellProgram(name) || name == "at" || name == "batch" || name == "crontab" || name == "ssh" || name == "source" || name == "." {
+			return true
+		}
+		for _, word := range argv[1:] {
+			if word != "" && shellProgram(commandBaseName(word)) {
+				return true
+			}
+		}
+		inner := launcherInner(argv)
+		if inner == nil {
+			return false
+		}
+		argv = inner
+	}
+	return len(argv) > 0
 }
 
 // defenseClawUnitSegments are the parts after the product namespace that the
