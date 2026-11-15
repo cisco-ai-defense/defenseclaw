@@ -29048,14 +29048,14 @@ function Copy-DefenseClawRecordedHookPreimage {
         the installed hook does not have the recorded digest (or cannot be
         read), the copy is the guardian's protected copy, taken only when it
         has that digest. When neither does, the rollback copy is this
-        Setup's own verified hook (ReplacementSource), and the notice says
-        so: the bytes that could not be checked are never kept, and the hook
+        Setup's own verified hook (ReplacementSource, when it carries its
+        digest), and the notice says so: the bytes that could not be checked are never kept, and the hook
         a rollback puts back is the replacement the early-hook protocol
         publishes anyway (GAP-0993). Before, this case threw on every Setup
         run: a recovery that left the replacement hook in place over the
         restored release's record then refused every /ensure, /repair,
         /upgrade and /uninstall, with every service stopped (GAP-0601).
-        With no ReplacementSource it still throws. Nothing is written when
+        With no ReplacementSource, or one without a digest, it still throws. Nothing is written when
         Destination is empty (a check before anything is stopped).
     #>
     param(
@@ -29119,9 +29119,12 @@ function Copy-DefenseClawRecordedHookPreimage {
     }
     $installed = if ($liveProblem) { "cannot be read ($liveProblem)" } else { "has sha256 $live" }
     $protected = if ([string]::IsNullOrEmpty($guardianDigest)) { 'is missing or unreadable' } else { "has sha256 $guardianDigest" }
+    # A replacement with no digest (a partial descriptor) cannot be the
+    # rollback copy: it gets the refusal below, not a strict-mode property
+    # error that names no next step.
     $replacementDigest = ''
     if ($null -ne $ReplacementSource) {
-        $replacementDigest = ([string]$ReplacementSource.sha256).ToLowerInvariant()
+        $replacementDigest = (Get-DefenseClawOptionalLayoutValue -Layout $ReplacementSource -Name 'sha256').ToLowerInvariant()
     }
     if ($replacementDigest -cmatch '^[0-9a-f]{64}$') {
         if ($write) {
