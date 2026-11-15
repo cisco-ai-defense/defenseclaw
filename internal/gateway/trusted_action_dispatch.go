@@ -346,6 +346,10 @@ type trustedActionRequest struct {
 	// same input and facts. dispatchTrustedAction makes it; a copy of the
 	// request shares it, and a child command with another input reads its own.
 	simpleMemo *trustedSimpleMemo
+	// inlineTierNested marks a request derived from one already dispatched:
+	// only the outermost call applies the inline hand-off tier
+	// (withInlineHandoffTier).
+	inlineTierNested bool
 }
 
 // trustedSimpleMemo holds the first simple-command split asked of it.
@@ -457,6 +461,12 @@ func dispatchTrustedAction(
 	request.posixReadingTwin = false
 	if trustedActionFaultHook != nil {
 		trustedActionFaultHook(request)
+	}
+	// The hand-off tier is for the call's final findings only: a twin or a
+	// simple-command pass inside it is a proof the outer call reads as proven.
+	if !request.inlineTierNested {
+		request.inlineTierNested = true // every twin and pass below is a copy of this request
+		defer func() { findings = withInlineHandoffTier(parent, request, findings) }()
 	}
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
@@ -1639,7 +1649,8 @@ func withActiveStateTargetMention(
 	if !hereStringMutates && !xargsMutates && !globbedStateMutation(facts) &&
 		(!placed || !globbedStateMutation(linkFacts)) && !throughLink(globbedStateMutationThroughLink) &&
 		!findGlobTwinStateMutation(facts, request) &&
-		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) &&
+		!archiveExtractsIntoState(facts, request) && !inlineHandoffStateWrite(facts, request) &&
+		!provenLinkedStateWrite(facts, request) &&
 		!provenFollowedInPlaceStateWrite(facts, request) && !fileToolWriteThroughLinkToState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known {

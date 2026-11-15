@@ -290,7 +290,7 @@ func overLimitCodeProgram(program string) bool {
 // overLimitInterpreterRow is the row of the inline interpreter table for a
 // program, nil when the program is not in it.
 func overLimitInterpreterRow(program string) *inlineCapabilityRow {
-	row, ok := inlineInterpreterRow(program)
+	_, row, ok := inlineInterpreterRow(program)
 	if !ok {
 		return nil
 	}
