@@ -5861,7 +5861,7 @@ var proxyNeutralCWD = sync.OnceValue(func() string {
 // (codeGuardScanWriteArgs), as inspectTrustedToolPolicyCtx scans it for the
 // hook routes. A Secure Client install keeps its own scanners.
 func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action trustedActionRequest) []RuleFinding {
-	if p.toolCallSecureClient(ctx) || ManagedEnterpriseActive() || !isWriteToolName(strings.ToLower(action.Input.Tool)) {
+	if p.toolCallSecureClient(ctx) || ManagedEnterpriseActive() || !codeGuardWriteTool(action.Input.Tool) {
 		return nil
 	}
 	rulesDir := ""
