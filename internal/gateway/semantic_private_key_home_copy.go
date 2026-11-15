@@ -4,7 +4,9 @@
 package gateway
 
 import (
+	"os"
 	"path"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -18,8 +20,16 @@ import (
 // backup folder, a renamed copy) exposes it to no one: the copy is as private
 // as the original. The copy stays a visible alert, but it is not the content
 // read of a key that leaves the user (rel-1-0-10:GAP-0018). A copy anywhere
-// else (/tmp, a web root, a shared folder, another account's home) or any
-// other reader of the key keeps the CRITICAL block.
+// else (/tmp, another account's home) or any other reader of the key keeps the
+// CRITICAL block.
+//
+// A place is private because of what the file system says about it, not
+// because of its name: the destination, or the nearest folder above it that
+// exists, has no group or other permission bit (homePlaceOwnerOnly). A web
+// root, a synced folder or a shared folder is made readable by others, and its
+// bits say so; a place this gateway cannot read (a home hidden from a managed
+// gateway, a Windows path) is not proven private and keeps the block of rel
+// (rel-1-0-10:GAP-0710).
 
 var (
 	// trustedActionHomeCopyPrograms are the programs that copy a file.
@@ -30,26 +40,18 @@ var (
 		"mkdir", "md", "chmod", "echo", "printf", "true", "false", ":", "cd", "pwd",
 		"ls", "dir", "test", "[", "write-host", "write-output",
 	}
-	// trustedActionHomeSharedFolders are the folders of a home that other
-	// accounts or the network can read.
-	trustedActionHomeSharedFolders = []string{"public", "public_html", "sites", "www", "html", "shared"}
 )
 
 // trustedActionPrivateHomeDestination reports a write target below the active
-// home (the home itself too) that no one else reads: not a shared folder and
-// not a file of the SSH folder that sshd or ssh read as policy.
+// home (the home itself too) that no one else reads: the place is owner-only
+// on this host (homePlaceOwnerOnly) and is not a file of the SSH folder that
+// sshd or ssh read as policy.
 func trustedActionPrivateHomeDestination(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
 	if !ok {
 		return false
 	}
-	if relative == "" {
-		return true
-	}
 	first, rest, _ := strings.Cut(relative, "/")
-	if slices.Contains(trustedActionHomeSharedFolders, first) {
-		return false
-	}
 	if first == ".ssh" && !strings.Contains(rest, "/") {
 		for _, protected := range []string{"authorized_keys", "authorized_keys2", "config", "environment", "rc"} {
 			if rest == protected {
@@ -57,7 +59,47 @@ func trustedActionPrivateHomeDestination(facts actionfacts.Facts, candidate acti
 			}
 		}
 	}
-	return true
+	// The matchers read a folded spelling; the file system is asked about the
+	// name as written, and only when the two are the same place.
+	place := path.Clean(strings.ReplaceAll(strings.TrimSpace(pathFactSpelling(candidate)), `\`, "/"))
+	if canonicalSemanticPath(place) != canonicalSemanticPath(semanticPathValue(candidate)) {
+		return false
+	}
+	return homePlaceOwnerOnly(place)
+}
+
+// homePlaceOwnerOnly reports a place that only its owner can enter or read, as
+// the file system shows it now: the place itself when it exists (a link is
+// followed), else the nearest folder above it that does, with no group or
+// other permission bit. A copy keeps the mode of its source and a folder a
+// command makes sits below the one that exists, so that one decides who can
+// reach the copy. What this gateway cannot read (nothing of the path exists on
+// this host, an error other than a missing name, a Windows path, whose access
+// is no mode) is not proven private.
+func homePlaceOwnerOnly(value string) bool {
+	if runtime.GOOS == "windows" || value == "" {
+		return false
+	}
+	existing := path.Clean(value)
+	for {
+		info, err := hookpaths.Lstat(existing)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				if info, err = hookpaths.Stat(existing); err != nil {
+					return false
+				}
+			}
+			return info.Mode().Perm()&0o077 == 0
+		}
+		if !os.IsNotExist(err) {
+			return false
+		}
+		parent := path.Dir(existing)
+		if parent == existing || parent == "." {
+			return false
+		}
+		existing = parent
+	}
 }
 
 // trustedActionCommandWritesOnlyPrivateHome reports a command whose write
@@ -381,20 +423,14 @@ func ownSSHFolderMkdirCall(args []string, cwd, home string) bool {
 }
 
 // ownSSHFolderPrivateDestination reports a destination inside home, outside the
-// SSH folder and the shared folders, whose existing part, links followed, stays
-// there too; a part that does not exist yet is only a name.
+// SSH folder, whose existing part, links followed, stays inside home too and
+// only its owner can enter or read (homePlaceOwnerOnly); a part that does not
+// exist yet is only a name. A home this gateway cannot see proves nothing.
 func ownSSHFolderPrivateDestination(destination, cwd, home string) bool {
 	value := path.Clean(hookpaths.OperandPath(destination, cwd))
 	if !pathWithin(value, home) || pathWithin(value, home+"/.ssh") {
 		return false
 	}
-	relative := strings.TrimPrefix(strings.TrimPrefix(value, home), "/")
-	first, _, _ := strings.Cut(relative, "/")
-	if slices.Contains(trustedActionHomeSharedFolders, strings.ToLower(first)) {
-		return false
-	}
-	// Nothing of the destination below the home exists on this host (the home
-	// itself may be absent): there is no link to follow, the name is all there is.
 	existing := value
 	for existing != home && pathWithin(existing, home) {
 		if _, err := hookpaths.Lstat(existing); err == nil {
@@ -403,7 +439,7 @@ func ownSSHFolderPrivateDestination(destination, cwd, home string) bool {
 		existing = path.Dir(existing)
 	}
 	if _, err := hookpaths.Lstat(existing); err != nil {
-		return true
+		return false
 	}
 	realHome, err := hookpaths.EvalSymlinks(home)
 	if err != nil {
@@ -413,7 +449,7 @@ func ownSSHFolderPrivateDestination(destination, cwd, home string) bool {
 	if err != nil {
 		return false
 	}
-	return pathWithin(resolved, realHome) && !pathWithin(resolved, realHome+"/.ssh")
+	return pathWithin(resolved, realHome) && !pathWithin(resolved, realHome+"/.ssh") && homePlaceOwnerOnly(resolved)
 }
 
 // ownSSHFolderLiteralGlob is the text of a word that is literal text and glob

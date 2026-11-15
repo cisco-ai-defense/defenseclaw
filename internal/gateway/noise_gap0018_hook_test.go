@@ -50,10 +50,15 @@ func gap0018RoutineHome(t *testing.T) (home, cwd string) {
 			t.Fatal(err)
 		}
 	}
-	for _, dir := range []string{"backups", "public_html", "out1", "src"} {
+	for _, dir := range []string{"backups", ".ssh_backup", "public_html", "out1", "src"} {
 		if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// A web folder is made readable by others; its bits say so, its name does
+	// not (rel-1-0-10:GAP-0710).
+	if err := os.Chmod(filepath.Join(home, "public_html"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cwd, "src.txt"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
