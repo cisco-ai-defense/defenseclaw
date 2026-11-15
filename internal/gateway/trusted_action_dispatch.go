@@ -7391,6 +7391,7 @@ func finalizeTrustedActionFindings(
 		protectedLocalFileRead: request.CopilotSharedLocalFile && request.Input.Tool == "read_file",
 		sendDestination:        request.sendDestination,
 	})
+	findings = withProvenScopeFindings(generation, request, facts, findings)
 	if !request.StrictPolicy {
 		findings = trustedActionOrdinaryCredentialCopyFindings(facts, findings)
 	}
