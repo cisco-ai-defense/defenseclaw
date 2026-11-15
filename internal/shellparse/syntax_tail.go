@@ -236,12 +236,27 @@ type quotedHereDoc struct {
 // quotedHereDocs finds the here-documents with a quoted delimiter word
 // (<<'EOF', <<"EOF", <<\EOF, and the same written inside a quoted argument,
 // <<'"'"'EOF'"'"') opened at or after offset from, whose body is closed by a
-// line holding the word (a quote that closes the argument may follow it). The
-// quotes of the text are not followed: the opener of a script passed as one
-// quoted argument is inside them. A quoted delimiter keeps the body free of
-// expansions, so its lines are input of the command and nothing else. A body
-// that is not closed is not one: its lines stay text of the call.
+// line holding the word (a quote that closes the argument may follow it). A
+// quoted delimiter keeps the body free of expansions, so its lines are input
+// of the command and nothing else. A body that is not closed is not one: its
+// lines stay text of the call.
+//
+// The quotes are followed with the split's own reading (tokenScan, from
+// offset from, where the complete statements end outside quotes). An opener
+// outside quotes is one. An opener inside quotes is one only in the shape of
+// a script passed as one quoted argument: the argument is still open at the
+// end of the opener line, so the lines after it are the argument's text, its
+// body. An opener spelled in a string that closes on its own line (echo
+// "a <<'X'") is text, and the lines after it stay statements
+// (rel-1-0-10:GAP-0890).
 func quotedHereDocs(command string, from int) []quotedHereDoc {
+	const unread = 0xff
+	quotes := make([]byte, len(command)-from)
+	for index := range quotes {
+		quotes[index] = unread
+	}
+	tokenScan(command[from:], func(at int, quote byte) { quotes[at] = quote })
+	quoteAt := func(at int) byte { return quotes[at-from] }
 	var docs []quotedHereDoc
 	for at := from; at+2 < len(command); at++ {
 		index := strings.Index(command[at:], "<<")
@@ -260,6 +275,11 @@ func quotedHereDocs(command string, from int) []quotedHereDoc {
 			continue
 		}
 		lineEnd += at
+		if opener, end := quoteAt(at), quoteAt(lineEnd); opener == unread ||
+			opener != 0 && (end == 0 || end == unread) {
+			at++
+			continue
+		}
 		bodyFrom := lineEnd + 1
 		bodyTo, closed := quotedHereDocClose(command, bodyFrom, word, dash)
 		if !closed {
@@ -417,12 +437,41 @@ type tokenPiece struct{ from, to int }
 // line: its lines are data (rel-1-0-10:GAP-0746). ok is false past
 // maxSyntaxTailPieces (the pieces before the cap are returned).
 func tokenPieces(text string) (pieces []tokenPiece, ok bool) {
+	return tokenScan(text, nil)
+}
+
+// The quote states of tokenScan beside ' and ": an ANSI-C string ($'...',
+// whose backslash escapes a quote) and a comment (# at the start of a word,
+// to the end of its line).
+const (
+	ansiQuote    byte = 'A'
+	commentQuote byte = '#'
+)
+
+// tokenScan is tokenPieces; visit, when set, is called with the offset and
+// the quote the shell is in there (', ", ansiQuote, commentQuote or 0) for
+// each byte the split reads: not the byte after a backslash, not a
+// here-document body, and nothing past maxSyntaxTailPieces. It follows the
+// shell's quotes, $'...' escapes and # comments, so a here-document opener
+// in a comment or a string is text (rel-1-0-10:GAP-0890, GAP-0903).
+func tokenScan(text string, visit func(at int, quote byte)) (pieces []tokenPiece, ok bool) {
 	from := 0
 	var quote byte
 	var pending []heredocMark
 	for i := 0; i < len(text); i++ {
 		c := text[i]
+		if visit != nil {
+			visit(i, quote)
+		}
 		switch {
+		case quote == ansiQuote:
+			// $'...': a backslash escapes the next byte, a quote closes it.
+			if c == '\\' {
+				i++
+			} else if c == '\'' {
+				quote = 0
+			}
+			continue
 		case quote == '\'':
 			if c == '\'' {
 				quote = 0
@@ -434,6 +483,23 @@ func tokenPieces(text string) (pieces []tokenPiece, ok bool) {
 		case quote == '"':
 			if c == '"' {
 				quote = 0
+			}
+			continue
+		case c == '$' && i+1 < len(text) && text[i+1] == '\'':
+			quote = ansiQuote
+			i++
+			if visit != nil {
+				visit(i, quote)
+			}
+			continue
+		case c == '#' && (i == 0 || strings.IndexByte(" \t\n;&|()", text[i-1]) >= 0):
+			// A comment runs to the end of its line; an opener or a quote in
+			// it is text (rel-1-0-10:GAP-0903).
+			for i+1 < len(text) && text[i+1] != '\n' {
+				i++
+				if visit != nil {
+					visit(i, commentQuote)
+				}
 			}
 			continue
 		case c == '\'' || c == '"':
