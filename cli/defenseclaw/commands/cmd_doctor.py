@@ -5083,6 +5083,25 @@ def _check_component_connector_compatibility(
                 remediation += (
                     " to verify the version and turn action mode back on (or --mode observe to keep observing)"
                 )
+        if finding.connector in rechecked.changed and finding.installed_version:
+            # The gateway and its hook events keep the version setup recorded
+            # (agent_version_normalized) until setup records the one installed
+            # now. Say so when that matters: a verdict that is not a pass, or a
+            # contract other than the one recorded (GAP-0164).
+            was = rechecked.changed[finding.connector]
+            before = resolve_connector_contract(finding.connector, was) if was else None
+            before_contract = before.contract.contract_id if before is not None and before.contract is not None else ""
+            if tag != "pass" or (before is not None and before_contract != (finding.contract_id or "")):
+                from defenseclaw.hook_integrity import setup_command
+
+                if tag == "pass":
+                    tag = "warn"
+                detail += (
+                    f"; the gateway and its hook events still use the recorded version "
+                    f"{was or 'from before the update'} until setup records this one"
+                )
+                step = f"run '{setup_command(finding.connector)} --yes' to record the version installed now"
+                remediation = f"{remediation}; {step}" if remediation else step
         unverified_detail, unverified_step = _unverified_executable_note(cfg, finding.connector)
         if unverified_detail:
             detail += unverified_detail
