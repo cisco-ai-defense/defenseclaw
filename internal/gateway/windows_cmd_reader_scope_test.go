@@ -70,7 +70,15 @@ func TestR105WindowsCMDReaderSkipsCommandsWithoutCMD(t *testing.T) {
 				Input: input, LegacyText: string(args), Connector: connectorName,
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
 			})
-			if got := buildVerdict(findings, "tool_call").Action == "block"; got != tc.block {
+			got := buildVerdict(findings, "tool_call").Action == "block"
+			if !tc.block {
+				// Past the action analysis depth bound a call is the unknown
+				// tier of the pack whatever it names (rel-1-0-10:GAP-0688, the
+				// one bound rule): an alert in this default pack. Only a proven
+				// finding may block it; the CMD reader adds none.
+				got = operandBoundTierAction(findings, false) == guardrailActionBlock
+			}
+			if got != tc.block {
 				t.Errorf("%s %d bytes %q...: block=%t, want %t (%v)", tool, len(tc.command),
 					tc.command[:min(len(tc.command), 40)], got, tc.block, FindingStrings(findings))
 			}

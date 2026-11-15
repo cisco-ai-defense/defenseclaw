@@ -29,7 +29,16 @@ func TestHeredocStdinCodeAndBenignHeredocsInFourCells(t *testing.T) {
 	notBlocked := func(string) string { return "" }
 	allow := func(string) string { return "allow" }
 	rows := []row{
-		{"sudo sh <<X\necho Defaults use_pty >> /etc/sudoers\nX", notBlocked},
+		// The here-document is the script sudo sh runs (rel-1-0-10:GAP-0691,
+		// the cap floor reads the consumer's COMMAND word): its proven
+		// /etc/sudoers append keeps the strict block, as the main file
+		// write below does; default stays below a block.
+		{"sudo sh <<X\necho Defaults use_pty >> /etc/sudoers\nX", func(profile string) string {
+			if profile == "strict" {
+				return "block"
+			}
+			return ""
+		}},
 		{"sudo bash <<X\nrm -rf $D\nX", notBlocked},
 		{"sudo -s <<X\nrm -rf $D\nX", notBlocked},
 		{"sudo -u root sh <<X\nrm -rf $D\nX", notBlocked},
