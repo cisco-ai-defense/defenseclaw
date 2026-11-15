@@ -34,6 +34,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A module that lowers every call it is asked about (S7 cascade review
@@ -252,7 +253,9 @@ func TestCascadeBoundFloorProxyPath(t *testing.T) {
 func TestCascadeRecordedDecisionReplaysLive(t *testing.T) {
 	api := cascadeModuleConfig(t, "default", cascadeAllowAllModule, "")
 	api.scannerCfg.Guardrail.Cascade.Policy.Lowest = "allow"
-	api.scannerCfg.DataDir = t.TempDir()
+	// The per-user data dir is private (0700; on Windows a protected
+	// owner-only DACL the record inherits), not a shared temp tree.
+	api.scannerCfg.DataDir = testenv.PrivateTempDir(t)
 	live := api.applyCascadeFinal(t.Context(), "claudecode", "tool_call", "PreToolUse", "Bash", &ToolInspectVerdict{
 		Action: "block", Severity: "HIGH", Findings: []string{"COG-CLAUDE-MD"},
 		DetailedFindings: []RuleFinding{{RuleID: "COG-CLAUDE-MD", Severity: "HIGH"}},
@@ -275,10 +278,8 @@ func TestCascadeRecordedDecisionReplaysLive(t *testing.T) {
 	if sim.Outcome.Final != rec.Live.Final || sim.Outcome.PolicyRule != rec.Live.PolicyRule {
 		t.Fatalf("replay %+v != live %+v", sim.Outcome, rec.Live)
 	}
-	info, err := os.Stat(filepath.Join(api.scannerCfg.DataDir, CascadeDecisionsFile))
-	if err != nil || info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("record file %v %v", info, err)
-	}
+	// Owner-only: mode 0600 on POSIX, the inherited DACL on Windows.
+	assertCascadeRecordPrivate(t, filepath.Join(api.scannerCfg.DataDir, CascadeDecisionsFile))
 	if _, err := ReadCascadeDecision(api.scannerCfg, 2); err == nil {
 		t.Fatal("a second record that was never written")
 	}
