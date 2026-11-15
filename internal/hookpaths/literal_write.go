@@ -622,12 +622,20 @@ func InPlaceEditOperands(command, cwd, home string, user KnownUser) []string {
 	return inPlaceEditOperands(command, cwd, home, user, false)
 }
 
-// FollowedInPlaceEditOperands lists the files a sed -i --follow-symlinks
-// (or gsed) call of the command edits, as absolute paths read in cwd. GNU
-// sed then rewrites the file a link names instead of replacing the link,
-// so a caller follows the operand name itself (GAP-2529).
-func FollowedInPlaceEditOperands(command, cwd, home string, user KnownUser) []string {
-	return inPlaceEditOperands(command, cwd, home, user, true)
+// InPlaceEdits lists the files the sed -i and perl -i calls of the command
+// edit in place (entries, as InPlaceEditOperands) and, of them, the files a
+// sed -i --follow-symlinks (or gsed) call edits (followed), from one parse
+// of the command. GNU sed then rewrites the file a link names instead of
+// replacing the link, so a caller follows the operand name itself
+// (GAP-2529).
+func InPlaceEdits(command, cwd, home string, user KnownUser) (entries, followed []string) {
+	readInPlaceEdits(command, cwd, home, user, func(name string, follows bool) {
+		entries = append(entries, name)
+		if follows {
+			followed = append(followed, name)
+		}
+	})
+	return entries, followed
 }
 
 func inPlaceEditOperands(command, cwd, home string, user KnownUser, followedOnly bool) (operands []string) {
@@ -639,10 +647,77 @@ func inPlaceEditOperands(command, cwd, home string, user KnownUser, followedOnly
 	return operands
 }
 
+// MayEditInPlace reports a command in which readInPlaceEdits may find an
+// in-place editor, under any directory and any login reading of its
+// statements: a call with a word whose static value, read with the home
+// alone or with the login the home spells too, is sed or perl to sedProgram.
+// The program word of readInPlaceEdits is one of the words of its call, so
+// this is a superset of the readers. It parses the command once, where the
+// readers parse each statement again and their callers place, link-read and
+// analyze each statement first. The parsed words decide, never a text test
+// of the spelling: s'e'd, "pe"rl, s\ed and a known $USER spelling are read
+// as the words they are (rel-1-0-10:GAP-0737, GAP-0901). A command that does
+// not parse may name one.
+func MayEditInPlace(command, home string) bool {
+	if !inPlaceEditorTextMayName(command) {
+		return false
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return true
+	}
+	user := KnownUser{Name: homeUser(home)}
+	may := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if may {
+			return false
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		for _, arg := range call.Args {
+			if value, static := StaticWord(arg, home); static && inPlaceEditorProgram(value) {
+				may = true
+			} else if user.Name != "" {
+				value, static := knownValueWord(arg, home, user)
+				may = static && inPlaceEditorProgram(value)
+			}
+			if may {
+				return false
+			}
+		}
+		return true
+	})
+	return may
+}
+
+func inPlaceEditorProgram(word string) bool {
+	program := sedProgram(word)
+	return program == "sed" || program == "perl"
+}
+
+// inPlaceEditorTextMayName reports a command text in which a word may have
+// a value that sedProgram reads as sed or perl. The value of a word with no
+// quote, escape, parameter, substitution, tilde or brace is its own text,
+// so its program is sed or perl only if the text holds sed or perl in some
+// case (programBase lowers it); any of those characters sends the command
+// on to the parsed reading. A long benign list often holds none of them and
+// skips the parse (GAP-0901).
+func inPlaceEditorTextMayName(command string) bool {
+	if strings.ContainsAny(command, "'\"\\$`~{}") {
+		return true
+	}
+	lower := strings.ToLower(command)
+	return strings.Contains(lower, "sed") || strings.Contains(lower, "perl")
+}
+
 // readInPlaceEdits calls edit with each in-place editor operand of command
-// (InPlaceEditOperands), and whether sed follows its links
-// (FollowedInPlaceEditOperands).
+// (InPlaceEditOperands, InPlaceEdits), and whether sed follows its links.
 func readInPlaceEdits(command, cwd, home string, user KnownUser, edit func(name string, followed bool)) {
+	if !inPlaceEditorTextMayName(command) {
+		return
+	}
 	file, ok := parseShell(command)
 	if !ok || !filepath.IsAbs(cwd) {
 		return
