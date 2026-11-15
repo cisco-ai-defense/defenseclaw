@@ -71,6 +71,13 @@ func launcherStatement(source string, words []layoutWord, depth int) bool {
 	first := 0
 	for first < len(words) && (words[first].assign || words[first].plain && layoutReserved[words[first].literal]) {
 		first++
+		if words[first-1].plain && words[first-1].literal == "time" {
+			// The time keyword's own options (time -p, time --) are no
+			// command (rel-1-0-10:GAP-0970).
+			for first < len(words) && words[first].plain && (words[first].literal == "-p" || words[first].literal == "--") {
+				first++
+			}
+		}
 	}
 	return launcherCommand(source, words, first, depth)
 }
@@ -154,11 +161,19 @@ func commandBase(word string) string {
 
 // launcherWrapper reports a command that runs the command it is given on
 // this machine. ssh runs it on another one: its argument is no local launcher.
+// Every pass-through wrapper the analysis unwraps (staticPOSIXWrapperPrograms:
+// time and nsenter as well as env, sudo, nice, timeout, nohup ...) is one, so
+// the launcher reader and the screen read through every wrapper the analysis
+// reads through; a wrapper missing here hid the launcher behind it while the
+// analysis read the chain whole (rel-1-0-10:GAP-0970).
 func launcherWrapper(name string) bool {
 	switch name {
 	case "ssh":
 		return false
-	case "start", "wsl", "command", "builtin":
+	case "start", "wsl":
+		return true
+	}
+	if _, ok := staticPOSIXWrapperPrograms[name]; ok {
 		return true
 	}
 	return layoutWrappers[name]

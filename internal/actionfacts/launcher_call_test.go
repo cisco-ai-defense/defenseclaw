@@ -55,6 +55,14 @@ func TestShellLauncherCallReadsWrappers(t *testing.T) {
 		{"start title", []string{"start", "My Title", "pwsh", "-c", body}, 2, DialectPowerShell, false, true},
 		{"start title spelled as a launcher", []string{"start", "cmd", "pwsh", "-c", body}, 2, DialectPowerShell, false, true},
 		{"start one title only", []string{"start", "a", "b", "pwsh", "-c", body}, 0, DialectNone, false, false},
+		// Every pass-through wrapper the analysis unwraps is read through
+		// (staticPOSIXWrapperPrograms, rel-1-0-10:GAP-0970), however long
+		// the chain the analysis reads whole.
+		{"time", []string{"time", "pwsh", "-c", body}, 1, DialectPowerShell, false, true},
+		{"time -p", []string{"time", "-p", "cmd", "/c", "dir"}, 2, DialectCMD, false, true},
+		{"nsenter", []string{"nsenter", "-t", "1", "-m", "pwsh", "-c", body}, 4, DialectPowerShell, false, true},
+		{"time chain", append(strings.Fields(strings.Repeat("time ", 5)), "pwsh", "-c", body), 5, DialectPowerShell, false, true},
+		{"neutral chain past 64 words", append(strings.Fields(strings.Repeat("nice -n 5 ", 30)), "cmd", "/c", "dir"), 90, DialectCMD, false, true},
 	}
 	for _, tc := range tests {
 		call, ok := ShellLauncherCall(tc.argv)
@@ -116,6 +124,15 @@ func TestShellLauncherCallOfTextReadsStatements(t *testing.T) {
 		{"cmd with a quoted redirect target", `cmd /c "dir" > "C:\work\out file.txt"`, `dir > "C:\work\out file.txt"`, 0, true},
 		{"nested cmd keeps the redirect", `cmd /c cmd /c dir 2>&1 >> out.txt`, "cmd /c dir 2>&1 >> out.txt", 0, true},
 		{"pwsh with a redirect", `pwsh -c 'dir' 2> err.txt; git status`, "dir 2> err.txt", 0, true},
+		// A redirect target is split as a word is (rel-1-0-10:GAP-0969): a
+		// backtick or doubled quote in double quotes is one quote, and a
+		// target that never closes ends the statement, so the launcher
+		// before it is still read.
+		{"redirect target with a backtick quote", "cmd /c dir >> out.txt 2> \"a`\"b\"", "dir >> out.txt 2> \"a`\"b\"", 0, true},
+		{"backtick quote target first", "cmd /c dir 2> \"a`\"b\" >> out.txt", "dir 2> \"a`\"b\" >> out.txt", 0, true},
+		{"redirect target with a doubled quote", `pwsh -c 'dir' > "a""b.txt"`, `dir > "a""b.txt"`, 0, true},
+		{"redirect target with a doubled single quote", `cmd /c dir > 'a''b.txt'`, `dir > 'a''b.txt'`, 0, true},
+		{"unreadable redirect target", `cmd /c dir >> out.txt 2> "abc`, "dir >> out.txt", 0, true},
 		{"start title", `start "" powershell -Command 'dir'`, "dir", 0, true},
 		{"quoted install path", `& 'C:\Program Files\PowerShell\7\pwsh.exe' -Command 'dir'`, "dir", 0, true},
 		{"past the command bound", `pwsh -c '# ` + pad + "\ndir'", "# " + pad + "\ndir", 0, true},

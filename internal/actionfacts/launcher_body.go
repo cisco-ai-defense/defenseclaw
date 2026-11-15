@@ -132,11 +132,15 @@ const maxLauncherReadings = 4
 // the walk goes on past it. cmd's start takes its first quoted word as the
 // window title and any other first word as the program: an argv carries no
 // quotes, so the first word after start's switches is read both ways, and
-// start has one title. command -v and -V only print.
+// start has one title. command -v and -V only print. The walk reads up to
+// MaxArgvItems words, the bound of the argv analysis itself: a wrapper chain
+// the analysis reads whole (context-neutral wrappers spend no wrapper depth up
+// to InlineChainWrappers, substrate-1:GAP-0334) is read whole here too, so the
+// launcher at its end is found (rel-1-0-10:GAP-0970).
 func launcherStarts(argv []string) []int {
 	var starts []int
 	wrapper, afterFlag, titled := "", false, false
-	for index := 0; index < len(argv) && index < maxLauncherTextWords; index++ {
+	for index := 0; index < len(argv) && index < MaxArgvItems; index++ {
 		literal := argv[index]
 		titleSlot := wrapper == "start" && !titled
 		if literal != "" && launcherProgramWord(literal) {
@@ -399,7 +403,13 @@ func launcherTextWords(text string, from int) ([]string, []string, int, bool) {
 			}
 			end, ok := launcherRedirectEnd(text, i)
 			if !ok {
-				return nil, nil, -1, false
+				// A redirection the reader cannot finish (its target opens a
+				// quote that never closes) ends the statement, as every
+				// redirection did before the reader kept them: the words
+				// and redirections before it are still read for a launcher,
+				// so a launcher the statement runs is never lost to an
+				// unreadable target (rel-1-0-10:GAP-0969).
+				return words, redirects, launcherRedirectStatementEnd(text, i), len(words) > 0
 			}
 			redirects = append(redirects, text[start:end])
 			i = end
@@ -410,49 +420,13 @@ func launcherTextWords(text string, from int) ([]string, []string, int, bool) {
 			}
 			flush()
 			return words, redirects, launcherStatementEnd(text, i), len(words) > 0
-		case '\'':
+		case '\'', '"':
 			in = true
-			i++
-			for i < len(text) {
-				if text[i] == '\'' {
-					if i+1 < len(text) && text[i+1] == '\'' {
-						word.WriteByte('\'')
-						i += 2
-						continue
-					}
-					break
-				}
-				word.WriteByte(text[i])
-				i++
-			}
-			if i >= len(text) {
+			end, ok := launcherQuoteEnd(text, i, &word)
+			if !ok {
 				return nil, nil, -1, false // unterminated quote
 			}
-			i++
-		case '"':
-			in = true
-			i++
-			for i < len(text) {
-				if text[i] == '`' && i+1 < len(text) {
-					word.WriteByte(text[i+1])
-					i += 2
-					continue
-				}
-				if text[i] == '"' {
-					if i+1 < len(text) && text[i+1] == '"' {
-						word.WriteByte('"')
-						i += 2
-						continue
-					}
-					break
-				}
-				word.WriteByte(text[i])
-				i++
-			}
-			if i >= len(text) {
-				return nil, nil, -1, false
-			}
-			i++
+			i = end
 		default:
 			in = true
 			word.WriteByte(c)
@@ -493,16 +467,62 @@ func launcherRedirectEnd(text string, i int) (int, bool) {
 		case ' ', '\t', '\n', '\r', ';', '|', '&', '<', '>':
 			return i, true
 		case '\'', '"':
-			end := strings.IndexByte(text[i+1:], c)
-			if end < 0 {
+			end, ok := launcherQuoteEnd(text, i, nil)
+			if !ok {
 				return 0, false
 			}
-			i += end + 2
+			i = end
 		default:
 			i++
 		}
 	}
 	return i, true
+}
+
+// launcherQuoteEnd is the index after the quoted span that opens at text[i]
+// (a single or a double quote), split as PowerShell splits it: in single
+// quotes a doubled quote is one quote; in double quotes a backtick escapes the
+// next byte and a doubled quote is one quote. The span's text goes to word
+// when word is not nil. ok is false for a quote that never closes. Words and
+// redirection targets are read by this one scanner, so a target never ends
+// where its word would not (rel-1-0-10:GAP-0969).
+func launcherQuoteEnd(text string, i int, word *strings.Builder) (int, bool) {
+	quote := text[i]
+	write := func(c byte) {
+		if word != nil {
+			word.WriteByte(c)
+		}
+	}
+	for i++; i < len(text); i++ {
+		c := text[i]
+		if quote == '"' && c == '`' && i+1 < len(text) {
+			i++
+			write(text[i])
+			continue
+		}
+		if c == quote {
+			if i+1 < len(text) && text[i+1] == quote {
+				i++
+				write(quote)
+				continue
+			}
+			return i + 1, true
+		}
+		write(c)
+	}
+	return 0, false
+}
+
+// launcherRedirectStatementEnd is the start of the next statement after a
+// redirection the reader cannot finish at text[i]: the operator run, its
+// blanks and any statement operators after them, as the reader ended a
+// statement at a redirection before it kept them (the target is then read as
+// a statement of its own).
+func launcherRedirectStatementEnd(text string, i int) int {
+	for i < len(text) && (text[i] == '<' || text[i] == '>' || launcherStatementByte(text[i])) {
+		i++
+	}
+	return i
 }
 
 // launcherStatementEnd is the index after the operator at text[i] (a run of
