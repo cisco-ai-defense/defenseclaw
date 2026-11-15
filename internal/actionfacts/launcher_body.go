@@ -147,8 +147,7 @@ func cmdLauncherBody(argv []string) (string, bool) {
 		case "/d", "/q", "/s", "/a", "/u":
 			continue
 		default:
-			if strings.HasPrefix(option, "/e:") || strings.HasPrefix(option, "/f:") ||
-				strings.HasPrefix(option, "/v:") || strings.HasPrefix(option, "/t:") {
+			if cmdSwitchWithValue(option) {
 				continue
 			}
 			return "", false
@@ -303,3 +302,32 @@ func posixLauncherBody(argv []string) (string, bool) {
 	}
 	return "", false
 }
+
+// cmdSwitchWithValue reports a cmd startup switch with a valid value:
+// /e:on, /e:off, /f:on, /f:off, /v:on, /v:off or /t:<one or two hex digits>.
+// Any other value is not read.
+func cmdSwitchWithValue(option string) bool {
+	if len(option) < 4 || option[2] != ':' || option[0] != '/' {
+		return false
+	}
+	value := option[3:]
+	switch option[1] {
+	case 'e', 'f', 'v':
+		return value == "on" || value == "off"
+	case 't':
+		if len(value) > 2 {
+			return false
+		}
+		for _, r := range value {
+			if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// MaxCommandBytes is the longest command line an analysis reads
+// (maxCommandBytes); a longer one is limit_exceeded with input_limit.
+const MaxCommandBytes = maxCommandBytes

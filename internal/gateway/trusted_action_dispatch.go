@@ -567,7 +567,9 @@ func dispatchTrustedAction(
 				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcherTwin))
 			}()
 		}
-		if cut := trustedReadingCut(request.Input, facts, launcherRead); cut.Any() {
+		// A script past the input bound is not read in full, so the bound of the argv
+		// call still cuts it (rel-1-0-10:GAP-0712).
+		if cut := trustedReadingCut(request.Input, facts, launcherRead && len(launcherTwin.Input.Command) <= actionfacts.MaxCommandBytes); cut.Any() {
 			// A CMD or PowerShell reading stopped at its command cap under the
 			// statement budget is truncated (the one bound rule): the call is
 			// never judged below the unknown tier of its pack. A CMD reading

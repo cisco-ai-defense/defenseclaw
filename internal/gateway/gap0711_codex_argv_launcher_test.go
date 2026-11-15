@@ -184,6 +184,12 @@ func gap0711LauncherBodies(t *testing.T, tierIndex int) {
 				}
 				// The same launcher as one command string gets the same
 				// verdict (rel-1-0-10:GAP-0735).
+				if r.id == "ordinary-over-64KiB" {
+					// A string past the input bound is a clean allow on rel
+					// (rel-1-0-10:GAP-0748, the revert of the bytes floor); the
+					// argv form is floored by its own bound (GAP-0712).
+					continue
+				}
 				if argvAction != textAction {
 					t.Errorf("%s/%s/%s: argv action %s differs from the same command as a string, %s", tier.name, l.name, r.id, argvAction, textAction)
 				}

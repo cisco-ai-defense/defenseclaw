@@ -106,7 +106,10 @@ func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Fac
 	twin.conflictSource = nil
 	switch dialect {
 	case actionfacts.DialectPOSIX:
-		if facts.Parse.Status != actionfacts.StatusLimitExceeded {
+		// A POSIX launcher string keeps the readings it has (its script is
+		// read inside the call); only an argv array, whose words the analysis
+		// bounds one by one, needs the script read on its own.
+		if !isArgv || facts.Parse.Status != actionfacts.StatusLimitExceeded {
 			return trustedActionRequest{}, false
 		}
 	case actionfacts.DialectPowerShell:
@@ -120,7 +123,12 @@ func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Fac
 			}
 			line := powerShellLineOfArgv(argv)
 			twin.Input.Command, twin.Input.Args, twin.Input.Argv = line, nil, nil
+			// The dialect the Windows hook gives the same text as a string.
 			twin.Input.DialectHint = actionfacts.DialectPowerShell
+			if request.windowsDialectReadings {
+				twin.Input.DialectHint = ""
+				twin.Input.DialectHint, _ = selectWindowsShellDialectReading(request.Input.Tool, line, twin.Input)
+			}
 			twin.LegacyText = line
 			return twin, true
 		}

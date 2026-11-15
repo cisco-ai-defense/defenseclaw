@@ -37,6 +37,8 @@ func TestShellLauncherBody(t *testing.T) {
 		{"cmd /s /c quoted", []string{"cmd", "/s", "/c", `"dir C:\"`}, `dir C:\`, DialectCMD, true},
 		{"cmd words joined", []string{"cmd", "/c", "echo", "a"}, "echo a", DialectCMD, true},
 		{"cmd unknown option", []string{"cmd", "/z", "/c", "dir"}, "", DialectCMD, false},
+		{"cmd switch value", []string{"cmd.exe", "/e:on", "/c", "dir"}, "dir", DialectCMD, true},
+		{"cmd bad switch value", []string{"cmd.exe", "/e:maybe", "/c", "dir"}, "", DialectCMD, false},
 		{"cmd no body", []string{"cmd", "/c"}, "", DialectCMD, false},
 		{"bash -lc", []string{"bash", "-lc", "ls -la"}, "ls -la", DialectPOSIX, true},
 		{"sh -c", []string{"/bin/sh", "-c", "ls"}, "ls", DialectPOSIX, true},
