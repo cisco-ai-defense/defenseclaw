@@ -31,6 +31,13 @@ const (
 	// the CLI: the same effect as a write to config.yaml, which the state
 	// rule blocks.
 	DefenseClawControlConfig DefenseClawControlKind = "config"
+	// DefenseClawControlSubstrate is a Substrate command that changes
+	// DefenseClaw's own state, configuration, credentials or session, or
+	// starts, connects to or changes an agent runtime DefenseClaw governs
+	// (defenseclaw substrate run, login, secrets set, template build; the
+	// gateway's substrate-controller). A Substrate command that only reports
+	// adds nothing.
+	DefenseClawControlSubstrate DefenseClawControlKind = "substrate"
 	// DefenseClawControlUnproven is a DefenseClaw command whose effect the
 	// parse could not resolve (a changing verb that is not a known stop or
 	// disable, a dynamic operand, an unparsed nested shell, a reading the
@@ -1187,6 +1194,40 @@ var (
 	// defenseClawWeakValues are the values of a mode option that move a guard to
 	// a weaker state.
 	defenseClawWeakValues = map[string]bool{"observe": true, "open": true}
+	// defenseClawSubstrateCommands are the Substrate commands: the
+	// `substrate` group of both CLIs and the gateway's substrate-* components
+	// (the controller, the egress callout, the bundle tool and the chart and
+	// volume steps). Their verbs are classified by the tables below, not by
+	// the verbs above, so a Substrate `set`, `run` or `apply` is not read as
+	// some other group's verb.
+	defenseClawSubstrateCommands = map[string]bool{
+		"substrate": true, "substrate-bundle": true, "substrate-chart": true, "substrate-controller": true,
+		"substrate-datadir": true, "substrate-extproc": true,
+	}
+	// defenseClawSubstrateGroups are the Substrate subcommand groups; the verb
+	// is the word after them.
+	defenseClawSubstrateGroups = map[string]bool{"policy": true, "bundle": true, "secrets": true, "template": true}
+	// defenseClawSubstrateReadVerbs only report: status, lists, logs, usage,
+	// the signed-in name, pending approvals, a policy explanation or offline
+	// test, the setup checks, and the template verify and scan. Under
+	// `secrets` only `list` is read (it prints names, scope, hosts and status,
+	// never a value; api.Secret has no value field).
+	defenseClawSubstrateReadVerbs = map[string]bool{
+		"status": true, "list": true, "show": true, "logs": true, "usage": true, "whoami": true,
+		"approvals": true, "explain": true, "verify": true, "doctor": true, "test": true, "scan": true,
+		"info": true, "describe": true,
+	}
+	// defenseClawSubstrateStopVerbs change DefenseClaw's state, configuration,
+	// credentials or session, or start, connect to or change an agent runtime.
+	// A Substrate verb in neither table is judged the same way (an ambiguous
+	// verb is a control); this table names the registered ones so the CLI
+	// drift test can tell a new verb from a reviewed one.
+	defenseClawSubstrateStopVerbs = map[string]bool{
+		"run": true, "connect": true, "pull": true, "checkpoint": true, "undo": true, "delete": true,
+		"migrate": true, "approve": true, "reject": true, "login": true, "logout": true, "set": true,
+		"rm": true, "reset": true, "setup": true, "apply": true, "rollback": true, "build": true,
+		"publish": true, "keygen": true, "serve": true,
+	}
 )
 
 // guardGroupBefore reports a guardrail command group among the words before
@@ -1201,6 +1242,43 @@ func guardGroupBefore(lower []string, index int) bool {
 		}
 	}
 	return false
+}
+
+// judgeDefenseClawSubstrate classifies a Substrate command (ok is false for
+// any other command). The verb is the first word after the command and an
+// optional group: a read verb adds nothing, every other verb, and a verb the
+// tables do not name, is a Substrate control. A bare `substrate` or
+// `substrate GROUP`, and the bare bundle and chart tools, only print their
+// help; the bare controller, callout and volume step run.
+func judgeDefenseClawSubstrate(lower []string) (kind DefenseClawControlKind, ok bool) {
+	if len(lower) == 0 || !defenseClawSubstrateCommands[lower[0]] {
+		return "", false
+	}
+	group, verb := "", ""
+	for _, word := range lower[1:] {
+		if group == "" && verb == "" && lower[0] == "substrate" && defenseClawSubstrateGroups[word] {
+			group = word
+			continue
+		}
+		verb = word
+		break
+	}
+	switch {
+	case verb == "":
+		switch lower[0] {
+		case "substrate", "substrate-bundle", "substrate-chart":
+			return "", true
+		}
+		return DefenseClawControlSubstrate, true
+	case group == "secrets":
+		if verb == "list" {
+			return "", true
+		}
+		return DefenseClawControlSubstrate, true
+	case defenseClawSubstrateReadVerbs[verb]:
+		return "", true
+	}
+	return DefenseClawControlSubstrate, true
 }
 
 // weakensMode reports a mode set to a weaker value through a verb
@@ -1251,6 +1329,9 @@ func judgeDefenseClawCLI(args []string, program string, dynamic bool) (kind Defe
 	}
 	if weakensMode(args) {
 		return DefenseClawControlDisable, true
+	}
+	if kind, ok := judgeDefenseClawSubstrate(lower); ok {
+		return kind, true
 	}
 	for index, word := range lower {
 		if found, ok := defenseClawStopVerbs[word]; ok {
