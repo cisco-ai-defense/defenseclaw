@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -23,6 +24,12 @@ func TestGAP0018RoutineWorkIsNotBlocked(t *testing.T) {
 	for _, tc := range gap0018RoutineRows {
 		for _, mode := range []string{"observe", "action"} {
 			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				if runtime.GOOS == "windows" && !tc.block {
+					// A place is private by its permission bits; a Windows path has
+					// none to read, so a copy of a key keeps the block of rel there
+					// (rel-1-0-10:GAP-0710).
+					t.Skip("no permission bits on Windows")
+				}
 				api := activeClaudeCodeTestAPI()
 				api.scannerCfg.Guardrail.Mode = mode
 				resp := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
