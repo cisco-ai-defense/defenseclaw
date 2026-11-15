@@ -5800,7 +5800,7 @@ func injectNotificationForPassthrough(raw json.RawMessage, content, path string)
 // named no home file and an unverifiable argument was never graded strict,
 // and every hook connector blocked what the proxy allowed
 // (rel-1-0-10:GAP-0782). A model reply names no session directory: a
-// relative target stays unresolved, as on /inspect/tool.
+// relative target resolves in an empty directory (proxyNeutralCWD).
 func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args string) trustedActionRequest {
 	connectorName := p.connectorName()
 	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, json.RawMessage(args))
@@ -5809,7 +5809,7 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args stri
 		Input: actionfacts.Input{
 			Tool:       agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS),
 			Args:       trusted,
-			CWD:        inspectToolTrustedShellCWD(toolCWD),
+			CWD:        proxyToolCallCWD(toolCWD),
 			ActiveHome: hookActiveHome(ctx),
 		},
 		LegacyText:         args,
@@ -5827,6 +5827,34 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args stri
 	withWindowsShellDialect(&action, windowsHookHost() && !p.toolCallSecureClient(ctx))
 	return action
 }
+
+// proxyToolCallCWD is the directory a tool call names for its command when
+// it is absolute, else proxyNeutralCWD: a model reply carries no session
+// directory. Judged with none, or with a directory that does not exist, a
+// shell call got no command reading that needs a directory, so an awk
+// system() or a PowerShell Add-Content that writes ~/.ssh/authorized_keys
+// raised no finding on the proxy where every hook connector blocks it
+// (rel-1-0-10:GAP-0782).
+func proxyToolCallCWD(toolCWD string) string {
+	if cwd := inspectToolTrustedShellCWD(toolCWD); cwd != "" {
+		return cwd
+	}
+	return proxyNeutralCWD()
+}
+
+// proxyNeutralCWD is an empty private directory the gateway creates once
+// (os.MkdirTemp, mode 0700): absolute and ~ operands are judged as on the
+// hook routes, and a relative one resolves to a file that does not exist,
+// as in a fresh project, never to a real file the call did not name. ""
+// when it cannot be created (the call is then judged without one, as
+// before).
+var proxyNeutralCWD = sync.OnceValue(func() string {
+	dir, err := os.MkdirTemp("", "defenseclaw-proxy-cwd-")
+	if err != nil {
+		return ""
+	}
+	return dir
+})
 
 // toolCallStrictTier reports whether the proxy judges its connector's tool
 // calls in the strict tier: the request's policy configuration when it has
