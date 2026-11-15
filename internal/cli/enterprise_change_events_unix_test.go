@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -120,7 +121,7 @@ func TestUnixChangeSyntaxRefusalsAreAudited(t *testing.T) {
 			cmd.SetIn(input)
 			cmd.SetOut(&bytes.Buffer{})
 			cmd.SetErr(&bytes.Buffer{})
-			if err := cmd.Execute(); commandExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
+			if err := cmd.Execute(); cliusage.ExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
 				t.Fatalf("syntax error = %v", err)
 			}
 			if input.Len() != len("credential-value-marker\n") {
@@ -156,7 +157,7 @@ func TestUnixChangeSyntaxRefusalsAreAudited(t *testing.T) {
 		cmd.SetArgs([]string{"--unknown"})
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetErr(&bytes.Buffer{})
-		if err := cmd.Execute(); commandExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
+		if err := cmd.Execute(); cliusage.ExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
 			t.Fatalf("%s syntax error = %v", mode, err)
 		}
 	}

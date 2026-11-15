@@ -9,13 +9,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 func TestOpenClawOutageToolKeepsProtectedTargetsClosed(t *testing.T) {
 	home := t.TempDir()
-	old := outageAccountHome
-	outageAccountHome = func() string { return home }
-	t.Cleanup(func() { outageAccountHome = old })
+	old := hookcli.OutageAccountHome
+	hookcli.OutageAccountHome = func() string { return home }
+	t.Cleanup(func() { hookcli.OutageAccountHome = old })
 	protected := filepath.Join(home, ".defenseclaw", "config.yaml")
 	if err := os.MkdirAll(filepath.Dir(protected), 0o700); err != nil {
 		t.Fatal(err)
@@ -77,9 +79,9 @@ func TestOpenClawOutageToolKeepsProtectedTargetsClosed(t *testing.T) {
 
 func TestOpenClawOutageExecContextTargets(t *testing.T) {
 	home := t.TempDir()
-	old := outageAccountHome
-	outageAccountHome = func() string { return home }
-	t.Cleanup(func() { outageAccountHome = old })
+	old := hookcli.OutageAccountHome
+	hookcli.OutageAccountHome = func() string { return home }
+	t.Cleanup(func() { hookcli.OutageAccountHome = old })
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -130,9 +132,9 @@ func TestOpenClawOutageExecContextTargets(t *testing.T) {
 
 func TestOpenClawOutageApplyPatchTarget(t *testing.T) {
 	home := t.TempDir()
-	old := outageAccountHome
-	outageAccountHome = func() string { return home }
-	t.Cleanup(func() { outageAccountHome = old })
+	old := hookcli.OutageAccountHome
+	hookcli.OutageAccountHome = func() string { return home }
+	t.Cleanup(func() { hookcli.OutageAccountHome = old })
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -153,9 +155,9 @@ func TestOpenClawOutageApplyPatchTarget(t *testing.T) {
 
 func TestOpenClawOutageBenignVariants(t *testing.T) {
 	home := t.TempDir()
-	old := outageAccountHome
-	outageAccountHome = func() string { return home }
-	t.Cleanup(func() { outageAccountHome = old })
+	old := hookcli.OutageAccountHome
+	hookcli.OutageAccountHome = func() string { return home }
+	t.Cleanup(func() { hookcli.OutageAccountHome = old })
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -188,9 +190,9 @@ func TestOpenClawOutageBenignVariants(t *testing.T) {
 
 func TestOpenClawOutageEnvLinkedTarget(t *testing.T) {
 	home := t.TempDir()
-	old := outageAccountHome
-	outageAccountHome = func() string { return home }
-	t.Cleanup(func() { outageAccountHome = old })
+	old := hookcli.OutageAccountHome
+	hookcli.OutageAccountHome = func() string { return home }
+	t.Cleanup(func() { hookcli.OutageAccountHome = old })
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -214,9 +216,9 @@ func TestOpenClawOutageEnvLinkedTarget(t *testing.T) {
 
 func TestOpenClawOutageWorkdirFalseBlock(t *testing.T) {
 	home := t.TempDir()
-	old := outageAccountHome
-	outageAccountHome = func() string { return home }
-	t.Cleanup(func() { outageAccountHome = old })
+	old := hookcli.OutageAccountHome
+	hookcli.OutageAccountHome = func() string { return home }
+	t.Cleanup(func() { hookcli.OutageAccountHome = old })
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -236,9 +238,9 @@ func TestOpenClawOutageWorkdirFalseBlock(t *testing.T) {
 
 func TestOpenClawOutageKnownEnvironmentShellVariants(t *testing.T) {
 	home := t.TempDir()
-	prior := outageAccountHome
-	outageAccountHome = func() string { return home }
-	t.Cleanup(func() { outageAccountHome = prior })
+	prior := hookcli.OutageAccountHome
+	hookcli.OutageAccountHome = func() string { return home }
+	t.Cleanup(func() { hookcli.OutageAccountHome = prior })
 	root := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)
@@ -294,9 +296,9 @@ func TestOpenClawOutageKnownEnvironmentShellVariants(t *testing.T) {
 
 func TestOpenClawOutageKnownEnvironmentCompoundAndChildValues(t *testing.T) {
 	home := t.TempDir()
-	prior := outageAccountHome
-	outageAccountHome = func() string { return home }
-	t.Cleanup(func() { outageAccountHome = prior })
+	prior := hookcli.OutageAccountHome
+	hookcli.OutageAccountHome = func() string { return home }
+	t.Cleanup(func() { hookcli.OutageAccountHome = prior })
 	root := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)

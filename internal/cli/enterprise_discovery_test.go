@@ -26,9 +26,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/spf13/cobra"
@@ -397,7 +399,7 @@ func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	}
 	var bad json.RawMessage
 	if _, err := enterpriseGatewayGet("/api/v1/guardrail/profiles/resolve?connector=bogus", &bad); err == nil ||
-		commandExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) || !strings.Contains(err.Error(), `unknown connector "bogus"`) ||
+		cliusage.ExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) || !strings.Contains(err.Error(), `unknown connector "bogus"`) ||
 		!strings.Contains(err.Error(), "claudecode, codex") {
 		t.Fatalf("unknown connector = %v", err)
 	}
@@ -566,7 +568,7 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 
 	// GAP-2114: a standard account's --json refusal is JSON on stdout too.
 	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
-		return enterpriseGatewayAIUsage{}, "", withExitCode(errors.New("elevation_required: ask your administrator"), 5)
+		return enterpriseGatewayAIUsage{}, "", cliusage.WithExitCode(errors.New("elevation_required: ask your administrator"), 5)
 	}
 	var refused bytes.Buffer
 	err := writeWindowsEnterpriseDiscovery(&refused, "", true)
@@ -575,7 +577,7 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 		Errors   []enterprisestatus.Message `json:"errors"`
 		ExitCode int                        `json:"exit_code"`
 	}
-	if commandExitCode(err) != 5 || json.Unmarshal(refused.Bytes(), &refusal) != nil || refusal.OK || refusal.ExitCode != 5 ||
+	if cliusage.ExitCode(err) != 5 || json.Unmarshal(refused.Bytes(), &refusal) != nil || refusal.OK || refusal.ExitCode != 5 ||
 		len(refusal.Errors) != 1 || refusal.Errors[0].Code != "elevation_required" || refusal.Errors[0].Message != "ask your administrator" {
 		t.Fatalf("--json refusal = %q (%v)", refused.String(), err)
 	}
@@ -779,9 +781,9 @@ func TestWindowsEnterpriseDiscoveryUserFormsListOnlyThatAccountsRuntimeFindings(
 // --user match it had before the identity views (GAP-0138), and drops the
 // other commands main does not have (issue #1092).
 func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
-	previousHost, previousCfg, previousReport := secureClientHost, cfg, enterpriseDiscoveryGatewayReport
+	previousHost, previousCfg, previousReport := hookcli.SecureClientHost, cfg, enterpriseDiscoveryGatewayReport
 	t.Cleanup(func() {
-		secureClientHost, cfg, enterpriseDiscoveryGatewayReport = previousHost, previousCfg, previousReport
+		hookcli.SecureClientHost, cfg, enterpriseDiscoveryGatewayReport = previousHost, previousCfg, previousReport
 	})
 	root := &cobra.Command{Use: "defenseclaw-gateway"}
 	enterprise := &cobra.Command{Use: "enterprise"}
@@ -812,9 +814,9 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	rulePack := &cobra.Command{Use: "rulepack", Long: rulePackCmd.Long, Annotations: rulePackCmd.Annotations}
 	sandboxSetup := newSandboxSetupCmd()
 	root.AddCommand(configGroup, export, rulePack, sandboxSetup)
-	hook := newHookCmd()
+	hook := hookcli.NewHookCmd()
 	root.AddCommand(hook)
-	secureClientHost = func() bool { return false }
+	hookcli.SecureClientHost = func() bool { return false }
 	keepCommandTreeOfMainOnSecureClient(root)
 	if got := len(group.Commands()); got != 3+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 || len(hook.Commands()) != 2 {
 		t.Fatalf("standalone groups have %d and %d commands, want the identity, sandbox and policy views and setup too", got, len(acpGroup.Commands()))
@@ -822,7 +824,7 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	if len(policyGroup.Commands()) != 2 || len(scanGroup.Commands()) != 4 {
 		t.Fatalf("standalone policy %v, scan %v: want policy digest and scan skill|mcp|plugin", policyGroup.Commands(), scanGroup.Commands())
 	}
-	secureClientHost = func() bool { return true }
+	hookcli.SecureClientHost = func() bool { return true }
 	keepCommandTreeOfMainOnSecureClient(root)
 	if got := group.Commands(); len(got) != 1 || got[0].Name() != "discovery" ||
 		discovery.Flag("user").Usage != "list one account's signals (account name or SID)" {

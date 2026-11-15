@@ -413,12 +413,14 @@ func (c *call) build(err error) Record {
 	end := time.Now()
 	rec := Record{Facts: c.f, Status: c.status, Outcome: "completed", TTFB: c.ttfb, Total: end.Sub(c.start), EndedAt: end}
 	switch {
-	case errors.Is(err, context.Canceled):
+	case c.status >= 400:
+		// The upstream answered with a failure: it stays failed even when
+		// the client then went away while the body was written.
+		rec.Outcome, rec.ErrorType = "failed", "http_"+itoa(c.status)
+	case errors.Is(err, context.Canceled), errors.Is(err, ErrClientGone):
 		rec.Outcome, rec.ErrorType = "cancelled", "cancelled"
 	case err != nil:
 		rec.Outcome, rec.ErrorType = "failed", "upstream_error"
-	case c.status >= 400:
-		rec.Outcome, rec.ErrorType = "failed", "http_"+itoa(c.status)
 	}
 	if c.parser != nil {
 		c.streamUse = c.parser.Usage()

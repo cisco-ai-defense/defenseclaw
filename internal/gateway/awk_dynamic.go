@@ -6,7 +6,6 @@ package gateway
 import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -73,5 +72,5 @@ func awkCommandDynamic(facts actionfacts.Facts) bool {
 // readers cannot read to the findings of what they did read, which keep
 // deciding on their own.
 func withAwkDynamicCommand(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
-	return withUnknownFinding(findings, unknownReasonFinding(awkDynamicTitle, awkprog.DynamicReason, bounded.CapSet{}, enforcementCapable))
+	return withUnknownFinding(findings, unknownReasonFinding(awkDynamicTitle, awkprog.DynamicReason, enforcementCapable))
 }

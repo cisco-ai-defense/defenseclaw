@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -114,8 +115,8 @@ func TestManagedAdministratorViewRefusesAStandardAccountWithElevationRequired(t 
 			"enterprise", "windows", "discovery", "--user", managedHostCurrentAccountName())
 	}
 	err := pinManagedAdministratorEnvironment("enterprise windows discovery", refusal)
-	if err == nil || commandExitCode(err) != 5 {
-		t.Fatalf("refusal = %v (exit %d), want exit 5", err, commandExitCode(err))
+	if err == nil || cliusage.ExitCode(err) != 5 {
+		t.Fatalf("refusal = %v (exit %d), want exit 5", err, cliusage.ExitCode(err))
 	}
 	for _, want := range []string{"the AI Discovery inventory", "enterprise windows discovery --user dcw-std1`", "Nothing was changed."} {
 		if !strings.Contains(err.Error(), want) {
@@ -132,15 +133,15 @@ func TestManagedAdministratorViewRefusesAStandardAccountWithElevationRequired(t 
 	if !strings.Contains(refused.String(), `"code":"elevation_required","message":"the AI Discovery inventory`) {
 		t.Fatalf("--json refusal = %s", refused.String())
 	}
-	if err := prepareManagedAuditExportEnvironment(); commandExitCode(err) != 5 || !strings.Contains(fmt.Sprint(err), "audit export -o <file>") {
+	if err := prepareManagedAuditExportEnvironment(); cliusage.ExitCode(err) != 5 || !strings.Contains(fmt.Sprint(err), "audit export -o <file>") {
 		t.Fatalf("audit export refusal = %v", err)
 	}
 	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
 		return enterpriseGatewayAIUsage{}, "", pinManagedAdministratorEnvironment("enterprise windows discovery", refusal)
 	}
 	err = writeWindowsEnterpriseDiscovery(io.Discard, "", false)
-	if commandExitCode(err) != 5 || !strings.HasPrefix(err.Error(), "the AI Discovery inventory of a managed computer") {
-		t.Fatalf("discovery = %v (exit %d)", err, commandExitCode(err))
+	if cliusage.ExitCode(err) != 5 || !strings.HasPrefix(err.Error(), "the AI Discovery inventory of a managed computer") {
+		t.Fatalf("discovery = %v (exit %d)", err, cliusage.ExitCode(err))
 	}
 }
 
@@ -152,7 +153,7 @@ func TestAuditExportDBFlagAndManagedBoundary(t *testing.T) {
 	previousDB := auditExportDB
 	auditExportDB = "previous/audit.db"
 	t.Cleanup(func() { auditExportDB = previousDB })
-	if err := auditExportPersistentPreRunE(nil, nil); commandExitCode(err) != 5 {
+	if err := auditExportPersistentPreRunE(nil, nil); cliusage.ExitCode(err) != 5 {
 		t.Fatalf("managed standard account with --db = %v, want elevation refusal", err)
 	}
 	auditExportCallerIsAdministrator = func() bool { return true }

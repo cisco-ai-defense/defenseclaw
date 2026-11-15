@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -90,7 +91,7 @@ func writeWindowsTestEnvKey(t *testing.T, path string, values ...windowsEnvValue
 // user's loaded hive and cleans the moved folders too; for a user whose
 // hive is not loaded it cleans the default locations and reports the skip.
 func TestWindowsForeignCleanupCleansFoldersTheUserEnvironmentNames(t *testing.T) {
-	if _, _, _, err := standaloneEnterprisePolicyLayout(); err != nil {
+	if _, _, _, err := hookcli.StandaloneEnterprisePolicyLayout(); err != nil {
 		t.Fatalf("the trusted machine roots must resolve on Windows: %v", err)
 	}
 	hives, _ := useWindowsEnvTestRegistry(t)

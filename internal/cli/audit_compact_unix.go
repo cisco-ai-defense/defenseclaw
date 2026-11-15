@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -124,7 +125,7 @@ var auditCompactRunAs = func(cmd *cobra.Command, db string, uid, gid uint32) err
 	if errors.As(err, &exited) {
 		// The child printed its own answer.
 		cmd.SilenceErrors = true
-		return withExitCode(err, exited.ExitCode())
+		return cliusage.WithExitCode(err, exited.ExitCode())
 	}
 	if err != nil {
 		return fmt.Errorf("audit compact: run as the gateway service account: %w", err)

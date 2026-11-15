@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -357,3 +359,28 @@ func TestRouteOnlyErrorBodiesAreProviderNative(t *testing.T) {
 		}
 	}
 }
+
+type brokenWriter struct{ header http.Header }
+
+func (b *brokenWriter) Header() http.Header       { return b.header }
+func (b *brokenWriter) WriteHeader(int)           {}
+func (b *brokenWriter) Write([]byte) (int, error) { return 0, errors.New("write: broken pipe") }
+
+// GAP-0631: a client that closes the connection mid-answer is not an upstream
+// failure: the copy returns modelusage.ErrClientGone, which records cancelled.
+func TestRouteOnlyCopyReportsAClientThatWentAway(t *testing.T) {
+	resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("data: x\n\n"))}
+	err := copyRouteOnlyResponse(&brokenWriter{header: http.Header{}}, resp, modelusage.Noop.Begin(context.Background(), modelusage.CallFacts{}), true)
+	if !errors.Is(err, modelusage.ErrClientGone) {
+		t.Fatalf("copy error = %v, want ErrClientGone", err)
+	}
+	resp = &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(&failingReader{})}
+	err = copyRouteOnlyResponse(httptest.NewRecorder(), resp, modelusage.Noop.Begin(context.Background(), modelusage.CallFacts{}), true)
+	if err == nil || errors.Is(err, modelusage.ErrClientGone) {
+		t.Fatalf("an upstream read failure = %v, must stay a failure", err)
+	}
+}
+
+type failingReader struct{}
+
+func (*failingReader) Read([]byte) (int, error) { return 0, errors.New("connection reset by peer") }

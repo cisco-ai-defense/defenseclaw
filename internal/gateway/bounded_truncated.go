@@ -83,19 +83,19 @@ func (a *APIServer) boundedTier(ctx context.Context, connectorName string) bound
 // (enforcementCapable false) still alerts: a truncated input is never a
 // silent allow.
 func boundedTruncatedFinding(set bounded.CapSet, enforcementCapable bool) RuleFinding {
-	return unknownReasonFinding(boundedTruncatedTitle, set.Reason(), set, enforcementCapable)
+	finding := unknownReasonFinding(boundedTruncatedTitle, set.Reason(), enforcementCapable)
+	finding.boundedCaps = set
+	return finding
 }
 
 // unknownReasonFinding is the evaluation-limit finding of an input the
 // readers cannot judge, with a ship-authored title and a reason from a closed
-// set (a cap name, awkprog.DynamicReason), and the caps it stands for (none
-// for a call whose command is computed). The profile maps it to the unknown
-// tier of the pack.
-func unknownReasonFinding(title, reason string, caps bounded.CapSet, enforcementCapable bool) RuleFinding {
+// set (a cap name, awkprog.DynamicReason). The profile maps it to the
+// unknown tier of the pack.
+func unknownReasonFinding(title, reason string, enforcementCapable bool) RuleFinding {
 	finding := trustedActionLimitFindings(enforcementCapable)[0]
 	finding.Title = title + " (" + reason + ")"
 	finding.Evidence = reason
-	finding.boundedCaps = caps
 	if !enforcementCapable {
 		finding.enforcement = findingEnforcementAlertOnly
 	}

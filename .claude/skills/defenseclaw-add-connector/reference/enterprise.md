@@ -121,7 +121,7 @@ There is no single source of truth on Windows. Update **every** list below; drif
    - `managed_runtime_windows.go` `ResolveWindowsManagedHookRuntime`;
    - the selector switch in `managed_runtime_generation_windows.go`;
    - `parseWindowsManagedRuntimeBundleLeaf`;
-   - `internal/cli/hook_trusted_state_windows.go` `windowsStandalonePerUserHookConnector`.
+   - `internal/hookcli/hook_trusted_state_windows.go` `windowsStandalonePerUserHookConnector`.
 5. **Version discovery.** Windows never executes the agent. Reads are static, bounded, and refuse reparse points (`winpath.RejectReparseChain`). Sources:
    - `agent_version_peruser_windows.go` `windowsStandalonePerUserAgentVersionCandidatePaths` (npm package map);
    - `discoverWindowsStandalonePerUserAgentVersion` (native installers: Devin `_versions`, the Hermes `install-stamp.json`, the Antigravity log tail);
@@ -241,7 +241,7 @@ Without these, the plugin fails closed with "hook credential is unavailable".
 
 | Mistake | Commit | Lesson |
 |---|---|---|
-| Kiro commands rendered a flag that the hook binary lacked; it exited 1 and Kiro went ahead | `cb96bc5d` | Every rendered argument must exist in `internal/cli/hook.go`. Test the rendered command end to end. |
+| Kiro commands rendered a flag that the hook binary lacked; it exited 1 and Kiro went ahead | `cb96bc5d` | Every rendered argument must exist in `internal/hookcli/hook.go`. Test the rendered command end to end. |
 | The Windows `& '<exe>'` form lost exit 2 | `cd6b6f2c` | Use the encoded bridge and test it through `cmd.exe /d /s /c`. |
 | The Kiro floor refused repairs of rows below it; every self-update counted as drift | `cd6b6f2c`, `cb96bc5d` | A floor gates new enrollments only. Not-gated connectors need `standaloneAcceptsAgentVersionChange`. |
 | Unix Devin ran the per-user script, so the guard never ran | `0f728f8b` | Guarded connectors run the admin binary. Keep the old script recognized for upgrade and teardown. |
