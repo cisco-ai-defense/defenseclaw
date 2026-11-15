@@ -138,7 +138,7 @@ func DiscoverUnixPrivateAgentInstalls(ctx context.Context, home string, connecto
 	case found := <-done:
 		return found
 	case <-grace.C:
-		scan := newPrivateInstallScan()
+		scan := newPrivateInstallScan(filepath.Clean(home))
 		scan.skipAll(wanted, PrivateInstallSkippedHome)
 		return scan.result()
 	}
@@ -149,7 +149,7 @@ func DiscoverUnixPrivateAgentInstalls(ctx context.Context, home string, connecto
 const privateInstallScanGrace = time.Second
 
 func discoverUnixPrivateAgentInstalls(ctx context.Context, home string, wanted []string) []PrivateAgentInstall {
-	scan := newPrivateInstallScan()
+	scan := newPrivateInstallScan(home)
 	roots := []string{home}
 	if connectorListed(wanted, "claudecode") {
 		// Keep the vendor's known root even if the bounded deep walk cannot
@@ -161,9 +161,9 @@ func discoverUnixPrivateAgentInstalls(ctx context.Context, home string, wanted [
 		scan.skipAll(wanted, PrivateInstallSkippedVersionManagers)
 	}
 	roots = append(roots, prefixes...)
-	nested, complete := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{open: unixPrivateWalkOpener(home), unreachable: unixPrivateWalkUnreachable, homeLinks: true})
+	nested, complete, unlisted := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{open: unixPrivateWalkOpener(home), unreachable: unixPrivateWalkUnreachable, homeLinks: true})
 	if !complete {
-		scan.skipAll(wanted, PrivateInstallSkippedHome)
+		scan.skipAllAt(wanted, PrivateInstallSkippedHome, unlisted)
 	}
 	roots = append(roots, nested...)
 	if ctx.Err() != nil {

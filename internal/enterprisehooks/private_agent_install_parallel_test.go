@@ -38,7 +38,7 @@ func TestPrivateWalkListsIndependentBranchesConcurrently(t *testing.T) {
 		case <-ctx.Done():
 		}
 	}()
-	prefixes, complete := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{
+	prefixes, complete, _ := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{
 		open: os.Open,
 		openChild: func(parent *os.File, name string) (*os.File, error) {
 			if name == "left" || name == "right" {

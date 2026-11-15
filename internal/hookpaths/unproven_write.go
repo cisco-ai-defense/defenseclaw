@@ -10,6 +10,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
@@ -71,6 +74,13 @@ func commandNewItemMayMakeLink(command string) bool {
 	if facts.Parse.Dialect != actionfacts.DialectPowerShell {
 		return true
 	}
+	// A call after the first of its pipeline reads pipeline input.
+	pipelineHead := make(map[int64]int64)
+	for _, call := range facts.Commands {
+		if head, seen := pipelineHead[call.PipelineID]; call.PipelineID != 0 && (!seen || call.ID < head) {
+			pipelineHead[call.PipelineID] = call.ID
+		}
+	}
 	read := 0
 	for _, call := range facts.Commands {
 		if len(call.Argv) == 0 || !strings.EqualFold(call.Argv[0], "new-item") {
@@ -82,7 +92,7 @@ func commandNewItemMayMakeLink(command string) bool {
 		for i, word := range call.Argv[1:] {
 			static[i] = call.ArgvComplete || !strings.ContainsAny(word, "$@(){}`")
 		}
-		if powerShellNewItemMayMakeLink(call.Argv[1:], static) {
+		if powerShellNewItemMayMakeLink(call.Argv[1:], static, call.PipelineID != 0 && pipelineHead[call.PipelineID] != call.ID) {
 			return true
 		}
 		read++
@@ -92,49 +102,167 @@ func commandNewItemMayMakeLink(command string) bool {
 
 // powerShellNewItemMayMakeLink reports a New-Item call (the words after the
 // program, and which are static) that may create a link: an item type that
-// is a link or that this reading cannot fix (a dynamic or unknown item type,
-// a splat or a dynamic parameter name). No item type (a file), or a static File or
-// Directory, makes no link.
-func powerShellNewItemMayMakeLink(args []string, static []bool) bool {
-	itemType := ""
+// is a link or that this reading cannot fix. The words bind as PowerShell
+// binds them (newItemParameter): a name or an alias in any case, a prefix
+// that names one parameter only, any dash form, and -Name: with the value
+// in the next word. A word that binds to no known parameter, a splat, a
+// dynamic parameter name or item type, or a second positional word may be
+// an item type, so the call may make a link (rel-1-0-10:GAP-0849: -Ty,
+// -Typ, an en dash, -ItemType: SymbolicLink and an em dash Type made links
+// the reading took for files). piped is a call after the first of its
+// pipeline: ItemType binds from a property of its input. No item type (a
+// file), or a static File, Directory or Container (or a prefix PowerShell
+// reads as one), makes no link.
+func powerShellNewItemMayMakeLink(args []string, static []bool, piped bool) bool {
+	if piped {
+		return true
+	}
+	itemType, typed, positional := "", false, 0
 	for i := 0; i < len(args); i++ {
-		// A splat can carry -ItemType; a dynamic word in a parameter's place
-		// can be one. Any other dynamic word is a value (a path or content).
-		if strings.HasPrefix(args[i], "@") {
+		word := args[i]
+		// A splat can carry -ItemType.
+		if strings.HasPrefix(word, "@") {
 			return true
 		}
-		if i >= len(static) || !static[i] {
-			if strings.HasPrefix(args[i], "-") {
+		name, isParameter := powerShellParameterWord(word)
+		if !isParameter {
+			// A value word: the first takes the -Path position. New-Item has
+			// no other positional parameter, so a second is binding this
+			// reading does not follow.
+			positional++
+			if positional > 1 {
 				return true
 			}
 			continue
 		}
-		word := strings.ToLower(args[i])
-		if !strings.HasPrefix(word, "-") {
+		// A dynamic word in a parameter's place can be -ItemType.
+		if i >= len(static) || !static[i] {
+			return true
+		}
+		name, value, inline := strings.Cut(name, ":")
+		param, known := newItemParameter(name)
+		if !known {
+			return true
+		}
+		if param.isSwitch {
 			continue
 		}
-		name, value, inline := strings.Cut(word, ":")
-		if name != "-type" && (len(name) < 3 || !strings.HasPrefix("-itemtype", name)) {
-			continue
-		}
-		if !inline {
-			if i+1 >= len(args) || i+1 >= len(static) || !static[i+1] {
-				return true
+		if !inline || value == "" {
+			if i+1 >= len(args) {
+				return param.isItemType
 			}
 			i++
-			value = strings.ToLower(args[i])
+			value = args[i]
+			if param.isItemType && (i >= len(static) || !static[i]) {
+				return true
+			}
 		}
-		value = strings.Trim(value, `'"`)
-		if itemType != "" && itemType != value {
+		if !param.isItemType {
+			continue
+		}
+		if typed {
 			return true
 		}
-		itemType = value
+		typed, itemType = true, strings.ToLower(strings.Trim(value, "'\""))
 	}
-	switch itemType {
-	case "", "file", "directory":
+	return typed && !powerShellItemTypeMakesNoLink(itemType)
+}
+
+// powerShellParameterWord is a word PowerShell reads as a parameter name (a
+// dash, en dash, em dash or horizontal bar, then a letter): the name after
+// the dash, in lower case.
+func powerShellParameterWord(word string) (string, bool) {
+	for _, dash := range []string{"-", "\u2013", "\u2014", "\u2015"} {
+		rest, ok := strings.CutPrefix(word, dash)
+		if !ok {
+			continue
+		}
+		first, _ := utf8.DecodeRuneInString(rest)
+		if rest == "" || !unicode.IsLetter(first) {
+			return "", false
+		}
+		return strings.ToLower(rest), true
+	}
+	return "", false
+}
+
+// powerShellItemTypeMakesNoLink reports an -ItemType value the FileSystem
+// provider reads as a file or a folder: it matches the value as a
+// case-insensitive prefix (value*) of directory, container and file before
+// the link types. A wildcard or an empty value is not read.
+func powerShellItemTypeMakesNoLink(value string) bool {
+	if value == "" || strings.ContainsAny(value, "*?[]`") {
 		return false
 	}
-	return true
+	for _, name := range strings.Fields(newItemNoLinkTypes) {
+		if strings.HasPrefix(name, value) {
+			return true
+		}
+	}
+	return false
+}
+
+// newItemParam is a New-Item parameter: its name and aliases in lower case,
+// whether it is a switch (takes no value word) and whether it is ItemType.
+type newItemParam struct {
+	names      []string
+	isSwitch   bool
+	isItemType bool
+}
+
+// newItemParamSpec lists the parameters of New-Item (FileSystem provider,
+// Windows PowerShell 5.1 and PowerShell 7) and the common parameters: each
+// field is a name and its aliases joined by commas, "@" marks ItemType and
+// a trailing "!" a switch. It is one string so the names add no word to the
+// package's literal sweep (TestGAP0749BoundedSweepReadsEveryFormAndStaysInBudget,
+// rel-1-0-10:GAP-0828).
+const newItemParamSpec = "path name @itemtype,type value,target credential force! whatif,wi! confirm,cf! " +
+	"usetransaction,usetx! verbose,vb! debug,db! erroraction,ea warningaction,wa informationaction,infa " +
+	"progressaction,proga errorvariable,ev warningvariable,wv informationvariable,iv outvariable,ov " +
+	"outbuffer,ob pipelinevariable,pv"
+
+// newItemParams are the parameters newItemParamSpec lists.
+var newItemParams = sync.OnceValue(func() []newItemParam {
+	var params []newItemParam
+	for _, field := range strings.Fields(newItemParamSpec) {
+		var param newItemParam
+		field, param.isItemType = strings.CutPrefix(field, "@")
+		field, param.isSwitch = strings.CutSuffix(field, "!")
+		param.names = strings.Split(field, ",")
+		params = append(params, param)
+	}
+	return params
+})
+
+// newItemNoLinkTypes are the item types the FileSystem provider matches
+// (value*) before the link types: a folder (directory, container) or a file.
+const newItemNoLinkTypes = "directory container file"
+
+// newItemParameter binds a lower-case parameter name as PowerShell does: an
+// exact name or alias first, else a prefix of the names and aliases of one
+// parameter only. An unknown or ambiguous name (-t: Type or Target) does
+// not bind.
+func newItemParameter(name string) (newItemParam, bool) {
+	params := newItemParams()
+	match := -1
+	for i, param := range params {
+		for _, candidate := range param.names {
+			if candidate == name {
+				return param, true
+			}
+			if strings.HasPrefix(candidate, name) {
+				if match >= 0 && match != i {
+					match = -2
+				} else if match != -2 {
+					match = i
+				}
+			}
+		}
+	}
+	if match < 0 {
+		return newItemParam{}, false
+	}
+	return params[match], true
 }
 
 // CommandMayMakeLink reports a command that may create a link itself, with a
