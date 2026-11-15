@@ -19,6 +19,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -34,6 +36,7 @@ import (
 
 func newWindowsHookImageRetireCommand() *cobra.Command {
 	var jsonOutput bool
+	var skipProfiles []string
 	command := &cobra.Command{
 		Use:          "retire",
 		Short:        "Point every agent hook back at bin\\defenseclaw-hook.exe before an older release's Setup runs",
@@ -41,23 +44,27 @@ func newWindowsHookImageRetireCommand() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			report := runWindowsHookImageRetire()
+			report := runWindowsHookImageRetire(skipProfiles)
 			summary := "every agent hook names the transition image again; the launch folders stay"
 			return writeWindowsHookImageReport(cmd.OutOrStdout(), jsonOutput, report, summary, report.OK, report.Reason, report.Error)
 		},
 	}
 	command.Flags().BoolVar(&jsonOutput, "json", false, "print the JSON report (otherwise one summary line)")
+	command.Flags().StringArrayVar(&skipProfiles, "skip-profile", nil,
+		"SID of an enrolled profile whose own agent configs still name a launch folder to leave unconverted (repeatable; audited, and listed by status and verify until converted)")
 	return command
 }
 
-func runWindowsHookImageRetire() windowsHookImageRetireReport {
+func runWindowsHookImageRetire(skipProfiles []string) windowsHookImageRetireReport {
 	refused := func(err error) windowsHookImageRetireReport {
 		return windowsHookImageRetireReport{
-			SchemaVersion: windowsHookImageReportSchema,
-			Reason:        windowsHookImageRetireRefused,
-			Error:         err.Error(),
-			Rewritten:     []string{},
-			StillNamed:    []windowsHookImageNamedFile{},
+			SchemaVersion:     windowsHookImageReportSchema,
+			Reason:            windowsHookImageRetireRefused,
+			Error:             err.Error(),
+			Rewritten:         []string{},
+			StillNamed:        []windowsHookImageNamedFile{},
+			SkippedProfiles:   []windowsHookImageSkippedProfile{},
+			SignedOutProfiles: []windowsHookImageSignedOutProfile{},
 		}
 	}
 	if !windowsEnterpriseIsElevated() {
@@ -83,10 +90,11 @@ func runWindowsHookImageRetire() windowsHookImageRetireReport {
 		return refused(err)
 	}
 	defer restoreOwner()
-	guardian, err := windowsHookImageGuardianService(roots, filepath.Dir(bin))
+	gateway, err := winpath.EnterpriseGatewayServiceForRoot(roots, filepath.Dir(bin))
 	if err != nil {
 		return refused(err)
 	}
+	guardian := windowsHookImageGuardianService(gateway)
 	return retireWindowsHookImages(windowsHookImageRetireSteps{
 		FS:  osWindowsHookImageFS{},
 		Bin: bin,
@@ -94,14 +102,15 @@ func runWindowsHookImageRetire() windowsHookImageRetireReport {
 			return windowsRecordedArtifactHash(roots.MetadataPath, artifact)
 		},
 		WriteMarker: func(path string, body []byte) error {
-			if err := os.WriteFile(path, body, 0o600); err != nil {
-				return err
-			}
-			return applyWindowsSDDL(path, windowsInstallFileSDDL)
+			return writeWindowsHookImageRetiredMarker(path, body, applyWindowsSDDL)
 		},
-		ReconcileCodex:  reconcileWindowsCodexRequirementsForHookImage,
-		RestartGuardian: func() error { return restartWindowsHookImageGuardian(guardian) },
-		Scan:            func() windowsHookImageConfigScan { return scanWindowsHookImageConfigs(roots, bin) },
+		ReconcileCodex: func() error { return reconcileWindowsCodexRequirementsForHookImage(gateway) },
+		DeselectSignedOut: func() windowsHookImageDeselection {
+			return deselectWindowsHookImageSignedOutSelections(roots, bin, gateway)
+		},
+		RestartGuardian:  func() error { return restartWindowsHookImageGuardian(guardian) },
+		GuardianFailures: windowsHookImageGuardianFailures,
+		Scan:             func() windowsHookImageConfigScan { return scanWindowsHookImageConfigs(roots, bin) },
 		RouteOnlyRouted: func() ([]string, error) {
 			cfg, err := loadWindowsEnterpriseStandaloneConfig("")
 			if errors.Is(err, fs.ErrNotExist) {
@@ -112,24 +121,180 @@ func runWindowsHookImageRetire() windowsHookImageRetireReport {
 			}
 			return managedRouteOnlyConnectors(cfg), nil
 		},
-		Now:   time.Now,
-		Sleep: time.Sleep,
-		Wait:  windowsHookImageRetireWait,
-		Poll:  windowsHookImageRetirePoll,
+		SkipProfiles: skipProfiles,
+		Profiles: func() (map[string]windowsHookImageProfile, error) {
+			return windowsHookImageEnrolledProfiles(roots)
+		},
+		Actor:      windowsHookImageRetireActor,
+		Audit:      postWindowsHookImageRetireSkip,
+		ReadMarker: os.ReadFile,
+		Now:        time.Now,
+		Sleep:      time.Sleep,
+		Wait:       windowsHookImageRetireWait,
+		Poll:       windowsHookImageRetirePoll,
 	})
 }
 
-// windowsHookImageGuardianService is the guardian service of the install
-// root: DefenseClawHookGuardian, or a certification run's guardian.
-func windowsHookImageGuardianService(roots winpath.EnterpriseRoots, installRoot string) (string, error) {
-	gateway, err := winpath.EnterpriseGatewayServiceForRoot(roots, installRoot)
+// windowsHookImageEnrolledProfiles is every enabled account of the
+// guardian's manifest by SID.
+func windowsHookImageEnrolledProfiles(roots winpath.EnterpriseRoots) (map[string]windowsHookImageProfile, error) {
+	manifest, err := enterprisehooks.LoadManifest(filepath.Join(roots.StateRoot, "hook-guardian", "targets.yaml"))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	profiles := map[string]windowsHookImageProfile{}
+	for _, target := range manifest.Targets {
+		sid := strings.TrimSpace(target.SID)
+		if sid == "" || (target.Enabled != nil && !*target.Enabled) {
+			continue
+		}
+		profiles[sid] = windowsHookImageProfile{Account: strings.TrimSpace(target.User), Home: strings.TrimSpace(target.UserHome)}
+	}
+	return profiles, nil
+}
+
+// windowsHookImageRetireActor names the account that runs retire:
+// "DOMAIN\user (SID)", or the SID alone when it has no name.
+func windowsHookImageRetireActor() string {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return "unknown account"
+	}
+	sid := user.User.Sid.String()
+	if account, domain, _, err := user.User.Sid.LookupAccount(""); err == nil && account != "" {
+		if domain != "" {
+			account = domain + `\` + account
+		}
+		return account + " (" + sid + ")"
+	}
+	return sid
+}
+
+// postWindowsHookImageRetireSkip writes the HIGH audit row of one skipped
+// profile through the managed gateway: who skipped it and when, the SID and
+// the files that still name a launch folder (GAP-0794 review F4). It is an
+// operator mutation of the managed hook state, so the config-update action.
+func postWindowsHookImageRetireSkip(profile windowsHookImageSkippedProfile) error {
+	return writeWindowsEnterpriseAuditRow(func() error {
+		return postWindowsManagedObservability(map[string]any{"kind": "activity", "activity": map[string]any{
+			"actor":       profile.SkippedBy,
+			"action":      string(audit.ActionConfigUpdate),
+			"target_type": "hook-image-retire-skip",
+			"target_id":   profile.SID,
+			"severity":    "HIGH",
+			"before":      map[string]any{"account": profile.Account, "still_named": profile.Files},
+			"after":       map[string]any{"skipped_at": profile.SkippedAt, "retired": false},
+		}})
+	})
+}
+
+// windowsHookImageGuardianService is the guardian service beside the
+// install root's gateway service: DefenseClawHookGuardian, or a
+// certification run's guardian.
+func windowsHookImageGuardianService(gateway string) string {
 	if id, ok := strings.CutPrefix(gateway, "DefenseClawCertGateway_"); ok {
-		return "DefenseClawCertGuardian_" + id, nil
+		return "DefenseClawCertGuardian_" + id
 	}
-	return "DefenseClawHookGuardian", nil
+	return "DefenseClawHookGuardian"
+}
+
+// deselectWindowsHookImageSignedOutSelections is retire's runtime selector
+// step (rel-1-0-10 GAP-0856): for each enrolled account of the guardian's
+// manifest the guardian cannot repair now (no Windows session it repairs
+// in, the guardian's own check), it drops the selections that name a launch
+// image of bin, under the guardian's service pins. An account with a session
+// keeps its selections: the guardian rewrites them after its restart.
+func deselectWindowsHookImageSignedOutSelections(roots winpath.EnterpriseRoots, bin, gateway string) windowsHookImageDeselection {
+	result := windowsHookImageDeselection{Errors: map[string]string{}}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		result.Error = "resolve the standalone layout: " + err.Error()
+		return result
+	}
+	manifest, err := windowsHookImageManifestLoader(filepath.Join(roots.StateRoot, "hook-guardian", "targets.yaml"))
+	if err != nil {
+		result.Error = "read the guardian's manifest: " + err.Error()
+		return result
+	}
+	targets := map[string]enterprisehooks.ManifestTarget{}
+	for _, target := range manifest.Targets {
+		sid := strings.ToUpper(strings.TrimSpace(target.SID))
+		if sid == "" || !target.IsEnabled() {
+			continue
+		}
+		if _, seen := targets[sid]; !seen {
+			targets[sid] = target
+		}
+	}
+	restore := setTemporaryEnvironment(windowsEnterpriseGuardianRecordPins(layout, gateway))
+	defer restore()
+	dropped, failures := windowsHookImageDeselector(bin, func(sid string) (bool, error) {
+		target, enrolled := targets[strings.ToUpper(strings.TrimSpace(sid))]
+		if !enrolled {
+			// Not this guardian's account: the guardian's own pass retires
+			// a selection its machine policy no longer registers (GAP-0262).
+			return false, nil
+		}
+		available, err := enterpriseHookTargetSessionAvailable(target)
+		return err == nil && !available, err
+	})
+	for path, failure := range failures {
+		if path == "" || !filepath.IsAbs(path) {
+			result.Error = strings.TrimSpace(strings.Join([]string{result.Error, path + ": " + failure.Error()}, " "))
+			continue
+		}
+		result.Errors[strings.ToLower(path)] = failure.Error()
+	}
+	byAccount := map[string]*windowsHookImageSignedOutProfile{}
+	var order []string
+	for _, selection := range dropped {
+		key := strings.ToUpper(selection.SID)
+		profile, seen := byAccount[key]
+		if !seen {
+			profile = &windowsHookImageSignedOutProfile{SID: selection.SID, Account: strings.TrimSpace(targets[key].User), Connectors: []string{}}
+			byAccount[key] = profile
+			order = append(order, key)
+		}
+		profile.Connectors = append(profile.Connectors, selection.Connector)
+	}
+	sort.Strings(order)
+	for _, key := range order {
+		sort.Strings(byAccount[key].Connectors)
+		result.Profiles = append(result.Profiles, *byAccount[key])
+	}
+	return result
+}
+
+// windowsHookImageDeselector is the enterprisehooks runtime selector step and
+// windowsHookImageManifestLoader the guardian manifest reader; seams for
+// tests.
+var (
+	windowsHookImageDeselector     = enterprisehooks.DeselectWindowsStandaloneSignedOutLaunchSelections
+	windowsHookImageManifestLoader = enterprisehooks.LoadManifest
+)
+
+// windowsHookImageGuardianFailures are the failed rows of the guardian's
+// last reconcile, worded as enterprise windows status words them, for the
+// cause of a machine file retire stays pending on.
+func windowsHookImageGuardianFailures() []string {
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return nil
+	}
+	state, exists, err := loadEnterpriseHookGuardianState(layout.DataDir)
+	if err != nil {
+		return []string{"the guardian's state could not be read: " + err.Error()}
+	}
+	if !exists {
+		return nil
+	}
+	var failures []string
+	for _, row := range state.Results {
+		if !row.OK && !row.Pending {
+			failures = append(failures, enterpriseHookGuardianFailureIssue(row))
+		}
+	}
+	return failures
 }
 
 // restartWindowsHookImageGuardian restarts the guardian so its first
@@ -160,12 +325,20 @@ func restartWindowsHookImageGuardian(name string) error {
 // requirements with the resolver's launch set, as Setup's
 // `codex-requirements reconcile` does. An install without Codex machine
 // requirements has nothing to rewrite.
-func reconcileWindowsCodexRequirementsForHookImage() error {
+//
+// It runs under the guardian's record pins (windowsEnterpriseGuardianRecordPins):
+// the layout resolver requires the guardian's authorization directory and the
+// gateway service name, which an administrator's or SYSTEM's shell does not
+// carry, so with the service pins alone every retire's reconcile refused with
+// "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR must be an exact absolute protected
+// path", the requirements kept naming the launch folder, and the guardian's
+// next pass refused them too (rel-1-0-10 GAP-0856).
+func reconcileWindowsCodexRequirementsForHookImage(gateway string) error {
 	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
 		return err
 	}
-	restore := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
+	restore := setTemporaryEnvironment(windowsEnterpriseGuardianRecordPins(layout, gateway))
 	defer restore()
 	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return err
@@ -183,17 +356,17 @@ func reconcileWindowsCodexRequirementsForHookImage() error {
 
 // scanWindowsHookImageConfigs reads every file DefenseClaw writes that can
 // name a hook image of bin (windowsHookImageConfigFiles): machine files make
-// the scan incomplete when they cannot be read, account files are skipped
-// (windowsHookImageConfigScan). An account path is looked at, listed and read
+// the scan incomplete when they cannot be read, account files are unverified
+// (windowsHookImageConfigScan.Unverified). An account path is looked at, listed and read
 // only from its home's handle with no link followed from the home down
 // (link_in_account_path otherwise).
 func scanWindowsHookImageConfigs(roots winpath.EnterpriseRoots, bin string) windowsHookImageConfigScan {
 	entries, problems := windowsHookImageConfigFiles(roots)
-	files, incomplete, skipped := expandWindowsHookImageConfigFiles(entries, os.Lstat, os.ReadDir,
+	files, incomplete, unverified := expandWindowsHookImageConfigFiles(entries, os.Lstat, os.ReadDir,
 		windowsHookImageAccountView(viewWindowsHookImageAccountPath))
 	scan := scanWindowsHookImageConfigFiles(files, bin, readWindowsHookImageConfigFile)
 	scan.Incomplete = append(append(problems, incomplete...), scan.Incomplete...)
-	scan.Skipped = append(skipped, scan.Skipped...)
+	scan.Unverified = append(unverified, scan.Unverified...)
 	return scan
 }
 
@@ -229,36 +402,13 @@ func viewWindowsHookImageAccountPath(home, path string) (fs.FileInfo, []fs.DirEn
 
 // windowsHookImageScanMaxBytes bounds one scanned file. Every file
 // DefenseClaw writes that names a hook is far smaller; a larger one is not
-// read (a machine file makes the scan incomplete, an account file is skipped).
+// read (a machine file makes the scan incomplete, an account file is unverified).
 const windowsHookImageScanMaxBytes = 16 << 20
 
-// windowsHookImageScanFileTimeout bounds one file's open and read, so a
-// file an account holds with an oplock, or a path that does not answer,
-// cannot keep retire or prune (which hold the lifecycle lock) waiting. A
-// read still blocked at the timeout is given up on; its goroutine ends with
-// the process.
-const windowsHookImageScanFileTimeout = 5 * time.Second
-
-var errWindowsHookImageScanTimeout = fmt.Errorf("did not answer within %s; not read", windowsHookImageScanFileTimeout)
-
+// readWindowsHookImageConfigFile reads one file within
+// windowsHookImageScanTimeout.
 func readWindowsHookImageConfigFile(file windowsHookImageConfigFile) ([]byte, error) {
-	type result struct {
-		body []byte
-		err  error
-	}
-	done := make(chan result, 1)
-	go func() {
-		body, err := readWindowsHookImageConfigFileNow(file)
-		done <- result{body, err}
-	}()
-	timer := time.NewTimer(windowsHookImageScanFileTimeout)
-	defer timer.Stop()
-	select {
-	case got := <-done:
-		return got.body, got.err
-	case <-timer.C:
-		return nil, errWindowsHookImageScanTimeout
-	}
+	return windowsHookImageBounded(func() ([]byte, error) { return readWindowsHookImageConfigFileNow(file) })
 }
 
 // readWindowsHookImageConfigFileNow reads a regular file: a link, a
@@ -402,7 +552,7 @@ func windowsHookImageConfigFiles(roots winpath.EnterpriseRoots) ([]windowsHookIm
 	accountFiles, accountProblems := enterprisehooks.WindowsManagedHookConfigFiles(
 		filepath.Join(roots.StateRoot, "hook-guardian", "targets.yaml"))
 	for _, file := range accountFiles {
-		files = append(files, windowsHookImageConfigFile{Path: file.Path, User: file.User, Home: file.Home})
+		files = append(files, windowsHookImageConfigFile{Path: file.Path, User: file.User, Home: file.Home, SID: file.SID, Unverified: file.Unverified})
 	}
 	problems = append(problems, accountProblems...)
 	return files, problems
@@ -474,4 +624,33 @@ func containsFoldString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// writeWindowsHookImageRetiredMarker writes the retire marker and protects it
+// like an install file. The body goes to <marker>.new, is protected there and
+// then renamed over the marker, so a failed write or protection leaves the
+// marker as it was: none when there was none, so no unprotected marker tells
+// the writers the install is retired (rel-1-0-10:GAP-0840: a failed
+// protection left the marker behind, and every later retire reported pending
+// over it), and the earlier one with its recorded skips when retire rewrites
+// it (turev #8: a failed rewrite removed it and un-retired the install).
+func writeWindowsHookImageRetiredMarker(path string, body []byte, protect func(path, sddl string) error) error {
+	temp := path + ".new"
+	_ = os.Remove(temp)
+	discard := func(err error) error {
+		if removeErr := os.Remove(temp); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			return fmt.Errorf("%w; remove %s: %v", err, temp, removeErr)
+		}
+		return err
+	}
+	if err := os.WriteFile(temp, body, 0o600); err != nil {
+		return discard(err)
+	}
+	if err := protect(temp, windowsInstallFileSDDL); err != nil {
+		return discard(fmt.Errorf("protect the retire marker: %w", err))
+	}
+	if err := os.Rename(temp, path); err != nil {
+		return discard(fmt.Errorf("replace the retire marker: %w", err))
+	}
+	return nil
 }
