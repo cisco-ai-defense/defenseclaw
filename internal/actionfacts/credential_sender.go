@@ -365,12 +365,20 @@ func cwdBefore(facts Facts, id int64) (cwd string, changed bool) {
 		}
 		changed = true
 		target := ""
-		if command.ArgvComplete && !command.ControlFlowUncertain && senderProgramName(command.Program) != "popd" {
-			for _, word := range command.Argv[1:] {
-				if word == "--" || word == "-L" || word == "-P" {
+		// the target is read from the arguments (an expansion is an empty
+		// word); cd on the left of && changes the directory of what follows
+		// it, any other control flow leaves the directory unknown
+		unconditional := !command.ControlFlowUncertain ||
+			command.ControlFlowOperator == ControlFlowOperatorNone || command.ControlFlowOperator == ControlFlowOperatorAnd
+		if unconditional && senderProgramName(command.Program) != "popd" && len(command.Arguments) > 1 {
+			for _, argument := range command.Arguments[1:] {
+				if argument.Value == "--" || argument.Value == "-L" || argument.Value == "-P" {
 					continue
 				}
-				target = word
+				target = argument.Value
+				if argument.Expands {
+					target = ""
+				}
 			}
 		}
 		switch {
@@ -465,7 +473,9 @@ func credentialToRemoteOperand(facts Facts) CredentialSenderReason {
 			continue
 		}
 		credential, remote := false, false
-		for _, word := range commandWords(command) {
+		// the values the program's option tables own (ssh -i, scp -o) are
+		// not operands: an identity file authenticates, it is not sent
+		for _, word := range senderOperandWords(senderProgramName(command.Program), commandWords(command)) {
 			switch {
 			case credentialPathOperand(word, facts.CWD, facts.ActiveHome):
 				credential = true

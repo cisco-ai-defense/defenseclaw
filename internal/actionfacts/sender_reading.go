@@ -61,6 +61,11 @@ const (
 	// whose code asks for a network capability: the code is opaque to the
 	// projection, so where it sends is not read (GAP-0595).
 	SenderInlineCode SenderOrigin = "inline_code"
+	// SenderUploadOption is a curl or wget the projection did not read as an
+	// upload (an option its tables do not know leaves the parse partial): it
+	// names upload files by its upload options, or its parse is partial so
+	// that it may (GAP-0768).
+	SenderUploadOption SenderOrigin = "upload_option"
 	// SenderNetworkRole and SenderUnprovenRole are read from the network
 	// facts and the operand shape (sender_network_role.go).
 )
@@ -183,6 +188,7 @@ func ReadSenders(facts Facts) SendReading {
 	var reading SendReading
 	readProjectedSenders(facts, &reading, 0)
 	readNetworkRoleSenders(facts, &reading, false)
+	readUploadOptionSenders(facts, &reading)
 	readInlineCodeSenders(facts, &reading)
 	if facts.Parse.Status != StatusComplete && facts.Parse.Status != StatusNotApplicable {
 		reading.Unread = true
