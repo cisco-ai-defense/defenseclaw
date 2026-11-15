@@ -5856,6 +5856,21 @@ var proxyNeutralCWD = sync.OnceValue(func() string {
 	return dir
 })
 
+// toolCallCodeGuardFindings is CodeGuard over a write call's content
+// (codeGuardScanWriteArgs), as inspectTrustedToolPolicyCtx scans it for the
+// hook routes. A Secure Client install keeps its own scanners.
+func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action trustedActionRequest) []RuleFinding {
+	if p.toolCallSecureClient(ctx) || ManagedEnterpriseActive() || !isWriteToolName(strings.ToLower(action.Input.Tool)) {
+		return nil
+	}
+	rulesDir := ""
+	if cfg := proxyDecisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
+	}
+	scan := codeGuardScanWriteArgs(rulesDir, action.Input.Tool, action.Input.Args)
+	return codeGuardRuleFindings(scan, true, action.EnforcementCapable)
+}
+
 // toolCallStrictTier reports whether the proxy judges its connector's tool
 // calls in the strict tier: the request's policy configuration when it has
 // one, else the proxy's own rule pack (the posture toolCallVerdictAction
@@ -5909,7 +5924,11 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		toolName := tc.Function.Name
 		args := tc.Function.Arguments
 
-		findings := trustedToolCallFindings(ctx, p.toolCallAction(ctx, toolName, args), "", p.toolCallSecureClient(ctx))
+		action := p.toolCallAction(ctx, toolName, args)
+		findings := trustedToolCallFindings(ctx, action, "", p.toolCallSecureClient(ctx))
+		// CodeGuard reads the file content a write call carries, as on the
+		// hook routes (rel-1-0-10:GAP-0776: the proxy never ran it).
+		findings = append(findings, p.toolCallCodeGuardFindings(ctx, action)...)
 		// Stamp the tool's capability class (read_fs / exec_shell /
 		// network_fetch / …) onto each finding from this call so the
 		// sliding-window correlator can reason about operator-defined
