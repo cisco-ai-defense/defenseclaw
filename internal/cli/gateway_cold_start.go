@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -24,8 +24,6 @@ import (
 // request is refused, it runs `defenseclaw-gateway start --hook-cold-start`
 // once and retries. These files keep that start from fighting the operator.
 const (
-	// hookColdStartFlag marks a start requested by a connector hook.
-	hookColdStartFlag = "hook-cold-start"
 	// gatewayStoppedMarkerName records `defenseclaw-gateway stop`. A hook does
 	// not start a gateway the operator (or an install, uninstall or rotation)
 	// stopped; the next successful start or restart removes it.
@@ -64,7 +62,7 @@ func hookColdStartRequested(cmdFlags interface {
 	if cmdFlags == nil {
 		return false
 	}
-	enabled, err := cmdFlags.GetBool(hookColdStartFlag)
+	enabled, err := cmdFlags.GetBool(hookcli.HookColdStartFlag)
 	return err == nil && enabled
 }
 
@@ -197,15 +195,6 @@ func recordHookColdStartFailure(dataDir string, cause error) {
 	_ = os.WriteFile(gatewayColdStartFailedPath(dataDir), []byte(body), 0o600)
 }
 
-// hookInstallInProgress reports an install or upgrade of this account's
-// DefenseClaw (install.sh or install.ps1 hold .install.lock in the data
-// directory while they run), or an interrupted one whose recovery waits for
-// the next installer run: a start would run the half-done install
-// (hookexec.InstallRecoveryPending, GAP-2082).
-func hookInstallInProgress(dataDir string) bool {
-	return hookexec.InstallLockHeld(dataDir) || hookexec.InstallRecoveryPending(dataDir)
-}
-
 // hookColdStartRefusal returns why a hook may not start the gateway now, or
 // nil when it may.
 func hookColdStartRefusal(dataDir string, now time.Time) error {
@@ -215,7 +204,7 @@ func hookColdStartRefusal(dataDir string, now time.Time) error {
 	// An install or upgrade stops the gateway the way an operator does (the
 	// stop marker) and starts it again when it is done: name the install,
 	// not an operator stop (GAP-0196).
-	if hookInstallInProgress(dataDir) {
+	if hookcli.HookInstallInProgress(dataDir) {
 		return errors.New("an install or upgrade is in progress")
 	}
 	if _, err := os.Lstat(gatewayStoppedMarkerPath(dataDir)); err == nil {
@@ -271,7 +260,7 @@ func startCrashedGatewayFromWatchdog(dataDir string) (bool, error) {
 	if err != nil || !strings.HasPrefix(filepath.Base(exe), "defenseclaw-gateway") {
 		return false, err
 	}
-	cmd := exec.Command(exe, "start", "--"+hookColdStartFlag)
+	cmd := exec.Command(exe, "start", "--"+hookcli.HookColdStartFlag)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 	return true, cmd.Run()
 }

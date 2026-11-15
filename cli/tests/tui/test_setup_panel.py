@@ -112,6 +112,8 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Gateway Watcher",
         "Gateway Watchdog",
         "Observability",
+        "Routing",
+        "Tokenomics",
         "Webhooks",
         "Admission Defaults",
         "Skill Admission",

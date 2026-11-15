@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -95,7 +96,7 @@ func TestWindowsEnterpriseSetupRepairFromAnotherReleaseIsRefusedBeforeAnyChange(
 	if called {
 		t.Fatal("the installer ran for a Setup /repair of another release")
 	}
-	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) && commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) && cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
 		t.Fatalf("refusal = %v", err)
 	}
 	var result enterprisestatus.Result

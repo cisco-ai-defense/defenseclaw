@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -1730,7 +1731,7 @@ func TestPrepareWindowsEnterprisePowerShellTempElevatedDescriptorRepairAndCleanu
 		_ = os.RemoveAll(path)
 	})
 
-	programData, err := trustedWindowsEnterpriseProgramData()
+	programData, err := hookcli.TrustedWindowsEnterpriseProgramData()
 	if err != nil {
 		t.Fatalf("resolve ProgramData: %v", err)
 	}

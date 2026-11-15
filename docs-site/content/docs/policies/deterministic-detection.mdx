@@ -281,7 +281,7 @@ mutated sequences cannot complete an enforcement proof.
 | Permission denied → runtime bypass | Same session, five-minute window | Alert-only |
 | Privilege discovery → elevation | Same session, system/root semantics | Alert-only |
 | Secret-manager read → external egress | Same session, bounded result | Alert-only |
-| Secret read → external egress | Exact artifact identity and mutation barrier | Alert-only |
+| Secret read → external egress | Exact artifact identity and mutation barrier; a sender the reader cannot read in full, or a reading cap, joins any exact credentials read at the unknown tier | Alert in the default and permissive packs, block in strict |
 | Workload identity read → lateral execution | Same workload identity context | Alert-only |
 | Download → decode → execute | Exact derived artifact identity and mutation barrier | Alert-only |
 | Download → execute | Exact artifact identity and mutation barrier | Alert-only |

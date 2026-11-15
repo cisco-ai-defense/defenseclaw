@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
@@ -46,7 +47,7 @@ func everyConnectorGuardedError(cfg *config.Config, snap gateway.HealthSnapshot)
 		if detail == "" {
 			detail = string(snap.Guardrail.State)
 		}
-		return withExitCode(fmt.Errorf(
+		return cliusage.WithExitCode(fmt.Errorf(
 			"gateway is running, but it guards no connector yet (guardrail: %s); check: defenseclaw-gateway status",
 			detail,
 		), gatewayStartAdmissionRefusedExitCode)
@@ -68,7 +69,7 @@ func everyConnectorGuardedError(cfg *config.Config, snap gateway.HealthSnapshot)
 		}
 		causes = append(causes, fmt.Sprintf("%s: its setup failed (see gateway.log), then run: defenseclaw setup %s", name, name))
 	}
-	return withExitCode(fmt.Errorf(
+	return cliusage.WithExitCode(fmt.Errorf(
 		"gateway is running, but it does not guard %s; %s",
 		strings.Join(notStarted, ", "), strings.Join(causes, "; "),
 	), gatewayStartAdmissionRefusedExitCode)

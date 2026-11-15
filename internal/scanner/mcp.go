@@ -27,7 +27,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -35,6 +34,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
@@ -568,7 +568,7 @@ const mcpQuoted = `(?:'(?:[^'\\\r\n]|\\.){0,512}'|"(?:[^"\\\r\n]|\\.){0,512}")`
 // with backoff. The match is anchored: text that only quotes a refusal (an
 // exception message, a server's stderr) is not the scanner's refusal
 // (rel-1-0-6:GAP-0364). Group 1 is the quoted launcher.
-var mcpLauncherRefusalPattern = regexp.MustCompile(`^(?:(?:scan failed|ValueError): refusing to scan local MCP server ` + mcpQuoted + `: ` +
+var mcpLauncherRefusalPattern = lazyregexp.New(`^(?:(?:scan failed|ValueError): refusing to scan local MCP server ` + mcpQuoted + `: ` +
 	`|(?:\[[A-Za-z0-9._-]{1,64} stderr\] mcp as-user scan: the hook enumerator did not start the server: )?MCP server ` + mcpQuoted + ` is not started: )` +
 	`(?:(?:command|launcher) (` + mcpQuoted + `) (?:is not an allowlisted stdio launcher|is a path, and paths are never an allowlisted stdio launcher` +
 	`|is a path; a scan starts only the bare names npx or uvx|uses forbidden execution flag |requires a package/server argument)` +
@@ -576,10 +576,10 @@ var mcpLauncherRefusalPattern = regexp.MustCompile(`^(?:(?:scan failed|ValueErro
 
 // mcpScanErrorLeadPattern is what the gateway puts before the scanner's
 // message: the fail-closed block reason and the error Scan builds.
-var mcpScanErrorLeadPattern = regexp.MustCompile(`^(?:scanner failure \(fail-closed\): )?(?:scanner: mcp-scanner exited -?[0-9]{1,10}: |scanner mcp-scanner exited -?[0-9]{1,10} \()?`)
+var mcpScanErrorLeadPattern = lazyregexp.New(`^(?:scanner failure \(fail-closed\): )?(?:scanner: mcp-scanner exited -?[0-9]{1,10}: |scanner mcp-scanner exited -?[0-9]{1,10} \()?`)
 
 // mcpBareLauncherPattern is a launcher the agent text may name.
-var mcpBareLauncherPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
+var mcpBareLauncherPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
 
 // mcpScannerMessage is text with the gateway's lead and the work-folder
 // note (workDirNote) taken off: where the scanner's own message starts.

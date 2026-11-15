@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -214,7 +215,7 @@ func TestSandboxDaemonRefusesUnmanagedHosts(t *testing.T) {
 	if _, err := planSandboxOpenShellExec(context.Background(), "linux", nil); !errors.Is(err, errNotStandaloneManaged) {
 		t.Fatalf("shim on an unmanaged host: %v", err)
 	}
-	var coded *exitCodeError
+	var coded *cliusage.ExitCodeError
 	if err := runSandboxDaemon(context.Background(), &bytes.Buffer{}); !errors.As(err, &coded) || coded.ExitCode() != sandboxPrerequisiteExit {
 		t.Fatalf("unmanaged host exit: %v", err)
 	}
@@ -305,7 +306,7 @@ func TestSandboxPreRunOnAManagedComputer(t *testing.T) {
 	}
 	untrusted := errors.New("sandboxapi: the managed runtime descriptor is not trusted: owner")
 	sandboxHostClient = func(string) (*sandboxapi.Client, error) { return nil, untrusted }
-	var coded *exitCodeError
+	var coded *cliusage.ExitCodeError
 	if err := sandboxPreRun(list, nil); !errors.Is(err, untrusted) || !errors.As(err, &coded) || coded.ExitCode() != 3 {
 		t.Fatalf("untrusted descriptor: %v", err)
 	}

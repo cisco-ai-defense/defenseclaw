@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -101,7 +102,7 @@ func TestWindowsEnterpriseEventCarriesARecordTheLifecycleLogHolds(t *testing.T) 
 // changes where a failed install's event goes.
 func windowsEnterpriseFootprintPresent(t *testing.T) bool {
 	t.Helper()
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		t.Fatal(err)
 	}

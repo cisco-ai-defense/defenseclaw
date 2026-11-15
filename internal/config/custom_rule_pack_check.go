@@ -37,6 +37,10 @@ func RegisterCustomRulePackValidator(validate RulePackValidator) {
 	customRulePackValidator = validate
 }
 
+// CustomRulePackValidatorRegistered reports whether this binary links the
+// rule loader validator; the slim hook binary tests that it does.
+func CustomRulePackValidatorRegistered() bool { return customRulePackValidator != nil }
+
 // StalePinError is the config error of a custom_packs entry whose folder is a
 // valid rule pack but whose files no longer hash to the pin of the entry. It
 // is an integrity refusal, not a fallback: the pack the administrator pinned

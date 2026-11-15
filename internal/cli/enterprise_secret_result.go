@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -50,7 +51,7 @@ func (r *secretRefusal) Error() string { return r.err.Error() }
 func (r *secretRefusal) Unwrap() error { return r.err }
 
 func secretFailed(code string, exit int, err error) error {
-	return withExitCode(&secretRefusal{code: code, err: err}, exit)
+	return cliusage.WithExitCode(&secretRefusal{code: code, err: err}, exit)
 }
 
 // secretRawArgs is the command line a flag error is read from: cobra stops
@@ -63,11 +64,11 @@ var secretRawArgs = func() []string { return os.Args[1:] }
 // state_invalid otherwise. The error line still goes to stderr (the Linux
 // and macOS MDM wrapper quotes it); Windows silences it.
 func reportSecretFailure(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error, asJSON bool, failureExit, invalidExit int) error {
-	err = withExitCode(err, failureExit)
+	err = cliusage.WithExitCode(err, failureExit)
 	if !asJSON {
 		return err
 	}
-	exit := commandExitCode(err)
+	exit := cliusage.ExitCode(err)
 	code := secretFailureCode(err, invalidExit)
 	result := secretFailureResult{SchemaVersion: 1, Action: action, Name: opts.name,
 		Errors: []enterprisestatus.Message{{Code: code, Message: err.Error()}}, ExitCode: exit}
