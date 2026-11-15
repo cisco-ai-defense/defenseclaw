@@ -234,10 +234,8 @@ def test_install_ps1_downloads_a_damaged_package_again(tmp_path: Path) -> None:
 _UNIMPORTABLE = "ImportError: cannot import name \x27use_litellm_rust\x27 from \x27litellm.rust_bridge.ocr\x27"
 
 
-def _check_scanners_rows(mcp_probe: subprocess.CompletedProcess[str], damaged: dict[str, list[str]]) -> dict[str, dict]:
+def _check_scanners_rows(mcp_import_error: str, damaged: dict[str, list[str]]) -> dict[str, dict]:
     def run(argv, **_kwargs):
-        if argv[1:3] == ["-I", "-c"]:
-            return mcp_probe
         return subprocess.CompletedProcess(argv, 0, stdout="skill-scanner 2.3.2\n", stderr="")
 
     cfg = type("Cfg", (), {})()
@@ -247,24 +245,26 @@ def _check_scanners_rows(mcp_probe: subprocess.CompletedProcess[str], damaged: d
         patch("defenseclaw.commands.cmd_doctor.subprocess.run", side_effect=run),
         patch("defenseclaw.commands.cmd_doctor._scanner_version_note", side_effect=lambda dist, v: ("pass", f"{dist} {v}")),
         patch.object(venv_integrity, "damaged_files", return_value=damaged),
+        patch.object(venv_integrity, "import_error", return_value=mcp_import_error) as probe,
     ):
         cmd_doctor._check_scanners(cfg, result)
+    assert probe.call_args.args == ("from mcpscanner import Config, Scanner",)
     return {check["label"]: check for check in result.checks}
 
 
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="the scanners need Python 3.11")
 def test_doctor_fails_a_scanner_that_is_installed_but_does_not_import() -> None:
     rows = _check_scanners_rows(
-        subprocess.CompletedProcess([], 1, stdout="", stderr=f"Traceback (most recent call last):\n  ...\n{_UNIMPORTABLE}\n"),
+        _UNIMPORTABLE,
         {"litellm": ["litellm/rust_bridge/__init__.py (264 bytes, the wheel has 320)"]},
     )
     row = rows["Scanner: mcp-scanner"]
     assert row["status"] == "fail", row
     assert "is installed but does not import (" + _UNIMPORTABLE + ")" in row["detail"]
     assert "litellm: litellm/rust_bridge/__init__.py (264 bytes, the wheel has 320)" in row["detail"]
-    assert venv_integrity.install_repair_hint("the Python environment") in row["detail"]
+    assert venv_integrity.install_repair_hint("the Python environment", windows=os.name == "nt") in row["detail"]
 
-    healthy = _check_scanners_rows(subprocess.CompletedProcess([], 0, stdout="", stderr=""), {})
+    healthy = _check_scanners_rows("", {})
     assert healthy["Scanner: mcp-scanner"]["status"] == "pass"
     assert healthy["Scanner: mcp-scanner"]["detail"].endswith(", imports")
 
@@ -281,5 +281,21 @@ def test_mcp_scan_says_the_scanner_is_installed_but_does_not_import() -> None:
     assert "not installed" not in text
     assert text.startswith("error: cisco-ai-mcp-scanner 4.8.7 is installed but does not import: " + _UNIMPORTABLE)
     assert "litellm/rust_bridge/__init__.py (264 bytes, the wheel has 320)" in text
-    assert venv_integrity.install_repair_hint("the Python environment") in text
+    assert venv_integrity.install_repair_hint("the Python environment", windows=os.name == "nt") in text
     assert "mcp_scanner_import_error(exc)" in Path(mcp.__file__).read_text(encoding="utf-8")
+
+
+def test_the_repair_hint_follows_the_platform_doctor_sees(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The Windows row names the install command, also when doctor runs its
+    # Windows checks with a patched os view, as the doctor tests do.
+    windows = venv_integrity.install_repair_hint("the gateway", windows=True)
+    assert "running the install command again" in windows and "defenseclaw-upgrade.sh" not in windows
+    assert "`bash defenseclaw-upgrade.sh --yes`" in venv_integrity.install_repair_hint("the gateway", windows=False)
+    monkeypatch.setattr(cmd_doctor, "os", type("NtOs", (), {"name": "nt"})())
+    assert cmd_doctor._install_repair_hint("the gateway") == windows
+
+
+def test_import_error_reports_the_last_line_of_a_failed_import() -> None:
+    assert venv_integrity.import_error("import json") == ""
+    failed = venv_integrity.import_error("from json import no_such_name")
+    assert failed.startswith("ImportError: cannot import name"), failed
