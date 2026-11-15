@@ -260,16 +260,22 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 	}
 	reason := CredentialSenderNone
 	for _, sender := range reading.Senders {
-		if sender.Origin == SenderProjected && !senderToExternal(sender) {
+		command := byID[sender.CommandID]
+		// The destination is where the connection goes: a route option
+		// (--resolve, --connect-to, a proxy) can send a local-looking URL to
+		// any address (GAP-0795).
+		override := sender.CommandID != 0 && senderRouteOverridden(command)
+		if sender.Origin == SenderProjected && !override && !senderToExternal(sender) {
 			continue // the data stays on this host or its private network
 		}
-		// A relative operand is rooted at the working directory the hook
-		// reports. A cd earlier in the call moves it to a place the hook
-		// does not report: such an operand is judged by its shape alone, as
-		// when the hook has no working directory (GAP-0773).
+		// A relative operand is rooted at the working directory the call has
+		// there: the one the hook reports, moved by every cd before the
+		// sender (GAP-0773, GAP-0797). A cd whose target is not read leaves
+		// no working directory: the operand is judged by its shape alone.
 		scoped := facts
-		if cwdMovedBefore(facts, sender.CommandID) {
-			scoped.CWD = ""
+		moved := false
+		if cwd, changed := cwdBefore(facts, sender.CommandID); changed {
+			scoped.CWD, moved = cwd, true
 		}
 		// A projected upload or remote copy (curl, scp, rsync, wget: the
 		// exact credential-file upload rule judges its files) keeps that
@@ -278,9 +284,10 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 		// not read.
 		exact := sender.Origin != SenderProjected && sender.Origin != SenderRemoteCopy
 		operands := sender.Operands
-		if !exact && sender.CommandID != 0 && !judgedByUploadRule(facts, byID[sender.CommandID]) {
+		if !exact && sender.CommandID != 0 && (override || moved || !judgedByUploadRule(facts, command)) {
 			// A projected upload the exact rule cannot judge (a partial or
-			// uncertain parse, another dialect) is read here by the files its
+			// uncertain parse, another dialect, a route option, a working
+			// directory the rule does not know) is read here by the files its
 			// upload options name (GAP-0768).
 			exact = true
 			if files, known := uploadOptionFiles(byID[sender.CommandID]); known {
@@ -292,8 +299,10 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 		if sender.Program == "scp" && remoteOperandCount(sender.Operands) >= 2 {
 			exact = true // scp -3: the file goes through the local host to a second remote
 		}
+		unreadDirectory := moved && scoped.CWD == ""
 		for _, operand := range operands {
-			if exact && credentialPathOperand(operand, scoped.CWD, facts.ActiveHome) {
+			if exact && (credentialPathOperand(operand, scoped.CWD, facts.ActiveHome) ||
+				unreadDirectory && relativeCredentialLeaf(operand)) {
 				return CredentialSenderFile
 			}
 			if credentialMayHold(operand, scoped.CWD, facts.ActiveHome) {
@@ -304,8 +313,7 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 		// standard input, the output of the commands piped or substituted
 		// into it (GAP-0775). A sender the exact rule judges keeps that
 		// rule for the files its options name; the fed data it does not read.
-		if sender.CommandID != 0 && (exact || senderToExternal(sender)) {
-			command := byID[sender.CommandID]
+		if sender.CommandID != 0 && (exact || override || senderToExternal(sender)) {
 			for _, redirect := range command.Redirects {
 				if redirect.FD == 0 && redirect.Access == PathAccessRead &&
 					credentialPathOperand(redirect.Target, scoped.CWD, facts.ActiveHome) {
@@ -319,7 +327,7 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 				reason = CredentialSenderDirectory
 			}
 		}
-		for _, word := range strings.Fields(sender.FedText) {
+		for _, word := range batchTransferWords(sender.FedText) {
 			if credentialPathOperand(word, scoped.CWD, facts.ActiveHome) {
 				return CredentialSenderFile
 			}
@@ -339,20 +347,112 @@ func judgedByUploadRule(facts Facts, command CommandFact) bool {
 		command.Effect == EffectExecute && !command.ControlFlowUncertain
 }
 
-// cwdMovedBefore reports a command that changes the working directory (cd,
-// pushd, popd) ahead of the command with the given id, or anywhere in the
-// call when the id is unknown.
-func cwdMovedBefore(facts Facts, id int64) bool {
+// cwdBefore is the working directory the call has at the command with the
+// given id: the hook's, moved by every cd, pushd or popd before it. changed
+// is false when no command moved it. A move whose target is not a static
+// word (or runs under uncertain control flow) leaves cwd empty: the
+// directory is not read.
+func cwdBefore(facts Facts, id int64) (cwd string, changed bool) {
+	cwd = facts.CWD
 	for _, command := range facts.Commands {
 		if id != 0 && command.ID >= id {
 			continue
 		}
 		switch senderProgramName(command.Program) {
-		case "cd", "pushd", "popd", "chdir":
+		case "cd", "chdir", "pushd", "popd":
+		default:
+			continue
+		}
+		changed = true
+		target := ""
+		if command.ArgvComplete && !command.ControlFlowUncertain && senderProgramName(command.Program) != "popd" {
+			for _, word := range command.Argv[1:] {
+				if word == "--" || word == "-L" || word == "-P" {
+					continue
+				}
+				target = word
+			}
+		}
+		switch {
+		case target == "" || strings.ContainsAny(target, "$`*?[") || target == "-":
+			cwd = ""
+		case strings.HasPrefix(target, "~/") && strings.HasPrefix(facts.ActiveHome, "/"):
+			cwd = path.Join(facts.ActiveHome, target[2:])
+		case target == "~" && strings.HasPrefix(facts.ActiveHome, "/"):
+			cwd = facts.ActiveHome
+		case strings.HasPrefix(target, "/"):
+			cwd = path.Clean(target)
+		case strings.HasPrefix(cwd, "/"):
+			cwd = path.Join(cwd, target)
+		default:
+			cwd = ""
+		}
+	}
+	return cwd, changed
+}
+
+// relativeCredentialLeaf reports a relative file name that is the last part
+// of a credentials file in some credentials folder (credentials of .aws, id_rsa
+// of .ssh, .env). Used when a cd whose target is not read leaves the folder
+// unknown: such a name is the unknown tier, as any other input the call does
+// not let us read.
+func relativeCredentialLeaf(word string) bool {
+	if word == "" || strings.HasPrefix(word, "/") || strings.HasPrefix(word, "~") || strings.HasPrefix(word, "-") ||
+		strings.ContainsAny(word, "$`*?[\x00") || len(word) > 256 {
+		return false
+	}
+	word = strings.ToLower(path.Clean(word))
+	if strings.HasPrefix(word, "../") || word == ".." {
+		return false
+	}
+	candidates := []string{"/" + word}
+	for _, dir := range credentialDirectoryNames {
+		candidates = append(candidates, "/"+dir+"/"+word)
+	}
+	for _, candidate := range candidates {
+		if _, ok := MatchCredentialFileShape(candidate); ok {
 			return true
 		}
 	}
 	return false
+}
+
+// senderRouteOverridden reports a curl or wget whose options send the
+// connection somewhere other than the URL names: --resolve, --connect-to, a
+// proxy, a socks proxy, a unix socket (curl's network-override options), or
+// a wget run with a proxy or an -e setting. Its URL is not its destination.
+func senderRouteOverridden(command CommandFact) bool {
+	switch {
+	case isCurlProgram(command.Program):
+		for _, option := range parseCurlArgv(command.Argv).Options {
+			if option.Role == curlOptionNetworkOverride && option.Canonical != "--noproxy" && option.Canonical != "--interface" {
+				return true
+			}
+		}
+	case isWgetProgram(command.Program):
+		parsed := parseWgetArgv(command.Argv)
+		return parsed.ConfigIndirect || (parsed.ProxySet && parsed.Proxy)
+	}
+	return false
+}
+
+// batchTransferWords are the local words of a file-transfer batch fed to a
+// sender (sftp, ftp): the words after the put, mput, send, reput or append
+// verb of a line. Any other fed text is that program's script or data, not a
+// list of local files to send (GAP-0796).
+func batchTransferWords(text string) []string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch strings.ToLower(fields[0]) {
+		case "put", "mput", "send", "reput", "append", "lput", "lmput":
+			out = append(out, fields[1:]...)
+		}
+	}
+	return out
 }
 
 // credentialToRemoteOperand reads a command no network program of the
@@ -520,10 +620,8 @@ var credentialDirectoryNames = func() []string {
 // home or one of its parents, or a glob whose name pattern a credentials
 // file name matches (or that sits in a credentials folder).
 func credentialMayHold(word, cwd, home string) bool {
-	if !strings.HasPrefix(cwd, "/") && !strings.HasPrefix(word, "/") && !strings.HasPrefix(word, "~") &&
-		!strings.ContainsAny(word, "*?[") && !strings.Contains(word, ":") {
-		return false // a relative folder with no working directory is not rooted: it is not the root or the home
-	}
+	unrooted := !strings.HasPrefix(cwd, "/") && !strings.HasPrefix(word, "/") && !strings.HasPrefix(word, "~") &&
+		!strings.ContainsAny(word, "*?[") && !strings.Contains(word, ":")
 	canonical, ok := senderOperandPath(word, cwd, home)
 	if !ok {
 		return false
@@ -582,7 +680,10 @@ func credentialMayHold(word, cwd, home string) bool {
 		return false // a file: the exact rules judge it
 	}
 	if inCredentialDirectory(canonical) {
-		return true
+		return true // a credentials folder by its name, rooted or not
+	}
+	if unrooted {
+		return false // a relative folder with no working directory is not rooted: it is not the root or the home
 	}
 	if home = strings.ToLower(path.Clean(home)); strings.HasPrefix(home, "/") {
 		return canonical == home || canonical == "/" || strings.HasPrefix(home, canonical+"/")
