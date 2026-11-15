@@ -1701,7 +1701,22 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
 			(target == hookpaths.CopyDestination(command.Argv, clientCWD) ||
 				candidate.Value != "" && candidate.Value == hookpaths.CopyDestinationOperand(command.Argv))
-		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
+		// A redirect the shell operands above already judged is the same
+		// write, whatever spelling the path fact carries: a PowerShell
+		// reading names it C:/dir/file where the shell operand is
+		// C:\dir\file (the same name once the separators agree, never a
+		// case fold: two names that differ in case are two files on a POSIX
+		// host). Judged again under the second spelling, it lost the
+		// proof that it opens before the call can make a link
+		// (SafeShellRedirectOccurrences): PowerShell, like a POSIX shell and
+		// cmd.exe, opens a >, >>, n> or *> target before the command it
+		// redirects runs (rel-1-0-10:GAP-0946, checked natively on Windows
+		// PowerShell 5.1 and pwsh 7). The cmdlets Set-Content, Add-Content
+		// and Tee-Object open their file at the first input instead; they
+		// are no redirect operator, so they are never matched here.
+		if integrityCommandOwnsStaticRedirect(command, candidate) && slices.ContainsFunc(operands, func(operand string) bool {
+			return filepath.Clean(filepath.FromSlash(operand)) == filepath.Clean(filepath.FromSlash(target))
+		}) {
 			continue
 		}
 		if replacedBySed[target] && !isProtected(target) {
