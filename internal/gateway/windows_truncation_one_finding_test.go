@@ -6,8 +6,6 @@ package gateway
 import (
 	"strings"
 	"testing"
-
-	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // TestWindowsTruncationIsOneFinding (s7/winrecall x int/r110-b11 53fca0e1c6): a
@@ -24,7 +22,7 @@ func TestWindowsTruncationIsOneFinding(t *testing.T) {
 	for _, pack := range []string{"default", "strict"} {
 		for name, size := range map[string]int{
 			"word-limit":  6 << 10,
-			"input-bound": actionfacts.MaxCommandBytes + 1<<10,
+			"input-bound": 64<<10 + 1<<10, // past the 64 KiB command bound
 		} {
 			t.Run(pack+"/"+name, func(t *testing.T) {
 				big := `Set-Content -Path C:\Users\alice\work\a.txt -Value '` + strings.Repeat("x", size) + `'`
