@@ -68,3 +68,51 @@ func TestGAP0746HereDocumentAfterTheErrorIsData(t *testing.T) {
 		}
 	}
 }
+
+// gap0876Script is the GAP-0876 shape built from a fixture (the shellparse
+// test of the same name): a quoted here-document of consumer, inside a
+// single-quoted argument of a program, whose body has a lone apostrophe and a
+// parenthesis (a syntax error of the outer text) before body.
+func gap0876Script(consumer, body string) string {
+	return "tool - '" + consumer + " <<'\"'\"'EOF'\"'\"'\nit's (x)\n" + body + "\nEOF\necho after'"
+}
+
+// rel-1-0-10:GAP-0876. A quoted here-document is its command's input: a
+// blocking fixture in the body of a non-shell command is data (never a
+// block; allowed where nothing scans the unread text), in the body of a
+// shell it is read and blocks (GAP-0526), and in the body of a command that
+// is not known it is the unknown tier (the unresolved-body alert, never a
+// block), in every pack.
+func TestGAP0876QuotedHereDocBodyIsItsCommandsInput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fixtures are POSIX shell text")
+	}
+	for _, p := range gap0437Packs {
+		hook := gap0437Server(t, p, "claudecode", "action")
+		cwd := t.TempDir()
+		for _, id := range []string{"B1", "B3"} {
+			control := gap0526ControlRule(t, p.name+" "+id, gap0437Hook(t, hook, cwd, p.name+"c"+id, gap0486Blocked[id]))
+			for _, consumer := range []string{"cat > notes.txt", "$P"} {
+				command := gap0876Script(consumer, gap0486Blocked[id])
+				gap0526HasSyntaxError(t, id, command)
+				out := gap0437Hook(t, hook, cwd, p.name+consumer+id, command)
+				where := p.name + " " + id + " " + consumer
+				if out["action"] == "block" {
+					t.Errorf("%s: the here-document body was judged as commands: %v", where, out)
+				}
+				// Outside strict and managed nothing scans the unread text: the
+				// body of cat is data, with no finding above the record.
+				if consumer != "$P" && !p.managed && p.pack != "strict" && (out["action"] != "allow" || gap0526Names(out, "CRITICAL")) {
+					t.Errorf("%s: action %v, want allow (the body is data): %v", where, out["action"], out)
+				}
+				if consumer == "$P" && (out["action"] != "alert" || !gap0526Names(out, unresolvedBodyTitle)) {
+					t.Errorf("%s: action %v, want the unknown tier (alert): %v", where, out["action"], out)
+				}
+			}
+			out := gap0437Hook(t, hook, cwd, p.name+"sh"+id, gap0876Script("bash", gap0486Blocked[id]))
+			if out["action"] != "block" || !gap0526Names(out, control) {
+				t.Errorf("%s %s bash: action %v, want block with %s (GAP-0526): %v", p.name, id, out["action"], control, out)
+			}
+		}
+	}
+}

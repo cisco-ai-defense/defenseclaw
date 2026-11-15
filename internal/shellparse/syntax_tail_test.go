@@ -129,3 +129,47 @@ func TestReadSyntaxTailWindowIsARecordAndHereDocsAreData(t *testing.T) {
 		t.Errorf("a here-document after the error: %q, want its body kept as data and the next statement read", tail.Statements)
 	}
 }
+
+// gap0876Script is the GAP-0876 shape: program's single-quoted argument holds
+// a script whose command consumer reads a quoted here-document (<<'EOF'
+// spelled inside the argument) with body as its lines. The first body line
+// has a lone apostrophe that closes the argument's quote, so the outer text
+// has a syntax error at its parenthesis and the next body lines are outside
+// quotes for the token split.
+func gap0876Script(program, consumer, body string) string {
+	return program + " '" + consumer + " <<'\"'\"'EOF'\"'\"'\nit's (x)\n" + body + "\nEOF\necho after'"
+}
+
+// rel-1-0-10:GAP-0876: the runs of a quoted here-document body after the
+// error are its command's input, kept apart with that command, not
+// statements of the text; a here-document whose body is not closed is not
+// one.
+func TestReadSyntaxTailQuotedHereDocBodyIsItsCommandsInput(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, consumer string
+	}{
+		{"in an argument", gap0876Script("tool -", "cat > notes.txt", "echo data"), "cat > notes.txt"},
+		{"piped on", "tool - 'cat <<'\"'\"'EOF'\"'\"' | sh\nit's (x)\necho data\nEOF\necho after'", "cat | sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tail, ok := ReadSyntaxTail(tc.command)
+			if !ok {
+				t.Fatalf("%q: not read", tc.command)
+			}
+			if slices.Contains(tail.Statements, "echo data") {
+				t.Errorf("the body is read as a statement of the text: %q", tail.Statements)
+			}
+			if len(tail.HereDocs) != 1 || tail.HereDocs[0].Consumer != tc.consumer ||
+				!slices.Contains(tail.HereDocs[0].Statements, "echo data") {
+				t.Errorf("here-documents %+v, want one of %q holding echo data", tail.HereDocs, tc.consumer)
+			}
+		})
+	}
+	unclosed := "tool '" + "cat <<'\"'\"'EOF'\"'\"'\nit's (x)\necho data\n'"
+	if tail, ok := ReadSyntaxTail(unclosed); !ok || len(tail.HereDocs) != 0 || !slices.Contains(tail.Statements, "echo data") {
+		t.Errorf("a body that is not closed: %+v, want its lines read as statements", tail)
+	}
+	if tail, ok := ReadSyntaxTail("fi\ncat <<EOF\necho data\nEOF"); ok && len(tail.HereDocs) != 0 {
+		t.Errorf("an unquoted here-document is kept apart: %+v", tail.HereDocs)
+	}
+}
