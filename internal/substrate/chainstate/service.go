@@ -222,6 +222,12 @@ type actorState struct {
 	// ActiveUnixNano is the receive time of the actor's last request (0
 	// before the first).
 	ActiveUnixNano int64 `json:"active_unix_nano,omitempty"`
+	// RunningHighUnixNano is the high-water mark of the running time: the
+	// latest the leader gave one of the actor's events. The running time
+	// never goes below it, so a backward step of the leader's wall clock (an
+	// NTP step, a failover onto a node whose clock lags) never puts a check
+	// before an event it follows (GAP-0310).
+	RunningHighUnixNano int64 `json:"running_high_unix_nano,omitempty"`
 	// SinceUnixNano is the start of the suspension the controller reported
 	// last (0 while running); it only decides retention (Sweep).
 	SinceUnixNano int64 `json:"since_unix_nano,omitempty"`
@@ -239,25 +245,33 @@ type actorState struct {
 	Egress *egressSnapshot `json:"egress,omitempty"`
 }
 
-// running is wall in the actor's running time.
+// running is wall in the actor's running time. It never goes back: a wall
+// time before the last request counts as that request's, and the result is
+// never below the high-water mark (GAP-0310).
 func (c actorState) running(wall time.Time) time.Time {
+	w := max(wall.UnixNano(), c.ActiveUnixNano)
 	off := c.UncountedNanos
 	if c.ActiveUnixNano != 0 {
-		if idle := wall.UnixNano() - c.ActiveUnixNano - int64(ActiveGap); idle > 0 {
+		if idle := w - c.ActiveUnixNano - int64(ActiveGap); idle > 0 {
 			off += idle
 		}
 	}
-	return wall.Add(-time.Duration(off))
+	r := max(w-off, c.RunningHighUnixNano)
+	return wall.Add(time.Duration(r - wall.UnixNano()))
 }
 
 // active is c after a request of the actor at wall. The running time at
-// wall does not change; from wall on it runs again.
+// wall does not change; from wall on it runs again. A wall time before the
+// last request is a backward step of the leader's clock: the running time
+// goes on from the last request's, never back (GAP-0310).
 func (c actorState) active(wall time.Time) actorState {
 	w := wall.UnixNano()
-	if w <= c.ActiveUnixNano {
+	switch {
+	case w == c.ActiveUnixNano:
 		return c
-	}
-	if c.ActiveUnixNano != 0 {
+	case w < c.ActiveUnixNano:
+		c.UncountedNanos -= c.ActiveUnixNano - w
+	case c.ActiveUnixNano != 0:
 		if idle := w - c.ActiveUnixNano - int64(ActiveGap); idle > 0 {
 			c.UncountedNanos += idle
 		}
@@ -763,11 +777,13 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 	cst := child.state
 	s.mu.Unlock()
 	cst = forkClock(cst, pst)
+	copyAt := cst.running(at)
+	cst.RunningHighUnixNano = copyAt.UnixNano()
 	result := LifecycleResult{}
 	if _, err := os.Stat(s.dbPath(parent)); err == nil {
 		r, err := st.CopyToolChainFork(ctx, s.dbPath(parent), audit.ToolChainForkCopy{
 			ParentInstance: parentInstance, ChildInstance: childInstance,
-			ParentActorDigest: parentDigest, ChildActorDigest: childDigest, At: cst.running(at),
+			ParentActorDigest: parentDigest, ChildActorDigest: childDigest, At: copyAt,
 		})
 		if errors.Is(err, audit.ErrToolChainForkAlreadyStarted) {
 			return LifecycleResult{}, nil
@@ -795,6 +811,7 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 func forkClock(cst, pst actorState) actorState {
 	if !cst.Forked {
 		cst.UncountedNanos, cst.ActiveUnixNano = pst.UncountedNanos, pst.ActiveUnixNano
+		cst.RunningHighUnixNano = max(cst.RunningHighUnixNano, pst.RunningHighUnixNano)
 		cst.SinceUnixNano, cst.Forked = 0, true
 	}
 	if cst.Task == "" {
@@ -870,8 +887,11 @@ func (s *Service) stateOf(e *actorEntry) actorState {
 	return e.state
 }
 
+// setState replaces the actor's state; the high-water mark a concurrent
+// call raised meanwhile is kept (GAP-0310).
 func (s *Service) setState(e *actorEntry, st actorState) error {
 	s.mu.Lock()
+	st.RunningHighUnixNano = max(st.RunningHighUnixNano, e.state.RunningHighUnixNano)
 	e.state = st
 	s.mu.Unlock()
 	return s.writeState(e)
@@ -894,7 +914,7 @@ func (s *Service) writeState(e *actorEntry) error {
 
 func (s *Service) repo(ctx context.Context, st *audit.Store, e *actorEntry, scope Scope) (*audit.ToolChainRepository, error) {
 	opts := []audit.ToolChainOption{audit.WithToolChainClock(func() time.Time {
-		return s.stateOf(e).running(s.opts.Now())
+		return s.stamp(e, s.opts.Now())
 	})}
 	switch scope {
 	case ScopeSession:
@@ -904,6 +924,21 @@ func (s *Service) repo(ctx context.Context, st *audit.Store, e *actorEntry, scop
 		return nil, bad(errors.New("chainstate: scope is session or actor"))
 	}
 	return st.ToolChainRepositoryWith(ctx, opts...)
+}
+
+// stamp is wall in the actor's running time for a time the leader gives
+// one of its events or checks: it raises the high-water mark, so nothing
+// later is ever before it, whatever the wall clock does (GAP-0310).
+func (s *Service) stamp(e *actorEntry, wall time.Time) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.raiseLocked(e, e.state.running(wall))
+}
+
+// raiseLocked raises the actor's high-water mark to t (s.mu held).
+func (s *Service) raiseLocked(e *actorEntry, t time.Time) time.Time {
+	e.state.RunningHighUnixNano = max(e.state.RunningHighUnixNano, t.UnixNano())
+	return t
 }
 
 // touch records a request of the actor itself: a hook chain call, an
@@ -956,7 +991,7 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 		if err := st.RecordToolChainJoin(ctx, audit.ToolChainJoin{
 			ConnectorInstanceID: instance, SemanticEventID: audit.SemanticEventID(in.Join.SemanticEventID),
 			EventName: in.Join.EventName, InputFingerprint: in.Join.InputFingerprint,
-			ReceivedAt: s.stateOf(e).running(s.opts.Now()), SessionDigest: in.Join.SessionDigest,
+			ReceivedAt: s.stamp(e, s.opts.Now()), SessionDigest: in.Join.SessionDigest,
 		}); err != nil {
 			return ObserveResponse{}, bad(err)
 		}
@@ -1037,7 +1072,7 @@ func (s *Service) notePending(e *actorEntry, scope Scope, p guardrail.ToolChainP
 	if scope != ScopeActor || !startsEgressChain(p.DetectionStepMask) {
 		return nil
 	}
-	e.memo.notePending(s.stateOf(e).running(s.opts.Now()), p)
+	e.memo.notePending(s.stamp(e, s.opts.Now()), p)
 	return s.writeState(e)
 }
 
@@ -1080,6 +1115,14 @@ func (s *Service) readMemo(ctx context.Context, st *audit.Store, e *actorEntry) 
 	if err != nil {
 		return false, err
 	}
+	s.mu.Lock()
+	for _, ev := range state.Events {
+		s.raiseLocked(e, ev.ReceivedAt)
+	}
+	for _, p := range state.Pending {
+		s.raiseLocked(e, p.PreparedAt)
+	}
+	s.mu.Unlock()
 	return e.memo.set(memoWindow{Ruleset: state.RulesetFingerprint, Next: state.NextSequence,
 		Events: state.Events, Pending: state.Pending}), nil
 }
@@ -1296,7 +1339,7 @@ func (s *Service) syntheticEvent(ctx context.Context, st *audit.Store, instance 
 	sum := sha256.Sum256([]byte(name + "\x00" + string(id)))
 	fp := hex.EncodeToString(sum[:])
 	err = st.RecordToolChainJoin(ctx, audit.ToolChainJoin{ConnectorInstanceID: instance, SemanticEventID: id,
-		EventName: name, InputFingerprint: fp, ReceivedAt: s.stateOf(e).running(wall), SessionDigest: session})
+		EventName: name, InputFingerprint: fp, ReceivedAt: s.stamp(e, wall), SessionDigest: session})
 	return id, fp, err
 }
 
@@ -1417,7 +1460,7 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 		return EgressVerdict{}, err
 	}
 	s.touch(e)
-	v, ok := e.memo.verdict(s.stateOf(e).running(s.opts.Now()), s.opts.EgressAction)
+	v, ok := e.memo.verdict(s.stamp(e, s.opts.Now()), s.opts.EgressAction)
 	switch {
 	case !ok:
 		s.egress.push(egressRecord{actor: e.actor, sync: true})
