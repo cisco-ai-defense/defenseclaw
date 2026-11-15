@@ -461,7 +461,7 @@ const ownSSHFolderCopyTitle = "A copy of your own SSH folder content to another 
 // (trustedActionCallOpensAccess).
 func trustedActionOwnSSHFolderCopy(request trustedActionRequest, input actionfacts.Input) bool {
 	home := strings.TrimRight(input.ActiveHome, "/")
-	if request.ProtectedHomeHook || home == "" || !trustedShellCommandInput(input) || trustedActionCallOpensAccess(request) {
+	if request.ProtectedHomeHook || home == "" || !trustedShellCommandInput(input) {
 		return false
 	}
 	// A hook call carries the command in its arguments, not in Command.
@@ -525,7 +525,9 @@ func trustedActionOwnSSHFolderCopy(request trustedActionRequest, input actionfac
 			return false
 		}
 	}
-	return copied
+	// Read last: it analyzes the whole call, and only a call that is such a
+	// copy needs it.
+	return copied && !trustedActionCallOpensAccess(request)
 }
 
 // ownSSHFolderCopyCall judges the operands of one cp: safe options, sources
