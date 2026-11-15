@@ -152,6 +152,9 @@ func posixParseTruncation(request trustedActionRequest, facts actionfacts.Facts)
 		}
 		return bounded.CapSet{}
 	}
+	if posixArgvScriptReadAsText(request, facts) {
+		return bounded.CapSet{}
+	}
 	if _, twinRead := overLimitCommandBoundedTwinRequest(request, facts); twinRead {
 		return bounded.CapSet{}
 	}
@@ -205,4 +208,21 @@ func withPosixDataWordRecord(findings []RuleFinding) []RuleFinding {
 	record.enforcement = findingEnforcementDetectionOnly
 	record.dataWordRecord = true
 	return append(slices.Clip(findings), record)
+}
+
+// posixArgvScriptReadAsText reports an argv shell launcher (["bash", "-lc",
+// SCRIPT], the Codex shell tool) whose script the launcher body reading
+// judges as the string command it is (launcherBodyTwinRequest): the script
+// word past 4 KiB is then no cut of the call, and the reading of the script
+// decides with its own floor, a code word past the bound inside the script
+// truncated as in the text form. Truncating the argv form for the length of
+// the script alone made every ordinary Codex script over 4 KiB (a
+// here-document file write, a long for list) an alert, and a block in
+// strict, where the same script as text is allowed (rel-1-0-10:GAP-0853).
+func posixArgvScriptReadAsText(request trustedActionRequest, facts actionfacts.Facts) bool {
+	if _, text := trustedBashCommandInput(request.Input); text {
+		return false
+	}
+	twin, read := launcherBodyTwinRequest(request, facts)
+	return read && len(twin.Input.Command) <= actionfacts.MaxCommandBytes
 }
