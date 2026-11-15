@@ -16,6 +16,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // On Linux and macOS the standalone Devin registration is the
@@ -53,7 +54,7 @@ func TestForeignHookGuardBlocksDevinRewriteEntriesOnTheStandaloneRegistration(t 
 		payload := `{"hook_event_name":"PreToolUse","cwd":"` + filepath.Join(fixture.project, "src") + `","tool_name":"exec"}`
 		var stderr bytes.Buffer
 		opts := hookexec.Options{Connector: "devin", ManagedEnterprise: true, Stdin: strings.NewReader(payload), Stderr: &stderr}
-		applyEnterpriseForeignHookGuard(&opts)
+		hookcli.ApplyEnterpriseForeignHookGuard(&opts)
 		return opts
 	}
 	verify := func() enterprisepolicy.GuardDecision {

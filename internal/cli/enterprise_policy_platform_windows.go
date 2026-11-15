@@ -18,7 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -94,21 +93,6 @@ func standaloneClaudeMachineHookContract(layout managed.StandaloneLayout) string
 		return ""
 	}
 	return enterpriseHookMachinePolicyContract(manifest)
-}
-
-// standaloneEnterprisePolicyLayout resolves the layout from the protected
-// HKLM machine roots, never from the caller's environment.
-func standaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, string, error) {
-	programFiles, err := trustedWindowsEnterpriseProgramFiles()
-	if err != nil {
-		return managed.StandaloneLayout{}, "", "", err
-	}
-	programData, err := trustedWindowsEnterpriseProgramData()
-	if err != nil {
-		return managed.StandaloneLayout{}, "", "", err
-	}
-	layout, err := managed.StandaloneWindowsLayoutForRoots(programFiles, programData)
-	return layout, programFiles, programData, err
 }
 
 // enterprisePolicyTarget names the account through the LSA and finds its
@@ -189,21 +173,4 @@ func enterprisePolicyLiveCredential(target enterprisehooks.TargetCredentials) fu
 // Replaceable in tests.
 var enterprisePolicyUnprotectedAgents = func(manifestPath string) ([]enterprisehooks.UnprotectedAgent, error) {
 	return enterprisehooks.ReadWindowsUnprotectedAgents(manifestPath)
-}
-
-// hookForeignGuardAccountHome returns the profile directory of the
-// process token (never the agent's environment): the guardian installs
-// DefenseClaw's per-user registrations there. Replaceable in tests.
-var hookForeignGuardAccountHome = func() string {
-	if account, err := user.Current(); err == nil && filepath.IsAbs(account.HomeDir) {
-		return filepath.Clean(account.HomeDir)
-	}
-	return ""
-}
-
-// hookForeignGuardEnvHomes lists the homes the agent's environment names
-// (USERPROFILE as inherited from the agent), which it may read hook config
-// from. Replaceable in tests.
-var hookForeignGuardEnvHomes = func() []string {
-	return []string{os.Getenv("USERPROFILE")}
 }

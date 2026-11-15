@@ -24,7 +24,7 @@ from typing import Any
 import click
 
 from defenseclaw import ux
-from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS, ACP_CLIENT_IDS, ACP_REGISTRY
+from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS, ACP_CLIENT_IDS, ACP_REGISTRY, own_tools_notice
 from defenseclaw.config import ACPBinding, ACPProfile
 from defenseclaw.connector_paths import _normalize_jsonc
 from defenseclaw.context import AppContext, pass_ctx
@@ -1900,6 +1900,11 @@ def _status(app: AppContext, data_dir: str, json_output: bool) -> None:
                 else "inherited"
             ),
         }
+        if notice := own_tools_notice(agent):
+            # An agent that runs its own tools: the guard reports its tool
+            # calls, it does not refuse them (GAP-0619).
+            bindings[f"{client}/{agent}"]["tool_calls_refused"] = False
+            bindings[f"{client}/{agent}"]["notice"] = notice
     payload = {
         "enabled": app.cfg.acp.enabled,
         "mode": app.cfg.acp.mode,
@@ -1935,6 +1940,8 @@ def _print_acp_status(payload: dict) -> None:
         click.echo(f"    {pair:<20} {health:<16} profile {info['profile']} ({info['mode']}{source})")
         for problem in info["problems"]:
             ux.warn(str(problem), indent="      ")
+        if info.get("notice"):
+            ux.warn(str(info["notice"]), indent="      ")
     if any(not info["healthy"] for info in bindings.values()):
         if any(
             "acp refresh --agent" in str(problem)

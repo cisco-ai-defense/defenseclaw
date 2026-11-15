@@ -8,11 +8,12 @@ package cli
 import (
 	"context"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func managedRefusalSocket() string {
-	descriptor, err := managed.LoadRuntimeDescriptor(managedHostDescriptorPath())
+	descriptor, err := managed.LoadRuntimeDescriptor(hookcli.ManagedHostDescriptorPath())
 	if err != nil || descriptor.HookSocket == "" {
 		return ""
 	}

@@ -22,34 +22,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookevidence"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
-// HookToolInvocationQuery selects the v8 event-history record the gateway
-// writes when a connector hook reports a tool call it is about to run
-// (tool.invocation.requested).
-type HookToolInvocationQuery struct {
-	// Connector is the connector the record must come from.
-	Connector string
-	// ToolCallID is the agent's tool call id (gen_ai.tool.call.id). It is an
-	// identifier, which every built-in redaction profile keeps, unlike the
-	// tool arguments.
-	ToolCallID string
-	// Since is the earliest record time accepted.
-	Since time.Time
-	// UserID, when set, is the OS user id the hook must have reported
-	// (user.id).
-	UserID string
-}
+// HookToolInvocationQuery selects the record a hook leaves for a tool call
+// (hookevidence.Query).
+type HookToolInvocationQuery = hookevidence.Query
 
-// HookToolInvocationEvidence is what the event history holds for a query.
-type HookToolInvocationEvidence struct {
-	// Matched reports a record that meets every condition of the query.
-	Matched bool
-	// Mismatches describe records with the query's tool call id that fail
-	// another condition.
-	Mismatches []string
-}
+// HookToolInvocationEvidence is what the event history holds for a query
+// (hookevidence.Evidence).
+type HookToolInvocationEvidence = hookevidence.Evidence
 
 const (
 	hookToolInvocationClockSkew = 2 * time.Second

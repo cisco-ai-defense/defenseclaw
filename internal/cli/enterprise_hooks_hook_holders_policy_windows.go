@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -1070,7 +1071,7 @@ const windowsHolderDataHeldPerTick = 4
 
 // windowsHookRuntimeDir is the hook runtime folder; tests replace it.
 var windowsHookRuntimeDir = func() (string, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	return layout.HookRuntimeDir, err
 }
 

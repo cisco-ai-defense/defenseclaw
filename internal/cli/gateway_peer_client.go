@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -36,10 +37,10 @@ const managedGatewayStartBudget = 30 * time.Second
 // for a per-user gateway, the gateway service for a managed one. While a
 // gateway restarts another account can bind its port; it receives nothing.
 func gatewayPeerClient(c *config.Config, host string, port int, timeout time.Duration) (*http.Client, error) {
-	if c != nil && c.SecureClientIntegration() && secureClientHost() {
-		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(true))
+	if c != nil && c.SecureClientIntegration() && hookcli.SecureClientHost() {
+		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), hookcli.ManagedServiceName(true))
 	}
-	if _, present := managedHostWindowsStandalone(); present &&
+	if _, present := hookcli.ManagedHostWindowsStandalone(); present &&
 		(c == nil || c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
 		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managed.StandaloneWindowsGatewaySvc)
 	}
@@ -48,26 +49,13 @@ func gatewayPeerClient(c *config.Config, host string, port int, timeout time.Dur
 	// service, which runs as its own account, not the caller's.
 	if c == nil && runtime.GOOS != "windows" {
 		if _, present := managedHostUnixRecord(nil); present {
-			return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(false))
+			return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), hookcli.ManagedServiceName(false))
 		}
 	}
 	if c != nil && (c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
-		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(false))
+		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), hookcli.ManagedServiceName(false))
 	}
 	return perUserGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)))
-}
-
-func managedServiceName(secureClient bool) string {
-	if runtime.GOOS == "linux" {
-		return "defenseclaw-gateway.service"
-	}
-	if runtime.GOOS == "darwin" {
-		if secureClient {
-			return "com.cisco.secureclient.defenseclaw"
-		}
-		return "com.cisco.defenseclaw.gateway"
-	}
-	return managed.StandaloneWindowsGatewaySvc
 }
 
 func gatewayPeerClientForURL(c *config.Config, rawURL string, timeout time.Duration) (*http.Client, error) {

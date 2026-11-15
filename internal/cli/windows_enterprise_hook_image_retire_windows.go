@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -66,7 +67,7 @@ func runWindowsHookImageRetire() windowsHookImageRetireReport {
 	if err != nil {
 		return refused(err)
 	}
-	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return refused(fmt.Errorf("resolve the standalone roots: %w", err))
 	}
