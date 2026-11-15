@@ -271,6 +271,7 @@
    "TestGAP0516HomeListingCompoundFourCell": 4.0,
    "TestGAP0563HookJudgeFallbackPersistsAfterEarlyTelemetry": 3.3,
    "TestGAP0568StatementBudgetWork": 2.9,
+   "TestGAP0589PowerShellCappedReadingFiveTiers": 34.0,
    "TestGAP0632PinnedPackIdentityKeepsStateProtection": 9.7,
    "TestGAP0700GAP0721OrdinaryCommandsAreDecidedWithoutHangOrPanic": 18.2,
    "TestHandlePassthrough_SSRFHardening": 2.8,
