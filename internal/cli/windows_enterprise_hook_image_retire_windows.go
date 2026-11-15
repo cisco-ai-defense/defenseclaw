@@ -19,6 +19,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -57,12 +58,13 @@ func newWindowsHookImageRetireCommand() *cobra.Command {
 func runWindowsHookImageRetire(skipProfiles []string) windowsHookImageRetireReport {
 	refused := func(err error) windowsHookImageRetireReport {
 		return windowsHookImageRetireReport{
-			SchemaVersion:   windowsHookImageReportSchema,
-			Reason:          windowsHookImageRetireRefused,
-			Error:           err.Error(),
-			Rewritten:       []string{},
-			StillNamed:      []windowsHookImageNamedFile{},
-			SkippedProfiles: []windowsHookImageSkippedProfile{},
+			SchemaVersion:     windowsHookImageReportSchema,
+			Reason:            windowsHookImageRetireRefused,
+			Error:             err.Error(),
+			Rewritten:         []string{},
+			StillNamed:        []windowsHookImageNamedFile{},
+			SkippedProfiles:   []windowsHookImageSkippedProfile{},
+			SignedOutProfiles: []windowsHookImageSignedOutProfile{},
 		}
 	}
 	if !windowsEnterpriseIsElevated() {
@@ -88,10 +90,11 @@ func runWindowsHookImageRetire(skipProfiles []string) windowsHookImageRetireRepo
 		return refused(err)
 	}
 	defer restoreOwner()
-	guardian, err := windowsHookImageGuardianService(roots, filepath.Dir(bin))
+	gateway, err := winpath.EnterpriseGatewayServiceForRoot(roots, filepath.Dir(bin))
 	if err != nil {
 		return refused(err)
 	}
+	guardian := windowsHookImageGuardianService(gateway)
 	return retireWindowsHookImages(windowsHookImageRetireSteps{
 		FS:  osWindowsHookImageFS{},
 		Bin: bin,
@@ -101,9 +104,13 @@ func runWindowsHookImageRetire(skipProfiles []string) windowsHookImageRetireRepo
 		WriteMarker: func(path string, body []byte) error {
 			return writeWindowsHookImageRetiredMarker(path, body, applyWindowsSDDL)
 		},
-		ReconcileCodex:  reconcileWindowsCodexRequirementsForHookImage,
-		RestartGuardian: func() error { return restartWindowsHookImageGuardian(guardian) },
-		Scan:            func() windowsHookImageConfigScan { return scanWindowsHookImageConfigs(roots, bin) },
+		ReconcileCodex: func() error { return reconcileWindowsCodexRequirementsForHookImage(gateway) },
+		DeselectSignedOut: func() windowsHookImageDeselection {
+			return deselectWindowsHookImageSignedOutSelections(roots, bin, gateway)
+		},
+		RestartGuardian:  func() error { return restartWindowsHookImageGuardian(guardian) },
+		GuardianFailures: windowsHookImageGuardianFailures,
+		Scan:             func() windowsHookImageConfigScan { return scanWindowsHookImageConfigs(roots, bin) },
 		RouteOnlyRouted: func() ([]string, error) {
 			cfg, err := loadWindowsEnterpriseStandaloneConfig("")
 			if errors.Is(err, fs.ErrNotExist) {
@@ -181,17 +188,113 @@ func postWindowsHookImageRetireSkip(profile windowsHookImageSkippedProfile) erro
 	})
 }
 
-// windowsHookImageGuardianService is the guardian service of the install
-// root: DefenseClawHookGuardian, or a certification run's guardian.
-func windowsHookImageGuardianService(roots winpath.EnterpriseRoots, installRoot string) (string, error) {
-	gateway, err := winpath.EnterpriseGatewayServiceForRoot(roots, installRoot)
-	if err != nil {
-		return "", err
-	}
+// windowsHookImageGuardianService is the guardian service beside the
+// install root's gateway service: DefenseClawHookGuardian, or a
+// certification run's guardian.
+func windowsHookImageGuardianService(gateway string) string {
 	if id, ok := strings.CutPrefix(gateway, "DefenseClawCertGateway_"); ok {
-		return "DefenseClawCertGuardian_" + id, nil
+		return "DefenseClawCertGuardian_" + id
 	}
-	return "DefenseClawHookGuardian", nil
+	return "DefenseClawHookGuardian"
+}
+
+// deselectWindowsHookImageSignedOutSelections is retire's runtime selector
+// step (rel-1-0-10 GAP-0856): for each enrolled account of the guardian's
+// manifest the guardian cannot repair now (no Windows session it repairs
+// in, the guardian's own check), it drops the selections that name a launch
+// image of bin, under the guardian's service pins. An account with a session
+// keeps its selections: the guardian rewrites them after its restart.
+func deselectWindowsHookImageSignedOutSelections(roots winpath.EnterpriseRoots, bin, gateway string) windowsHookImageDeselection {
+	result := windowsHookImageDeselection{Errors: map[string]string{}}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		result.Error = "resolve the standalone layout: " + err.Error()
+		return result
+	}
+	manifest, err := windowsHookImageManifestLoader(filepath.Join(roots.StateRoot, "hook-guardian", "targets.yaml"))
+	if err != nil {
+		result.Error = "read the guardian's manifest: " + err.Error()
+		return result
+	}
+	targets := map[string]enterprisehooks.ManifestTarget{}
+	for _, target := range manifest.Targets {
+		sid := strings.ToUpper(strings.TrimSpace(target.SID))
+		if sid == "" || !target.IsEnabled() {
+			continue
+		}
+		if _, seen := targets[sid]; !seen {
+			targets[sid] = target
+		}
+	}
+	restore := setTemporaryEnvironment(windowsEnterpriseGuardianRecordPins(layout, gateway))
+	defer restore()
+	dropped, failures := windowsHookImageDeselector(bin, func(sid string) (bool, error) {
+		target, enrolled := targets[strings.ToUpper(strings.TrimSpace(sid))]
+		if !enrolled {
+			// Not this guardian's account: the guardian's own pass retires
+			// a selection its machine policy no longer registers (GAP-0262).
+			return false, nil
+		}
+		available, err := enterpriseHookTargetSessionAvailable(target)
+		return err == nil && !available, err
+	})
+	for path, failure := range failures {
+		if path == "" || !filepath.IsAbs(path) {
+			result.Error = strings.TrimSpace(strings.Join([]string{result.Error, path + ": " + failure.Error()}, " "))
+			continue
+		}
+		result.Errors[strings.ToLower(path)] = failure.Error()
+	}
+	byAccount := map[string]*windowsHookImageSignedOutProfile{}
+	var order []string
+	for _, selection := range dropped {
+		key := strings.ToUpper(selection.SID)
+		profile, seen := byAccount[key]
+		if !seen {
+			profile = &windowsHookImageSignedOutProfile{SID: selection.SID, Account: strings.TrimSpace(targets[key].User), Connectors: []string{}}
+			byAccount[key] = profile
+			order = append(order, key)
+		}
+		profile.Connectors = append(profile.Connectors, selection.Connector)
+	}
+	sort.Strings(order)
+	for _, key := range order {
+		sort.Strings(byAccount[key].Connectors)
+		result.Profiles = append(result.Profiles, *byAccount[key])
+	}
+	return result
+}
+
+// windowsHookImageDeselector is the enterprisehooks runtime selector step and
+// windowsHookImageManifestLoader the guardian manifest reader; seams for
+// tests.
+var (
+	windowsHookImageDeselector     = enterprisehooks.DeselectWindowsStandaloneSignedOutLaunchSelections
+	windowsHookImageManifestLoader = enterprisehooks.LoadManifest
+)
+
+// windowsHookImageGuardianFailures are the failed rows of the guardian's
+// last reconcile, worded as enterprise windows status words them, for the
+// cause of a machine file retire stays pending on.
+func windowsHookImageGuardianFailures() []string {
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return nil
+	}
+	state, exists, err := loadEnterpriseHookGuardianState(layout.DataDir)
+	if err != nil {
+		return []string{"the guardian's state could not be read: " + err.Error()}
+	}
+	if !exists {
+		return nil
+	}
+	var failures []string
+	for _, row := range state.Results {
+		if !row.OK && !row.Pending {
+			failures = append(failures, enterpriseHookGuardianFailureIssue(row))
+		}
+	}
+	return failures
 }
 
 // restartWindowsHookImageGuardian restarts the guardian so its first
@@ -222,12 +325,20 @@ func restartWindowsHookImageGuardian(name string) error {
 // requirements with the resolver's launch set, as Setup's
 // `codex-requirements reconcile` does. An install without Codex machine
 // requirements has nothing to rewrite.
-func reconcileWindowsCodexRequirementsForHookImage() error {
+//
+// It runs under the guardian's record pins (windowsEnterpriseGuardianRecordPins):
+// the layout resolver requires the guardian's authorization directory and the
+// gateway service name, which an administrator's or SYSTEM's shell does not
+// carry, so with the service pins alone every retire's reconcile refused with
+// "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR must be an exact absolute protected
+// path", the requirements kept naming the launch folder, and the guardian's
+// next pass refused them too (rel-1-0-10 GAP-0856).
+func reconcileWindowsCodexRequirementsForHookImage(gateway string) error {
 	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
 		return err
 	}
-	restore := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
+	restore := setTemporaryEnvironment(windowsEnterpriseGuardianRecordPins(layout, gateway))
 	defer restore()
 	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return err

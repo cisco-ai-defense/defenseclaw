@@ -1454,7 +1454,9 @@ Before an older release's Setup, the gateway runs one more step from an elevated
 `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise windows hook-image retire [--skip-profile <SID>]... [--json]`.
 It points every agent hook back at `bin\defenseclaw-hook.exe` and ends `ok` only when no machine file and no
 enrolled account's agent config names a launch folder; otherwise `hook_image_retire_pending` lists each file in
-`still_named` ([Roll back](/docs/enterprise/lifecycle#roll-back)). `--skip-profile <SID>` (repeatable, no blanket
+`still_named`, each machine file with the `cause` that kept it from being rewritten; do not run the older Setup then
+([Roll back](/docs/enterprise/lifecycle#roll-back)). An enrolled account that is signed out does not hold back the machine
+files: `retire` drops its launch-folder runtime selections and lists it in `signed_out_profiles`. `--skip-profile <SID>` (repeatable, no blanket
 form) leaves one enrolled profile's own configs unconverted: the SID must be an enrolled profile that still holds
 `retire` back, or `retire` refuses with nothing changed. Each skip writes a HIGH `config-update` audit row
 (target `hook-image-retire-skip`: who, when, the SID and its files), is listed in `skipped_profiles`, and
