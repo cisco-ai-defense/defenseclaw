@@ -472,3 +472,5 @@
 {"id": "g596c-b14", "dialect": "", "command": "cat <<'EOF'\nOperators run defenseclaw stop from the runbook\nEOF", "want": ""}
 {"id": "g596c-b15", "dialect": "", "command": "echo \"$(cat <<'EOF'\nThe runbook step is defenseclaw stop\nEOF\n)\" > summary.md", "want": ""}
 {"id": "g596c-b16", "dialect": "", "command": "diff <(cat <<'EOF'\nstep: defenseclaw stop\nEOF\n) old.txt", "want": ""}
+{"id": "g596d3-c01", "dialect": "", "command": "defenseclaw guardrail cascade explain", "want": ""}
+{"id": "g596d3-c02", "dialect": "", "command": "defenseclaw guardrail cascade explain --json --last 5", "want": ""}
