@@ -68,10 +68,15 @@ call to the judge. It judges those effects rather than the call's vocabulary: a
 call the parser proves sends nothing over the network is not judged as data
 exfiltration.
 
-When the judge reads a tool's output, it also gets the tool's name and what
-its call did (the paths it read, or its arguments with credentials removed)
-in its instructions, and your request for the turn next to the output, marked
-as untrusted text. The output cannot change either.
+When the judge reads a tool's output (the injection judge, and the PII judge
+for the tools your pack lists), it also gets what the tool-call judge gets: the
+tool's name, its call's arguments (shortened, credentials removed), what the
+parser found the call does, and your request for the turn (read from the
+shared intent store, so every gateway replica gives the same one). They come
+before the output as sections marked with a nonce that is new for every call
+and named only in the judge's instructions, so text in the output or the call
+cannot open or close a section. Everything in them is treated as untrusted
+data.
 
 ## Frozen public validation
 

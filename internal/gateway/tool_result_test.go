@@ -164,7 +164,9 @@ func TestRunJudgesToolResultUsesToolResultPrompt(t *testing.T) {
 	if len(mock.captured) != 1 {
 		t.Fatalf("want one injection judge call on a tool result, got %d", len(mock.captured))
 	}
-	if sys := mock.captured[0].Messages[0].Content; sys != toolResultInjectionSystemPrompt {
+	// The tool-result prompt, then the note on the tool-result sections
+	// (rel-1-0-10:GAP-0847).
+	if sys := mock.captured[0].Messages[0].Content; !strings.HasPrefix(sys, toolResultInjectionSystemPrompt) || !strings.Contains(sys, "CONTEXT FROM DEFENSECLAW") {
 		t.Fatalf("tool result judged with the prompt judge's system prompt: %.80q", sys)
 	}
 	// The PII judge reads a tool's output only for a tool the pack lists with

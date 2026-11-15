@@ -333,28 +333,34 @@ func TestHookJudge_ClaudeCodeToolResultCarriesCallContext(t *testing.T) {
 		ToolInput:    map[string]interface{}{"query": "parser fixtures review"},
 		ToolResponse: map[string]interface{}{"content": "{\"case\": 1, \"text\": \"fixture row for the parser tests\"}"},
 	})
-	var system string
+	var system, user string
 	for _, req := range mock.captured {
 		if strings.Contains(req.Messages[0].Content, "CONTEXT FROM DEFENSECLAW") {
-			system = req.Messages[0].Content
+			system, user = req.Messages[0].Content, req.Messages[1].Content
 		}
 	}
 	if system == "" {
-		t.Fatalf("no tool-result judge call with the context block (%d calls)", len(mock.captured))
+		t.Fatalf("no tool-result judge call with the context note (%d calls)", len(mock.captured))
 	}
-	for _, want := range []string{"\ntool: mail_search\n", "\ncall: arguments ", "parser fixtures review"} {
-		if !strings.Contains(system, want) {
-			t.Errorf("system message lacks %q:\n%s", want, system)
+	// The sections are in the user message, before the sample, with the nonce
+	// the system message names; the session's text never reaches the system
+	// message (rel-1-0-10:GAP-0638, GAP-0847).
+	nonce := toolJudgeSampleNonce(user)
+	if nonce == "" || !strings.Contains(system, toolJudgeNonceLine(nonce)) {
+		t.Fatalf("system message does not name the sections' nonce %q:\n%s", nonce, system)
+	}
+	for _, want := range []string{`<SESSION_USER_INTENT nonce="` + nonce + `" untrusted="true">` + "\nupdate the parser fixtures\n", `<CURRENT_TOOL_CALL nonce="` + nonce + `" tool="mail_search">`, "parser fixtures review"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("user message lacks %q:\n%.600s", want, user)
 		}
 	}
-	var user string
-	for _, req := range mock.captured {
-		if strings.Contains(req.Messages[0].Content, "CONTEXT FROM DEFENSECLAW") {
-			user = req.Messages[1].Content
-		}
+	if !strings.Contains(user, "\n\n<<<SAMPLE>>>\n") {
+		t.Errorf("the sections do not come before the sample: %.600q", user)
 	}
-	if !strings.HasPrefix(user, "USER_REQUEST") || !strings.Contains(user, "update the parser fixtures") {
-		t.Errorf("user message lacks the session's request before the sample: %.200q", user)
+	for _, leaked := range []string{"parser fixtures review", "update the parser fixtures"} {
+		if strings.Contains(system, leaked) {
+			t.Errorf("session text %q reached the system message", leaked)
+		}
 	}
 }
 

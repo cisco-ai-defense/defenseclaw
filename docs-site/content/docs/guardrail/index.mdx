@@ -362,7 +362,7 @@ while the judge is on for the connector, and each ships `on`:
 |---|---|---|
 | `judge_read_skip` | With `regex_judge`, a call no rule flagged that the parser proves only reads is not sent to the judge. | Every call the rules leave open goes to the judge. |
 | `judge_unmodeled_alert` | In the default pack, a lone `needs_review` finding on a call the parser does not model (MCP and other tools) alerts. | It is recorded without an alert, like a modeled call. |
-| `judge_tool_result_context` | The judge that reads a tool's output also gets the tool, what its call did (arguments redacted) and your request for the turn. | It judges the output alone. |
+| `judge_tool_result_context` | Both judges that read a tool's output (injection, and PII for the tools your pack lists) also get the tool, its call (arguments shortened, credentials removed), what the parser found the call does, and your request for the turn. | They judge the output alone. |
 
 `shadow` acts as `off` for these lanes: they change which question the judge
 is asked and have no verdict of their own to record.
