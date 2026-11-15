@@ -1353,7 +1353,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				if role == "" {
 					role = "user"
 				}
-				geminiMsgs = append(geminiMsgs, ChatMessage{Role: role, Content: t.Text})
+				geminiMsgs = append(geminiMsgs, ChatMessage{Role: role, Content: t.Text, ContentJoined: t.Joined})
 			}
 			userText = lastUserText(geminiMsgs)
 			turnText = promptTurnText(geminiMsgs)
@@ -1438,7 +1438,8 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict, as one evaluation
 		// (GAP-2288).
-		verdict := inspectPromptWithRawRecheck(r.Context(), p.inspector, inspectionText, inspectRaw, partial.Messages, label, mode)
+		verdict := inspectPromptWithRawRecheck(r.Context(), p.inspector, inspectionText, inspectRaw, partial.Messages, label, mode,
+			promptReadTexts(promptTurnTextRead(partial.Messages), turnText)...)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		if deferManagedPrompt {
 			// AID directive from this prompt's inspection is now known;
@@ -3329,7 +3330,8 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict, as one evaluation
 		// (GAP-2288).
-		verdict := inspectPromptWithRawRecheck(agentCtx, p.inspector, inspectionText, inspectText, req.Messages, req.Model, mode)
+		verdict := inspectPromptWithRawRecheck(agentCtx, p.inspector, inspectionText, inspectText, req.Messages, req.Model, mode,
+			promptReadTexts(promptInspectTextRead(req.Messages), inspectText)...)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		promptEmitContext := r.Context()
 		if deferManagedPrompt {

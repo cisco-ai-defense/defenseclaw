@@ -693,27 +693,62 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 // it was derived from (F-1265), and keeps the stricter verdict. Both checks
 // are one evaluation with one apply_guardrail span, so an OpenClaw prompt is
 // not traced and counted twice (GAP-2288).
-func (g *GuardrailInspector) InspectWithRawRecheck(ctx context.Context, direction, content, raw string, messages []ChatMessage, model, mode string) *ScanVerdict {
+func (g *GuardrailInspector) InspectWithRawRecheck(ctx context.Context, direction, content, raw string, messages []ChatMessage, model, mode string, more ...string) *ScanVerdict {
 	if raw == content {
 		raw = ""
 	}
-	return g.inspect(ctx, direction, content, raw, messages, model, mode)
+	return g.inspect(ctx, direction, content, raw, messages, model, mode, more...)
 }
 
 // inspectPromptWithRawRecheck is the F-1265 prompt check for any inspector:
-// one evaluation when the inspector supports it, two otherwise.
-func inspectPromptWithRawRecheck(ctx context.Context, inspector ContentInspector, content, raw string, messages []ChatMessage, model, mode string) *ScanVerdict {
+// one evaluation when the inspector supports it, one more text each
+// otherwise. more are further readings of the same turn (promptReadTexts),
+// checked like raw; the stricter verdict stands.
+func inspectPromptWithRawRecheck(ctx context.Context, inspector ContentInspector, content, raw string, messages []ChatMessage, model, mode string, more ...string) *ScanVerdict {
 	if guardrail, ok := inspector.(*GuardrailInspector); ok {
-		return guardrail.InspectWithRawRecheck(ctx, "prompt", content, raw, messages, model, mode)
+		return guardrail.InspectWithRawRecheck(ctx, "prompt", content, raw, messages, model, mode, more...)
 	}
 	verdict := inspector.Inspect(ctx, "prompt", content, messages, model, mode)
 	if content != raw {
 		verdict = mergePromptVerdicts(verdict, inspector.Inspect(ctx, "prompt", raw, messages, model, mode))
 	}
+	for _, text := range promptRecheckTexts(content, raw, more) {
+		verdict = mergePromptVerdicts(verdict, inspector.Inspect(ctx, "prompt", text, messages, model, mode))
+	}
 	return verdict
 }
 
-func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, raw string, messages []ChatMessage, model, mode string) *ScanVerdict {
+// promptRecheckTexts are the readings of a prompt still to inspect after
+// content and raw: each non-blank text of more that is neither of them nor
+// repeated.
+func promptRecheckTexts(content, raw string, more []string) []string {
+	var out []string
+	seen := map[string]bool{content: true, raw: true, "": true}
+	for _, text := range more {
+		if seen[text] || strings.TrimSpace(text) == "" {
+			continue
+		}
+		seen[text] = true
+		out = append(out, text)
+	}
+	return out
+}
+
+// promptReadTexts are the further readings of a prompt turn when a client
+// split its text over several parts: read is the turn as the model reads it
+// (the parts run together with no separator), shown the text already
+// inspected. A literal rule must not be broken by a part boundary the model
+// does not see (substrate-1:GAP-0258); the line-feed join of shown stays the
+// display text and is inspected as before. It returns the reading as it is
+// and with the OpenClaw untrusted envelope stripped, as shown is inspected.
+func promptReadTexts(read, shown string) []string {
+	if strings.TrimSpace(read) == "" || read == shown {
+		return nil
+	}
+	return []string{promptInspectionText(read), read}
+}
+
+func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, raw string, messages []ChatMessage, model, mode string, more ...string) *ScanVerdict {
 	// Scope correction:
 	// Completion/response scanning must only inspect assistant-visible output.
 	// It must not re-scan request-side system prompts, tool definitions,
@@ -749,6 +784,9 @@ func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, ra
 	verdict := g.inspectStrategy(ctx, strategy, direction, content, messages, model, mode)
 	if raw != "" {
 		verdict = mergePromptVerdicts(verdict, g.inspectStrategy(ctx, strategy, direction, raw, messages, model, mode))
+	}
+	for _, text := range promptRecheckTexts(content, raw, more) {
+		verdict = mergePromptVerdicts(verdict, g.inspectStrategy(ctx, strategy, direction, text, messages, model, mode))
 	}
 
 	elapsed := time.Since(start)
@@ -2658,9 +2696,16 @@ func recordCrossLayerDisagreement(regex, judge *ScanVerdict) {
 // user prompt from inspection. Scanning the full history still causes
 // false positives when a previously flagged message stays in context.
 func lastUserText(messages []ChatMessage) string {
+	return lastUserTextBy(messages, ChatMessage.contentShown)
+}
+
+// contentShown is Content, the line-feed reading of a split content.
+func (m ChatMessage) contentShown() string { return m.Content }
+
+func lastUserTextBy(messages []ChatMessage, text func(ChatMessage) string) string {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
-			return messages[i].Content
+		if messages[i].Role == "user" && strings.TrimSpace(text(messages[i])) != "" {
+			return text(messages[i])
 		}
 	}
 	return ""
@@ -2690,14 +2735,18 @@ func promptSideInstructionText(messages []ChatMessage) string {
 // OpenClaw 2026.9 appends a synthetic context message after the prompt, so the
 // last message alone would leave the prompt itself unscanned (GAP-0190).
 func currentTurnUserText(messages []ChatMessage) string {
+	return currentTurnUserTextBy(messages, ChatMessage.contentShown)
+}
+
+func currentTurnUserTextBy(messages []ChatMessage, text func(ChatMessage) string) string {
 	var turn []string
 	for i := len(messages) - 1; i >= 0; i-- {
 		role := messages[i].Role
 		if role == "assistant" || role == "tool" {
 			break
 		}
-		if role == "user" && strings.TrimSpace(messages[i].Content) != "" {
-			turn = append(turn, messages[i].Content)
+		if role == "user" && strings.TrimSpace(text(messages[i])) != "" {
+			turn = append(turn, text(messages[i]))
 		}
 	}
 	for i, j := 0, len(turn)-1; i < j; i, j = i+1, j-1 {
@@ -2714,6 +2763,27 @@ func promptTurnText(messages []ChatMessage) string {
 		return lastUserText(messages)
 	}
 	return currentTurnUserText(messages)
+}
+
+// promptTurnTextRead is promptTurnText with each split message read as the
+// model reads it (ChatMessage.ContentRead).
+func promptTurnTextRead(messages []ChatMessage) string {
+	if ManagedEnterpriseActive() {
+		return lastUserTextBy(messages, ChatMessage.ContentRead)
+	}
+	return currentTurnUserTextBy(messages, ChatMessage.ContentRead)
+}
+
+// promptInspectTextRead is promptInspectText with each split message read as
+// the model reads it.
+func promptInspectTextRead(messages []ChatMessage) string {
+	if text := promptTurnTextRead(messages); strings.TrimSpace(text) != "" {
+		return text
+	}
+	if text := lastUserTextBy(messages, ChatMessage.ContentRead); strings.TrimSpace(text) != "" {
+		return text
+	}
+	return promptSideInstructionText(messages)
 }
 
 // promptInspectText is the pre-call inspection source: the user turn in

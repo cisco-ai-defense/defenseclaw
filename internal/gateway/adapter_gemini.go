@@ -101,6 +101,9 @@ func (geminiAdapter) WriteBlockResponse(p *GuardrailProxy, w http.ResponseWriter
 type geminiTurn struct {
 	Role string
 	Text string
+	// Joined is the text parts joined with no separator (see
+	// ChatMessage.ContentJoined); empty for a turn of fewer than two parts.
+	Joined string
 }
 
 // extractGeminiContentsText flattens a Gemini-shaped `contents[]` JSON
@@ -130,7 +133,8 @@ func extractGeminiContentsText(raw json.RawMessage) []geminiTurn {
 		if err := json.Unmarshal(r, &turn); err != nil {
 			continue
 		}
-		var sb strings.Builder
+		var sb, joined strings.Builder
+		parts := 0
 		for _, p := range turn.Parts {
 			var part struct {
 				Text string `json:"text"`
@@ -140,10 +144,16 @@ func extractGeminiContentsText(raw json.RawMessage) []geminiTurn {
 					sb.WriteByte('\n')
 				}
 				sb.WriteString(part.Text)
+				joined.WriteString(part.Text)
+				parts++
 			}
 		}
 		if sb.Len() > 0 {
-			out = append(out, geminiTurn{Role: turn.Role, Text: sb.String()})
+			t := geminiTurn{Role: turn.Role, Text: sb.String()}
+			if parts > 1 {
+				t.Joined = joined.String()
+			}
+			out = append(out, t)
 		}
 	}
 	return out

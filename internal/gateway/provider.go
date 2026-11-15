@@ -27,13 +27,19 @@ import (
 // representation throughout the proxy. Content can be a plain string or an
 // array of content blocks ([{"type":"text","text":"..."}]).
 type ChatMessage struct {
-	Role         string          `json:"role"`
-	Content      string          `json:"-"`
-	RawContent   json.RawMessage `json:"content,omitempty"`
-	ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
-	ToolCallID   string          `json:"tool_call_id,omitempty"`
-	Name         string          `json:"name,omitempty"`
-	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
+	Role    string `json:"role"`
+	Content string `json:"-"`
+	// ContentJoined is the text parts of an array content joined with NO
+	// separator, the way a model reads a turn whose parts the client split
+	// (substrate-1:GAP-0258). Content joins the parts with a line feed for
+	// display and for the rules that read line by line. It is set only for a
+	// content of two or more text parts; use ContentRead for the reading.
+	ContentJoined string          `json:"-"`
+	RawContent    json.RawMessage `json:"content,omitempty"`
+	ToolCalls     json.RawMessage `json:"tool_calls,omitempty"`
+	ToolCallID    string          `json:"tool_call_id,omitempty"`
+	Name          string          `json:"name,omitempty"`
+	ExtraContent  json.RawMessage `json:"extra_content,omitempty"`
 }
 
 func (m *ChatMessage) UnmarshalJSON(data []byte) error {
@@ -75,7 +81,8 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 			m.Content = string(p.Content)
 			return nil
 		}
-		var sb strings.Builder
+		var sb, joined strings.Builder
+		parts := 0
 		for i, b := range blocks {
 			// "text" — Chat Completions / Anthropic
 			// "input_text" / "output_text" — OpenAI Responses API
@@ -84,14 +91,29 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 					sb.WriteString("\n")
 				}
 				sb.WriteString(b.Text)
+				joined.WriteString(b.Text)
+				parts++
 			}
 		}
 		m.Content = sb.String()
+		m.ContentJoined = ""
+		if parts > 1 && joined.String() != m.Content {
+			m.ContentJoined = joined.String()
+		}
 		return nil
 	}
 
 	m.Content = string(p.Content)
 	return nil
+}
+
+// ContentRead is the message text as the model reads it: the text parts of a
+// split content run together with no separator (ContentJoined), else Content.
+func (m ChatMessage) ContentRead() string {
+	if m.ContentJoined != "" {
+		return m.ContentJoined
+	}
+	return m.Content
 }
 
 func (m ChatMessage) MarshalJSON() ([]byte, error) {
