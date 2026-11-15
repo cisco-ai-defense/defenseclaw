@@ -1218,6 +1218,14 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 			return command
 		}
 	}
+	// Any other key the trusted-action parser reads as the command (agy
+	// run_command's CommandLine): read only under command and cmd, an
+	// Antigravity command that stops or disables DefenseClaw, or rewrites an
+	// agent's hook configuration, raised no guard finding where every other
+	// hook connector blocks it.
+	if command, ok := trustedShellCommandArgument(input.Args); ok {
+		return command
+	}
 	return ""
 }
 
