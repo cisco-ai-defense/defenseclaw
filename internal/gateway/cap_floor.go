@@ -705,10 +705,10 @@ func capFloorStripKeywords(text string) string {
 // syntax depth or node bound, the wrapper bound or the fact bound. The facts
 // of such a call hold no, or only some of the, paths and commands of the
 // text, so no reader proved what the call does (rel-1-0-10:GAP-0688,
-// GAP-0689). The input bound is not here: it is the size of one script the
-// shell reading budget grades by target (the owner rule of GAP-0677, a benign
-// 10 KB `bash -c` script is allowed), and a call past the byte bound is
-// truncated by s7/posix-cap (GAP-0382). Other tools keep their own bounds.
+// GAP-0689). The input bound is not here: posixParseTruncation truncates a
+// call that stopped at a byte bound or at the inline program bound
+// (GAP-0382, GAP-0689), with the data-word and padding twins it reads
+// instead. Other tools keep their own bounds.
 func capFloorAnalysisCaps(facts actionfacts.Facts) bounded.CapSet {
 	var set bounded.CapSet
 	if !trustedBashExecutionTool(facts.Tool) {

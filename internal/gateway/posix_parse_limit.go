@@ -43,9 +43,12 @@ import (
 // position decides, no program is named for being data (rel-1-0-10:GAP-0382,
 // second round).
 
-// posixByteBoundCommand is the command text of a POSIX shell call the
-// analysis stopped reading at a byte bound, "" for any other call.
-func posixByteBoundCommand(request trustedActionRequest, facts actionfacts.Facts) string {
+// posixInputLimitCommand is the command text of a POSIX shell call whose
+// analysis stopped at an input bound (limit_exceeded, input_limit), "" for any
+// other call: a byte bound of the text or of a word (posixByteBoundCommand),
+// a count of words, or the bound of a reader inside the text, such as the
+// 2 KiB bound of an inline perl or ruby program.
+func posixInputLimitCommand(request trustedActionRequest, facts actionfacts.Facts) string {
 	input := request.Input
 	if facts.Parse.Status != actionfacts.StatusLimitExceeded ||
 		!slices.Contains(facts.Parse.Issues, actionfacts.IssueInputLimit) ||
@@ -69,7 +72,17 @@ func posixByteBoundCommand(request trustedActionRequest, facts actionfacts.Facts
 		// truncated (rel-1-0-10:GAP-0689).
 		command, known = trustedArgvCommandText(input)
 	}
-	if !known || !actionfacts.ShellInputPastByteBound(command, len(input.Args)) {
+	if !known {
+		return ""
+	}
+	return command
+}
+
+// posixByteBoundCommand is the command text of a POSIX shell call the
+// analysis stopped reading at a byte bound, "" for any other call.
+func posixByteBoundCommand(request trustedActionRequest, facts actionfacts.Facts) string {
+	command := posixInputLimitCommand(request, facts)
+	if command == "" || !actionfacts.ShellInputPastByteBound(command, len(request.Input.Args)) {
 		return ""
 	}
 	return command
@@ -109,15 +122,34 @@ func trustedArgvCommandText(input actionfacts.Input) (string, bool) {
 	return text.String(), text.Len() > 0
 }
 
-// posixParseTruncation is the cap of the byte bound the POSIX analysis of a
+// posixParseTruncation is the cap of the input bound the POSIX analysis of a
 // shell call hit, empty when it read the call to the end, stopped at another
 // bound, the call is not a POSIX shell call, a call over the text bound only
 // by the white space or comments that pad it, whose bounded twin
 // (overLimitCommandBoundedTwinRequest) is read in full and judged as the
 // unpadded command (GAP-0934), or a call whose every over-limit word is DATA
 // (posixDataWordTwinRequest).
+//
+// An inline perl or ruby program past the 2 KiB bound of its reader, in a
+// word under the byte bound, is truncated too (actionfacts.InlineProgramPastBound):
+// the program's commands were never read, and no twin reads it shorter. It
+// used to end in a clean allow in every pack when nothing else was proven:
+// under the ONE BOUND RULE it is the unknown tier (an alert in the default and
+// permissive packs and the managed default, a block in strict and managed
+// strict), and a finding proven elsewhere in the call keeps its own verdict
+// (rel-1-0-10:GAP-0689, lead ruling 2026-11-15). Any other input bound under
+// the byte bound keeps its own path: a count of words is the operand bound
+// (operandBoundDispatch), and a data word inside a command substitution is
+// read by the data-word ruling.
 func posixParseTruncation(request trustedActionRequest, facts actionfacts.Facts) bounded.CapSet {
-	if posixByteBoundCommand(request, facts) == "" {
+	command := posixInputLimitCommand(request, facts)
+	if command == "" {
+		return bounded.CapSet{}
+	}
+	if !actionfacts.ShellInputPastByteBound(command, len(request.Input.Args)) {
+		if slices.ContainsFunc(facts.Commands, actionfacts.InlineProgramPastBound) {
+			return bounded.Of(bounded.Bytes)
+		}
 		return bounded.CapSet{}
 	}
 	if _, twinRead := overLimitCommandBoundedTwinRequest(request, facts); twinRead {
