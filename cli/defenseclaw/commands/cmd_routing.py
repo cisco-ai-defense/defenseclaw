@@ -355,6 +355,46 @@ def _health_routing(app: AppContext) -> dict[str, Any]:
     return live if isinstance(live, dict) else {}
 
 
+def _startup_cause(app: AppContext) -> str:
+    """Why the running gateway could not start routing, in its words (what
+    doctor shows on the FAIL Semantic routing row); empty when it reports none."""
+    live = _health_routing(app)
+    if live.get("state") != "error":
+        return ""
+    return " ".join(str(live.get("last_error") or "").split())[:300]
+
+
+def _cause_fix(cause: str) -> str:
+    """The way out of a routing startup failure that the CLI can name."""
+    if "docker" in cause.lower():
+        return "start Docker, or use the built-in classifier: defenseclaw routing setup --classifier rules"
+    return "run defenseclaw doctor, then restart the gateway: defenseclaw-gateway restart"
+
+
+def _docker_problem() -> str:
+    """Why the managed vllm_sr router cannot run here (no Docker CLI, or its
+    daemon does not answer); empty when Docker is up. The wording is doctor's
+    and setup's (observability.local_stack)."""
+    import shutil
+    import subprocess
+
+    from defenseclaw import platform_support
+    from defenseclaw.observability.local_stack import docker_cli_missing_message, docker_daemon_unreachable_message
+
+    docker = shutil.which("docker")
+    if docker is None:
+        return docker_cli_missing_message(platform_support.host_os())
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [docker, "info"], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"Docker did not answer ({exc.__class__.__name__})"
+    if proc.returncode == 0:
+        return ""
+    return docker_daemon_unreachable_message((proc.stderr or proc.stdout or "").strip(), platform_support.host_os())
+
+
 # --------------------------------------------------------------------------
 # the group
 
@@ -419,6 +459,10 @@ def _status_data(app: AppContext) -> dict[str, Any]:
     data["effective"] = effective if isinstance(effective, dict) else None
     if error and data.get("enabled"):
         warnings.append(f"no live routing view: {error}")
+    if data.get("enabled") and (data["health"] or {}).get("state") == "error":
+        cause = " ".join(str((data["health"] or {}).get("last_error") or "").split())[:300]
+        if cause:
+            warnings.append(f"routing is on but the gateway could not start it: {cause} ({_cause_fix(cause)})")
     for budget in _dicts(effective.get("budgets")) if isinstance(effective, dict) else []:
         if budget.get("exceeded"):
             warnings.append(
@@ -581,7 +625,26 @@ def routing_enable(app: AppContext, connector: str) -> None:
             "routing needs at least one model; add one first: defenseclaw "
             "routing models add NAME --provider P --model M"
         )
+    routing = _routing(doc)
+    classifier = str(routing.get("classifier") or "")
+    remote = routing.get("remote")
+    remote_endpoint = str(remote.get("endpoint") or "").strip() if isinstance(remote, dict) else ""
+    needs_docker = (classifier or DEFAULT_CLASSIFIER) == "vllm_sr" and not remote_endpoint
+    docker_problem = _docker_problem() if needs_docker else ""
     _write(app, {"routing.enabled": True})
+    if classifier:
+        click.echo(f"Classifier: {classifier}")
+    else:
+        click.echo(
+            f"Classifier: {DEFAULT_CLASSIFIER} (the default: the vLLM Semantic Router in Docker; "
+            "use the built-in one with defenseclaw routing setup --classifier rules)"
+        )
+    if docker_problem:
+        ux.warn(
+            f"the {DEFAULT_CLASSIFIER} classifier needs Docker and it is not usable here ({docker_problem}), "
+            "so the gateway will leave routing off. Use the built-in classifier instead: "
+            "defenseclaw routing setup --classifier rules"
+        )
 
 
 @routing_cmd.command("disable")
@@ -1217,6 +1280,9 @@ def routing_test(app: AppContext, prompt: str, connector: str, as_profile: str, 
     payload = {"prompt": prompt, "connector": connector, "profile": as_profile, "user": as_user}
     answer, error = _ask_gateway(app, "POST", "/api/v1/routing/test", json=payload, timeout=10)
     if error:
+        cause = _startup_cause(app) if "routing is" in error else ""
+        if cause:
+            raise click.ClickException(f"{error}\nThe gateway reports: {cause}\nFix: {_cause_fix(cause)}")
         raise click.ClickException(error)
     if as_json:
         _emit_json(answer)
