@@ -24,7 +24,7 @@ const (
 )
 
 // Closed causes of a route-only connector that is not ready, published next
-// to the free-text problem so status can name the cause without free text
+// to the free-text problem (a code, never text from the config)
 // (doctor and the TUI read them from /health; the status routing block has
 // no cause member: its schema in packaging/mdm/contract is a published contract).
 const (
