@@ -61,9 +61,11 @@ func appendTrustedPrivateKeyReaderFinding(
 		}
 		proved = hookpaths.ActionPrivateKeyReadWithDialect(command, request.Input.CWD, request.Input.ActiveHome, dialect) ||
 			hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome)
-		if proved && (trustedActionPrivateKeyOnlyCopiedInHome(request.Input, facts) || trustedActionOwnSSHFolderCopy(request, request.Input)) {
-			// Every command copies inside the home: the key is read only to
-			// be copied there, which alerts and does not block.
+		if proved && (trustedActionPrivateKeyOnlyCopiedInHome(request.Input, facts) && !trustedActionCallOpensAccess(request) ||
+			trustedActionOwnSSHFolderCopy(request, request.Input)) {
+			// Every command copies inside the home and nothing in the call
+			// opens access (rel-1-0-10:GAP-0854): the key is read only to be
+			// copied there, which alerts and does not block.
 			return appendTrustedPrivateKeyHomeCopyAlert(findings, generation, request)
 		}
 	}

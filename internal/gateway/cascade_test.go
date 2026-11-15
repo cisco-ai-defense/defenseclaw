@@ -194,6 +194,8 @@ func TestCascadeJudgeRole(t *testing.T) {
 		{"needs System One: asks", func(c *config.CascadeConfig) { c.Judge.BlockNeedsSystemOne = &yes }, block, false, "confirm"},
 		{"needs System One: agreed", func(c *config.CascadeConfig) { c.Judge.BlockNeedsSystemOne = &yes }, agreed, false, "block"},
 		{"cascade 2 is not the judge", func(c *config.CascadeConfig) { c.Judge.MaxAction = "alert" }, block, true, "block"},
+		// The cap is the judge's: System One's own block stands (GAP-0867).
+		{"max alert keeps System One's block", func(c *config.CascadeConfig) { c.Judge.MaxAction = "alert" }, agreed, false, "block"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -234,11 +236,12 @@ func TestCascadeUnsureVerdicts(t *testing.T) {
 }
 
 // D6: decide is retired (s7/sysone 1eb8bf9277); a cascade-3 confident block
-// with a silent judge ends at the decision model's HIGH floor: an alert in
-// the default pack (block_at CRITICAL), a block in strict (block_at MEDIUM).
+// with a silent judge ends at System One's own block, as in cascade 2, in
+// every pack (raise-only across layers, rel-1-0-10:GAP-0867).
 func TestCascadeThreeConfidentBlockSilentJudge(t *testing.T) {
-	floor := &ScanVerdict{Action: "block", Severity: "HIGH", Findings: []string{decisionModelFindingID}, Scanner: decisionModelScanner, systemOneBlocked: true}
-	for posture, want := range map[string]string{"default": "alert", "permissive": "alert", "strict": "block"} {
+	floor := (&decisionModel{blockAt: 0.75, blockRiskScore: 1.5}).blockFloor(t.Context(), decisionResult{route: decisionBlock, risk: 0.95, riskScore: 1.9})
+	floor.systemOneBlocked = true
+	for posture, want := range map[string]string{"default": "block", "permissive": "block", "strict": "block"} {
 		cfg := cascadeConfig(t, posture, nil)
 		got := hookJudgeLaneVerdict(cfg, "claudecode", "tool_call", strongerDecisionVerdict(nil, floor))
 		if got.Action != want {

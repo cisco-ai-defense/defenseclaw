@@ -34,11 +34,40 @@ const (
 type SyntaxTail struct {
 	// Statements are the readable parts of the text, in order: first the
 	// longest prefix that parses (the statements complete before the error),
-	// then each run of the text after it that parses on its own.
+	// then each run of the text after it that parses on its own, outside the
+	// bodies of HereDocs.
 	Statements []string
+	// HereDocs are the quoted here-documents opened in the statement with
+	// the error or after it whose bodies hold readable runs of the text after
+	// the error. Those runs are input of the here-document's command, not
+	// statements of the text: they are read here and left out of Statements,
+	// and the caller judges them as statements only when that command runs
+	// its standard input as shell code (rel-1-0-10:GAP-0876).
+	HereDocs []SyntaxTailHereDoc
 	// Truncated holds the caps the reading stopped at: bounded.Items for the
 	// statements or pieces, bounded.Bytes for the parse budget.
 	Truncated bounded.CapSet
+}
+
+// SyntaxTailHereDoc is a quoted here-document of a text with a syntax error
+// (SyntaxTail.HereDocs).
+type SyntaxTailHereDoc struct {
+	// Consumer is the command the body is the input of, as written on the
+	// line of the opener: the text from the start of that command to the <<
+	// and the rest of the line after the delimiter word (a pipe into another
+	// program stays in it). It is empty when the start was not found.
+	Consumer string
+	// Statements are the runs of the body that parse on their own, in order.
+	Statements []string
+}
+
+func (tail SyntaxTail) clone() SyntaxTail {
+	tail.Statements = slices.Clone(tail.Statements)
+	tail.HereDocs = slices.Clone(tail.HereDocs)
+	for index := range tail.HereDocs {
+		tail.HereDocs[index].Statements = slices.Clone(tail.HereDocs[index].Statements)
+	}
+	return tail
 }
 
 // ReadSyntaxTail reads a command the Bash and POSIX grammars both reject
@@ -58,6 +87,13 @@ type SyntaxTail struct {
 //   - the text after it, split at newlines and at the list and pipe
 //     operators outside quotes (the token fallback): each shortest run of
 //     pieces that parses on its own.
+//
+// A quoted here-document opened in the statement with the error, or after it,
+// whose body runs into the text after the error (the opener is often inside a
+// quoted argument of a program, so the shell's quotes no longer match the
+// author's): the runs of its body are its command's input, not statements of
+// the text, and are kept apart in SyntaxTail.HereDocs with that command
+// (rel-1-0-10:GAP-0876).
 //
 // What is left unread is the caller's to record; a reading cut at a cap is
 // at least the unknown tier of the pack. ok is false for a command that
@@ -99,7 +135,7 @@ func (c *syntaxTailCache) get(command string) (syntaxTailEntry, bool) {
 	defer c.mu.Unlock()
 	entry, hit := c.entries[command]
 	if hit {
-		entry.tail.Statements = slices.Clone(entry.tail.Statements)
+		entry.tail = entry.tail.clone()
 	}
 	return entry, hit
 }
@@ -110,8 +146,7 @@ func (c *syntaxTailCache) put(command string, tail SyntaxTail, ok bool) {
 	if len(c.entries) >= syntaxTailCacheEntries {
 		clear(c.entries)
 	}
-	tail.Statements = slices.Clone(tail.Statements)
-	c.entries[command] = syntaxTailEntry{tail: tail, ok: ok}
+	c.entries[command] = syntaxTailEntry{tail: tail.clone(), ok: ok}
 }
 
 func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
@@ -122,12 +157,22 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	if faulted {
 		return SyntaxTail{}, false
 	}
+	// The here-documents are found from the statement with the error on: a
+	// statement the parser completed before it closed its own quotes and
+	// here-documents.
+	docs := quotedHereDocs(command, end)
+	docRuns := make([][]string, len(docs))
 	var trunc bounded.Truncated
 	budget := bounded.NewCounter(&trunc, bounded.Bytes, 4*len(command)+(64<<10))
 	statements := bounded.NewCounter(&trunc, bounded.Items, MaxSyntaxTailStatements)
-	add := func(statement string) {
-		if statements.Take() {
+	add := func(statement string, doc int) {
+		if !statements.Take() {
+			return
+		}
+		if doc < 0 {
 			tail.Statements = append(tail.Statements, statement)
+		} else {
+			docRuns[doc] = append(docRuns[doc], statement)
 		}
 	}
 	// The error is inside the statement after the complete ones: the text
@@ -144,7 +189,7 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 		at = previousWordBoundary(command, end, at)
 	}
 	if prefix := trimSeparators(command[:end]); prefix != "" && parsesAlone(prefix, &budget) {
-		add(prefix)
+		add(prefix, -1)
 	}
 	rest := command[end:]
 	pieces, split := tokenPieces(rest)
@@ -154,23 +199,156 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	// A statement longer than maxSyntaxTailRun pieces is not read; like the
 	// cut-back tries above, that is the detection-only record, not a cap
 	// (lead ruling (a) on GAP-0745).
+	// A run stays within one here-document body, or outside every one.
+	docOf := func(piece tokenPiece) int { return hereDocAt(docs, end+piece.from) }
 	for start := 0; start < len(pieces) && !trunc.Set().Any(); {
 		next := start + 1
-		for stop := start; stop < len(pieces) && stop < start+maxSyntaxTailRun; stop++ {
+		doc := docOf(pieces[start])
+		for stop := start; stop < len(pieces) && stop < start+maxSyntaxTailRun && docOf(pieces[stop]) == doc; stop++ {
 			run := trimSeparators(rest[pieces[start].from:pieces[stop].to])
 			if run == "" {
 				break
 			}
 			if parsesAlone(run, &budget) {
-				add(run)
+				add(run, doc)
 				next = stop + 1
 				break
 			}
 		}
 		start = next
 	}
+	for index, runs := range docRuns {
+		if len(runs) > 0 {
+			tail.HereDocs = append(tail.HereDocs, SyntaxTailHereDoc{Consumer: docs[index].consumer, Statements: runs})
+		}
+	}
 	tail.Truncated = trunc.Set(&budget, &statements)
 	return tail, true
+}
+
+// quotedHereDoc is the body of a quoted here-document found by
+// quotedHereDocs: the byte range [from, to) of its lines, and its command.
+type quotedHereDoc struct {
+	from, to int
+	consumer string
+}
+
+// quotedHereDocs finds the here-documents with a quoted delimiter word
+// (<<'EOF', <<"EOF", <<\EOF, and the same written inside a quoted argument,
+// <<'"'"'EOF'"'"') opened at or after offset from, whose body is closed by a
+// line holding the word (a quote that closes the argument may follow it). The
+// quotes of the text are not followed: the opener of a script passed as one
+// quoted argument is inside them. A quoted delimiter keeps the body free of
+// expansions, so its lines are input of the command and nothing else. A body
+// that is not closed is not one: its lines stay text of the call.
+func quotedHereDocs(command string, from int) []quotedHereDoc {
+	var docs []quotedHereDoc
+	for at := from; at+2 < len(command); at++ {
+		index := strings.Index(command[at:], "<<")
+		if index < 0 {
+			break
+		}
+		at += index
+		if at > 0 && command[at-1] == '<' || strings.HasPrefix(command[at:], "<<<") {
+			at += 2
+			continue
+		}
+		word, dash, quoted, afterWord := quotedHereDocWord(command, at+2)
+		lineEnd := strings.IndexByte(command[at:], '\n')
+		if word == "" || !quoted || lineEnd < 0 || afterWord > at+lineEnd {
+			at++
+			continue
+		}
+		lineEnd += at
+		bodyFrom := lineEnd + 1
+		bodyTo, closed := quotedHereDocClose(command, bodyFrom, word, dash)
+		if !closed {
+			at++
+			continue
+		}
+		docs = append(docs, quotedHereDoc{from: bodyFrom, to: bodyTo,
+			consumer: hereDocConsumer(command, at, afterWord, lineEnd)})
+		at++
+	}
+	return docs
+}
+
+// quotedHereDocWord reads the delimiter after a << at offset at: an optional
+// -, blanks, the quote and backslash characters before the word (quoted is
+// set when there is one), then the word. afterWord is the offset after it and
+// the quote characters that follow it.
+func quotedHereDocWord(command string, at int) (word string, dash, quoted bool, afterWord int) {
+	if at < len(command) && command[at] == '-' {
+		dash = true
+		at++
+	}
+	for at < len(command) && (command[at] == ' ' || command[at] == '\t') {
+		at++
+	}
+	for at < len(command) && strings.IndexByte(`'"\`, command[at]) >= 0 {
+		quoted = true
+		at++
+	}
+	start := at
+	for at < len(command) && strings.IndexByte(" \t\n;&|<>()'\"\\`", command[at]) < 0 {
+		at++
+	}
+	word = command[start:at]
+	for at < len(command) && strings.IndexByte(`'"\`, command[at]) >= 0 {
+		at++
+	}
+	return word, dash, quoted, at
+}
+
+// quotedHereDocClose is the offset of the line that closes a body starting at
+// from: the word alone, after tabs for <<-, or followed by a quote character
+// (the end of the argument that holds the script).
+func quotedHereDocClose(command string, from int, word string, dash bool) (int, bool) {
+	for at := from; at < len(command); {
+		end := strings.IndexByte(command[at:], '\n')
+		line := command[at:]
+		if end >= 0 {
+			line = command[at : at+end]
+		}
+		if dash {
+			line = strings.TrimLeft(line, "\t")
+		}
+		if rest, found := strings.CutPrefix(line, word); found && (rest == "" || rest[0] == '\'' || rest[0] == '"') {
+			return at, true
+		}
+		if end < 0 {
+			break
+		}
+		at += end + 1
+	}
+	return 0, false
+}
+
+// hereDocConsumer is the command of a here-document opened at offset at:
+// the text from the start of its command (after the last newline, list or
+// pipe operator, group character or quote before the opener) to the <<, and
+// the rest of the opener line after the delimiter word (afterWord to
+// lineEnd). It is empty when no command text is found before the opener.
+func hereDocConsumer(command string, at, afterWord, lineEnd int) string {
+	start := at
+	for start > 0 && strings.IndexByte("\n;&|(){}`'\"", command[start-1]) < 0 {
+		start--
+	}
+	before := strings.TrimSpace(command[start:at])
+	if before == "" {
+		return ""
+	}
+	return strings.TrimSpace(before + " " + strings.TrimSpace(command[afterWord:lineEnd]))
+}
+
+// hereDocAt is the index of the body of docs that holds offset at, or -1.
+func hereDocAt(docs []quotedHereDoc, at int) int {
+	for index, doc := range docs {
+		if at >= doc.from && at < doc.to {
+			return index
+		}
+	}
+	return -1
 }
 
 // completeStatementsEnd is the end of the last top-level statement the Bash

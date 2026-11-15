@@ -248,6 +248,21 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		// Quoting makes *, ? and [ literal only in a POSIX reading of a
 		// POSIX home; a Windows-spelled home reads them as wildcards.
 		literalReading := !spelledWindows && !actionPosixWindowsHome(home)
+		// The read-only excuse of ActionMentionsNoWriteRole follows the
+		// call-level GAP-0570 rules (actionCallKeepsMentions): where a reader
+		// can hand a name on ($_) or run something else (an assignment, a
+		// function, an echo of an expansion), no statement of the call is
+		// excused as a reader (rel-1-0-10:GAP-0643, GAP-0860). A program of
+		// unknown role keeps its own excuse (GAP-0013, GAP-0708).
+		// Asked only when a statement would be excused, once per walk.
+		callKeepsRead, callKeepsValue := false, false
+		callKeeps := func() bool {
+			if !callKeepsRead {
+				callKeepsRead = true
+				callKeepsValue = memo.nonWritesExcused() && !stateOnly && actionCallKeepsMentions(file, home)
+			}
+			return callKeepsValue
+		}
 		if memo.nonWritesExcused() && !stateOnly {
 			// A pipeline of readers (sudo sha256sum KEYS | sed -n 1,5p | tail) prints
 			// to the terminal: its statements read like a direct reader does.
@@ -418,6 +433,18 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					// copy of the content into a resolved file.
 					readOnly = actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) ||
 						actionReaderToUnknownSink(stmt, home)
+				}
+				// The excuse of ActionMentionsNoWriteRole reads a call as a reader
+				// only when the program it runs
+				// (and a bash -c body's) is a bare name or one in a system folder:
+				// ./ls, ~/bin/cat or a copied file run by its path can be anything,
+				// so the name it holds keeps the rel reading (rel-1-0-10:GAP-0715 in
+				// the excused scan). Only the call that holds the name is asked:
+				// ./gradlew beside ls ~/.ssh does not make ls something else.
+				systemPrograms := !memo.nonWritesExcused() || stateOnly ||
+					actionReadersAreSystemPrograms(&syntax.File{Stmts: []*syntax.Stmt{{Cmd: call}}}, home, 0)
+				if readOnly && (!systemPrograms || callKeeps()) {
+					readOnly = false
 				}
 				readsReplaced := len(replacedEntries) > 0 && readOnly
 				var quick func([]string) bool
@@ -598,27 +625,18 @@ func actionSSHCopyIDToThisHost(call *syntax.CallExpr, home string) bool {
 	return false
 }
 
-// actionPlainReadStatements are the statements whose words name files only
-// for a reader to read them (rel-1-0-10:GAP-0570): a known reader statement
-// (actionKnownReadOnlyShell: ls, cat, stat, grep ...) at the top of the call
-// or in an && or || list, and each stage of such a pipeline whose stages are
-// all readers (ls -la ~/.ssh | head -5). Such a statement prints to the
-// terminal or to /dev/null: it writes no file and hands no name to the other
-// statements, so a protected path it names is not a write target of the
-// call, whatever the others run (ssh -V, make). A statement that changes
-// folder (cd, pushd, popd) is not one: the folder decides what later
-// relative names reach. A call has none when it reads $_ (the last word of
-// the statement before, which can pass a name on), assigns a variable or
-// declares a function (PATH=/tmp/x can change what a later reader runs, as
-// actionKnownReadOnlyShell reads it), or prints an expansion with echo or
-// printf (the rel-1-0-6:GAP-0225 ruling keeps the mention there: only a
-// fixed-text echo is verdict-neutral, actionFixedTextEchoes).
-func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]bool {
-	if file == nil {
-		return nil
-	}
+// actionCallKeepsMentions reports a call in which a statement that only reads
+// may still hand a name on or run something else than a reader: it rebinds a
+// reader name, reads $_ (the last word of the statement before), assigns a
+// variable, declares a function (PATH=/tmp/x, f() {...} change what a later
+// reader runs), prints an expansion with echo or printf (rel-1-0-6:GAP-0225:
+// only a fixed-text echo is verdict-neutral, actionFixedTextEchoes), or runs
+// a program word that is not static. A reader statement of such a call is no
+// plain read (actionPlainReadStatements), and its mentions are not excused
+// (ActionMentionsNoWriteRole, rel-1-0-10:GAP-0018 under GAP-0570/GAP-0643).
+func actionCallKeepsMentions(file *syntax.File, home string) bool {
 	if actionRebindsReaderNames(file, home) {
-		return nil
+		return true
 	}
 	neutral := actionFixedTextEchoes(file)
 	// An agent's exit-status wrapper (status=$?; printf '%s' "$status";
@@ -648,7 +666,29 @@ func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]
 		}
 		return !kept
 	})
-	if kept {
+	return kept
+}
+
+// actionPlainReadStatements are the statements whose words name files only
+// for a reader to read them (rel-1-0-10:GAP-0570): a known reader statement
+// (actionKnownReadOnlyShell: ls, cat, stat, grep ...) at the top of the call
+// or in an && or || list, and each stage of such a pipeline whose stages are
+// all readers (ls -la ~/.ssh | head -5). Such a statement prints to the
+// terminal or to /dev/null: it writes no file and hands no name to the other
+// statements, so a protected path it names is not a write target of the
+// call, whatever the others run (ssh -V, make). A statement that changes
+// folder (cd, pushd, popd) is not one: the folder decides what later
+// relative names reach. A call has none when it reads $_ (the last word of
+// the statement before, which can pass a name on), assigns a variable or
+// declares a function (PATH=/tmp/x can change what a later reader runs, as
+// actionKnownReadOnlyShell reads it), or prints an expansion with echo or
+// printf (the rel-1-0-6:GAP-0225 ruling keeps the mention there: only a
+// fixed-text echo is verdict-neutral, actionFixedTextEchoes).
+func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]bool {
+	if file == nil {
+		return nil
+	}
+	if actionCallKeepsMentions(file, home) {
 		return nil
 	}
 	reads := map[*syntax.Stmt]bool{}
@@ -5858,7 +5898,9 @@ func actionReaderToUnknownSink(stmt *syntax.Stmt, home string) bool {
 
 // actionReadOnlyPipelines returns the statements of every list operand or top
 // level statement that is a pipeline whose stages all only read, with no
-// redirect: the statements of such a pipeline, stage by stage.
+// redirect, and run only system programs (actionReadersAreSystemPrograms: a
+// stage run by its path, ls KEYS | ./head, can be anything,
+// rel-1-0-10:GAP-0715): the statements of such a pipeline, stage by stage.
 func actionReadOnlyPipelines(file *syntax.File, home string) map[*syntax.Stmt]bool {
 	out := map[*syntax.Stmt]bool{}
 	var mark func(stmt *syntax.Stmt)
@@ -5887,7 +5929,8 @@ func actionReadOnlyPipelines(file *syntax.File, home string) map[*syntax.Stmt]bo
 			mark(binary.Y)
 		case syntax.Pipe, syntax.PipeAll:
 			if len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated &&
-				actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) {
+				actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) &&
+				actionReadersAreSystemPrograms(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0) {
 				stages(stmt)
 			}
 		}

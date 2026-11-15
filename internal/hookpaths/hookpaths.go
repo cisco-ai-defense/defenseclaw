@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
@@ -84,9 +85,13 @@ const TruncatedKey = "\x00truncated"
 const AwkFilesKey = "\x00awk-files"
 
 // ReadProgramFile reads the program file of an awk call as the hook client
-// does: the file the system opens for the name, as the user, up to the size
-// bound of a script body.
-func ReadProgramFile(name, cwd string) (string, bool) { return readActionScript(name, cwd) }
+// does: the file the system opens for the name, as the user. A file past the
+// awk program bound (awkprog.MaxProgramBytes) is read to that bound and one
+// byte more, so the reading judges what the start of the program holds and
+// reports the rest as truncated (rel-1-0-10:GAP-0734).
+func ReadProgramFile(name, cwd string) (string, bool) {
+	return readActionScriptWith(name, cwd, indirectRead{limit: awkprog.MaxProgramBytes, prefix: true})
+}
 
 // PatchCompleteKey is positive hook-side proof that every apply_patch (or
 // Hermes V4A patch) directive was parsed and each target was resolved in the
@@ -426,9 +431,10 @@ func childStateOperands(command, cwd, home string) []stateOperand {
 // of command read in cwd with the known values of the action (user): an
 // entry, or a followed name for sed --follow-symlinks.
 func inPlaceStateOperands(command, cwd, home string, user KnownUser) []stateOperand {
-	if !strings.Contains(command, "sed") && !strings.Contains(command, "perl") {
-		return nil
-	}
+	// No text test of the command stands in front of the reader: the program
+	// is the word the parser makes (readInPlaceEdits), so s""ed, "gsed" and
+	// perl5.38.2 name an editor as sed and perl do (rel-1-0-10:GAP-0737, as
+	// GAP-0667 for the backup reader).
 	var operands []stateOperand
 	readInPlaceEdits(command, cwd, home, user, func(name string, followed bool) {
 		operands = append(operands, stateOperand{path: name, entry: !followed})
@@ -2243,7 +2249,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					// that reading, and behind ProtectHome reads its targets
 					// only from this map (GAP-0499).
 					awkTwin := actionfacts.AwkCommandTwinFiles(command, func(name string) (string, bool) {
-						return readActionScript(name, cwd)
+						return ReadProgramFile(name, cwd)
 					})
 					// An awk call that is the whole command and starts one touch -h of
 					// a link itself is as safe as the plain call: the plain call lists

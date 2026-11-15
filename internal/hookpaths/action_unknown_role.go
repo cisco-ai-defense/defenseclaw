@@ -22,7 +22,9 @@ import (
 
 // actionRoleKnownWriters are the programs, besides the lists of this package,
 // that write, remove, change or run what they are given.
-var actionRoleKnownWriters = strings.Fields(`rm rmdir unlink shred mkdir mkfifo mknod touch tee dd truncate
+// xxd writes its second operand (xxd [-r] infile outfile), so a protected name
+// there keeps the rel block of the write (rel-1-0-10:GAP-0018 sshfp probe R04).
+var actionRoleKnownWriters = strings.Fields(`rm rmdir unlink shred mkdir mkfifo mknod touch tee dd truncate xxd
 	sed gsed awk gawk mawk nawk perl ruby node deno bun php lua tclsh expect python python3 pwsh powershell cmd
 	bash sh zsh dash ksh fish csh tcsh eval source exec env sudo doas su nohup timeout nice ionice setsid stdbuf command
 	xargs find gfind ssh scp sftp rsync git curl wget aria2c patch install chmod chown chgrp chattr setfacl

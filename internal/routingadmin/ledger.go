@@ -48,6 +48,18 @@ func NewLedger() *Ledger {
 		unknown: map[string]time.Time{}, seeded: map[string]bool{}, now: time.Now}
 }
 
+// NewLedgerClock returns an empty ledger that reads today from now (nil is the
+// real clock). Charge, MarkUnknown and the day pruning use it, so a charge is
+// never moved to the real today when now is another date: a test or a replay
+// owns its clock and gets the same answer on any day.
+func NewLedgerClock(now func() time.Time) *Ledger {
+	l := NewLedger()
+	if now != nil {
+		l.now = now
+	}
+	return l
+}
+
 // Charge adds usd to every key on the UTC day of at. Non-positive or
 // non-finite amounts are ignored (absent cost adds nothing); a charge dated
 // in the future (a clock step) counts today.

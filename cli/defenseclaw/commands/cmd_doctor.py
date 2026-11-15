@@ -14160,6 +14160,9 @@ def _check_guardrail_cascade(cfg, r: _DoctorResult) -> None:
         f"System One {(view.get('system_one') or {}).get('runs')}, Rego policy "
         f"{'on' if (view.get('policy') or {}).get('active') else 'off'}, CRITICAL floor {view.get('critical_floor')}"
     )
+    lanes = cascade.lane_summary(view)
+    if lanes:
+        summary += f", lanes {lanes}"
     if notes:
         _emit("warn", "Guardrail cascade", summary + "; " + "; ".join(notes), r=r,
               remediation="defenseclaw guardrail cascade explain")

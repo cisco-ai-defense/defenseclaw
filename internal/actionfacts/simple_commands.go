@@ -96,7 +96,11 @@ func isSyntaxTailUnread(simple SimpleCommand) bool {
 // error (tail): each readable statement, as a command of its own and with
 // its own commands, in the directory the text starts in, then the
 // EvaluationFailureSyntax marker for the part that was not read. A statement
-// keeps the readings it has alone, a limit included.
+// keeps the readings it has alone, a limit included. The runs of a quoted
+// here-document body are statements only when its command runs its standard
+// input as shell code; another command's body is its data and stays unread
+// text, and a command that is not known is the unknown tier
+// (EvaluationFailureUnresolvedBody, rel-1-0-10:GAP-0876).
 func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
 	result := make([]SimpleCommand, 0, len(tail.Statements)+2)
 	emitted := make(map[SimpleCommand]bool, len(tail.Statements))
@@ -112,14 +116,13 @@ func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, inte
 		}
 		return true
 	}
-read:
-	for _, statement := range tail.Statements {
+	read := func(statement string) bool {
 		piece := input
 		piece.Command, piece.Args, piece.Argv = statement, nil, nil
 		// The statement as written is judged whatever its own reading
 		// finds: its raw-text and whole-call readers run on it.
 		if !add(SimpleCommand{Text: statement, CWD: input.CWD}) {
-			break
+			return false
 		}
 		for _, command := range simpleCommands(piece, Analyze(piece), depth+1, interpreter, inherited, guess, nil) {
 			if command.EvaluationFailure == "limit" {
@@ -132,9 +135,28 @@ read:
 				continue
 			}
 			if !add(command) {
-				break read
+				return false
 			}
 		}
+		return true
+	}
+	statements := slices.Clone(tail.Statements)
+	unknownBody := false
+	for _, doc := range tail.HereDocs {
+		switch syntaxTailHereDocConsumer(doc.Consumer) {
+		case hereDocRunsCode:
+			statements = append(statements, doc.Statements...)
+		case hereDocUnknown:
+			unknownBody = true
+		}
+	}
+	for _, statement := range statements {
+		if !read(statement) {
+			break
+		}
+	}
+	if unknownBody {
+		add(SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
 	}
 	result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntax})
 	if capped {
@@ -144,6 +166,63 @@ read:
 		result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntaxCap})
 	}
 	return result
+}
+
+// hereDocConsumer is what the command of a quoted here-document does with
+// its body (syntaxTailHereDocConsumer).
+type hereDocConsumer uint8
+
+const (
+	// hereDocData: no command of the opener line runs its standard input as
+	// shell code; the body is data.
+	hereDocData hereDocConsumer = iota
+	// hereDocUnknown: the command is not known (no command text, a text that
+	// does not parse, or a word made at run time that could start a shell).
+	hereDocUnknown
+	// hereDocRunsCode: a command runs its standard input as shell code
+	// (posixStdinCodeTarget: a shell without -c, also behind env, command or
+	// a privilege wrapper or scheduler that does).
+	hereDocRunsCode
+)
+
+// syntaxTailHereDocConsumer reads the command of a quoted here-document
+// (shellparse.SyntaxTailHereDoc.Consumer). Each simple command of the text is
+// one that may get the body (cat <<'EOF' | sh pipes it on); a word made at run
+// time is read as sh, so a command that could start a shell through it is
+// not known.
+func syntaxTailHereDocConsumer(consumer string) hereDocConsumer {
+	if strings.TrimSpace(consumer) == "" {
+		return hereDocUnknown
+	}
+	file, ok := shellparse.Parse(consumer)
+	if !ok || file == nil {
+		return hereDocUnknown
+	}
+	verdict := hereDocData
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, isCall := node.(*syntax.CallExpr)
+		if !isCall || len(call.Args) == 0 {
+			return verdict != hereDocRunsCode
+		}
+		argv := make([]string, 0, len(call.Args))
+		dynamic := false
+		for _, arg := range call.Args {
+			word, known := simpleStaticWord(arg, nil)
+			if !known {
+				word, dynamic = "sh", true
+			}
+			argv = append(argv, word)
+		}
+		if posixStdinCodeTarget(argv) {
+			if !dynamic {
+				verdict = hereDocRunsCode
+			} else if verdict == hereDocData {
+				verdict = hereDocUnknown
+			}
+		}
+		return verdict != hereDocRunsCode
+	})
+	return verdict
 }
 
 // EvaluationFailureSyntaxCap follows EvaluationFailureSyntax when the reading
