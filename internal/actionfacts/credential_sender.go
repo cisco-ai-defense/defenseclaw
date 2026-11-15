@@ -435,6 +435,22 @@ func credentialMayHold(word, cwd, home string) bool {
 		if inCredentialDirectory(dir) {
 			return true
 		}
+		// A name glob counts when it names something: a literal prefix of
+		// three bytes or more (.env*, cred*, id_*), or a key-file suffix
+		// (*.key, *.pem, *.p12, *.pfx). A bare * or *.json matches every file.
+		literal := base
+		if i := strings.IndexAny(base, "*?["); i >= 0 {
+			literal = base[:i]
+		}
+		switch path.Ext(base) {
+		case ".key", ".pem", ".p12", ".pfx":
+			if strings.HasPrefix(base, "*") {
+				literal = "   "
+			}
+		}
+		if len(literal) < 3 {
+			return false
+		}
 		for _, row := range credentialFileShapes {
 			name := row.base
 			switch {

@@ -220,8 +220,8 @@ func unprovenRoleSends(prog string, words []string, fed bool) bool {
 // (not file:), user@host:path, or a dotted host followed by a path (never a
 // port: file.go:12 is a line, host.example:443 a bare port).
 func unprovenRemoteOperand(word string) bool {
-	if len(word) > 2048 || strings.ContainsRune(word, 0) {
-		return false
+	if len(word) > 2048 || strings.ContainsAny(word, "\x00 \t\r\n|;&<>()") {
+		return false // a pattern or a sentence, not an operand
 	}
 	if senderURLOperand.MatchString(word) {
 		return !strings.HasPrefix(strings.ToLower(word), "file:")
