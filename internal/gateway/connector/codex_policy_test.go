@@ -469,9 +469,14 @@ func TestValidateCodexPolicyExecutableRejectsReplacement(t *testing.T) {
 	if !errors.Is(err, ErrCodexExecutableChanged) || !strings.Contains(err.Error(), "run: defenseclaw setup codex --yes") {
 		t.Fatalf("replacement error = %v, want ErrCodexExecutableChanged with the setup step", err)
 	}
+	// GAP-0249: it is an executable admission refusal made before Setup
+	// changes anything, so a gateway start stops only Codex.
+	if !errors.Is(err, ErrExecutableAdmission) {
+		t.Fatalf("replacement error = %v, want ErrExecutableAdmission", err)
+	}
 	opts.AgentVersion = "codex 0.164.0"
-	if _, err := validateCodexPolicyExecutable(opts); !errors.Is(err, ErrCodexExecutableChanged) {
-		t.Fatalf("version change error = %v, want ErrCodexExecutableChanged", err)
+	if _, err := validateCodexPolicyExecutable(opts); !errors.Is(err, ErrCodexExecutableChanged) || !errors.Is(err, ErrExecutableAdmission) {
+		t.Fatalf("version change error = %v, want ErrCodexExecutableChanged and ErrExecutableAdmission", err)
 	}
 }
 

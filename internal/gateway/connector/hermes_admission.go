@@ -48,8 +48,11 @@ var ErrExecutableAdmission = errors.New("agent executable admission refused")
 
 type executableAdmissionError struct{ err error }
 
-func (e executableAdmissionError) Error() string   { return e.err.Error() }
-func (e executableAdmissionError) Unwrap() []error { return []error{e.err, ErrExecutableAdmission} }
+// A single Unwrap (not a list) keeps the cause reachable to errors.Unwrap, so
+// AgentExecutableChangedBeforeChange and the repair-step lookup can walk it.
+func (e executableAdmissionError) Error() string        { return e.err.Error() }
+func (e executableAdmissionError) Unwrap() error        { return e.err }
+func (e executableAdmissionError) Is(target error) bool { return target == ErrExecutableAdmission }
 
 // executableAdmissionRefused marks err as ErrExecutableAdmission and keeps its
 // message and chain.
@@ -136,7 +139,7 @@ func validateHermesWindowsSetupAdmission(ctx context.Context, opts SetupOpts) er
 		return fmt.Errorf("Hermes executable admission: %w", err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if opts.AgentVersion != authority.rawVersion {
-		return errors.New("Hermes executable admission: selected raw version does not match protected evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+		return fmt.Errorf("Hermes executable admission: selected raw version does not match protected evidence (%w)", errHermesExecutableChanged) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if opts.HookContractID != "" && opts.HookContractID != authority.contractID {
 		return errors.New("Hermes executable admission: selected hook contract does not match protected evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
@@ -254,7 +257,7 @@ func validateHermesExecutableEvidence(
 		return errors.New("selected executable changed during custody validation")
 	}
 	if !strings.EqualFold(digest, authority.digest) {
-		return errors.New("selected executable digest does not match protected evidence")
+		return fmt.Errorf("selected executable digest does not match protected evidence (%w)", errHermesExecutableChanged)
 	}
 
 	// A privileged guardian acting for a target user must never launch that

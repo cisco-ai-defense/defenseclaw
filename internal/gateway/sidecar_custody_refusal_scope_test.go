@@ -135,8 +135,9 @@ func TestCustodyRefusalOfOneActiveConnectorKeepsTheOthersEnforcing(t *testing.T)
 
 // The same rule covers the other custody refusal made before Setup writes: the
 // agent executable folder another account can write. Anything that is not a
-// custody refusal keeps failing the refresh of an active connector, so an
-// upgrade still rolls back.
+// custody refusal (or an agent executable that changed since setup, GAP-0249)
+// keeps failing the refresh of an active connector, so an upgrade still rolls
+// back.
 func TestOnlyCustodyRefusalsOfAnActiveConnectorAreScopedToIt(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
