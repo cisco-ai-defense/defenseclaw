@@ -73,8 +73,9 @@ func awkCommandDynamic(facts actionfacts.Facts) bool {
 // awk "BEGIN {print 1 >> \"$out\"}"): the simple-command pass binds them and
 // judges each awk call on its bound text, so the call as written is not an
 // awk program built at run time. A call with a simple command the pass cannot
-// read, or with an awk call still built at run time after the binding, keeps
-// the unknown tier (rel-1-0-10:GAP-0729).
+// read, with an awk call still built at run time after the binding, or with a
+// bound program that starts a command, keeps the unknown tier
+// (rel-1-0-10:GAP-0729).
 func awkDynamicBoundBySimpleCommands(request trustedActionRequest, facts actionfacts.Facts) bool {
 	simples := request.simpleMemo.commands(request.Input, facts)
 	if len(simples) == 0 {
@@ -89,11 +90,26 @@ func awkDynamicBoundBySimpleCommands(request trustedActionRequest, facts actionf
 		if simple.CWD != "" {
 			input.CWD = simple.CWD
 		}
-		if awkCommandDynamic(actionfacts.Analyze(input)) {
+		facts := actionfacts.Analyze(input)
+		if awkCommandDynamic(facts) || awkStartsCommands(facts) {
 			return false
 		}
 	}
 	return true
+}
+
+// awkStartsCommands reports an awk call of facts whose program starts a
+// command (system(), print |, | getline). Bound or not, such a call keeps the
+// unknown tier when the call as written built its program at run time: the
+// hook client resolved no targets for the commands of the bound reading
+// (TestAwkSpellingRowsReachTheRule A20, A21: P='BEGIN{system(...)}'; awk "$P").
+func awkStartsCommands(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if actionfacts.IsAwkCall(command) && actionfacts.AwkCall(command).Read().Body != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // withAwkDynamicCommand adds the unknown-tier finding of an awk command the
