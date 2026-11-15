@@ -37,13 +37,14 @@ var placeholderCredentialWords = []string{
 	"redacted", "sample", "test", "tests", "your", "xxx",
 }
 
-// randomPieceLength is the length from which a single-case, letters-only
-// piece reads as random rather than as a word: the shortest value the rule
-// reads at all, so such a run alone is long enough to be the whole secret.
-// Measured on the corpora (GAP-0942): the longest non-stand-in letters piece
-// of a value d4's shape rule called a placeholder is 10; every random piece
-// of a true-positive value there is mixed with digits or case.
-const randomPieceLength = 16
+// placeholderPieceMax is the longest single-case letters piece a placeholder
+// holds beside its stand-in: measured on the corpora (GAP-0942), the longest
+// non-stand-in letters piece of a value d4's shape rule called a placeholder
+// is 10 ("production" in "changeme-before-production"). A longer single-case
+// run beside a stand-in reads as random, so the stand-in does not excuse it
+// (GAP-0957). The cut matters only beside a stand-in: a value without one is
+// a finding anyway.
+const placeholderPieceMax = 10
 
 // standInRunLength is the length from which a repeated or sequential piece
 // (qqqqqqqq, 12345678) marks the value a stand-in on its own; a shorter run
@@ -51,28 +52,27 @@ const randomPieceLength = 16
 const standInRunLength = 8
 
 // placeholderCredentialValue reports a value that is plainly not a secret: a
-// low-entropy shape only. A template (<your-key>, ${API_KEY}), a run of one
-// repeated character, unit or alphabet sequence (xxxxxxxx, abcabcabc,
-// abcdefghijklmnop, 0123456789), or a value that names itself a stand-in
-// with a whole placeholder word or a long low-entropy piece and holds no
-// random-looking piece. Any other
-// value stays a finding, a random string of letters only included
-// (GAP-0942): the shape of words alone does not make a stand-in.
+// low-entropy shape only. A run of one repeated character, unit or alphabet
+// sequence (xxxxxxxx, abcabcabc, abcdefghijklmnop, 0123456789), or a value
+// that names itself a stand-in (a whole placeholder word, a long low-entropy
+// piece, or a <...> / ${...} template slot) and holds no random-looking piece.
+// Any other value stays a finding, a random string of letters only included
+// (GAP-0942). A stand-in excuses a value only when no other piece reads as
+// random: a stand-in word or a template beside a random piece is a finding
+// (GAP-0957).
 func placeholderCredentialValue(value string) bool {
-	if templateCredentialValue(value) {
-		return true
-	}
-	pieces := strings.FieldsFunc(value, func(r rune) bool {
+	inner, template := templateCredentialInner(value)
+	pieces := strings.FieldsFunc(inner, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
 	compact := strings.Join(pieces, "")
 	if compact == "" {
-		return false
+		return template
 	}
 	if lowEntropyRun(strings.ToLower(compact)) {
 		return true
 	}
-	standIn := false
+	standIn := template
 	for _, piece := range pieces {
 		switch {
 		case slices.Contains(placeholderCredentialWords, strings.ToLower(piece)):
@@ -86,11 +86,18 @@ func placeholderCredentialValue(value string) bool {
 	return standIn
 }
 
-// templateCredentialValue is a value that is a template slot, not a value:
-// <...> or ${...}.
-func templateCredentialValue(value string) bool {
-	return (strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">")) ||
-		(strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}"))
+// templateCredentialInner returns the text inside a template slot (<...> or
+// ${...}) and whether the value is one. The slot marks the value a stand-in,
+// but its inner text is still read, so a random key inside the brackets is a
+// finding (GAP-0957).
+func templateCredentialInner(value string) (string, bool) {
+	switch {
+	case strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}"):
+		return value[2 : len(value)-1], true
+	case strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">"):
+		return value[1 : len(value)-1], true
+	}
+	return value, false
 }
 
 // lowEntropyRun reports a run that repeats a unit of one to four runes
@@ -130,7 +137,7 @@ func lowEntropyRun(s string) bool {
 
 // randomPiece reports a piece that reads as random: letters and digits mixed,
 // a capital after a small letter three or more times (KqvZmXbT, not
-// SendGrid or SG), or a letters run of randomPieceLength or more.
+// SendGrid or SG), or a letters run longer than placeholderPieceMax.
 func randomPiece(piece string) bool {
 	letters, digits, rises := 0, 0, 0
 	var prev rune
@@ -146,7 +153,7 @@ func randomPiece(piece string) bool {
 		}
 		prev = r
 	}
-	return (letters > 0 && digits > 0) || rises >= 3 || letters >= randomPieceLength
+	return (letters > 0 && digits > 0) || rises >= 3 || letters > placeholderPieceMax
 }
 
 // hardcodedCredentialView is the line CG-CRED-001 reads: an assignment whose

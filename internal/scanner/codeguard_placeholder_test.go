@@ -108,3 +108,44 @@ func TestHardcodedCredentialRuleLowEntropyPlaceholdersOnly(t *testing.T) {
 		})
 	}
 }
+
+// A stand-in word, run or template excuses a value only when no other piece
+// reads as random: beside a stand-in, a single-case letters run longer than
+// the measured placeholder max (10), a piece with three case rises, or a
+// letters and digits mix is a finding, as on rel (GAP-0957). The values are
+// made up; the GAP-0957 review probe ids are in the names.
+func TestHardcodedCredentialRuleStandInBesideRandomPiece(t *testing.T) {
+	credential := credentialRule(t)
+	for _, tc := range []struct {
+		name, value string
+		fires       bool
+	}{
+		{"B07 random run then test", "qhtzrpkvmbnxcls-test", true},
+		{"B08 test then random run", "test-qhtzrpkvmbnxcls", true},
+		{"B11 your then two case rises", "your-QhtzrPkvmbnxcl", true},
+		{"B12 random run then a sequence", "qhtzrpkvmbnxcls-abcdefgh", true},
+		{"B13 vendor test prefix then random run", "sk_test_qhtzrpkvmbnxcls", true},
+		{"B14 angle template around a random key", "<Qh7tZ3rP9kVm4BnX2cLs>", true},
+		{"B15 dollar template around a random key", "${Qh7tZ3rP9kVm4BnX2cLs}", true},
+		{"B19 fake then upper-case random run", "fake-QHTZRPKVMBNXCLS", true},
+		{"random run eleven beside example", "example-wjqzrtkvmhn", true},
+		{"stand-in between random runs", "wjqzrtkvmhnpx_sample_wjqzrtkvmhnpx", true},
+		{"two stand-in words and one random run", "your-fake-wjqzrtkvmhnpxbd", true},
+		{"stand-in after mixed case", "PwqZtrKvmHnx-dummy", true},
+		{"template around stand-in then random run", "<test-wjqzrtkvmhnpxbd>", true},
+		{"stand-in word and a repeated run", "test-qqqqqqqqqqqqqqqqqqqq", false},
+		{"stand-in word and a sequence", "your-abcdefghijklmnopqrst", false},
+		{"two stand-in words and a sequence", "fake-test-0123456789", false},
+		{"stand-in word and ten-letter words", "changeme-before-production", false},
+		{"template of words", "<PRIVATE_KEY_VALUE_GOES_HERE>", false},
+		{"template of a repeated run", "<xxxxxxxxxxxxxxxxxxxx>", false},
+		{"template of separators only", "${_________________}", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "api_key = \"" + tc.value + "\""
+			if got := credential.matches(line); got != tc.fires {
+				t.Fatalf("matches(%q) = %t, want %t", line, got, tc.fires)
+			}
+		})
+	}
+}
