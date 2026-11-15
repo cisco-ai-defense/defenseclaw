@@ -139,16 +139,25 @@ func inlineProgramRow(command CommandFact) (inlineCapabilityRow, []string, bool)
 	if len(argv) < 2 || command.Kind != CommandKindProcess {
 		return inlineCapabilityRow{}, nil, false
 	}
-	base := path.Base(argv[0])
+	row, ok := inlineInterpreterRow(path.Base(argv[0]))
+	if !ok {
+		return inlineCapabilityRow{}, nil, false
+	}
+	return row, argv, true
+}
+
+// inlineInterpreterRow is the row of the table for a program base name (a
+// version suffix such as python3.12 is dropped).
+func inlineInterpreterRow(base string) (inlineCapabilityRow, bool) {
 	for len(base) > 0 && (base[len(base)-1] == '.' || (base[len(base)-1] >= '0' && base[len(base)-1] <= '9')) &&
 		inlineProgramAliases[base] == "" {
 		base = base[:len(base)-1]
 	}
 	key, ok := inlineProgramAliases[base]
 	if !ok {
-		return inlineCapabilityRow{}, nil, false
+		return inlineCapabilityRow{}, false
 	}
-	return inlineCapabilityTable[key], argv, true
+	return inlineCapabilityTable[key], true
 }
 
 func inlineCodeOperands(row inlineCapabilityRow, args []string) string {
@@ -179,11 +188,18 @@ func InlineCodeNetworkAndExec(facts Facts) bool {
 	return false
 }
 
-func inlineSourceNetworkAndExec(row inlineCapabilityRow, source string) bool {
+// inlineSourceNetwork reports code that asks for a network capability: a
+// library name from the row or a URL, unless every destination is a loopback
+// literal and no value comes from outside the code.
+func inlineSourceNetwork(row inlineCapabilityRow, source string) bool {
 	if !identifierMatcher(row.network).MatchString(source) && !inlineLiteralURLPattern.MatchString(source) {
 		return false
 	}
-	if !identifierMatcher(row.dynamicInput).MatchString(source) && inlineCodeOnlyLoopback(source) {
+	return identifierMatcher(row.dynamicInput).MatchString(source) || !inlineCodeOnlyLoopback(source)
+}
+
+func inlineSourceNetworkAndExec(row inlineCapabilityRow, source string) bool {
+	if !inlineSourceNetwork(row, source) {
 		return false
 	}
 	return identifierMatcher(row.exec).MatchString(source) || (row.backtickExec && strings.Contains(source, "`"))

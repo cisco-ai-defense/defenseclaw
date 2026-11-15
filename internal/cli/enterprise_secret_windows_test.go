@@ -35,8 +35,10 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -147,7 +149,7 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 	previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted, previousAbsentParentTrusted := windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted, windowsSecretAbsentConfigParentTrusted
 	previousBundle, previousPath, previousLifecycle, previousWait, previousArgs := windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs
 	previousChangeSpool := windowsChangeSpool
-	previousManaged := managedHostWindowsStandalone
+	previousManaged := hookcli.ManagedHostWindowsStandalone
 	previousLive := windowsSecretGatewayLive
 	previousStartedAfter := windowsSecretGatewayStartedAfter
 	t.Cleanup(func() {
@@ -156,7 +158,7 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted, windowsSecretAbsentConfigParentTrusted = previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted, previousAbsentParentTrusted
 		windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs = previousBundle, previousPath, previousLifecycle, previousWait, previousArgs
 		windowsChangeSpool = previousChangeSpool
-		managedHostWindowsStandalone = previousManaged
+		hookcli.ManagedHostWindowsStandalone = previousManaged
 	})
 	host := &windowsSecretLockEvents{}
 	// Credential tests exercise real durable reservations while replacing
@@ -212,7 +214,7 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 	// the refusal class: a managed test host turned the unmanaged 1603
 	// expectation into exit 5 (mgmt-agent-api GAP-0002). A test that wants
 	// a managed computer stubs the marker itself.
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	return host
 }
 
@@ -727,7 +729,7 @@ func TestWindowsSecretRemoveRefusesAnUnreadableConfig(t *testing.T) {
 
 func TestWindowsSecretRefusals(t *testing.T) {
 	windowsSecretTestHarness(t)
-	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "../escape", fromStdin: true}, "x"); err == nil || commandExitCode(err) != windowsSecretExitInvalid {
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "../escape", fromStdin: true}, "x"); err == nil || cliusage.ExitCode(err) != windowsSecretExitInvalid {
 		t.Fatalf("an unsafe name must be refused with 1639, got %v", err)
 	}
 	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ok-name", fromStdin: true}, "two\nlines"); err == nil {
@@ -740,18 +742,18 @@ func TestWindowsSecretRefusals(t *testing.T) {
 	windowsSecretIsElevated = func() bool { return false }
 	// Without the standalone marker a standard account gets 1603
 	// elevation_required (management-agent.md 4.7).
-	if _, err := runWindowsSecretCommand(t, "status", enterpriseSecretOptions{}, ""); err == nil || commandExitCode(err) != windowsSecretExitFailure {
-		t.Fatalf("a non-elevated token on a computer without the standalone marker must be refused with 1603, got %v (exit %d)", err, commandExitCode(err))
+	if _, err := runWindowsSecretCommand(t, "status", enterpriseSecretOptions{}, ""); err == nil || cliusage.ExitCode(err) != windowsSecretExitFailure {
+		t.Fatalf("a non-elevated token on a computer without the standalone marker must be refused with 1603, got %v (exit %d)", err, cliusage.ExitCode(err))
 	}
 	// GAP-0931: on a managed computer a standard account gets exit 5
 	// elevation_required and the command to ask for, like every other
 	// enterprise refusal there.
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + hookcli.WindowsEnterpriseMarkerKey, true }
 	_, err := runWindowsSecretCommand(t, "status", enterpriseSecretOptions{}, "")
 	var refusal *managedViewRefusal
-	if err == nil || commandExitCode(err) != 5 || !errors.As(err, &refusal) || refusal.code != "elevation_required" ||
+	if err == nil || cliusage.ExitCode(err) != 5 || !errors.As(err, &refusal) || refusal.code != "elevation_required" ||
 		!strings.Contains(err.Error(), "enterprise secret status") {
-		t.Fatalf("a standard account on a managed computer: %v (exit %d)", err, commandExitCode(err))
+		t.Fatalf("a standard account on a managed computer: %v (exit %d)", err, cliusage.ExitCode(err))
 	}
 }
 
@@ -780,7 +782,7 @@ func windowsSecretFailureDoc(t *testing.T, out string, err error, action, code s
 	allowed := map[string]bool{"elevation_required": true, "invalid_arguments": true, "not_installed": true, "lifecycle_busy": true,
 		"credential_in_use": true, "credential_changed": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true,
 		"rotation_confirmed": true, "confirmed_bundle_changed": true}
-	exit := commandExitCode(err)
+	exit := cliusage.ExitCode(err)
 	if doc.SchemaVersion != 1 || doc.OK || doc.Action != action || doc.GatewayRestarted || len(doc.Errors) != 1 ||
 		doc.Errors[0].Code != code || !allowed[doc.Errors[0].Code] || doc.Errors[0].Message == "" || doc.ExitCode != exit {
 		t.Fatalf("failure document %+v for exit %d, want action %s code %s", doc, exit, action, code)
@@ -829,19 +831,21 @@ func TestWindowsSecretFailuresPrintOneDocument(t *testing.T) {
 		{name: "standard user, managed", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true}, stdin: value, code: "elevation_required", exit: enterprisestatus.WindowsExitAccessDenied,
 			setup: func(*windowsSecretLockEvents) {
 				windowsSecretIsElevated = func() bool { return false }
-				managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
+				hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + hookcli.WindowsEnterpriseMarkerKey, true }
 			}},
 		{name: "standard user, unmanaged", action: "remove", opts: enterpriseSecretOptions{name: "ok-name"}, code: "elevation_required", exit: windowsSecretExitFailure,
 			setup: func(*windowsSecretLockEvents) {
 				windowsSecretIsElevated = func() bool { return false }
-				managedHostWindowsStandalone = func() (string, bool) { return "", false }
+				hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			secrets := filepath.Join(t.TempDir(), "secrets")
 			host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: secrets, LifecycleDir: t.TempDir()})
-			restoreManaged, restoreWait := managedHostWindowsStandalone, windowsSecretInstallerLockWait
-			t.Cleanup(func() { managedHostWindowsStandalone, windowsSecretInstallerLockWait = restoreManaged, restoreWait })
+			restoreManaged, restoreWait := hookcli.ManagedHostWindowsStandalone, windowsSecretInstallerLockWait
+			t.Cleanup(func() {
+				hookcli.ManagedHostWindowsStandalone, windowsSecretInstallerLockWait = restoreManaged, restoreWait
+			})
 			windowsSecretInstallerLockWait = 50 * time.Millisecond
 			if tc.setup != nil {
 				tc.setup(host)
@@ -849,8 +853,8 @@ func TestWindowsSecretFailuresPrintOneDocument(t *testing.T) {
 			opts := tc.opts
 			opts.json = true
 			out, err := runWindowsSecretCommand(t, tc.action, opts, tc.stdin)
-			if commandExitCode(err) != tc.exit {
-				t.Fatalf("exit %d (%v), want %d", commandExitCode(err), err, tc.exit)
+			if cliusage.ExitCode(err) != tc.exit {
+				t.Fatalf("exit %d (%v), want %d", cliusage.ExitCode(err), err, tc.exit)
 			}
 			doc := windowsSecretFailureDoc(t, out, err, tc.action, tc.code)
 			if doc.Name != tc.opts.name {
@@ -876,8 +880,8 @@ func TestWindowsSecretFailuresPrintOneDocument(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(host)
 			}
-			if out, err := runWindowsSecretCommand(t, tc.action, opts, tc.stdin); out != "" || commandExitCode(err) != tc.exit {
-				t.Fatalf("text mode: exit %d, stdout %q", commandExitCode(err), out)
+			if out, err := runWindowsSecretCommand(t, tc.action, opts, tc.stdin); out != "" || cliusage.ExitCode(err) != tc.exit {
+				t.Fatalf("text mode: exit %d, stdout %q", cliusage.ExitCode(err), out)
 			}
 		})
 	}
@@ -908,8 +912,8 @@ func TestWindowsSecretFlagErrorsPrintTheFailureDocument(t *testing.T) {
 		cmd.SetArgs(tc.args)
 		secretRawArgs = func() []string { return tc.args }
 		err := cmd.Execute()
-		if commandExitCode(err) != windowsSecretExitInvalid {
-			t.Fatalf("%v: exit %d (%v), want 1639", tc.args, commandExitCode(err), err)
+		if cliusage.ExitCode(err) != windowsSecretExitInvalid {
+			t.Fatalf("%v: exit %d (%v), want 1639", tc.args, cliusage.ExitCode(err), err)
 		}
 		if !tc.json {
 			if out.Len() != 0 {
@@ -1193,8 +1197,8 @@ func TestWindowsSecretVerbsRefuseAStoreThatIsNotARealDirectory(t *testing.T) {
 				}
 				out, err := runWindowsSecretCommand(t, action, opts, "new-value\n")
 				doc := windowsSecretFailureDoc(t, out, err, action, "state_invalid")
-				if commandExitCode(err) != windowsSecretExitFailure || !strings.Contains(doc.Errors[0].Message, "is not a real directory") {
-					t.Fatalf("exit %d, %+v; want 1603 and not a real directory", commandExitCode(err), doc)
+				if cliusage.ExitCode(err) != windowsSecretExitFailure || !strings.Contains(doc.Errors[0].Message, "is not a real directory") {
+					t.Fatalf("exit %d, %+v; want 1603 and not a real directory", cliusage.ExitCode(err), doc)
 				}
 				if strings.Contains(out, "new-value") || strings.Contains(out, kept) {
 					t.Fatalf("output carries a value: %s", out)
@@ -1384,8 +1388,8 @@ func TestWindowsSecretSetStoresOnlyTheValueTheConfirmedBundleSigns(t *testing.T)
 	credential := filepath.Join(dir, "ai-defense-api-key")
 
 	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, "key-2\r\n")
-	if err == nil || commandExitCode(err) != windowsSecretExitFailure {
-		t.Fatalf("set of a value the bundle does not sign: %v (exit %d), want exit %d", err, commandExitCode(err), windowsSecretExitFailure)
+	if err == nil || cliusage.ExitCode(err) != windowsSecretExitFailure {
+		t.Fatalf("set of a value the bundle does not sign: %v (exit %d), want exit %d", err, cliusage.ExitCode(err), windowsSecretExitFailure)
 	}
 	var doc struct {
 		OK     bool `json:"ok"`
@@ -1852,8 +1856,8 @@ func TestWindowsSecretFailedTrustCheckKeepsThePreviousCredential(t *testing.T) {
 	}
 	host.events = nil
 	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true}, "second-value-0002\r\n")
-	if err == nil || commandExitCode(err) != windowsSecretExitFailure || checked != 1 {
-		t.Fatalf("set with a failing trust check: %v (exit %d, checks %d), want exit %d after one check", err, commandExitCode(err), checked, windowsSecretExitFailure)
+	if err == nil || cliusage.ExitCode(err) != windowsSecretExitFailure || checked != 1 {
+		t.Fatalf("set with a failing trust check: %v (exit %d, checks %d), want exit %d after one check", err, cliusage.ExitCode(err), checked, windowsSecretExitFailure)
 	}
 	var doc struct {
 		OK     bool `json:"ok"`

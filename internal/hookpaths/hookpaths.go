@@ -75,6 +75,19 @@ const (
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
+// AwkFilesKey is the hook client's answer for an awk call that names a
+// program file (-f, --file, -E, --exec, -W exec): "1" when it read every file
+// as the user and every command they start is known, listed in this map and
+// judged like the command typed directly; "0" when one is not. A managed
+// gateway behind ProtectHome cannot open the user's files, so it answers the
+// call at the unknown tier unless this key is "1" (rel-1-0-10:GAP-0652).
+const AwkFilesKey = "\x00awk-files"
+
+// ReadProgramFile reads the program file of an awk call as the hook client
+// does: the file the system opens for the name, as the user, up to the size
+// bound of a script body.
+func ReadProgramFile(name, cwd string) (string, bool) { return readActionScript(name, cwd) }
+
 // PatchCompleteKey is positive hook-side proof that every apply_patch (or
 // Hermes V4A patch) directive was parsed and each target was resolved in the
 // user's filesystem view. The gateway may be unable to repeat that walk
@@ -552,6 +565,58 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 		}
 	}
 	return called
+}
+
+// awkTwinTouchesNoLink reports an awk reading that is one touch -h whose
+// operands are links that are not themselves protected: the call changes no
+// protected file, as the plain no-dereference touch (noDereferenceTouchStatus).
+func awkTwinTouchesNoLink(twin actionfacts.AwkTwin, cwd, home string) bool {
+	if len(twin.Bodies) != 1 || twin.Text != twin.Bodies[0] || !NoDereferenceTouchShape(twin.Text, cwd, home) {
+		return false
+	}
+	safe, protectedTarget := noDereferenceTouchStatus(twin.Text, cwd, home)
+	return safe && !protectedTarget
+}
+
+// clientProtectedDecision is the protected-target decision the hook client
+// reaches for a plain shell command (the one an awk program starts too): a concrete write to a protected file, a
+// variable write a per-user gateway resolves through the user's links, a loop
+// copy destination that is protected, or a no-dereference touch that is not
+// safe.
+func clientProtectedDecision(command, cwd, home string) bool {
+	var concrete actionConcreteOperands
+	decision := actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concrete)
+	if decision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
+		decision = false
+	}
+	if !decision && actionClientVariableWriteCandidate(command, home) {
+		decision = ActionCommandDecision(command, cwd, home) != "" &&
+			!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
+			!actionClientProvedOverwrittenRedirect(command, cwd, home)
+	}
+	if !decision {
+		decision = actionClientLoopCopyDestinationProtected(command, cwd, home)
+	}
+	if !decision && NoDereferenceTouchShape(command, cwd, home) {
+		_, decision = noDereferenceTouchStatus(command, cwd, home)
+	}
+	return decision
+}
+
+// mergeFacts is the facts of both maps; an entry of first stays.
+func mergeFacts(first, second map[string]string) map[string]string {
+	if len(second) == 0 {
+		return first
+	}
+	if first == nil {
+		first = make(map[string]string, len(second))
+	}
+	for key, value := range second {
+		if _, found := first[key]; !found {
+			first[key] = value
+		}
+	}
+	return first
 }
 
 // OperandPath is actionfacts.OperandPath: the client keys its path answers by
@@ -1368,6 +1433,14 @@ func protectedAuthorizedKeysPaths(home string, memo *TargetMemo) []string {
 // client does: links are followed, including one whose final file does not
 // exist yet. ok is false when the target cannot be resolved.
 func ResolveWriteTarget(path string) (string, bool) {
+	// A hook call is one decision: a path resolved once is the same path for
+	// the rest of the call, as for every evaluation that carries a TargetMemo.
+	// The reach scans of a shell call ask for every word of it again for each
+	// statement, 446,000 file system reads for 100 PowerShell lines, 27 s on a
+	// Windows host (rel-1-0-10:GAP-0766).
+	if call := currentHookCall(); call != nil {
+		return call.targets().resolveWriteTarget(path)
+	}
 	return resolveWritePath(path, 0)
 }
 
@@ -1428,6 +1501,13 @@ func (p protectedFiles) keysOnlyWith(home string, memo *TargetMemo) protectedFil
 }
 
 func newProtectedFiles(home string) protectedFiles {
+	// Within one hook call the protected set is read once: the reach scans of a
+	// shell call ask for it for every statement, and each read walks every key
+	// file path and reads each file (rel-1-0-10:GAP-0766). The files are the
+	// same files for the whole decision.
+	if call := currentHookCall(); call != nil {
+		return call.targets().protectedFiles(home)
+	}
 	return newProtectedFilesWith(home, nil)
 }
 
@@ -1468,7 +1548,7 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 		}
 		if info == nil {
 			var err error
-			if info, err = pathStat(resolved); err != nil || !info.Mode().IsRegular() {
+			if info, err = callStat(resolved); err != nil || !info.Mode().IsRegular() {
 				return resolved, true
 			}
 		}
@@ -1873,7 +1953,10 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	var safeRedirects []RedirectOccurrence
 	opaqueFacts := map[string]string{}
 	var globFacts, walkFacts map[string]string
+	var twinReadings []string
+	var awkFiles string
 	var unprovenReason string
+	var backupUnresolved bool
 	protectedDecision := hermesV4AProtected
 	var noDereferenceTouchSafe bool
 	// identities is the file-identity evidence for InstructionIdentityKey:
@@ -1998,11 +2081,18 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				if twin, _, isTwin := actionfacts.ActiveUserTildeTwin(command, home, clientLogin()); isTwin {
 					command = twin
 				}
+				if !isApplyPatchToolName(tool) && !backupUnresolved {
+					// A sed -i or perl -i backup path the reader cannot resolve
+					// in full is told to the gateway, which judges it at least in
+					// the unknown tier (BackupUnresolvedKey, GAP-0540).
+					backupUnresolved = SedInPlaceBackupUnresolved(command, cwd, home)
+				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
-					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands)
+					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands) ||
+						actionSedInPlaceWrite(command, cwd, home, nil)
 					if protectedDecision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
 						protectedDecision = false
 					}
@@ -2105,19 +2195,86 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// the map also lists the targets of that reading (GAP-2563).
 				if !isApplyPatchToolName(tool) {
 					readings := []string{command}
-					if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(command); isTwin && wrapped != command {
-						readings = append(readings, wrapped)
+					// addReading lists the targets of a second reading of the
+					// command that the gateway judges too; full adds every
+					// operand reading the command itself gets.
+					addReading := func(reading string, full bool) {
+						readings = append(readings, reading)
+						if full {
+							twinReadings = append(twinReadings, reading)
+						}
 						twinInput := fallback
-						twinInput.Command = wrapped
+						twinInput.Command = reading
 						twinFacts := actionfacts.Analyze(twinInput)
 						facts.Paths = append(facts.Paths, twinFacts.Paths...)
 						truncated = truncated || twinFacts.Parse.Status == actionfacts.StatusLimitExceeded
-						twinOperands, _, _ := ShellWriteOperands(wrapped, cwd, home)
+						twinOperands, _, _ := ShellWriteOperands(reading, cwd, home)
 						operands = append(operands, twinOperands...)
-						literalOperands = append(literalOperands, LiteralWriteOperands(wrapped, cwd, home)...)
-						twinDirectories, twinUnknown := ShellDirectoryWriteOperands(wrapped, cwd, home, sourceFacts, true, false)
+						literalOperands = append(literalOperands, LiteralWriteOperands(reading, cwd, home)...)
+						twinDirectories, twinUnknown := ShellDirectoryWriteOperands(reading, cwd, home, sourceFacts, true, false)
 						directoryOperands = append(directoryOperands, twinDirectories...)
 						truncated = truncated || twinUnknown
+						if !full {
+							return
+						}
+						if strings.Contains(reading, ">") {
+							assignedOperands = append(assignedOperands, AdjacentAssignedWriteOperands(reading, cwd, home)...)
+							assignedOperands = append(assignedOperands, DeclaredRedirectWriteOperands(reading, cwd, home)...)
+							boundedTwin, _ := BoundedShellWriteOperands(reading, cwd, home)
+							literalOperands = append(literalOperands, boundedTwin...)
+						}
+						literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(reading, cwd, home)...)
+						literalOperands = append(literalOperands, quotedGlobNameWriteOperands(reading, cwd, home, twinFacts.Paths)...)
+						literalOperands = append(literalOperands, BoundedLoopCopyDestinations(reading, cwd, home)...)
+						literalOperands = append(literalOperands, CopySourceGlobDestinations(reading, cwd, home, nil)...)
+						literalOperands = append(literalOperands, BoundedGlobLoopCopyDestinations(reading, cwd, home, nil)...)
+						// A link text the reading cannot place leaves its map
+						// incomplete, as it does for the command itself.
+						if inner := commandLinksWithFacts(reading, cwd, home, sourceFacts, true); inner.opaque {
+							truncated = true
+						}
+					}
+					if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(command); isTwin && wrapped != command {
+						addReading(wrapped, false)
+					}
+					// The commands an awk program starts through system(),
+					// print | and | getline, written as string literals, run
+					// as the hook would run them directly; the gateway judges
+					// that reading, and behind ProtectHome reads its targets
+					// only from this map (GAP-0499).
+					awkTwin := actionfacts.AwkCommandTwinFiles(command, func(name string) (string, bool) {
+						return readActionScript(name, cwd)
+					})
+					// An awk call that is the whole command and starts one touch -h of
+					// a link itself is as safe as the plain call: the plain call lists
+					// its entry and the safe mark, and a gateway that reads the awk
+					// text as written would read the entry alone, so the reading is
+					// not listed (GAP-0499).
+					if awkTwin.Text != "" && awkTwin.Text != command && !awkTwinTouchesNoLink(awkTwin, cwd, home) {
+						addReading(awkTwin.Text, true)
+						// A runner, an assignment, a time or a function in front
+						// of or around the awk call changes where the sh call
+						// that stands for the commands sits in the text, not
+						// what each command is: awk starts it in a shell of its
+						// own, as the hook would run it directly. Each command
+						// is listed as that plain reading too, so the targets
+						// are the same behind every spelling (GAP-0731). The
+						// gateway cannot read a program file behind ProtectHome
+						// and reads these targets only from this map.
+						for _, body := range awkTwin.Bodies {
+							addReading(body, true)
+							protectedDecision = protectedDecision || clientProtectedDecision(body, cwd, home)
+						}
+					}
+					// A program file the client cannot read is code the map does
+					// not list: the map is incomplete (the one bound rule).
+					truncated = truncated || awkTwin.Truncated.Any() || awkTwin.FilesUnknown
+					if awkTwin.ProgramFiles {
+						if awkTwin.FilesUnknown || awkFiles == "0" {
+							awkFiles = "0"
+						} else {
+							awkFiles = "1"
+						}
 					}
 					// A cp, mv, install, ln, dd or tee call with a
 					// runtime-expanded operand word ($(true), `true`, $SRC)
@@ -2183,9 +2340,18 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					}
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
 					globFacts = actionGlobFacts(command, cwd, home)
+					// The reading of an awk program's commands is judged by the
+					// gateway too: the pattern and link walk facts of its text
+					// are listed beside those of the command.
+					for _, reading := range twinReadings {
+						globFacts = mergeFacts(globFacts, actionGlobFacts(reading, cwd, home))
+					}
 					// Where each link-walk spelling of the command lies, for a
 					// gateway that cannot walk the home itself (GAP-2569).
 					walkFacts = LinkWalkFacts(command, cwd, home)
+					for _, reading := range twinReadings {
+						walkFacts = mergeFacts(walkFacts, LinkWalkFacts(reading, cwd, home))
+					}
 					// An unresolved program word alone does not make a
 					// concrete write operand or its link walk incomplete.
 					truncated = truncated || links.opaque
@@ -2251,6 +2417,10 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if noDereferenceTouchSafe {
 		targets[NoDereferenceTouchSafeKey] = "1"
 		size += len(jsonString(NoDereferenceTouchSafeKey)) + 1 + len(jsonString("1")) + 1
+	}
+	if backupUnresolved {
+		targets[BackupUnresolvedKey] = "1"
+		size += len(jsonString(BackupUnresolvedKey)) + 1 + len(jsonString("1")) + 1
 	}
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
@@ -2701,7 +2871,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if unread := shareBodyUnreadFact(); unread != "" {
 		entry := len(jsonString(ShareBodyUnreadKey)) + 1 + len(jsonString(unread)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
-			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision)
+			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision, backupUnresolved)
 		}
 		targets[ShareBodyUnreadKey] = unread
 		size += entry
@@ -2709,7 +2879,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if unprovenReason != "" {
 		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
-			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision)
+			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision, backupUnresolved)
 		}
 		targets[UnprovenReasonKey] = unprovenReason
 		size += entry
@@ -2717,10 +2887,20 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if identity != "" {
 		entry := len(jsonString(InstructionIdentityKey)) + 1 + len(jsonString(identity)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+3 {
-			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision)
+			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision, backupUnresolved)
 		}
 		targets[InstructionIdentityKey] = identity
 		size += entry
+	}
+	if awkFiles != "" {
+		entry := len(jsonString(AwkFilesKey)) + 1 + len(jsonString(awkFiles)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+4 {
+			// A gateway that cannot read the files cannot place them.
+			truncated = true
+		} else {
+			targets[AwkFilesKey] = awkFiles
+			size += entry
+		}
 	}
 	if len(fileIdentities) > 0 {
 		value := strings.Join(fileIdentities, ",")
@@ -3279,13 +3459,16 @@ func incompleteEvidenceKeeping(cwd string, protectedDecision bool) string {
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
-func unprovenEvidence(cwd, reason, identity string, protectedDecision bool) string {
+func unprovenEvidence(cwd, reason, identity string, protectedDecision, backupUnresolved bool) string {
 	// The full target map overflowed while adding the class reason or the
 	// file-identity evidence. Keep the incomplete-map marker and both facts
 	// in the small header.
 	targets := map[string]string{CWDKey: cwd, TruncatedKey: "1"}
 	if protectedDecision {
 		targets[ActionDecisionKey] = ProtectedTargetDecision
+	}
+	if backupUnresolved {
+		targets[BackupUnresolvedKey] = "1"
 	}
 	if reason != "" {
 		targets[UnprovenReasonKey] = reason
@@ -3322,6 +3505,7 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[NoDereferenceTouchSafeKey] != "" && targets[NoDereferenceTouchSafeKey] != "1") ||
+		(targets[BackupUnresolvedKey] != "" && targets[BackupUnresolvedKey] != "1") ||
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
 		!validShareBodyUnreadFact(targets[ShareBodyUnreadKey]) ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
@@ -3887,6 +4071,44 @@ func scopedMoveName(name string) bool {
 	return true
 }
 
+// sameFolderNameLinks reports links and moves that make and rename only
+// entries of plain names: every link name, every link text, every move
+// source and destination is one path component that scopedMoveName accepts
+// (no dot, no authorized-keys or SSH control file name), and no move keeps
+// a backup or names a target folder. Such a link points at a sibling of its
+// own entry under a plain name, in whatever folder an unplaced cd (cd $W)
+// left it, and a move keeps it in that folder or moves it, under its plain
+// name, into an existing folder of a plain name. A write through it reaches
+// the file the sibling name reaches written directly there, which the walk
+// judges in the folder it places the call in; and no entry the command makes
+// or renames is a protected name (rel-1-0-10:GAP-0571). A link text with a
+// separator, a dot or a protected name, an absolute text, and a move of any
+// other shape keep the opaque reading.
+func (l shellLinks) sameFolderNameLinks(ops []renameOp) bool {
+	if len(l.aliases) == 0 {
+		return false
+	}
+	plain := func(name string) bool {
+		return !strings.ContainsAny(name, "/\\") && scopedMoveName(name)
+	}
+	for _, alias := range l.aliases {
+		if !plain(alias.text) || !plain(filepath.Base(alias.name)) {
+			return false
+		}
+	}
+	for _, op := range ops {
+		if op.backup || op.targetDir != "" || !plain(op.dest) {
+			return false
+		}
+		for _, source := range op.sources {
+			if !plain(source) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // dotDotComponent reports a path word with a .. component: the move then
 // passes through a name the archive may have made a link, so the write
 // operand keeps the raw spelling (OperandPath) that the scope reading
@@ -4210,13 +4432,24 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	if !parsed {
 		// Resolve already marks a command that does not parse incomplete.
 		if opaqueLink.MatchString(command) {
+			if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
+				return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
+			}
 			links.unknown(true)
 		}
 		return links, false
 	}
-	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) && !links.addPythonLiteralLinks(file, command, cwd, home) {
-		links.unknown(true)
-		return links, false
+	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) {
+		// A PowerShell New-Item link and Move-Item with static operands are
+		// read as the ln and mv they are (rel-1-0-10:GAP-0749); every other
+		// link-making text keeps the opaque reading.
+		if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
+			return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
+		}
+		if !links.addPythonLiteralLinks(file, command, cwd, home) {
+			links.unknown(true)
+			return links, false
+		}
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, nestedCopyDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
@@ -4555,8 +4788,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
 				if archiveMayLink(program, words[1:], static[1:]) &&
-					(!onlyDirectoryStatementsBefore(file, call, home) ||
-						!tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, facts, record)) {
+					!archiveExtractionHoldsNoLink(file, call, program, words[1:], static[1:], dir, command, home, facts, record) {
 					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
 				if archiveCopiesLinks(program, words[1:], static[1:]) {
@@ -4773,6 +5005,19 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			walkFailed = !stable
 		}
 		unplacedRelative := cds && links.relative && linkCall == nil && !linkDirsKnown
+		// Links and moves of plain names only (sameFolderNameLinks) reach
+		// what those names reach written directly, wherever an unplaced cd
+		// leaves them: they are read as the walk places the direct names
+		// (rel-1-0-10:GAP-0571).
+		if (!stable && !walkFailed || unplacedRelative) && cds && !renames && !wrappedCds && len(findMoves) == 0 &&
+			links.known && !links.opaque && !links.unread && links.sameFolderNameLinks(renameOps) {
+			stable, unplacedRelative = links.followRenames(renameOps, userView), false
+			if stable && !userView {
+				stable = links.dotDotPastLinksClear(command, cwd, home) && links.aliasesAwayFromState(cwd, home) &&
+					movedEntriesAwayFromState(renameOps, findMoves, home)
+				links.movesStable = stable
+			}
+		}
 		if !stable || unplacedRelative {
 			// Only the disk walks of a nested directory change failed, with no
 			// move and no other unread link: the names of the link calls
@@ -5777,9 +6022,12 @@ func copyLinkOptions(args []*syntax.Word, words []string, static []bool) (option
 	return option, dynamic
 }
 
-// quotedDynamicCopySource accepts only a single scalar shell parameter.
-// Double quoting makes its expansion one argv word, including when its value
-// contains spaces or starts with a dash.
+// quotedDynamicCopySource accepts only a single scalar shell parameter or a
+// single command substitution, alone in double quotes. Double quoting makes
+// its expansion one argv word, including when its value contains spaces or
+// starts with a dash. A substitution runs its own commands, and the walk that
+// reads the call reads them as calls of their own (a link made inside it is a
+// link of the command); only the word they produce is the source.
 func quotedDynamicCopySource(word *syntax.Word) bool {
 	if word == nil || len(word.Parts) != 1 {
 		return false
@@ -5787,6 +6035,9 @@ func quotedDynamicCopySource(word *syntax.Word) bool {
 	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
 	if !ok || len(quoted.Parts) != 1 {
 		return false
+	}
+	if _, substitution := quoted.Parts[0].(*syntax.CmdSubst); substitution {
+		return true
 	}
 	param, ok := quoted.Parts[0].(*syntax.ParamExp)
 	if !ok || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||

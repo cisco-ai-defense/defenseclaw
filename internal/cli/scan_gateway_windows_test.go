@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -32,11 +33,11 @@ func TestManagedScanGatewayEndpointUsesInstalledAPIPort(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN=test-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previousHost, previousLayout := managedHostWindowsStandalone, managedScanWindowsLayout
+	previousHost, previousLayout := hookcli.ManagedHostWindowsStandalone, managedScanWindowsLayout
 	t.Cleanup(func() {
-		managedHostWindowsStandalone, managedScanWindowsLayout = previousHost, previousLayout
+		hookcli.ManagedHostWindowsStandalone, managedScanWindowsLayout = previousHost, previousLayout
 	})
-	managedHostWindowsStandalone = func() (string, bool) { return "managed", true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "managed", true }
 	managedScanWindowsLayout = func() (managed.StandaloneLayout, error) {
 		return managed.StandaloneLayout{ConfigPath: configPath, DataDir: root, APIAddr: managed.StandaloneAPIAddr}, nil
 	}
@@ -52,11 +53,11 @@ func TestManagedScanGatewayEndpointUsesInstalledAPIPort(t *testing.T) {
 func TestManagedScanGatewayEndpointRefusesAStandardAccountPlainly(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yaml")
-	previousHost, previousLayout, previousRead := managedHostWindowsStandalone, managedScanWindowsLayout, managedScanReadFile
+	previousHost, previousLayout, previousRead := hookcli.ManagedHostWindowsStandalone, managedScanWindowsLayout, managedScanReadFile
 	t.Cleanup(func() {
-		managedHostWindowsStandalone, managedScanWindowsLayout, managedScanReadFile = previousHost, previousLayout, previousRead
+		hookcli.ManagedHostWindowsStandalone, managedScanWindowsLayout, managedScanReadFile = previousHost, previousLayout, previousRead
 	})
-	managedHostWindowsStandalone = func() (string, bool) { return "managed", true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "managed", true }
 	managedScanWindowsLayout = func() (managed.StandaloneLayout, error) {
 		return managed.StandaloneLayout{ConfigPath: configPath, DataDir: root, APIAddr: managed.StandaloneAPIAddr}, nil
 	}
@@ -125,9 +126,9 @@ func TestWindowsStandaloneGatewayStatusSendsNoTokenToAnUnverifiedListener(t *tes
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN=managed-admin-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previousHost, previousLayout := managedHostWindowsStandalone, managedScanWindowsLayout
-	t.Cleanup(func() { managedHostWindowsStandalone, managedScanWindowsLayout = previousHost, previousLayout })
-	managedHostWindowsStandalone = func() (string, bool) { return "managed", true }
+	previousHost, previousLayout := hookcli.ManagedHostWindowsStandalone, managedScanWindowsLayout
+	t.Cleanup(func() { hookcli.ManagedHostWindowsStandalone, managedScanWindowsLayout = previousHost, previousLayout })
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "managed", true }
 	managedScanWindowsLayout = func() (managed.StandaloneLayout, error) {
 		return managed.StandaloneLayout{ConfigPath: configPath, DataDir: root, APIAddr: managed.StandaloneAPIAddr}, nil
 	}
@@ -158,14 +159,14 @@ func TestWindowsStandaloneViewsDoNotSendToAnUnverifiedListener(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN=private-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previousLayout, previousHost, previousFactory := managedScanWindowsLayout, managedHostWindowsStandalone, managedGatewayClientFactory
+	previousLayout, previousHost, previousFactory := managedScanWindowsLayout, hookcli.ManagedHostWindowsStandalone, managedGatewayClientFactory
 	t.Cleanup(func() {
-		managedScanWindowsLayout, managedHostWindowsStandalone, managedGatewayClientFactory = previousLayout, previousHost, previousFactory
+		managedScanWindowsLayout, hookcli.ManagedHostWindowsStandalone, managedGatewayClientFactory = previousLayout, previousHost, previousFactory
 	})
 	managedScanWindowsLayout = func() (managed.StandaloneLayout, error) {
 		return managed.StandaloneLayout{ConfigPath: configPath, DataDir: root, APIAddr: managed.StandaloneAPIAddr}, nil
 	}
-	managedHostWindowsStandalone = func() (string, bool) { return "managed", true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "managed", true }
 	managedGatewayClientFactory = func(time.Duration, string, string) (*http.Client, error) {
 		return nil, fmt.Errorf("connected gateway listener is not the protected service")
 	}

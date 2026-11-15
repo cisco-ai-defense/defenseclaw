@@ -16,6 +16,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // rel-1-0-10:GAP-0176. ACP terminal, filesystem, permission and tool frames
@@ -205,6 +206,10 @@ type acpActionEnv struct {
 	hookAPI *APIServer
 	project string
 	mode    acp.Mode
+	// agent is the ACP agent the frames come from (kiro unless a test says).
+	agent string
+	// managed: the frames come from an enrolled guard of a managed install.
+	managed bool
 	// sessionCWD is the directory the editor gave the session, as the guard
 	// sends it (Evaluation.SessionCWD): the project, unless a test changes it.
 	sessionCWD string
@@ -215,6 +220,14 @@ type acpActionEnv struct {
 
 func newACPActionEnv(t *testing.T, pack string) *acpActionEnv {
 	t.Helper()
+	return newACPActionEnvFor(t, pack, "kiro", false)
+}
+
+// newACPActionEnvFor is newACPActionEnv for the ACP agent (and its connector)
+// agent, on a managed install when managedInstall: the tier rows of the bound
+// rule (default, permissive, strict, managed, managed strict).
+func newACPActionEnvFor(t *testing.T, pack, agent string, managedInstall bool) *acpActionEnv {
+	t.Helper()
 	home := t.TempDir()
 	project := filepath.Join(home, "proj")
 	if err := os.MkdirAll(project, 0o700); err != nil {
@@ -223,18 +236,22 @@ func newACPActionEnv(t *testing.T, pack string) *acpActionEnv {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Chdir(project)
-	installToolCallCorpusProfileConnector(t, "kiro", pack)
+	installToolCallCorpusProfileConnector(t, agent, pack)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Connector = "kiro"
+	cfg.Guardrail.Connector = agent
 	cfg.Guardrail.RulePack = pack
 	cfg.ACP = config.ACPConfig{
 		Enabled: true, Mode: "action", DefaultProfile: "default",
 		Clients: map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "default"}},
-		Agents:  map[string]config.ACPBinding{"kiro": {Enabled: true, Profile: "default"}},
+		Agents:  map[string]config.ACPBinding{agent: {Enabled: true, Profile: "default"}},
 		Profiles: map[string]config.ACPProfile{"default": {
-			Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"},
+			Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{agent},
 		}},
+	}
+	if managedInstall {
+		cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		cfg.Enterprise.Profile = managed.ProfileStandalone
 	}
 	api, capture := newGuardrailEventV8TestAPI(t)
 	previous := liveGuardrailProfiles.Load()
@@ -242,7 +259,7 @@ func newACPActionEnv(t *testing.T, pack string) *acpActionEnv {
 	api.scannerCfg = cfg
 	api.initGuardrailProfiles(cfg)
 	return &acpActionEnv{
-		acpAPI: api, capture: capture, project: project, mode: acp.ModeAction, sessionCWD: project,
+		acpAPI: api, capture: capture, project: project, mode: acp.ModeAction, sessionCWD: project, agent: agent, managed: managedInstall,
 		hookAPI: &APIServer{scannerCfg: cfg, health: NewSidecarHealth()},
 	}
 }
@@ -268,7 +285,7 @@ func (e *acpActionEnv) evaluate(t *testing.T, direction acp.Direction, frame []b
 func (e *acpActionEnv) post(t *testing.T, direction acp.Direction, frame []byte, asMethod string) *httptest.ResponseRecorder {
 	t.Helper()
 	evaluation := acp.Evaluation{
-		Profile: "default", Mode: e.mode, AgentID: "kiro", ClientID: "zed",
+		Profile: "default", Mode: e.mode, AgentID: e.agent, ClientID: "zed",
 		Direction: direction, Payload: frame, SessionCWD: e.sessionCWD, ToolCallState: e.toolCallState,
 	}
 	if asMethod != "" {
@@ -286,6 +303,10 @@ func (e *acpActionEnv) post(t *testing.T, direction acp.Direction, frame []byte,
 	}
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+	if e.managed {
+		request = request.WithContext(withACPEnterpriseCredential(request.Context(),
+			acp.EnterpriseCredential{Principal: "home:acp-action-test", ClientID: "zed", AgentID: e.agent, Profile: "default"}))
+	}
 	e.acpAPI.handleACPEvaluate(response, request)
 	return response
 }

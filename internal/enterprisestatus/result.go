@@ -267,6 +267,10 @@ type Result struct {
 	// elsewhere.
 	Cowork         *CoworkState         `json:"cowork,omitempty"`
 	CoworkVMSensor *CoworkVMSensorState `json:"cowork_vm_sensor,omitempty"`
+	// Routing is the routing block (routing_block.go) of status and verify
+	// on the standalone profile; nil (omitted) elsewhere and when routing is
+	// not configured.
+	Routing *RoutingState `json:"routing,omitempty"`
 	// HealthReport summarizes the managed gateway's last endpoint health
 	// report (health_report.go), for status on a Secure Client host; nil
 	// (omitted) when there is no report.

@@ -229,9 +229,18 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			word *syntax.Word
 			cwd  string
 			vals actionValues
+			// read: the word only names a file a reader statement reads
+			// (actionPlainReadStatements), so it is no write target.
+			read bool
 		}
 		var pendingReads []pendingRead
 		direct := actionDirectStatements(file)
+		var plainReads map[*syntax.Stmt]bool
+		if !stateOnly && depth == 0 {
+			// A nested shell body keeps the whole-body reading
+			// (TestR104StructuralProtectedNamedPOSIX: sh -c 'cat KEYS').
+			plainReads = actionPlainReadStatements(file, home)
+		}
 		// Quoting makes *, ? and [ literal only in a POSIX reading of a
 		// POSIX home; a Windows-spelled home reads them as wildcards.
 		literalReading := !spelledWindows && !actionPosixWindowsHome(home)
@@ -414,8 +423,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						continue
 					}
 					if actionExpandedWordGlob(word, values, effectiveCWD, home, check) || checkBraceFields(word, false) || checkWord(word) {
-						if readOnly && direct[stmt] {
-							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values)})
+						read := readOnly && plainReads[stmt] && !actionWordHasUnquotedGlob(word, command)
+						if readOnly && (direct[stmt] || read) {
+							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values), read: read})
 							judgedWords = append(judgedWords, word)
 							continue
 						}
@@ -433,6 +443,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		for _, read := range pendingReads {
 			if found {
 				break
+			}
+			if read.read && len(removedEntries) == 0 && len(replacedEntries) == 0 {
+				// No link was removed or replaced: the reader statement names
+				// the file to read it. Where one was, the rel-1-0-4:GAP-2590
+				// reading below decides (a read of the removed entry only).
+				continue
 			}
 			found = !actionReplacedEntryWord(read.word, read.vals, read.cwd, home, removedEntries)
 		}
@@ -470,6 +486,136 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 	}
 	return false
+}
+
+// actionPlainReadStatements are the statements whose words name files only
+// for a reader to read them (rel-1-0-10:GAP-0570): a known reader statement
+// (actionKnownReadOnlyShell: ls, cat, stat, grep ...) at the top of the call
+// or in an && or || list, and each stage of such a pipeline whose stages are
+// all readers (ls -la ~/.ssh | head -5). Such a statement prints to the
+// terminal or to /dev/null: it writes no file and hands no name to the other
+// statements, so a protected path it names is not a write target of the
+// call, whatever the others run (ssh -V, make). A statement that changes
+// folder (cd, pushd, popd) is not one: the folder decides what later
+// relative names reach. A call has none when it reads $_ (the last word of
+// the statement before, which can pass a name on), assigns a variable or
+// declares a function (PATH=/tmp/x can change what a later reader runs, as
+// actionKnownReadOnlyShell reads it), or prints an expansion with echo or
+// printf (the rel-1-0-6:GAP-0225 ruling keeps the mention there: only a
+// fixed-text echo is verdict-neutral, actionFixedTextEchoes).
+func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]bool {
+	if file == nil {
+		return nil
+	}
+	neutral := actionFixedTextEchoes(file)
+	// An agent's exit-status wrapper (status=$?; printf '%s' "$status";
+	// exit "$status", GAP-2168) prints the status only and stays neutral.
+	status := map[string]bool{"?": true}
+	kept := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.ParamExp:
+			kept = node.Param != nil && node.Param.Value == "_"
+		case *syntax.Assign, *syntax.FuncDecl, *syntax.DeclClause:
+			kept = true
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 && actionExitStatusAssignment(node) {
+				for _, assign := range node.Assigns {
+					status[assign.Name.Value] = true
+				}
+				return false
+			}
+			if len(node.Args) > 0 && !neutral[node] {
+				program, known := staticProgramWord(node.Args[0], home)
+				base := programBase(program)
+				if !known || (base == "echo" || base == "printf") && !actionStatusReport(node.Args[1:], status) {
+					kept = true
+				}
+			}
+		}
+		return !kept
+	})
+	if kept {
+		return nil
+	}
+	reads := map[*syntax.Stmt]bool{}
+	var stages func(stmt *syntax.Stmt) bool
+	stages = func(stmt *syntax.Stmt) bool {
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+			if binary.Op != syntax.Pipe && binary.Op != syntax.PipeAll {
+				return false
+			}
+			return stages(binary.X) && stages(binary.Y)
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return false
+		}
+		if program, known := staticProgramWord(call.Args[0], home); !known || slices.Contains(cdPrograms, programBase(program)) {
+			return false
+		}
+		reads[stmt] = true
+		return true
+	}
+	// The statements actionDirectStatements reads, and the pipelines in
+	// the same places, which it leaves out.
+	var visit func(stmt *syntax.Stmt)
+	visit = func(stmt *syntax.Stmt) {
+		if stmt == nil || stmt.Background || stmt.Coprocess || stmt.Negated {
+			return
+		}
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && (binary.Op == syntax.AndStmt || binary.Op == syntax.OrStmt) {
+			visit(binary.X)
+			visit(binary.Y)
+			return
+		}
+		alone := &syntax.File{Stmts: []*syntax.Stmt{stmt}}
+		if !actionKnownReadOnlyShell(alone, home) || !actionReadersAreSystemPrograms(alone, home, 0) {
+			return
+		}
+		marked := maps.Clone(reads)
+		if !stages(stmt) {
+			reads = marked
+		}
+	}
+	for _, stmt := range file.Stmts {
+		visit(stmt)
+	}
+	return reads
+}
+
+// actionReadersAreSystemPrograms reports that every program a plain reader
+// statement runs is one the shell finds on its trusted PATH or a fixed system
+// path: a bare name (ls, cat) or a program in /bin, /usr/bin or
+// /usr/local/bin (readerDirectories). A program named by any other path
+// (./ls, /tmp/x/ls, ~/bin/cat) can be a file the call or an earlier call put
+// there under a reader's name, so it is an unknown program, not a reader
+// (rel-1-0-10:GAP-0715). A bash -c body is read the same way.
+func actionReadersAreSystemPrograms(file *syntax.File, home string, depth int) bool {
+	if depth >= 8 {
+		return false
+	}
+	trusted := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || !trusted || len(call.Args) == 0 {
+			return trusted
+		}
+		program, known := staticProgramWord(call.Args[0], home)
+		if !known || strings.Contains(program, "\\") ||
+			strings.Contains(program, "/") && !slices.Contains(readerDirectories, filepath.Dir(program)) {
+			trusted = false
+			return false
+		}
+		if programBase(program) == "bash" && len(call.Args) == 3 {
+			if child, parsed := parseShell(actionWordLiteralText(call.Args[2])); parsed &&
+				!actionReadersAreSystemPrograms(child, home, depth+1) {
+				trusted = false
+			}
+		}
+		return trusted
+	})
+	return trusted
 }
 
 // actionInterpreterSSHName and actionInterpreterKeysName match the two
@@ -3053,6 +3199,10 @@ var actionPowerShellListOnly = map[string]bool{
 	"select-object": true, "select": true, "format-list": true, "fl": true, "format-table": true, "ft": true,
 	"format-wide": true, "fw": true, "measure-object": true, "measure": true, "sort-object": true,
 	"out-string": true, "write-output": true, "echo": true,
+	// Get-Content reads what a file holds and writes nothing; the bare
+	// statement is read-only already (actionKnownReadOnlyWindowsStatement), so a
+	// launcher around it is too (rel-1-0-10:GAP-0157).
+	"get-content": true, "gc": true,
 }
 
 // actionPowerShellListOnlyBodyText is the text a list-only body may hold:
@@ -3085,11 +3235,61 @@ func actionPowerShellListOnlyBody(body, home string) bool {
 				program, static = StaticWord(node.Args[0], home)
 			}
 			listOnly = static && actionPowerShellListOnly[strings.ToLower(program)]
+			for _, arg := range node.Args[1:] {
+				// An unquoted glob word is not static to the POSIX reading but is
+				// a listing to PowerShell; only a parameter that keeps the
+				// objects is refused.
+				if option, known := StaticWord(arg, home); known && actionPowerShellKeepsObjects(option) {
+					listOnly = false
+				}
+			}
 			calls++
 		}
 		return listOnly
 	})
 	return listOnly && calls > 0
+}
+
+// actionPowerShellReadsContent are the list-only commands that print file
+// content, not names or properties.
+var actionPowerShellReadsContent = map[string]bool{"get-content": true, "gc": true}
+
+// powerShellListOnlyWords is the text of a PowerShell script of plain words:
+// letters, digits, path characters, wildcards, pipes, statement ends and
+// quotes. No variable, sub-expression, script block, escape, redirect or call
+// operator.
+var powerShellListOnlyWords = lazyregexp.New(`^[A-Za-z0-9_./~:*?,|; \t'"\\-]+$`)
+
+// PowerShellListOnlyBody reports a PowerShell script whose every command only
+// lists names or properties (Get-ChildItem, Test-Path, Select-Object ...) and
+// whose text holds no other syntax: it proves no write to any path it names. A
+// second reading of such a script adds nothing the call as written lacks
+// (rel-1-0-10:GAP-0364).
+func PowerShellListOnlyBody(body, _ string) bool {
+	// The script is read as PowerShell words (statements split at ; and |). A
+	// command that reads file content (Get-Content and its aliases) is not a
+	// listing: what it prints can be a credential.
+	if !powerShellListOnlyWords.MatchString(body) {
+		return false
+	}
+	statements := 0
+	for _, statement := range strings.FieldsFunc(body, func(r rune) bool { return r == ';' || r == '|' }) {
+		words := strings.Fields(statement)
+		if len(words) == 0 {
+			continue
+		}
+		command := strings.ToLower(strings.Trim(words[0], `'"`))
+		if !actionPowerShellListOnly[command] || actionPowerShellReadsContent[command] {
+			return false
+		}
+		for _, word := range words[1:] {
+			if actionPowerShellKeepsObjects(word) {
+				return false
+			}
+		}
+		statements++
+	}
+	return statements > 0
 }
 
 // actionWindowsLaunchText is the text a list-only PowerShell launch may hold
@@ -4574,6 +4774,28 @@ func actionWindowsDiscardTarget(word string) bool {
 	return false
 }
 
+// actionPowerShellKeepsObjects reports a PowerShell common parameter that
+// stores what the stage outputs in a variable or buffer (-OutVariable, -ov,
+// -PipelineVariable, -pv, -OutBuffer, -ob, with the abbreviations the engine
+// accepts). The stage then hands the object, with its path, to a later
+// statement that names no path (Get-Item <key> -OutVariable k; Set-Content
+// -Path $k.FullName x), so the read is not only a read.
+func actionPowerShellKeepsObjects(option string) bool {
+	if len(option) < 3 || option[0] != '-' {
+		return false
+	}
+	name := strings.ToLower(option[1:])
+	if colon := strings.IndexByte(name, ':'); colon >= 0 {
+		name = name[:colon]
+	}
+	for _, full := range []string{"outvariable", "pipelinevariable", "outbuffer"} {
+		if strings.HasPrefix(full, name) && len(name) >= 2 && name[0] == full[0] {
+			return true
+		}
+	}
+	return name == "ov" || name == "pv" || name == "ob"
+}
+
 func actionKnownReadOnlyWindowsStatement(words []string) bool {
 	if len(words) == 0 {
 		return false
@@ -4590,12 +4812,12 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 	}
 	program := programBase(words[0])
 	for _, option := range words[1:] {
-		if actionReadOptionMayWrite(option) {
+		if actionReadOptionMayWrite(option) || actionPowerShellKeepsObjects(option) {
 			return false
 		}
 	}
 	switch program {
-	case "cat", "get-content", "get-childitem", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location",
+	case "cat", "get-content", "get-childitem", "get-item", "gi", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location",
 		// cmd type, and the search and select filters, only read (GAP-2168).
 		"type", "findstr", "select-string", "sls", "select-object", "select",
 		// Git Bash search and count programs read their operands as on a

@@ -1,0 +1,84 @@
+{
+ "comment": "Which data URL values of an attachment field are attachments (rel-1-0-10:GAP-0511). Each row's value is \"data:text/plain;name=\" + fill x count + \";base64,\" + a binary base64 payload (\"AAEC\" x 1500). It is an attachment only when \";base64,\" ends within message_data_url_header_max_bytes UTF-8 bytes of the start (marker_end_bytes; a lone surrogate counts as the 3 bytes of U+FFFD, as JSON decoding gives it). The gateway (TestMessageAttachmentDataURLWindow, internal/gateway/message_text_test.go) and the OpenClaw plugin (extensions/defenseclaw/src/__tests__/inspect-body-limit.test.ts) both read this file, so the two windows stay in step.",
+ "payload_unit": "AAEC",
+ "payload_repeat": 1500,
+ "cases": [
+  {
+   "name": "ascii-marker-ends-at-256",
+   "fill": "a",
+   "count": 227,
+   "marker_end_bytes": 256,
+   "attachment": true
+  },
+  {
+   "name": "ascii-marker-ends-at-257",
+   "fill": "a",
+   "count": 228,
+   "marker_end_bytes": 257,
+   "attachment": false
+  },
+  {
+   "name": "two-byte-at-255",
+   "fill": "\u00e9",
+   "count": 113,
+   "marker_end_bytes": 255,
+   "attachment": true
+  },
+  {
+   "name": "two-byte-at-257",
+   "fill": "\u00e9",
+   "count": 114,
+   "marker_end_bytes": 257,
+   "attachment": false
+  },
+  {
+   "name": "two-byte-150-review-shape",
+   "fill": "\u00e9",
+   "count": 150,
+   "marker_end_bytes": 329,
+   "attachment": false
+  },
+  {
+   "name": "three-byte-at-254",
+   "fill": "\u62a5",
+   "count": 75,
+   "marker_end_bytes": 254,
+   "attachment": true
+  },
+  {
+   "name": "three-byte-at-257",
+   "fill": "\u62a5",
+   "count": 76,
+   "marker_end_bytes": 257,
+   "attachment": false
+  },
+  {
+   "name": "four-byte-at-253",
+   "fill": "\ud83d\ude80",
+   "count": 56,
+   "marker_end_bytes": 253,
+   "attachment": true
+  },
+  {
+   "name": "four-byte-at-257",
+   "fill": "\ud83d\ude80",
+   "count": 57,
+   "marker_end_bytes": 257,
+   "attachment": false
+  },
+  {
+   "name": "lone-surrogate-at-254",
+   "fill": "\ud800",
+   "count": 75,
+   "marker_end_bytes": 254,
+   "attachment": true
+  },
+  {
+   "name": "lone-surrogate-at-257",
+   "fill": "\ud800",
+   "count": 76,
+   "marker_end_bytes": 257,
+   "attachment": false
+  }
+ ]
+}

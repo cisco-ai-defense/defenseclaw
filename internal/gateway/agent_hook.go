@@ -147,6 +147,10 @@ type agentHookRequest struct {
 	// ToolArgsAreHookEnvelope marks ToolArgs as the whole hook body, used when
 	// the payload carries no tool-argument object.
 	ToolArgsAreHookEnvelope bool
+	// PromptField is the text of a declared prompt field of the payload
+	// (prompt, user_prompt, userPrompt, initial_prompt, initialPrompt): what the
+	// user typed, as opposed to the fallback fields Content may come from.
+	PromptField string
 	// ToolCallUnparsed: the connector's decoder found no tool call it can
 	// read (connector.HookProfileRequest.ToolCallUnparsed).
 	ToolCallUnparsed bool
@@ -170,6 +174,10 @@ type agentHookRequest struct {
 	Payload            map[string]interface{}
 	toolChain          *toolChainHookCapture
 	alertOnlySQLNotice bool
+	// toolResultInjection marks a tool-result verdict with a prompt-injection
+	// finding: the agent-facing text tells the agent not to follow the
+	// result's instructions (GAP-0605).
+	toolResultInjection bool
 }
 
 func hookActionCommandAuditExtra(req agentHookRequest, home string) map[string]string {
@@ -826,7 +834,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if shouldResetToolJudgeSession(req) {
 			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
 			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ResetToolJudgeSession(sessionKey)
+				judge.ResetToolJudgeSession(ctx, judgeSessionKeyFor(ctx, req.SessionID))
 			}
 			a.resetUserDownloadRequests(sessionKey)
 		}
@@ -1201,6 +1209,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// No answer leaves this process unjournaled. The 503
 				// closes the managed hook before the proposal is offered.
 				resp = pendingFailureHookDecision(resp)
+				// A journal failure is a store problem, not load: no
+				// capacity outcome.
 				persistCtx := telemetryPersistenceCtx
 				var cancelPersist context.CancelFunc
 				if persistCtx == nil {
@@ -1212,7 +1222,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 						cancelFinalPersistence = cancelPersist
 					}
 				}
-				finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
+				finalization := a.finalizeAgentHookAnswer(
+					context.WithValue(a.pendingHookDecidedContext(persistCtx, pending, resp), hookCapacityExcludedContextKey{}, true),
 					connectorName, req, resp, rawEventIDs, b, time.Since(t0), panicked, auditExtra, false)
 				a.settlePendingHook(persistCtx, pending, finalization)
 				if cancelPersist != nil && finalPersistenceCtx == nil {
@@ -1259,6 +1270,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 			return a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
 		}
+		var capacityReceipt *hookCapacityReceipt
 		if delivery != nil {
 			preKey, preNoted = a.notePreToolDecision(ctx, req, wireResp)
 			body := a.hookAnswerBody(ctx, profile, connectorName, req,
@@ -1275,6 +1287,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				resp = unreceipted(resp)
 			} else {
 				resp = a.deliveredHookDecision(connectorName, resp, receipt)
+				capacityReceipt = &hookCapacityReceipt{line: receipt}
 			}
 			delivered := resp
 			answered = &delivered
@@ -1308,6 +1321,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// The receipt decided what the agent got (delivered or
 			// unconfirmed); a hang-up after it is not a missed answer.
 			persistCtx = context.WithValue(persistCtx, hookDeliveryReceiptContextKey{}, true)
+		}
+		if capacityReceipt != nil {
+			// What the receipt said is the deadline evidence of the call.
+			persistCtx = context.WithValue(persistCtx, hookCapacityReceiptContextKey{}, *capacityReceipt)
 		}
 		// A managed answer offered on the receipt channel is already on the
 		// wire: finalization records it as delivered and cannot replace it.
@@ -1583,6 +1600,11 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// acknowledgement is a live answer even though it reuses the pending
 	// occurrence IDs to deduplicate audit writes.
 	live := !req.pendingRecovery || req.sandboxReceiptAcknowledgment
+	if live {
+		// The overload signal (DESIGN 18); recovers its own panics, so it
+		// never changes this answer.
+		a.noteHookCallCapacity(ctx, connectorName, resp, clientLeft)
+	}
 	safeSection := func(section string, fn func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -3409,6 +3431,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		content = stringifyHookValue(firstValue(payload, "tool_response", "toolResponse", "tool_result", "toolResult", "result", "error"))
 	}
 
+	promptField := firstString(payload, "prompt", "user_prompt", "userPrompt", "initial_prompt", "initialPrompt")
 	direction := "tool_call"
 	switch {
 	case isPromptLikeEvent(event):
@@ -3427,6 +3450,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		AgentID:       agentID, AgentName: agentName, AgentType: agentType,
 		RootAgentID: rootAgentID, ParentAgentID: parentAgentID, ChildAgentID: childAgentID,
 		HookEventName:   event,
+		PromptField:     promptField,
 		SemanticEventID: correlationValue(connector.CorrelationTargetSemanticEvent),
 		SessionID:       sessionID, TurnID: turnID, MessageID: correlationValue(connector.CorrelationTargetMessage),
 		ThreadID:      correlationValue(connector.CorrelationTargetThread),
@@ -3640,6 +3664,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
 	}
 	t0 := time.Now()
+	ctx = withCascadeTrace(ctx, a.decisionConfig(ctx), req.ConnectorName)
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
@@ -3665,13 +3690,18 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// lifecycle events) can repeat or contain model-generated material;
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
-		if isToolJudgeIntentEvent(req.HookEventName) {
-			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ObserveSessionPrompt(ctx, req.Content)
-			}
-			a.observeUserDownloadRequest(ctx, req.Content)
-		}
+		intentEvent := isToolJudgeIntentEvent(req.HookEventName)
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
+		if intentEvent {
+			// Only a declared prompt field names scope targets: the generic
+			// fallback also reads descriptions, tool responses and results, and
+			// Hermes and OpenClaw "user" text can come from a remote chat party.
+			scopeText := req.PromptField
+			if req.ConnectorName == "hermes" || req.ConnectorName == "openclaw" {
+				scopeText = ""
+			}
+			a.observeUserTurn(ctx, req.Content, scopeText, req.CWD, verdict)
+		}
 	case isResultLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a
@@ -3709,12 +3739,13 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// onto the context so the downstream emit choke points and the OS
 	// toast honor it (managed_enterprise only; no-op otherwise).
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+	verdict = a.applyCascadeFinal(ctx, req.ConnectorName, hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	caps := profile.Capabilities
 	effectiveMode := mode
-	if mode != "action" && a.provenHookActionMustEnforce(ctx, verdict) {
+	if mode != "action" && a.hookActionMustEnforce(ctx, verdict) {
 		effectiveMode = "action"
 	}
 	action, wouldBlock := mapHookActionForProfile(rawAction, effectiveMode, req.HookEventName, caps, profile, req.Payload)
@@ -3797,6 +3828,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			req.alertOnlySQLNotice = hasAlertOnlySQLFinding(findings)
 		}
 	}
+	req.toolResultInjection = isToolResultDirection(req.Direction) && verdictHasPromptInjection(verdict)
 	resp := agentHookResponseForProfile(
 		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps, responsePolicy,
 	)
@@ -3825,6 +3857,9 @@ const hookOversizeUninspectedRuleID = "HOOK-OVERSIZE-COMMAND-NOT-INSPECTED"
 
 const oversizeUninspectedReason = "oversize, command not inspected: this hook payload is over DefenseClaw's size cap, " +
 	"so the gateway could read only part of the call."
+
+// contentCutReason is the reason of content cut at maxInspectContentLen.
+const contentCutReason = "content over the 256 KiB inspect cap: only the first 256 KiB were inspected"
 
 // oversizeUninspectedPayload reports a bounded review of an oversized call.
 // Every bounded review lacks part of the call (hookexec.OversizeUninspectedField),
@@ -4002,7 +4037,23 @@ func selectWindowsShellDialectReading(tool, command string, input actionfacts.In
 			return actionfacts.DialectCMD, nil
 		}
 	}
+	if cappedPowerShellReading(powerShell) {
+		return actionfacts.DialectPowerShell, nil
+	}
 	return "", &windowsHintedReading{input: powerShellInput, facts: powerShell}
+}
+
+// cappedPowerShellReading reports a PowerShell reading that stopped at its
+// command cap: PowerShell read the call up to the cap, so the call is
+// PowerShell code, judged truncated in that dialect. The selection read only a
+// complete reading as PowerShell, so a script of `$o = & git rev-parse HEAD`
+// lines (two commands a statement, the cap at about 64 statements) fell to the
+// inferred POSIX reading on the Codex Windows hook, where & is a background
+// operator, and was judged as POSIX statements no shell runs there, while the
+// same text on the PowerShell tool was a PowerShell reading
+// (rel-1-0-10:GAP-0590).
+func cappedPowerShellReading(facts actionfacts.Facts) bool {
+	return facts.Parse.Dialect == actionfacts.DialectPowerShell && facts.Parse.Status == actionfacts.StatusLimitExceeded
 }
 
 // agentHookWindowsShellDialect reads only the server-projected shell arguments.
@@ -4749,6 +4800,23 @@ func (a *APIServer) provenHookActionMustEnforce(ctx context.Context, verdict *To
 	return false
 }
 
+// hookActionMustEnforce is provenHookActionMustEnforce on a hook route, where
+// observe mode also enforces a call the evaluation failed on: the hook
+// recovery's failed-check answer was a block in every mode, and the
+// contained fault keeps that answer (rel-1-0-10:GAP-0486).
+//
+// The observe-mode asymmetry is deliberate (1.0.10 lead, 2026-11-14): a hook
+// route in observe mode BLOCKS a call the evaluation failed on, while
+// /api/v1/inspect/tool and ACP in observe mode answer would_block on a normal
+// 200 verdict. The hook routes already blocked such a call in every mode on
+// rel, and a fix is never weaker than rel; /inspect/tool and ACP crashed on
+// rel, so there is no block to keep and they follow observe mode like any
+// other block. Do not drop evaluationFaultMustEnforce here to make the routes
+// match: that makes the hook routes weaker than rel.
+func (a *APIServer) hookActionMustEnforce(ctx context.Context, verdict *ToolInspectVerdict) bool {
+	return a.provenHookActionMustEnforce(ctx, verdict) || a.evaluationFaultMustEnforce(ctx, verdict)
+}
+
 func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookCapability, profile connector.HookProfile, payload map[string]interface{}) (string, bool) {
 	if profile.MapVerdict != nil {
 		out := profile.MapVerdict(connector.HookVerdictInput{
@@ -4826,6 +4894,16 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 	additional := genericHookAdditionalContext(req.ConnectorName, req.HookEventName, mode, rawAction, severity, safeReason, wouldBlock)
 	if req.alertOnlySQLNotice {
 		additional += sqlAlertOnlyHookNotice
+	}
+	if additional != "" && isToolResultDirection(req.Direction) {
+		if req.toolResultInjection {
+			additional = connector.WithToolResultInjectionGuidance(additional)
+		}
+		// An agent with no tool-result block form says so in the note, in
+		// every posture: strict cannot block here (GAP-0605).
+		if !caps.CanBlock || !eventIn(req.HookEventName, caps.BlockEvents) {
+			additional = toolResultAlertOnlyNotice(additional, req.ConnectorName)
+		}
 	}
 	if agent := confirmWithoutAskAgent(req.ConnectorName, rawAction, mode, req.HookEventName); action == "block" && agent != "" {
 		safeReason = agentConfirmUnavailableReason(agent, reason, agentDisplayReason(reason, notificationSinkPolicy(policy)), notificationSinkPolicy(policy))

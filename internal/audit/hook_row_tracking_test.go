@@ -334,12 +334,15 @@ func TestFailModeDecisionIsListedOnlyWhileUnpaired(t *testing.T) {
 	agree("listed", "[recovered-hd stop-hd]")
 	hookRowForTest(t, store.db, "recovered-ch", string(ActionConnectorHook), "sid-recovered", 0)
 	trackForTest(t, store, string(ActionConnectorHook), "recovered-ch", "sid-recovered", false)
+	agree("one paired", "[stop-hd]") // a row pairs its own event only
 	hookRowForTest(t, store.db, "stop-syn", string(ActionConnectorHookSynthetic), "sid-stop", 0)
 	trackForTest(t, store, string(ActionConnectorHookSynthetic), "stop-syn", "sid-stop", false)
 	agree("paired by later rows", "[]")
 
 	observedHookRowForTest(t, store, "first-ch", string(ActionConnectorHook), "sid-first")
 	awaiting("first-hd", "sid-first")
+	observedHookRowForTest(t, store, "first-syn", string(ActionConnectorHookSynthetic), "sid-first-stop")
+	awaiting("first-stop-hd", "sid-first-stop")
 	// Only a connector-hook row pairs: another row kind of the same event
 	// does not.
 	observedHookRowForTest(t, store, "other-block", string(ActionGuardrailBlock), "sid-other")

@@ -600,6 +600,20 @@ func flockShellString(args []*syntax.Word) (int, bool) {
 	return 0, false
 }
 
+// setDir records the directory a wrapper (env -C, sudo -D) runs its child
+// in; a relative one is joined to the directory an earlier wrapper set. It
+// reports false for an empty name.
+func (run *PrefixWrapperRun) setDir(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if run.Dir != "" && !strings.HasPrefix(dir, "/") && !strings.HasPrefix(dir, homeDirSentinel) {
+		dir = strings.TrimRight(run.Dir, "/") + "/" + dir
+	}
+	run.Dir = dir
+	return true
+}
+
 // wrapperChildIndex returns the index of the word a prefix wrapper at
 // index runs. Every wrapper word must be static; an option that splits a
 // string, starts a shell with no command, acts on a running process or is
@@ -684,9 +698,20 @@ func wrapperChildIndex(name string, value func(int) (string, bool), count, index
 	case "sudo":
 		before := next
 		known = options(sudoSwitches,
-			[]string{"-u", "-g", "-p", "-C", "-T", "-h"},
-			[]string{"--user=", "--group=", "--prompt=", "--preserve-env=", "--host="}, true)
+			[]string{"-u", "-g", "-p", "-C", "-T", "-h", "-D", "--chdir"},
+			[]string{"--user=", "--group=", "--prompt=", "--preserve-env=", "--host=", "--chdir=", "-D"}, true)
 		for at := before; at < next; at++ {
+			// sudo -D DIR (--chdir DIR, --chdir=DIR, -DDIR) runs the command
+			// in DIR (sudoers must allow it; the words are read as if it does).
+			if arg, _ := value(at); arg == "-D" || arg == "--chdir" {
+				if dir, static := value(at + 1); static {
+					run.setDir(dir)
+				}
+			} else if dir, found := strings.CutPrefix(arg, "--chdir="); found {
+				run.setDir(dir)
+			} else if dir, found := strings.CutPrefix(arg, "-D"); found && dir != "" {
+				run.setDir(dir)
+			}
 			// sudo -i starts the command in the target user home.
 			// (also as a letter of a switch cluster: sudo -Ei).
 			if arg, _ := value(at); arg == "-i" || arg == "--login" ||
@@ -752,16 +777,7 @@ func clusteredSwitches(arg string, switches []string) bool {
 // -C dir and --chdir=dir set the directory the child runs in; -S splits a
 // string and ends the reading.
 func envOptions(value func(int) (string, bool), next *int, run *PrefixWrapperRun) bool {
-	chdir := func(dir string) bool {
-		if dir == "" {
-			return false
-		}
-		if run.Dir != "" && !strings.HasPrefix(dir, "/") && !strings.HasPrefix(dir, homeDirSentinel) {
-			dir = strings.TrimRight(run.Dir, "/") + "/" + dir
-		}
-		run.Dir = dir
-		return true
-	}
+	chdir := run.setDir
 	for {
 		arg, static := value(*next)
 		if !static {

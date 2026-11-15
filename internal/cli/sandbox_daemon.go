@@ -36,6 +36,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -307,21 +308,21 @@ const sandboxPrerequisiteExit = 78
 func runSandboxDaemon(ctx context.Context, logw io.Writer) error {
 	goos := runtime.GOOS
 	if err := openshell.CheckPlatform(goos); err != nil {
-		return withExitCode(errors.New("OpenShell sandboxes run on Linux and macOS only"), sandboxPrerequisiteExit)
+		return cliusage.WithExitCode(errors.New("OpenShell sandboxes run on Linux and macOS only"), sandboxPrerequisiteExit)
 	}
 	if os.Getuid() == 0 {
-		return withExitCode(errors.New("the sandbox daemon runs as your own user, not root"), sandboxPrerequisiteExit)
+		return cliusage.WithExitCode(errors.New("the sandbox daemon runs as your own user, not root"), sandboxPrerequisiteExit)
 	}
 	layout, descriptor, err := sandboxDaemonHost(goos)
 	if errors.Is(err, managed.ErrNoRuntimeDescriptor) {
-		return withExitCode(errNotStandaloneManaged, sandboxPrerequisiteExit)
+		return cliusage.WithExitCode(errNotStandaloneManaged, sandboxPrerequisiteExit)
 	}
 	if err != nil {
-		return withExitCode(fmt.Errorf("the managed runtime descriptor is not trusted: %w", err), sandboxPrerequisiteExit)
+		return cliusage.WithExitCode(fmt.Errorf("the managed runtime descriptor is not trusted: %w", err), sandboxPrerequisiteExit)
 	}
 	socketPath, stateDir, err := sandboxDaemonPaths(goos)
 	if err != nil {
-		return withExitCode(err, sandboxPrerequisiteExit)
+		return cliusage.WithExitCode(err, sandboxPrerequisiteExit)
 	}
 	ln, err := sandboxDaemonListener(socketPath)
 	if err != nil {

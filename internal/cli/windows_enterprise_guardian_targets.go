@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // windowsEnterpriseGuardianRepairPendingCode is the warning of a target the
@@ -197,7 +198,7 @@ func standaloneGuardianOptionsFor(current *config.Config) (opts enterprisepolicy
 	if current == nil || !current.StandaloneEnterprise() {
 		return enterprisepolicy.Options{}, nil, false, nil
 	}
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		return enterprisepolicy.Options{}, nil, true, err
 	}

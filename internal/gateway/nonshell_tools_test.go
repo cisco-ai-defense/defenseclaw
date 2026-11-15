@@ -412,7 +412,7 @@ func TestNonShellRedirectIsAnAlertAtMost(t *testing.T) {
 func nonShellLaneCtx(mode string) context.Context {
 	cfg := &config.Config{}
 	if mode != "" {
-		cfg.Guardrail.Cascade.Lanes.NonShell = &mode
+		cfg.Guardrail.Cascade.Lanes = config.CascadeLaneValues{config.CascadeLaneNonShell: mode}
 	}
 	return withPinnedGeneration(context.Background(), &Generation{Config: cfg, N: 1})
 }
@@ -443,8 +443,10 @@ func TestNonShellLaneShadowSwitch(t *testing.T) {
 	}
 }
 
-// GAP-0472: the lane is live only for on, in any case; shadow and off add
-// nothing; a value the loader would refuse never turns it on.
+// GAP-0472: the lane is live only for on; shadow and off add nothing; a value
+// the loader would refuse never turns it on. The loaders take exact values
+// only (internal/config cascade.go); a config built in memory is read
+// trimmed and in any case, as here.
 func TestNonShellLaneSpellings(t *testing.T) {
 	req := nonShellReq("mcp__acme__read_file", `{"path":"/home/u/.ssh/id_rsa"}`, true)
 	shell, _ := json.Marshal(map[string]string{"command": "vault token lookup"})
@@ -462,8 +464,7 @@ func TestNonShellLaneSpellings(t *testing.T) {
 		ctx := nonShellLaneCtx(c.value)
 		if c.value == "" {
 			cfg := &config.Config{}
-			empty := ""
-			cfg.Guardrail.Cascade.Lanes.NonShell = &empty
+			cfg.Guardrail.Cascade.Lanes = config.CascadeLaneValues{config.CascadeLaneNonShell: ""}
 			ctx = withPinnedGeneration(context.Background(), &Generation{Config: cfg, N: 1})
 		}
 		got := nonShellToolFindings(ctx, req, prior, "")

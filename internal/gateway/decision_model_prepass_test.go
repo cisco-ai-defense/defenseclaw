@@ -59,8 +59,10 @@ func TestDecisionPrepassUnderJudgeLoad(t *testing.T) {
 			a.hookJudgeSemOnce.Do(func() { a.hookJudgeSem = make(chan struct{}) })
 			return context.Background()
 		}},
-		{"hook judge budget spent", func(*APIServer) context.Context {
-			return withHookJudgeBudget(context.Background(), time.Now())
+		{"hook judge budget under the judge minimum", func(*APIServer) context.Context {
+			// 800 ms left: too little for the judge (1 s minimum), a quarter
+			// of it (200 ms) for the decision model.
+			return withHookJudgeBudget(context.Background(), time.Now().Add(800*time.Millisecond))
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,6 +76,12 @@ func TestDecisionPrepassUnderJudgeLoad(t *testing.T) {
 			}
 		})
 	}
+	// A fully spent hook judge budget leaves no time for either: the rule
+	// verdict, and the decision model is not asked (review round 4, P4-1).
+	spentSrv, spentHits := prepassServer(t, 0, "block", 0.02)
+	if v := spentSrv.runHookJudge(withHookJudgeBudget(context.Background(), time.Now()), "tool_call", "tool_call", "codex", prepassArgs, "Bash", nil); v != nil || spentHits.Load() != 0 {
+		t.Fatalf("spent budget: verdict %+v, %d requests; want the rule verdict and no request", v, spentHits.Load())
+	}
 	// An escalation keeps the rule verdict when the judge cannot run.
 	a, _ := prepassServer(t, 0, "allow", 0.55)
 	a.hookJudgeSemOnce.Do(func() { a.hookJudgeSem = make(chan struct{}) })
@@ -86,20 +94,17 @@ func TestDecisionPrepassUnderJudgeLoad(t *testing.T) {
 // uses the prepass answer and sample: one model request, one session entry.
 func TestDecisionPrepassAsksOnceAndRecordsOnce(t *testing.T) {
 	a, hits := prepassServer(t, 0, "allow", 0.55)
+	// The session context is counted through the judge's public intent-store
+	// setter (feat/substrate moved it behind intentstore.Store).
+	store := &sharedIntentStore{}
+	a.hookJudge.Load().SetIntentStore(store)
 	ctx := ContextWithSessionID(context.Background(), "prepass-session")
 	a.runHookJudge(ctx, "tool_call", "tool_call", "codex", prepassArgs, "Bash", nil)
 	if hits.Load() != 1 {
 		t.Fatalf("decision model asked %d times, want 1", hits.Load())
 	}
-	j := a.hookJudge.Load()
-	j.toolContextMu.Lock()
-	n := 0
-	for _, e := range j.toolContext {
-		n += len(e.events)
-	}
-	j.toolContextMu.Unlock()
-	if n != 1 {
-		t.Fatalf("session context holds %d entries for one call, want 1", n)
+	if n := len(store.appends); n != 1 {
+		t.Fatalf("session context recorded %d entries for one call, want 1", n)
 	}
 }
 

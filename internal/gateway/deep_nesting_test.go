@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // A very long command of nested ( made a hook-path reader recurse until
@@ -47,9 +48,24 @@ func TestDeeplyNestedCommandTakesTheOverLimitPath(t *testing.T) {
 			}
 		}
 	}
+	// Nesting past the analysis depth bound, short of the reader bound, is
+	// TRUNCATED at cap=depth (s7/cap-floor, rel-1-0-10:GAP-0688, as
+	// TestCapFloorDepthTruncatesEveryCall): the unknown tier of the pack, an
+	// alert in the default profile, never a block outside strict and never the
+	// over-limit path of the reader bound above.
+	nested40 := "echo " + strings.Repeat("$(echo ", 40) + "x" + strings.Repeat(")", 40)
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input:     actionfacts.Input{Tool: "Bash", Command: nested40, CWD: home, ActiveHome: home},
+		Connector: "claudecode", EnforcementCapable: true,
+	})
+	if !boundedHasLimit(FindingStrings(findings), bounded.Depth, true) {
+		t.Errorf("40 nested substitutions: no cap=depth limit finding, %v", FindingStrings(findings))
+	}
+	if got := guardrailActionForProfile(findings, false, func() bool { return false }, boundedTestActionFor); got != guardrailActionAlert {
+		t.Errorf("40 nested substitutions: %s in the default profile, want alert (%v)", got, FindingStrings(findings))
+	}
 	// Ordinary nesting is read as before.
 	for _, command := range []string{
-		"echo " + strings.Repeat("$(echo ", 40) + "x" + strings.Repeat(")", 40),
 		"(cd src && (make && (echo ok)))",
 		"find . \\( -name a -o -name b \\) -print",
 	} {

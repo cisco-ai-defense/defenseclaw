@@ -200,6 +200,7 @@ func (a *APIServer) bindObservabilityV8Lifecycle(runtime lifecycleV8Runtime) {
 	a.observabilityV8Mu.Lock()
 	a.observabilityV8Lifecycle = runtime
 	a.observabilityV8Mu.Unlock()
+	hookCapacity.setSink(a.recordHookDeadlineOutcomeMetric)
 }
 
 func (a *APIServer) bindObservabilityV8Runtimes(
@@ -221,6 +222,7 @@ func (a *APIServer) bindObservabilityV8Runtimes(
 	if inspector := a.currentCiscoInspector(); inspector != nil {
 		inspector.bindObservabilityV8(metricRuntime)
 	}
+	hookCapacity.setSink(a.recordHookDeadlineOutcomeMetric)
 }
 
 func (a *APIServer) observabilityV8RuntimeEmitter() sidecarRuntimeEmitter {

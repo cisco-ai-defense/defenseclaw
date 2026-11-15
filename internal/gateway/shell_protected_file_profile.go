@@ -103,7 +103,7 @@ func profileClassFloor(findings []RuleFinding, secureClient bool) string {
 		if !finding.contributesToEnforcement() {
 			continue
 		}
-		if selfProtectionRules[canonicalTrustedRuleID(finding.RuleID)] {
+		if selfProtectionRules[canonicalTrustedRuleID(finding.RuleID)] || finding.evaluationFault {
 			floor = guardrailActionBlock
 		} else if finding.shellProtectedFile {
 			floor = strongerGuardrailAction(floor, guardrailActionAlert)
@@ -142,7 +142,8 @@ func withoutEnforcingEvaluationLimit(findings []RuleFinding) ([]RuleFinding, boo
 // operand), which the profile maps by tier.
 func profileMappedLimitFinding(finding RuleFinding) bool {
 	id := canonicalTrustedRuleID(finding.RuleID)
-	return !finding.omittedOperand && (id == evaluationLimitRuleID || id == canonicalTrustedRuleID(parseFailureRuleID))
+	return !finding.omittedOperand && !finding.evaluationFault &&
+		(id == evaluationLimitRuleID || id == canonicalTrustedRuleID(parseFailureRuleID))
 }
 
 // guardrailActionForProfile maps findings to the action of the profile: the
@@ -157,10 +158,28 @@ func profileMappedLimitFinding(finding RuleFinding) bool {
 func guardrailActionForProfile(
 	findings []RuleFinding, secureClient bool, strict func() bool, actionFor func(severity string) string,
 ) string {
+	return guardrailActionForProfileUnknown(findings, secureClient, func() string {
+		if strict() {
+			return ""
+		}
+		return guardrailActionAlert
+	}, actionFor)
+}
+
+// guardrailActionForProfileUnknown is guardrailActionForProfile with the
+// unknown tier of guardrail.cascade: unknown is read only when a limit
+// finding is present; "" maps the limit finding by the pack's levels (the
+// strict pack), else it is the unknown-tier action (alert in the default
+// and permissive packs, or cascade.unknown).
+func guardrailActionForProfileUnknown(
+	findings []RuleFinding, secureClient bool, unknown func() string, actionFor func(severity string) string,
+) string {
 	if !secureClient {
-		if rest, limited := withoutEnforcingEvaluationLimit(findings); limited && !strict() {
-			return strongerGuardrailAction(guardrailActionAlert, strongerGuardrailAction(
-				profileClassFloor(rest, false), guardrailActionForFindings(rest, actionFor)))
+		if rest, limited := withoutEnforcingEvaluationLimit(findings); limited {
+			if floor := unknown(); floor != "" {
+				return strongerGuardrailAction(floor, strongerGuardrailAction(
+					profileClassFloor(rest, false), guardrailActionForFindings(rest, actionFor)))
+			}
 		}
 	}
 	return strongerGuardrailAction(profileClassFloor(findings, secureClient),

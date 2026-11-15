@@ -1279,8 +1279,9 @@ rules:
   - id: exfil.credential_file_external_upload
     tool_call_only: true
     # CEL proves an upload to a non-local literal destination. The semantic
-    # owner additionally requires an exact file-backed curl source in the
-    # closed high-confidence credential-file vocabulary.
+    # owner additionally requires an exact uploaded file (curl, scp, rsync,
+    # wget) in the closed high-confidence credential-file vocabulary. It
+    # alerts in default and permissive and blocks in strict (GAP-0595).
     expression: >-
       f.commands.exists(c,
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations &&
@@ -1292,7 +1293,7 @@ rules:
     title: "Credential file uploaded to an external destination"
     severity: HIGH
     confidence: 0.99
-    tags: [credential, exfiltration, exact-file, detection-only]
+    tags: [credential, exfiltration, exact-file]
   - id: privilege.sudoers_unrestricted_nopasswd
     tool_call_only: true
     # CEL proves an exact executing sudoers mutation. The semantic owner adds

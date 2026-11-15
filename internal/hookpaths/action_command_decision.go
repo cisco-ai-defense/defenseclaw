@@ -138,7 +138,8 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	if actionMakeProtectedRecipe(command, cwd, home) {
 		return "protected-target"
 	}
-	if actionConcreteProtectedWriteOnWith(command, cwd, home, false, memo) {
+	if actionConcreteProtectedWriteOnWith(command, cwd, home, false, memo) ||
+		actionSedInPlaceWrite(command, cwd, home, memo) {
 		return "protected-target"
 	}
 	return ""
@@ -433,19 +434,28 @@ func ActionCommandAuditReasonWithDialect(command, cwd, home string, dialect acti
 	return actionCommandDecision(command, cwd, home, 0)
 }
 
-// ShellParseBound reports whether the hook client reading of a tool call of
-// connector ends at the recovered-parse proof bound: the reason
-// "shell-parse-bound" the client sends a managed gateway under
-// UnprovenReasonKey (ActionCommandAuditReasonWithDialect in the client
-// dialect). A per-user gateway, which gets no client evidence, derives the
-// same fact with it (rel-1-0-6:GAP-0534).
-func ShellParseBound(connector, tool, command, cwd, home string) bool {
+// ShellParseReason is the hook client reading of a tool call of connector at
+// the recovered parse: "shell-parse-bound" (the proof bound), the reason the
+// client sends a managed gateway under UnprovenReasonKey
+// (ActionCommandAuditReasonWithDialect in the client dialect);
+// UnprovenParserFault (the parser failed on the text, which every pack
+// blocks); or "" for any other reading. A per-user gateway, which gets no
+// client evidence, derives the same fact with it (rel-1-0-6:GAP-0534).
+func ShellParseReason(connector, tool, command, cwd, home string) string {
 	dialect := hookShellDialect(connector, tool)
+	var reason string
 	if !actionWindowsHome(home) || dialect == actionfacts.DialectPOSIX && runtime.GOOS == "windows" {
 		// The POSIX reading returns the unproven-write reason first.
-		return len(command) <= MaxPayloadBytes && UnprovenProtectedWrite(command, cwd, home) == "shell-parse-bound"
+		if len(command) <= MaxPayloadBytes {
+			reason = UnprovenProtectedWrite(command, cwd, home)
+		}
+	} else {
+		reason = ActionCommandAuditReasonWithDialect(command, cwd, home, dialect)
 	}
-	return ActionCommandAuditReasonWithDialect(command, cwd, home, dialect) == "shell-parse-bound"
+	if reason == "shell-parse-bound" || reason == UnprovenParserFault {
+		return reason
+	}
+	return ""
 }
 
 // ActionPrivateKeyRead recognizes a command that reads an active SSH private
@@ -797,6 +807,10 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 	if kind := actionInterpreterKind(words[0]); kind != "" {
 		code, ok := actionInterpreterInlineCode(words, 0)
 		return ok && actionInterpreterReadsPrivateKey(code, kind)
+	}
+	if shell, _ := awkCommandShell(words, cwd, true); shell != nil &&
+		actionPrivateKeyReadWords(shell, cwd, home, mode, depth+1) {
+		return true // A command an awk program starts reads the key.
 	}
 	if actionRecursiveKeyDirectoryRead(words, cwd, home, windows) {
 		return true
@@ -1427,6 +1441,13 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home, false) {
 		if protectedReachPath(target, protected, ssh) {
 			return "dynamic-argument"
+		}
+	}
+	if shell, _ := awkCommandShell(words, cwd, true); shell != nil {
+		// An awk program's string-literal commands are judged as the hook
+		// running them directly (GAP-0499).
+		if class := actionChildDecision(shell, stmt, cwd, home, depth+1); class != "" {
+			return class
 		}
 	}
 	if program == "sort" {

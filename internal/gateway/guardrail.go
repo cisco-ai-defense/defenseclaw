@@ -109,11 +109,23 @@ type ScanVerdict struct {
 	// needs_review category (MEDIUM, nothing actionable): audit-only in the
 	// default pack when the rules did not flag the call (judgeReviewOnlyAudit).
 	reviewOnly bool
+	// systemOneBlocked marks a judge-lane verdict on a call System One
+	// confidently blocked (guardrail.cascade.judge.block_needs_system_one).
+	systemOneBlocked bool
+	// cascadeFixed marks a verdict whose action guardrail.cascade set (an
+	// on_unsure or no_verdict answer): the hook lane does not map it by
+	// severity again. In-process only.
+	cascadeFixed bool
 	// decisionFloorOnly marks a verdict that is only the decision model's
 	// confident-block floor because the LLM judge gave no verdict (failed,
 	// late, busy, no budget). It is not a judge answer: a closed-mode
 	// refusal of an escalated CRITICAL call still applies. In-process only.
 	decisionFloorOnly bool
+	// decisionAbstain marks the decision model's no-answer in cascade 2 (the
+	// flow guard took the confidence away from an allow): an allow that is
+	// not a verdict, so the rule verdict stands and a closed-mode refusal
+	// still applies. In-process only.
+	decisionAbstain bool
 }
 
 func allowVerdict(scanner string) *ScanVerdict {
@@ -3052,6 +3064,14 @@ func blockMessage(customMsg, direction, reason string) string {
 				"concern was detected in the prompt (%s). "+
 				"If you believe this is a false positive, contact your "+
 				"administrator or adjust the guardrail policy.", reason)
+	}
+	if direction == directionToolResult {
+		return fmt.Sprintf(
+			"[DefenseClaw] This request was blocked. A tool's output "+
+				"carried instructions aimed at the agent (%s), so it was "+
+				"not sent to the model. If you believe this is a false "+
+				"positive, contact your administrator or adjust the "+
+				"guardrail policy.", reason)
 	}
 	return fmt.Sprintf(
 		"[DefenseClaw] The model's response was blocked due to a "+

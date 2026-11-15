@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
@@ -86,11 +87,32 @@ func scanWithTimeout(ctx context.Context, text, toolName string, timeout time.Du
 	}
 }
 
-func truncateInspectContent(s string, max int) string {
-	if len(s) <= max {
-		return s
+// scanToolResultWithTimeout is scanWithTimeout for a tool's output: the
+// tool-result checks of the generic route (toolResponseEndpointFindings)
+// under the same deadline.
+func scanToolResultWithTimeout(ctx context.Context, text, toolName string, timeout time.Duration) ([]RuleFinding, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ch := make(chan []RuleFinding, 1)
+	go func() {
+		ch <- toolResponseEndpointFindings(snapshotRulePackGenerationFor(ctx, profileRequestConnector(ctx)), text, toolName, !ManagedEnterpriseActive())
+	}()
+	select {
+	case findings := <-ch:
+		return findings, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return s[:max]
+}
+
+// truncateInspectContent cuts s at max bytes and reports whether it did:
+// a cut input is not read in full (markContentCut).
+func truncateInspectContent(s string, max int) (string, bool) {
+	if len(s) <= max {
+		return s, false
+	}
+	return s[:max], true
 }
 
 func (a *APIServer) recordManagedAIDFailOpenForSelectedGenericResult(
@@ -151,7 +173,8 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	req.Content = truncateInspectContent(req.Content, maxInspectContentLen)
+	var contentCut bool
+	req.Content, contentCut = truncateInspectContent(req.Content, maxInspectContentLen)
 	managedAIDOnly := a.managedAIDOnly()
 	if req.Content == "" && !managedAIDOnly && !req.BoundedPrefixReview {
 		a.writeJSON(w, http.StatusOK, &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}})
@@ -180,9 +203,13 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		// demote.
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "prompt", false)
 	}
+	if contentCut {
+		verdict.markContentCut(bounded.Unknown(a.boundedTier(r.Context(), profileRequestConnector(r.Context()))).String())
+	}
 	if req.BoundedPrefixReview {
 		verdict.markOversizeUninspected()
 	}
+	verdict = a.applyCascadeFinal(r.Context(), profileRequestConnector(r.Context()), "prompt", "", "", verdict)
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 	// The strict tier refuses a prompt while an install or upgrade holds this
 	// account's data directory, as on the hook and tool routes (GAP-1438).
@@ -254,7 +281,8 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	req.Content = truncateInspectContent(req.Content, maxInspectContentLen)
+	var contentCut bool
+	req.Content, contentCut = truncateInspectContent(req.Content, maxInspectContentLen)
 	managedAIDOnly := a.managedAIDOnly()
 	if req.Content == "" && !managedAIDOnly && !req.BoundedPrefixReview {
 		a.writeJSON(w, http.StatusOK, &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}})
@@ -280,9 +308,13 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		}
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "completion", false)
 	}
+	if contentCut {
+		verdict.markContentCut(bounded.Unknown(a.boundedTier(r.Context(), profileRequestConnector(r.Context()))).String())
+	}
 	if req.BoundedPrefixReview {
 		verdict.markOversizeUninspected()
 	}
+	verdict = a.applyCascadeFinal(r.Context(), profileRequestConnector(r.Context()), "response", "", "", verdict)
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)
@@ -353,7 +385,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 			outputStr = semanticOutput
 		}
 	}
-	outputStr = truncateInspectContent(outputStr, maxInspectContentLen)
+	outputStr, contentCut := truncateInspectContent(outputStr, maxInspectContentLen)
 
 	fmt.Fprintf(os.Stderr, "[inspect] >>> post-tool tool=%q output_len=%d exit_code=%d\n",
 		req.Tool, len(outputStr), req.ExitCode)
@@ -370,7 +402,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 			deferManagedAIDFailOpenAccounting(r.Context()), "message", aidContent,
 		)
 	} else {
-		ruleFindings, err := scanWithTimeout(r.Context(), outputStr, req.Tool+"-response", inspectScanTimeout)
+		ruleFindings, err := scanToolResultWithTimeout(r.Context(), outputStr, req.Tool+"-response", inspectScanTimeout)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[inspect] post-tool scan timeout after %s\n", time.Since(t0))
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
@@ -378,12 +410,11 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		}
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "tool_response", false)
 
-		// Judge lane (J3-3c/J3-3d): the generic /inspect/tool-response
-		// endpoint was regex-only. Forward the tool output to the LLM judge
+		// Judge lane (J3-3c/J3-3d): forward the tool output to the LLM judge
 		// for connectors opted into the completion direction via
-		// guardrail.judge.hook_connectors + EffectiveStrategy("completion").
-		// Tool output is completion-shaped (matches the proxy lane's
-		// inspectToolResult). This is the J3-3c timeout split: the regex
+		// guardrail.judge.hook_connectors + EffectiveStrategy("completion"),
+		// as a tool result (the tool-result injection judge, GAP-0171) with
+		// the tool-result disposition. This is the J3-3c timeout split: the regex
 		// scan above keeps the 200ms inspectScanTimeout cap, while the judge
 		// runs on the request context bounded by its own HookTimeout.
 		// Secure Client keeps its existing detached request context. The
@@ -394,15 +425,19 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		if cfg := a.decisionConfig(judgeCtx); cfg != nil && cfg.SecureClientIntegration() {
 			judgeCtx = context.WithoutCancel(judgeCtx)
 		}
-		if jv := a.runHookJudge(judgeCtx, "completion", "completion",
-			a.connectorName(), outputStr, req.Tool, verdict); jv != nil {
+		if jv := capToolResultJudgeVerdict(a.decisionConfig(judgeCtx), a.connectorName(), a.runHookJudge(judgeCtx, "completion", directionToolResult,
+			a.connectorName(), outputStr, req.Tool, verdict)); jv != nil {
 			verdict = mergeWithJudgeVerdict(verdict, jv)
 		}
 	}
 
+	if contentCut {
+		verdict.markContentCut(bounded.Unknown(a.boundedTier(r.Context(), profileRequestConnector(r.Context()))).String())
+	}
 	if req.BoundedPrefixReview {
 		verdict.markOversizeUninspected()
 	}
+	verdict = a.applyCascadeFinal(r.Context(), profileRequestConnector(r.Context()), "tool_result", "", "", verdict)
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)
