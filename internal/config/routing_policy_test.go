@@ -45,7 +45,7 @@ func TestRoutingPolicyKeysValidate(t *testing.T) {
 			r.Sensitive = &RoutingSensitiveConfig{SeverityAtLeast: "high", Aliases: []string{"fast"}}
 		}, ""},
 		{"sensitive no aliases", func(r *RoutingConfig) { r.Sensitive = &RoutingSensitiveConfig{SeverityAtLeast: "HIGH"} }, "sensitive.aliases"},
-		{"sensitive needs a trigger", func(r *RoutingConfig) { r.Sensitive = &RoutingSensitiveConfig{Aliases: []string{"fast"}} }, "severity_at_least or signals"},
+		{"sensitive needs a trigger", func(r *RoutingConfig) { r.Sensitive = &RoutingSensitiveConfig{Aliases: []string{"fast"}} }, "severity_at_least, signals or check"},
 		{"sensitive signals on rules", func(r *RoutingConfig) {
 			r.Classifier = "rules"
 			r.Sensitive = &RoutingSensitiveConfig{Signals: []string{"code"}, Aliases: []string{"fast"}}

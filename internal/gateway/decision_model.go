@@ -83,6 +83,15 @@ var decisionModelQuestions = map[string]any{
 	},
 }
 
+// decisionBench holds bench-only switches (s7/sysone-bench only; set by
+// S7SetDecisionRouting under -tags s7bench, never in the product).
+//   - noBreaker: an offline replay counts each cache miss once.
+//   - mediumAlerts: a judge lone MEDIUM review finding on a call the
+//     decision model escalated is not made audit-only (variant b).
+//   - allowRiskVeto: a risk score at or above block_risk_score turns a
+//     confident allow into an escalation.
+var decisionBench struct{ noBreaker, mediumAlerts, allowRiskVeto bool }
+
 // decisionRoute is what the guardrail does with one decision-model answer.
 type decisionRoute int
 
@@ -280,6 +289,9 @@ func (d *decisionModel) budget(ctx context.Context) time.Duration {
 func (d *decisionModel) breakerOpen(now time.Time) bool {
 	d.breakerMu.Lock()
 	defer d.breakerMu.Unlock()
+	if decisionBench.noBreaker {
+		return false
+	}
 	if now.Before(d.openUntil) {
 		d.skippedWhileOpen++
 		return true
@@ -386,7 +398,7 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 		// finding is refused under a closed hook fail mode (the strict
 		// pack, a managed install, hook_fail_mode closed).
 		res.flowGuarded = true
-	case choice == "allow" && res.risk <= routing.allowAt:
+	case choice == "allow" && res.risk <= routing.allowAt && !(decisionBench.allowRiskVeto && score >= routing.blockRiskScore):
 		res.route = decisionAllow
 	case choice == "block" && res.risk >= routing.blockAt && score >= routing.blockRiskScore && !routing.ruleFlagEscalates(ctx):
 		// A confident block needs the disposition AND the risk score (R4),
@@ -702,6 +714,15 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 	if res.failure == "" && res.logLine != "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", res.logLine)
 	}
+	// What System One gives on its own for an unsure answer (cascade 2), read
+	// before a rule-flagged allow is escalated below.
+	unsure := decisionUnsureVerdict(res, dm.routingFor(ctx))
+	if unsure != nil && normalizedGuardrailAction(unsure.Action) == guardrailActionAllow {
+		// on_unsure: rules adds nothing of its own: a judge that does not
+		// answer leaves the rule verdict and judge.no_verdict to decide, as
+		// before, so a failed judge never turns into an allow-shaped answer.
+		unsure = nil
+	}
 	if res.route == decisionAllow && decisionRuleFloorFrom(ctx) {
 		// The rules flagged this call: their finding is a floor and the
 		// judge still runs (the benchmark's escalate-on-confirm).
@@ -716,7 +737,7 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 		recordCascadeSystemOne(ctx, res, v)
 		return v
 	case decisionBlock:
-		floor := dm.blockFloor(res)
+		floor := dm.blockFloor(ctx, res)
 		floor.systemOneBlocked = true
 		emitDecisionModel(ctx, dm.model, toolName, args, res, floor)
 		recordCascadeSystemOne(ctx, res, floor)
@@ -736,7 +757,24 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 			emitDecisionModel(ctx, dm.model, toolName, args, res, nil)
 		}
 		recordCascadeSystemOne(ctx, res, nil)
-		return j.runToolJudgeLLM(ctx, toolName, args, sample)
+		if unsure != nil {
+			// A judge that does not answer (an error, a timeout, a late
+			// answer, no slot) never lowers what System One gives on its
+			// own: the hook keeps cascade 2's ask or alert (GAP-0868).
+			decisionFloorSlotFrom(ctx).set(unsure)
+		}
+		judged := j.runToolJudgeLLM(ctx, toolName, args, sample)
+		if unsure != nil && (judged == nil || judged.JudgeFailed) {
+			out := *unsure
+			out.decisionFloorOnly = true
+			return &out
+		}
+		if decisionBench.mediumAlerts && judged != nil && judged.reviewOnly && !res.skipped && res.failure == "" {
+			c := *judged
+			c.reviewOnly = false
+			return &c
+		}
+		return judged
 	}
 }
 
@@ -807,14 +845,26 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 		}
 		v.Confidence = 1 - res.risk
 	case res.route == decisionBlock:
-		v = &ScanVerdict{
-			Action:     guardrailActionBlock,
-			Severity:   "CRITICAL",
-			Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f, risk score %.2f >= %.2f)", res.risk, routing.blockAt, res.riskScore, routing.blockRiskScore),
-			Findings:   []string{decisionModelFindingID},
-			Scanner:    decisionModelScanner,
-			Confidence: res.risk,
-		}
+		v = confidentBlockVerdict(res, routing.blockAt, routing.blockRiskScore)
+	default:
+		v = decisionUnsureVerdict(res, routing)
+	}
+	emitDecisionModel(ctx, dm.model, toolName, args, res, v)
+	return v
+}
+
+// decisionUnsureVerdict is cascade 2's verdict on an unsure System One answer
+// (a refusal, a confirm, or an allow or block short of its threshold): the
+// ask, or what guardrail.cascade.system_one.on_unsure sets. nil for a
+// confident allow or block, a flow-guarded allow (an abstention) and a model
+// that gave no answer. Cascade 3 keeps it when the judge does not answer
+// (raise-only across layers, rel-1-0-10:GAP-0868); a judge answer may
+// resolve it.
+func decisionUnsureVerdict(res decisionResult, routing cascadeSystemOneRouting) *ScanVerdict {
+	var v *ScanVerdict
+	switch {
+	case res.flowGuarded, res.failure != "" && res.refusal == "", res.route == decisionAllow, res.route == decisionBlock:
+		return nil
 	case res.refusal != "" && cascadeUnsureVerdict(routing.onUnsure, "", 0) != nil:
 		v = cascadeUnsureVerdict(routing.onUnsure, fmt.Sprintf("decision-model: declined (%s)", res.refusal), 0)
 	case res.refusal != "":
@@ -841,7 +891,6 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 			decisionConfirm: true,
 		}
 	}
-	emitDecisionModel(ctx, dm.model, toolName, args, res, v)
 	return v
 }
 
@@ -998,17 +1047,30 @@ func judgeInputHash(content string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// blockFloor is the cascade-3 verdict of a confident block: a HIGH
-// JUDGE-DECISION-MODEL finding the judge can raise and never remove.
-func (d *decisionModel) blockFloor(res decisionResult) *ScanVerdict {
+// confidentBlockVerdict is System One's verdict on a confident block: a
+// CRITICAL JUDGE-DECISION-MODEL block, blocked at every built-in block_at.
+// It is the same verdict with the judge on or off: a later layer only adds to
+// what an earlier layer gives on its own (raise-only across layers,
+// rel-1-0-10:GAP-0867). Cascade 2 returns it; cascade 3 makes it the floor
+// the judge can raise and never lower.
+func confidentBlockVerdict(res decisionResult, blockAt, blockRiskScore float64) *ScanVerdict {
 	return &ScanVerdict{
-		Action:     "block",
-		Severity:   "HIGH",
-		Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f, risk score %.2f >= %.2f)", res.risk, d.blockAt, res.riskScore, d.blockRiskScore),
+		Action:     guardrailActionBlock,
+		Severity:   "CRITICAL",
+		Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f, risk score %.2f >= %.2f)", res.risk, blockAt, res.riskScore, blockRiskScore),
 		Findings:   []string{decisionModelFindingID},
 		Scanner:    decisionModelScanner,
 		Confidence: res.risk,
 	}
+}
+
+// blockFloor is the cascade-3 floor of a confident block: System One's own
+// confident-block verdict (confidentBlockVerdict), which the judge can raise
+// and never remove. Before rel-1-0-10:GAP-0867 it was a HIGH finding, which
+// the default pack only alerts on, so turning the judge on lowered a block.
+func (d *decisionModel) blockFloor(ctx context.Context, res decisionResult) *ScanVerdict {
+	routing := d.routingFor(ctx)
+	return confidentBlockVerdict(res, routing.blockAt, routing.blockRiskScore)
 }
 
 // decisionPrepass is a decision-model answer the hook lane got before it
@@ -1040,7 +1102,7 @@ func (j *LLMJudge) prepareDecision(ctx context.Context, toolName, args string) (
 	p := &decisionPrepass{judge: j, sample: sample, res: j.decision.decide(ctx, j.takeDecisionState(sample, toolName, args))}
 	if p.res.route == decisionBlock && !j.decisionOnly {
 		// Visible to the hook before the judge starts (GAP-0392).
-		decisionFloorSlotFrom(ctx).set(j.decision.blockFloor(p.res))
+		decisionFloorSlotFrom(ctx).set(j.decision.blockFloor(ctx, p.res))
 	}
 	return context.WithValue(ctx, decisionPrepassKey{}, p), p
 }

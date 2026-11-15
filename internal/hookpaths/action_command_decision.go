@@ -1815,12 +1815,16 @@ func actionScriptInsideCWD(script, cwd string) bool {
 // opens a script in the user home or beside the project for a managed
 // gateway that cannot (rel-1-0-9:GAP-1035, GAP-1038, GAP-1039).
 func readActionScript(script, cwd string) (string, bool) {
+	return readActionScriptWith(script, cwd, scriptRead)
+}
+
+func readActionScriptWith(script, cwd string, lim indirectRead) (string, bool) {
 	if actionScriptInsideCWD(script, cwd) {
-		if content, read := readIndirectSource(script, cwd); read {
+		if content, read := readIndirectSourceWith(script, cwd, lim); read {
 			return content, true
 		}
 	}
-	return readIndirectSourceAnywhere(script, cwd)
+	return readIndirectSourceAnywhereWith(script, cwd, lim)
 }
 
 // actionScriptBodyDecision is the decision on the body of the script a source,

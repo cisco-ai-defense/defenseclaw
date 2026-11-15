@@ -111,6 +111,9 @@ func TestToolJudgeForgedTagsNeverCarryTheCallNonce(t *testing.T) {
 
 // Two calls with the same arguments get different nonces, so a section of one is not a section of the other.
 func TestToolJudgeSamplesDifferPerCall(t *testing.T) {
+	if s7benchBuild {
+		t.Skip("the s7bench build derives the nonce from the call (s7bench_nonce.go)")
+	}
 	j, _ := newNonceTestJudge()
 	ctx := ContextWithSessionID(context.Background(), "nonce-per-call")
 	j.ObserveSessionPrompt(ctx, "do it")
@@ -123,7 +126,7 @@ func TestToolJudgeSamplesDifferPerCall(t *testing.T) {
 	}
 	// a call with no session is structured the same way
 	bare := (*LLMJudge)(nil).toolJudgeContextSample(context.Background(), "Bash", `{"command":"ls"}`)
-	if n, c := sectionNonceCount(bare); !toolJudgeNonceShape.MatchString(n) || c != 2 {
+	if n, c := sectionNonceCount(bare); !toolJudgeNonceShape.MatchString(n) || c-packetSectionTags(bare) != 2 {
 		t.Fatalf("a sessionless sample needs one CURRENT_TOOL_CALL section with the nonce: %q", bare)
 	}
 }

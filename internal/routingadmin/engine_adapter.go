@@ -52,6 +52,10 @@ type Runtime struct {
 	callsMu   sync.Mutex
 	calls     map[string]struct{}
 	callOrder []string
+
+	// now is the clock the ledger, the sync and the evaluator read (nil: the
+	// real clock, always so in production).
+	now func() time.Time
 }
 
 // Kick asks the sync loop to sync now (a new user was seen).
@@ -83,6 +87,23 @@ const DefaultSyncInterval = 30 * time.Second
 // with routing.admin rules or budgets is compiled.
 func NewRuntime() *Runtime {
 	return &Runtime{interval: DefaultSyncInterval, kick: make(chan struct{}, 1), epoch: newEpoch()}
+}
+
+// NewRuntimeClock returns an empty runtime whose ledger, sync and evaluator read
+// now instead of the real clock (nil: the real clock, as NewRuntime). For
+// tests and replays that pin a date.
+func NewRuntimeClock(now func() time.Time) *Runtime {
+	rt := NewRuntime()
+	rt.now = now
+	return rt
+}
+
+// clock is the runtime time source.
+func (rt *Runtime) clock() time.Time {
+	if rt != nil && rt.now != nil {
+		return rt.now()
+	}
+	return time.Now()
 }
 
 // newEpoch is a random writer id: the store learns nothing about the
@@ -285,7 +306,7 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	}
 	rt.mu.Lock()
 	if len(a.Budgets) > 0 && rt.ledger == nil {
-		rt.ledger = NewLedger()
+		rt.ledger = NewLedgerClock(rt.now)
 	}
 	if rt.feed {
 		ev.ledger = rt.ledger
@@ -351,7 +372,7 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 		return
 	}
 	rt.push(ctx)
-	since := time.Unix(int64(dayNumber(time.Now())-LedgerDays)*86400, 0).UTC()
+	since := time.Unix(int64(dayNumber(rt.clock())-LedgerDays)*86400, 0).UTC()
 	var rows []SeedRow
 	var err error
 	// This device's earlier processes always count: a fleet answer that
@@ -360,7 +381,8 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 	localRows, localErr := local.Totals(ctx, epoch, since, nil)
 	if fleet != nil {
 		if rows, err = fleet.Totals(ctx, epoch, since, fleetWanted(ledger, keys)); err == nil {
-			ledger.ApplyRemote(ids, maxRows(fromFleet(rows, keys), localRows), time.Now())
+			ledger.ApplyRemote(ids, maxRows(fromFleet(rows, keys), localRows), rt.clock())
+			ledger.MarkFleetRead(rt.clock())
 			if localErr != nil {
 				ledger.SyncFailed(localErr)
 			}
@@ -372,7 +394,7 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 		ledger.SyncFailed(localErr)
 		return
 	}
-	ledger.ApplyRemote(ids, localRows, time.Now())
+	ledger.ApplyRemote(ids, localRows, rt.clock())
 	if fleet != nil {
 		// Keep why: the store down, the device refused, a budget it lacks.
 		ledger.SyncFailed(fmt.Errorf("%w (%v)", errFleetFallback, err))
@@ -530,7 +552,7 @@ func (e *evaluator) Evaluate(_ context.Context, p engine.Policy, r engine.Reques
 		ClassifierFailed: classifierFailed,
 		Severity:         r.Severity,
 	}
-	v := e.policy.Evaluate(req, e.ledger, time.Now())
+	v := e.policy.Evaluate(req, e.ledger, e.rt.clock())
 	return ToEngineVerdict(p, v)
 }
 

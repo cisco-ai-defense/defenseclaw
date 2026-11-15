@@ -34,6 +34,10 @@ type PrivateAgentInstall struct {
 	// could not be finished (a PrivateInstallSkipped* code), so status
 	// says what was not inspected and why instead of truncating silently.
 	Skipped string `json:"skipped,omitempty"`
+	// Folder is, for an incomplete entry, the first folder the scan could
+	// not list completely (an open or listing error, its entry, depth or
+	// time bound), when it knows one (rel-1-0-10 GAP-0802).
+	Folder string `json:"folder,omitempty"`
 	// Untrusted marks a copy in a location another account can change: its
 	// package metadata cannot prove the version, so the copy is reported
 	// as unverified whatever it claims.
@@ -74,21 +78,29 @@ type privateInstallWalk struct {
 	mu        *sync.Mutex
 	budget    int
 	complete  bool
-	ctx       context.Context
+	// unlisted is the first folder the walk could not list completely.
+	unlisted string
+	ctx      context.Context
 }
 
 const privateInstallWalkMaxDepth = 64
 const privateInstallWalkParallelism = 32
 
-func (w *privateInstallWalk) fail() {
+// fail marks the walk incomplete at dir, the folder it could not list
+// completely; the first such folder is the one the scan names.
+func (w *privateInstallWalk) fail(dir string) {
 	w.mu.Lock()
 	w.complete = false
+	if w.unlisted == "" {
+		w.unlisted = dir
+	}
 	w.mu.Unlock()
 }
 
-func (w *privateInstallWalk) stopped() bool {
+// stopped reports a walk out of time (failed at dir) or out of entries.
+func (w *privateInstallWalk) stopped(dir string) bool {
 	if w.ctx.Err() != nil {
-		w.fail()
+		w.fail(dir)
 		return true
 	}
 	w.mu.Lock()
@@ -97,12 +109,17 @@ func (w *privateInstallWalk) stopped() bool {
 	return exhausted
 }
 
-func (w *privateInstallWalk) charge(entries int) bool {
+// charge takes entries listed in dir from the bound; the folder where it
+// runs out is the one the walk could not list.
+func (w *privateInstallWalk) charge(dir string, entries int) bool {
 	w.mu.Lock()
 	w.budget -= entries
 	ok := w.budget >= 0
 	if !ok {
 		w.complete = false
+		if w.unlisted == "" {
+			w.unlisted = dir
+		}
 	}
 	w.mu.Unlock()
 	return ok
@@ -115,8 +132,9 @@ func (w *privateInstallWalk) charge(entries int) bool {
 // descends through a link or other reparse point, so a link cannot loop
 // it or lead it outside the home. complete is false when the walk ran out
 // of its bound or a directory could not be listed: the scan then says so
-// instead of reporting the account clean.
-func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWalk) (prefixes []string, complete bool) {
+// instead of reporting the account clean, and unlisted names the first
+// folder it could not list completely (the home when it knows none).
+func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWalk) (prefixes []string, complete bool, unlisted string) {
 	w.budget, w.complete, w.ctx = privateInstallWalkMaxEntries, true, ctx
 	w.mu = &sync.Mutex{}
 	if w.ctx == nil {
@@ -167,12 +185,12 @@ func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWa
 		return w.open(dir)
 	}
 	probe = func(pkg string, parent *os.File, name string, depth int) {
-		if w.stopped() {
+		if w.stopped(pkg) {
 			return
 		}
 		moduleDir := filepath.Join(pkg, "node_modules")
 		if depth+2 > privateInstallWalkMaxDepth {
-			w.fail()
+			w.fail(pkg)
 			return
 		}
 		if w.openChild == nil {
@@ -186,7 +204,7 @@ func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWa
 		packageHandle, err := open(pkg, parent, name)
 		if err != nil {
 			if !w.unreachable(pkg, err) {
-				w.fail()
+				w.fail(pkg)
 			}
 			return
 		}
@@ -197,7 +215,7 @@ func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWa
 		modulesHandle, err := open(moduleDir, packageHandle, "node_modules")
 		if err != nil {
 			if !w.unreachable(moduleDir, err) {
-				w.fail()
+				w.fail(moduleDir)
 			}
 			return
 		}
@@ -205,8 +223,8 @@ func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWa
 		visit(moduleDir, nil, "", true, depth+2, modulesHandle)
 	}
 	visit = func(dir string, parent *os.File, name string, modules bool, depth int, held *os.File) {
-		if w.stopped() || depth > privateInstallWalkMaxDepth {
-			w.fail()
+		if w.stopped(dir) || depth > privateInstallWalkMaxDepth {
+			w.fail(dir)
 			if held != nil {
 				_ = held.Close()
 			}
@@ -218,7 +236,7 @@ func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWa
 			f, err = open(dir, parent, name)
 			if err != nil {
 				if !w.unreachable(dir, err) {
-					w.fail()
+					w.fail(dir)
 				}
 				return
 			}
@@ -227,7 +245,7 @@ func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWa
 		var children sync.WaitGroup
 		defer children.Wait()
 		for _, entry := range w.list(f, dir) {
-			if w.stopped() {
+			if w.stopped(dir) {
 				return
 			}
 			name, child := entry.Name(), filepath.Join(dir, entry.Name())
@@ -247,19 +265,19 @@ func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWa
 				schedule(&children, func() { visit(child, f, name, false, depth+1, nil) })
 			case strings.HasPrefix(name, "@") || name == ".pnpm":
 				if depth+1 > privateInstallWalkMaxDepth {
-					w.fail()
+					w.fail(child)
 					continue
 				}
 				scope, err := open(child, f, name)
 				if err != nil {
 					if !w.unreachable(child, err) {
-						w.fail()
+						w.fail(child)
 					}
 					continue
 				}
 				var scopeChildren sync.WaitGroup
 				for _, inner := range w.list(scope, child) {
-					if inner.Type() == fs.ModeDir && !w.stopped() {
+					if inner.Type() == fs.ModeDir && !w.stopped(child) {
 						packageDir, packageName := filepath.Join(child, inner.Name()), inner.Name()
 						schedule(&scopeChildren, func() { probe(packageDir, scope, packageName, depth+1) })
 					}
@@ -277,8 +295,14 @@ func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWa
 	}
 	w.mu.Lock()
 	complete = w.complete && w.budget >= 0 && w.ctx.Err() == nil
+	if !complete {
+		unlisted = w.unlisted
+		if unlisted == "" {
+			unlisted = home
+		}
+	}
 	w.mu.Unlock()
-	return prefixes, complete
+	return prefixes, complete, unlisted
 }
 
 // privateInstallWalkReadDir lists one batch of an opened folder. Tests
@@ -287,22 +311,22 @@ var privateInstallWalkReadDir = (*os.File).ReadDir
 
 // list reads dir's entries in batches, charging each to the walk's bound.
 func (w *privateInstallWalk) list(f *os.File, dir string) []fs.DirEntry {
-	if w.stopped() {
+	if w.stopped(dir) {
 		return nil
 	}
 	var out []fs.DirEntry
 	for {
-		if w.stopped() {
+		if w.stopped(dir) {
 			return out
 		}
 		batch, err := privateInstallWalkReadDir(f, 256)
-		if !w.charge(len(batch)) {
+		if !w.charge(dir, len(batch)) {
 			return nil
 		}
 		out = append(out, batch...)
 		if err != nil {
 			if err != io.EOF && !w.unreachable(dir, err) {
-				w.fail()
+				w.fail(dir)
 			}
 			return out
 		}
@@ -382,11 +406,17 @@ func privateInstallUnreadVersionReason(connector string) string {
 }
 
 // privateInstallUnprotected is the unprotected-agents entry for one scan
-// finding, without its account; ok is false for a supported copy.
+// finding, without its account; ok is false for a supported copy. An
+// incomplete entry keeps its skipped code and folder: status judges a scan
+// gap of an account whose managed hook is verified as a warning only
+// (InstallScanGapCovered, rel-1-0-10 GAP-0802).
 func privateInstallUnprotected(install PrivateAgentInstall) (agent UnprotectedAgent, ok bool) {
 	if install.Incomplete {
-		return UnprotectedAgent{Connector: install.Connector, Code: UnprotectedCodeInstallScanIncomplete,
-			Reason: privateInstallIncompleteReason(install.Skipped)}, true
+		agent = privateInstallIncompleteAgent(install.Connector, install.Skipped)
+		if agent.Skipped != "" {
+			agent.Folder = install.Folder
+		}
+		return agent, true
 	}
 	reason := privateInstallReason(install.Connector, install.Version)
 	if install.Untrusted {
@@ -400,19 +430,30 @@ func privateInstallUnprotected(install PrivateAgentInstall) (agent UnprotectedAg
 		Code: UnprotectedCodeHookContractUnverified, Reason: reason}, true
 }
 
+// privateInstallIncompleteAgent is the unprotected-agents entry for a part
+// of the scan of connector that could not be finished, without its account.
+func privateInstallIncompleteAgent(connector, skipped string) UnprotectedAgent {
+	return UnprotectedAgent{Connector: connector, Code: UnprotectedCodeInstallScanIncomplete,
+		Skipped: KnownPrivateInstallSkipped(skipped), Reason: privateInstallIncompleteReason(skipped)}
+}
+
 // privateInstallScan collects one account's findings. seen holds the
 // identity of every copy already judged; incomplete the connectors whose
-// scan was left unfinished, with the first reason.
+// scan was left unfinished, with the first reason, and folders the folder
+// it names. home is the account's home: a gap of the home listing or of
+// the scan deadline that names no folder names it.
 type privateInstallScan struct {
 	seen       map[string]bool
 	found      []PrivateAgentInstall
 	incomplete map[string]string
+	folders    map[string]string
 	order      []string
 	full       bool
+	home       string
 }
 
-func newPrivateInstallScan() *privateInstallScan {
-	return &privateInstallScan{seen: map[string]bool{}, incomplete: map[string]string{}}
+func newPrivateInstallScan(home string) *privateInstallScan {
+	return &privateInstallScan{seen: map[string]bool{}, incomplete: map[string]string{}, folders: map[string]string{}, home: home}
 }
 
 // judge reports whether the copy with identity is new, recording it.
@@ -437,16 +478,27 @@ func (s *privateInstallScan) add(install PrivateAgentInstall) {
 }
 
 func (s *privateInstallScan) skip(connector, code string) {
+	s.skipAt(connector, code, "")
+}
+
+// skipAt records the first unfinished part of the scan of connector, and
+// the folder it could not list when it knows one.
+func (s *privateInstallScan) skipAt(connector, code, folder string) {
 	if _, known := s.incomplete[connector]; known {
 		return
 	}
 	s.incomplete[connector] = code
+	s.folders[connector] = folder
 	s.order = append(s.order, connector)
 }
 
 func (s *privateInstallScan) skipAll(connectors []string, code string) {
+	s.skipAllAt(connectors, code, "")
+}
+
+func (s *privateInstallScan) skipAllAt(connectors []string, code, folder string) {
 	for _, connector := range connectors {
-		s.skip(connector, code)
+		s.skipAt(connector, code, folder)
 	}
 }
 
@@ -455,7 +507,11 @@ func (s *privateInstallScan) skipAll(connectors []string, code string) {
 func (s *privateInstallScan) result() []PrivateAgentInstall {
 	out := append([]PrivateAgentInstall(nil), s.found...)
 	for _, connector := range s.order {
-		out = append(out, PrivateAgentInstall{Connector: connector, Incomplete: true, Skipped: s.incomplete[connector]})
+		code, folder := s.incomplete[connector], s.folders[connector]
+		if folder == "" && (code == PrivateInstallSkippedHome || code == PrivateInstallSkippedTimedOut) {
+			folder = s.home
+		}
+		out = append(out, PrivateAgentInstall{Connector: connector, Incomplete: true, Skipped: code, Folder: folder})
 	}
 	return out
 }

@@ -88,7 +88,7 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 	}
 	switch msg.Method {
 	case "terminal/create":
-		return acpFrameAction{calls: []acpToolCall{acpTerminalCreateCall(msg.Params, goos)}, enforceable: true}, true
+		return acpFrameAction{calls: acpTerminalCreateCalls(msg.Params, goos), enforceable: true}, true
 	case "fs/read_text_file", "fs/write_text_file":
 		return acpFrameAction{calls: []acpToolCall{acpFileCall(msg.Method, msg.Params)}, enforceable: true}, true
 	case "session/request_permission":
@@ -154,6 +154,44 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 		enforceable: msg.IsRequest(),
 		prose:       acp.InspectableText(req.Payload),
 	}, true
+}
+
+// acpTerminalCreateCalls is terminal/create as the shell calls it makes:
+// the command line the editor runs (acpTerminalCreateCall) and, when that
+// line is a POSIX shell running one command string (bash -c <command>, the
+// way ACP agents run a shell tool) with no environment of its own, that
+// command string as the shell call it is. Read only through the quoted
+// -c operand, a command was judged weaker than the same command on every
+// hook connector (a world-writable chmod and eval forms allowed where
+// Claude Code alerts, rel-1-0-10:GAP-0783). The line keeps its own reading,
+// so the frame is never judged weaker than before.
+func acpTerminalCreateCalls(raw json.RawMessage, goos string) []acpToolCall {
+	calls := []acpToolCall{acpTerminalCreateCall(raw, goos)}
+	if goos == "windows" || calls[0].unread {
+		return calls
+	}
+	var params struct {
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     []json.RawMessage `json:"env"`
+	}
+	if json.Unmarshal(raw, &params) != nil || len(params.Env) != 0 || len(params.Args) != 2 {
+		return calls
+	}
+	switch strings.TrimSpace(params.Command) {
+	case "bash", "sh", "zsh", "/bin/bash", "/bin/sh", "/bin/zsh", "/usr/bin/bash", "/usr/bin/zsh":
+	default:
+		return calls
+	}
+	switch params.Args[0] {
+	case "-c", "-lc", "-ic":
+	default:
+		return calls
+	}
+	if strings.TrimSpace(params.Args[1]) == "" {
+		return calls
+	}
+	return append(calls, acpToolCall{tool: "shell", args: acpCommandArgs(params.Args[1]), cwd: calls[0].cwd})
 }
 
 // acpTerminalCreateCall is terminal/create as a shell call: the command
@@ -694,7 +732,13 @@ func (a *APIServer) inspectACPFrameAction(
 			// refused. The report of a tool the agent already ran is then
 			// capped below: an alert that would have blocked, as for a hook
 			// event outside a connector's block events.
-			judged = a.inspectAgentHookToolCall(ctx, agentHookRequest{
+			// A frame cut at a bound is judged in full: the judge's
+			// proven-read skip reads only what was kept.
+			callCtx := ctx
+			if trunc.Any() {
+				callCtx = withJudgeInputCut(ctx)
+			}
+			judged = a.inspectAgentHookToolCall(callCtx, agentHookRequest{
 				ConnectorName: connectorName,
 				HookEventName: req.Method,
 				SessionID:     session,

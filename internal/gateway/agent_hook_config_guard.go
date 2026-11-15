@@ -119,6 +119,10 @@ type agentHookConfigGuard struct {
 	// not <worktree>/.git/index, so a file the tree lacks is not known to be
 	// absent from the index (rel-1-0-10:GAP-0789).
 	gitIndexRedirected bool
+	// links are the links the shell call itself makes, read lexically (they
+	// do not exist yet when the hook runs). A write operand or a git -C
+	// folder under one of them names its target too (rel-1-0-10:GAP-0718).
+	links hookpaths.Links
 }
 
 // shellMentionsRegistryPath is a cheap prefilter. Every component comes from
@@ -157,7 +161,7 @@ func newAgentHookConfigGuard(cwd, home string) *agentHookConfigGuard {
 		if hermes := hermespath.ConfigPathForUserHome(guard.home); hermes != "" {
 			guard.files = append(guard.files, gatewayconnector.AgentHookConfigFile{Path: hermes, Format: gatewayconnector.AgentHookConfigHermesYAML})
 		}
-		if physical, err := filepath.EvalSymlinks(guard.home); err == nil && physical != guard.home {
+		if physical, err := seamEvalSymlinks(guard.home); err == nil && physical != guard.home {
 			guard.physicalHome = physical
 		}
 	}
@@ -193,7 +197,7 @@ func (g *agentHookConfigGuard) shellTarget(raw string) bool {
 				strings.HasPrefix(g.cwd, place+string(filepath.Separator)) {
 				continue
 			}
-			if info, err := os.Stat(place); err == nil && info.IsDir() {
+			if info, err := seamStat(place); err == nil && info.IsDir() {
 				return true
 			}
 		}
@@ -320,15 +324,15 @@ func (g *agentHookConfigGuard) resolvePlaces(raw string) []string {
 	places := []string{target}
 	current := target
 	for hop := 0; hop < agentHookConfigMaxLinkHops; hop++ {
-		if physical, err := filepath.EvalSymlinks(current); err == nil {
+		if physical, err := seamEvalSymlinks(current); err == nil {
 			places = append(places, physical)
 			break
 		}
 		// A file that does not exist yet, or a link to one: the folder it
 		// lands in, through its links, and the link's own target.
-		info, err := os.Lstat(current)
+		info, err := seamLstat(current)
 		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			link, err := os.Readlink(current)
+			link, err := seamReadlink(current)
 			if err != nil {
 				break
 			}
@@ -339,7 +343,7 @@ func (g *agentHookConfigGuard) resolvePlaces(raw string) []string {
 			places = append(places, current)
 			continue
 		}
-		if dir, err := filepath.EvalSymlinks(filepath.Dir(current)); err == nil {
+		if dir, err := seamEvalSymlinks(filepath.Dir(current)); err == nil {
 			places = append(places, filepath.Join(dir, filepath.Base(current)))
 		}
 		break
@@ -414,7 +418,7 @@ func (g *agentHookConfigGuard) read(raw string) ([]byte, bool) {
 	if len(places) == 0 {
 		return nil, false
 	}
-	file, err := os.Open(places[0])
+	file, err := seamOpen(places[0])
 	if err != nil {
 		return nil, false
 	}
@@ -1118,6 +1122,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	text := strings.ToLower(request.LegacyText + "\n" + request.Input.Command + "\n" + string(request.Input.Args) + "\n" + strings.Join(request.Input.Argv, "\n"))
 	rawCommand := agentHookConfigRawShellCommand(request.Input)
 	guard.gitIndexRedirected = agentHookConfigRedirectsGitIndex(rawCommand)
+	guard.links = hookpaths.CommandLinks("Bash", rawCommand, guard.cwd, guard.home)
 	// A command that spells a link only through a variable (dest=LINK; then
 	// the variable as an operand) never names the registered file in its
 	// text; the shared reader resolves the values the command binds, as the
@@ -1140,6 +1145,24 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		if part.Dir != guard.cwd {
 			partGuard = newAgentHookConfigGuard(part.Dir, guard.home)
 			partGuard.gitIndexRedirected = guard.gitIndexRedirected
+			partGuard.links = guard.links
+		}
+		// Every write operand the shell reading names is judged as the
+		// managed route judges the resolved targets of the hook client: a
+		// hook file of any project folder (agentHookConfigProjectFiles) or
+		// of the home, as written and through a link the call makes. The
+		// registration set below lists only the folders from the working
+		// directory up to the home, so a write into another project folder,
+		// or one that a cd the walk cannot place (cd $W) leaves in no listed
+		// folder, reached none of it (rel-1-0-10:GAP-0718).
+		for _, operand := range agentHookConfigShellWriteOperands(part.Command, part.Dir, guard.home) {
+			for _, place := range append([]string{operand}, guard.links.AliasTargets(operand, false)...) {
+				if guard.ownedFile(place) {
+					add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", place)
+				} else if guard.format(place) != "" {
+					add(agentHookConfigWriteRuleID, "", place)
+				}
+			}
 		}
 		if hookpaths.RegistrationWriteCandidate(part.Command) {
 			registered := agentHookConfigRegistrationPaths(partGuard)
@@ -1185,6 +1208,27 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	return out
 }
 
+// agentHookConfigShellWriteOperands lists the absolute write operands of a
+// shell statement: the literal writers (cp, tee, mv, install, ...) and the
+// output redirects, read in the directory of the statement.
+func agentHookConfigShellWriteOperands(command, dir, home string) []string {
+	if !filepath.IsAbs(dir) {
+		return nil
+	}
+	operands := hookpaths.LiteralWriteOperands(command, dir, home)
+	if strings.Contains(command, ">") {
+		redirects, _, _ := hookpaths.ShellWriteOperands(command, dir, home)
+		operands = append(operands, redirects...)
+	}
+	var out []string
+	for _, operand := range operands {
+		if filepath.IsAbs(operand) && !slices.Contains(out, operand) {
+			out = append(out, operand)
+		}
+	}
+	return out
+}
+
 // agentHookConfigReachedPaths lists the registered paths a statement writes,
 // split into installed DefenseClaw artifacts (and the folders that hold them)
 // and the other registration documents. The set is narrowed by halves in one
@@ -1196,6 +1240,27 @@ func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHoo
 			owned = append(owned, path)
 		} else {
 			other = append(other, path)
+		}
+	}
+	// Code that is not proven read-only is handed a hook config by a runner
+	// the shared reader does not follow (sudo find -exec, su -c, ssh, uv run,
+	// sh -c with $0 or $1, a brace word): the hand-off reading judges it
+	// (rel-1-0-10:GAP-0365).
+	handed, _ := hookpaths.InlineHandedPaths(part.Command, part.Dir, guard.home)
+	for _, word := range handed {
+		switch {
+		case !word.Dynamic:
+			if (slices.Contains(registered, word.Path) || guard.format(word.Path) != "") && !slices.Contains(other, word.Path) &&
+				!slices.Contains(owned, word.Path) {
+				other = append(other, word.Path)
+			}
+		default:
+			for _, name := range registered {
+				if hookpaths.CommandMentionsPath(part.Command, guard.home, name) && !slices.Contains(other, name) &&
+					!slices.Contains(owned, name) {
+					other = append(other, name)
+				}
+			}
 		}
 	}
 	return owned, other
@@ -1224,6 +1289,14 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 		if json.Unmarshal(args[key], &command) == nil && command != "" {
 			return command
 		}
+	}
+	// Any other key the trusted-action parser reads as the command (agy
+	// run_command's CommandLine): read only under command and cmd, an
+	// Antigravity command that stops or disables DefenseClaw, or rewrites an
+	// agent's hook configuration, raised no guard finding where every other
+	// hook connector blocks it.
+	if command, ok := trustedShellCommandArgument(input.Args); ok {
+		return command
 	}
 	return ""
 }
@@ -1386,8 +1459,26 @@ func agentHookConfigGitGlobalSubcommand(argv []string, guard *agentHookConfigGua
 			if explicitWorktree != "" {
 				return index, agentHookConfigGitJoin(root, explicitWorktree)
 			}
+			// A folder that is a link this call makes is read at its target
+			// (rel-1-0-10:GAP-0718). A target the hook cannot read now (not
+			// on disk yet, or in a folder that a cd the walk cannot place
+			// left the call in) is an unreadable worktree: it is returned as
+			// is, and agentHookConfigGitTarget counts it as GAP-0572 counts
+			// an unreadable folder.
+			if _, err := os.Stat(root); err != nil {
+				targets := guard.links.AliasTargets(root, false)
+				for _, target := range targets {
+					if info, err := os.Stat(target); err == nil && info.IsDir() {
+						root = target
+						break
+					}
+				}
+				if _, err := os.Stat(root); err != nil && len(targets) > 0 {
+					return index, root
+				}
+			}
 			for dir := root; ; dir = filepath.Dir(dir) {
-				if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+				if _, err := seamLstat(filepath.Join(dir, ".git")); err == nil {
 					return index, dir
 				}
 				if dir == filepath.Dir(dir) {
@@ -1608,7 +1699,7 @@ func agentHookConfigGitGlobReach(spec, worktree string, guard *agentHookConfigGu
 		}
 		// A pattern matches the tracked files of the tree, not every name a
 		// registration file could have in this folder.
-		if _, err := os.Lstat(file.Path); err != nil {
+		if _, err := seamLstat(file.Path); err != nil {
 			continue
 		}
 		base := guard.cwd
@@ -1678,9 +1769,9 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 				if !filepath.IsAbs(directory) {
 					directory = filepath.Join(guard.cwd, directory)
 				}
-				redirected := guard.gitIndexRedirected
+				redirected, links := guard.gitIndexRedirected, guard.links
 				guard = newAgentHookConfigGuard(directory, guard.home)
-				guard.gitIndexRedirected = redirected
+				guard.gitIndexRedirected, guard.links = redirected, links
 			}
 			rest = child
 		} else if child, wrapper := agentHookConfigWrapperChild(rest); wrapper {
@@ -1777,7 +1868,7 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 				unknown = true
 				break
 			}
-			patch, err := os.ReadFile(places[0])
+			patch, err := seamReadFile(places[0])
 			if err != nil || len(patch) > agentHookConfigMaxBytes {
 				unknown = true
 				break
@@ -1795,6 +1886,14 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 		if readAny && !unknown {
 			return ""
 		}
+	}
+	// A worktree that is a link the call makes, with a target the hook
+	// cannot read, may hold any hook file: a rewrite of it counts unless
+	// every pathspec names a file that is no hook file (rel-1-0-10:GAP-0718,
+	// the GAP-0572 unreadable-folder reading).
+	if _, err := os.Stat(worktree); err != nil && len(guard.links.AliasTargets(worktree, false)) > 0 &&
+		!agentHookConfigGitFilePathspecsOnly(args, worktree, guard) {
+		return worktree
 	}
 	// An explicit pathspec may name a file currently absent from this tree.
 	fromIndex := agentHookConfigGitFromIndex(sub, args)
@@ -1863,7 +1962,7 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 			if !filepath.IsAbs(candidate) {
 				candidate = filepath.Join(guard.cwd, candidate)
 			}
-			info, err := os.Lstat(candidate)
+			info, err := seamLstat(candidate)
 			if err != nil {
 				continue
 			}
@@ -1874,7 +1973,7 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 				dir := filepath.Clean(candidate) + string(filepath.Separator)
 				for _, file := range guard.files {
 					if strings.HasPrefix(file.Path, dir) {
-						if _, err := os.Stat(file.Path); err == nil {
+						if _, err := seamStat(file.Path); err == nil {
 							return arg
 						}
 					}
@@ -1890,18 +1989,42 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 	for _, file := range guard.files {
 		relative, err := filepath.Rel(worktree, file.Path)
 		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			if _, err := os.Stat(file.Path); err == nil {
+			if _, err := seamStat(file.Path); err == nil {
 				return file.Path
 			}
 		}
 	}
 	for _, file := range agentHookConfigProjectFiles {
 		path := filepath.Join(worktree, filepath.FromSlash(strings.TrimPrefix(file.suffix, "/")))
-		if _, err := os.Stat(path); err == nil {
+		if _, err := seamStat(path); err == nil {
 			return path
 		}
 	}
 	return ""
+}
+
+// agentHookConfigGitFilePathspecsOnly reports git arguments whose pathspecs
+// (after --) all name a file with an extension that is no hook file: such a
+// rewrite cannot replace a hook file, wherever its worktree is.
+func agentHookConfigGitFilePathspecsOnly(args []string, worktree string, guard *agentHookConfigGuard) bool {
+	start, saw := false, false
+	for _, arg := range args {
+		if arg == "--" {
+			start = true
+			continue
+		}
+		if !start || strings.HasPrefix(arg, "-") {
+			continue
+		}
+		saw = true
+		base := filepath.Base(arg)
+		path := filepath.Join(worktree, arg)
+		if strings.ContainsAny(arg, "*?[:") || filepath.Ext(base) == "" || base == "." || base == ".." ||
+			guard.format(path) != "" || guard.ownedFile(path) {
+			return false
+		}
+	}
+	return saw
 }
 
 // agentHookConfigPatchTarget trusts a patch as unrelated only when every

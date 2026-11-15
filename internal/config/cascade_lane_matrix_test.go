@@ -15,10 +15,12 @@ import (
 // value, written as YAML, through the three loaders (LoadFromFile, the
 // gateway runtime load and the candidate check of a CLI save). A value is
 // accepted with its mode or refused with the lane key named; effects and
-// secret_flow are never on. Values are exact (cascade.go): another case or a
+// secret_flow are never on, and alert and block are the alignment lane's alone. Values are exact (cascade.go): another case or a
 // padded value is refused, never read as the value. A null lane, or an empty string for a string lane,
 // is refused by all three loaders: LoadFromFile runs no schema pass, so it
-// checks the lane values itself (GAP-0545).
+// checks the lane values itself (GAP-0545). The opt-in alignment lane is
+// not in the schema: at gateway start a value it refuses invalidates the
+// cascade (pack defaults, lane off), as its own test pins.
 func TestCascadeLaneSpellingMatrix(t *testing.T) {
 	spellings := []struct {
 		yaml string
@@ -26,8 +28,14 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 	}{
 		{"on", map[string]string{"nonshell": "on"}},
 		{"\"on\"", map[string]string{"nonshell": "on"}},
-		{"shadow", map[string]string{"nonshell": "shadow", "effects": "shadow", "secret_flow": "shadow"}},
-		{"off", map[string]string{"nonshell": "off", "effects": "off", "secret_flow": "off"}},
+		{"shadow", map[string]string{"nonshell": "shadow", "effects": "shadow", "secret_flow": "shadow", "alignment": "shadow"}},
+		{"off", map[string]string{"nonshell": "off", "effects": "off", "secret_flow": "off", "alignment": "off"}},
+		// The alignment lane's own values (GAP-0823): no other lane takes them.
+		{"alert", map[string]string{"alignment": "alert"}},
+		{"\"block\"", map[string]string{"alignment": "block"}},
+		{"Alert", nil},
+		{"\"alert \"", nil},
+		{"BLOCK", nil},
 		{"ON", nil},
 		{"\"On\"", nil},
 		{"\" shadow \"", nil},
@@ -48,9 +56,9 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 		{"[on]", nil},
 		{"{on: on}", nil},
 	}
-	defaults := map[string]string{"nonshell": "on", "effects": "shadow", "secret_flow": "shadow"}
+	defaults := map[string]string{"nonshell": "on", "effects": "shadow", "secret_flow": "shadow", "alignment": "off"}
 	// The shipped lanes (cascade_test.go registers test lanes the schema does not name).
-	for _, lane := range []string{CascadeLaneEffects, CascadeLaneNonShell, CascadeLaneSecretFlow} {
+	for _, lane := range []string{CascadeLaneEffects, CascadeLaneNonShell, CascadeLaneSecretFlow, CascadeLaneAlignment} {
 		for _, s := range spellings {
 			dir := t.TempDir()
 			t.Setenv("DEFENSECLAW_HOME", dir)
@@ -72,6 +80,12 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 				cfg, err := l.load()
 				label := lane + "=" + s.yaml + " via " + l.name
 				if !accept {
+					if err == nil && lane == CascadeLaneAlignment && l.name == "LoadRuntimeV8File" && cfg != nil &&
+						cfg.Guardrail.Cascade.Invalid() != nil && cfg.ResolveCascade("").LaneMode(lane) == CascadeLaneOff {
+						// The alignment lane's start rule (TestCascadeAlignmentLaneLoadsItsValues): the
+						// schema takes any short string, the invalid cascade falls back and the lane is off.
+						continue
+					}
 					if err == nil {
 						got := ""
 						if cfg != nil {

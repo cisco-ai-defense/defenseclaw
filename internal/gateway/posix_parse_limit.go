@@ -4,7 +4,9 @@
 package gateway
 
 import (
+	"encoding/json"
 	"slices"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -41,9 +43,12 @@ import (
 // position decides, no program is named for being data (rel-1-0-10:GAP-0382,
 // second round).
 
-// posixByteBoundCommand is the command text of a POSIX shell call the
-// analysis stopped reading at a byte bound, "" for any other call.
-func posixByteBoundCommand(request trustedActionRequest, facts actionfacts.Facts) string {
+// posixInputLimitCommand is the command text of a POSIX shell call whose
+// analysis stopped at an input bound (limit_exceeded, input_limit), "" for any
+// other call: a byte bound of the text or of a word (posixByteBoundCommand),
+// a count of words, or the bound of a reader inside the text, such as the
+// 2 KiB bound of an inline perl or ruby program.
+func posixInputLimitCommand(request trustedActionRequest, facts actionfacts.Facts) string {
 	input := request.Input
 	if facts.Parse.Status != actionfacts.StatusLimitExceeded ||
 		!slices.Contains(facts.Parse.Issues, actionfacts.IssueInputLimit) ||
@@ -59,21 +64,95 @@ func posixByteBoundCommand(request trustedActionRequest, facts actionfacts.Facts
 		return ""
 	}
 	command, known := trustedBashCommandInput(input)
-	if !known || !actionfacts.ShellInputPastByteBound(command, len(input.Args)) {
+	if !known {
+		// A call whose command is an argv array (the Codex shell tool, an
+		// Input.Argv) is the shell text of its words: a word past the bound is
+		// in code or data position by the same grammar as in a text call, so
+		// the array form is never a clean allow where the text form is
+		// truncated (rel-1-0-10:GAP-0689).
+		command, known = trustedArgvCommandText(input)
+	}
+	if !known {
 		return ""
 	}
 	return command
 }
 
-// posixParseTruncation is the cap of the byte bound the POSIX analysis of a
+// posixByteBoundCommand is the command text of a POSIX shell call the
+// analysis stopped reading at a byte bound, "" for any other call.
+func posixByteBoundCommand(request trustedActionRequest, facts actionfacts.Facts) string {
+	command := posixInputLimitCommand(request, facts)
+	if command == "" || !actionfacts.ShellInputPastByteBound(command, len(request.Input.Args)) {
+		return ""
+	}
+	return command
+}
+
+// trustedArgvCommandText is the shell text of a call whose command is an
+// array of words: each word single-quoted, joined by blanks, so the words
+// keep their positions in the grammar. false when the call carries no such
+// array or a word is not a string.
+func trustedArgvCommandText(input actionfacts.Input) (string, bool) {
+	words := input.Argv
+	if len(words) == 0 {
+		var args struct {
+			Command []any `json:"command"`
+		}
+		if len(input.Args) == 0 || json.Unmarshal(input.Args, &args) != nil || len(args.Command) == 0 {
+			return "", false
+		}
+		for _, word := range args.Command {
+			text, ok := word.(string)
+			if !ok {
+				return "", false
+			}
+			words = append(words, text)
+		}
+	}
+	var text strings.Builder
+	for i, word := range words {
+		if strings.IndexByte(word, 0) >= 0 {
+			return "", false
+		}
+		if i > 0 {
+			text.WriteByte(' ')
+		}
+		text.WriteString("'" + strings.ReplaceAll(word, "'", `'\''`) + "'")
+	}
+	return text.String(), text.Len() > 0
+}
+
+// posixParseTruncation is the cap of the input bound the POSIX analysis of a
 // shell call hit, empty when it read the call to the end, stopped at another
 // bound, the call is not a POSIX shell call, a call over the text bound only
 // by the white space or comments that pad it, whose bounded twin
 // (overLimitCommandBoundedTwinRequest) is read in full and judged as the
 // unpadded command (GAP-0934), or a call whose every over-limit word is DATA
 // (posixDataWordTwinRequest).
+//
+// An inline perl or ruby program past the 2 KiB bound of its reader, in a
+// word under the byte bound, is truncated too (actionfacts.InlineProgramPastBound):
+// the program's commands were never read, and no twin reads it shorter. It
+// used to end in a clean allow in every pack when nothing else was proven:
+// under the ONE BOUND RULE it is the unknown tier (an alert in the default and
+// permissive packs and the managed default, a block in strict and managed
+// strict), and a finding proven elsewhere in the call keeps its own verdict
+// (rel-1-0-10:GAP-0689, lead ruling 2026-11-15). Any other input bound under
+// the byte bound keeps its own path: a count of words is the operand bound
+// (operandBoundDispatch), and a data word inside a command substitution is
+// read by the data-word ruling.
 func posixParseTruncation(request trustedActionRequest, facts actionfacts.Facts) bounded.CapSet {
-	if posixByteBoundCommand(request, facts) == "" {
+	command := posixInputLimitCommand(request, facts)
+	if command == "" {
+		return bounded.CapSet{}
+	}
+	if !actionfacts.ShellInputPastByteBound(command, len(request.Input.Args)) {
+		if slices.ContainsFunc(facts.Commands, actionfacts.InlineProgramPastBound) {
+			return bounded.Of(bounded.Bytes)
+		}
+		return bounded.CapSet{}
+	}
+	if posixArgvScriptReadAsText(request, facts) {
 		return bounded.CapSet{}
 	}
 	if _, twinRead := overLimitCommandBoundedTwinRequest(request, facts); twinRead {
@@ -95,6 +174,9 @@ func posixDataWordTwinRequest(request trustedActionRequest, facts actionfacts.Fa
 		return trustedActionRequest{}, false
 	}
 	split, ok := actionfacts.SplitOverLimitWords(command)
+	if _, text := trustedBashCommandInput(request.Input); !text {
+		split, ok = actionfacts.SplitOverLimitWordsOfArgv(command)
+	}
 	if !ok || split.Code > 0 || split.Data == 0 ||
 		actionfacts.ShellInputPastByteBound(split.Twin, len(request.Input.Args)) {
 		return trustedActionRequest{}, false
@@ -126,4 +208,24 @@ func withPosixDataWordRecord(findings []RuleFinding) []RuleFinding {
 	record.enforcement = findingEnforcementDetectionOnly
 	record.dataWordRecord = true
 	return append(slices.Clip(findings), record)
+}
+
+// posixArgvScriptReadAsText reports an argv shell launcher (["bash", "-lc",
+// SCRIPT], the Codex shell tool) whose script the launcher body reading
+// judges as the string command it is, with nothing else the call runs
+// (launcherBodyTwinRequest, read and fully, rel-1-0-10:GAP-0803): the script
+// word past 4 KiB is then no cut of the call, and the reading of the script
+// decides with its own floor, a code word past the bound inside the script
+// truncated as in the text form. Truncating the argv form for the length of
+// the script alone made every ordinary Codex script over 4 KiB (a
+// here-document file write, a long for list) an alert, and a block in
+// strict, where the same script as text is allowed (rel-1-0-10:GAP-0853).
+func posixArgvScriptReadAsText(request trustedActionRequest, facts actionfacts.Facts) bool {
+	if _, text := trustedBashCommandInput(request.Input); text {
+		return false
+	}
+	launcher := launcherBodyTwinRequest(request, facts)
+	// fully already holds every launcher reading of the call to the command
+	// bound (launcherCallTwin, rel-1-0-10:GAP-0857).
+	return launcher.read && launcher.fully
 }

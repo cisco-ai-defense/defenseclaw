@@ -157,8 +157,11 @@ func (r *RoutingConfig) validatePolicyKeys(aliases map[string]string) error {
 		return err
 	}
 	if s := r.Sensitive; s != nil {
-		if s.SeverityAtLeast == "" && len(s.Signals) == 0 {
-			return fmt.Errorf("sensitive needs severity_at_least or signals")
+		if err := s.validateCheck(); err != nil {
+			return err
+		}
+		if s.SeverityAtLeast == "" && len(s.Signals) == 0 && !s.CheckEnabled() {
+			return fmt.Errorf("sensitive needs severity_at_least, signals or check")
 		}
 		if s.SeverityAtLeast != "" && !validRoutingSeverity(s.SeverityAtLeast) {
 			return fmt.Errorf("sensitive.severity_at_least %q must be LOW, MEDIUM, HIGH or CRITICAL", s.SeverityAtLeast)
@@ -322,4 +325,33 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// validateCheck checks the decision-model check keys of routing.sensitive.
+func (s *RoutingSensitiveConfig) validateCheck() error {
+	switch s.Check {
+	case "", RoutingSensitiveCheckOff, RoutingSensitiveCheckAuto, RoutingSensitiveCheckDecisionModel, RoutingSensitiveCheckJudge:
+	default:
+		return fmt.Errorf("sensitive.check %q must be off, auto, decision_model or judge", s.Check)
+	}
+	switch s.OnUnavailable {
+	case "", RoutingSensitiveUnavailableLocal, RoutingSensitiveUnavailableIgnore:
+	default:
+		return fmt.Errorf("sensitive.on_unavailable %q must be local or ignore", s.OnUnavailable)
+	}
+	if s.TimeoutMs != 0 && (s.TimeoutMs < RoutingSensitiveMinTimeoutMs || s.TimeoutMs > RoutingSensitiveMaxTimeoutMs) {
+		return fmt.Errorf("sensitive.timeout_ms must be %d to %d, got %d", RoutingSensitiveMinTimeoutMs, RoutingSensitiveMaxTimeoutMs, s.TimeoutMs)
+	}
+	if s.MaxBytes != 0 && (s.MaxBytes < RoutingSensitiveMinMaxBytes || s.MaxBytes > RoutingSensitiveMaxMaxBytes) {
+		return fmt.Errorf("sensitive.max_bytes must be %d to %d, got %d", RoutingSensitiveMinMaxBytes, RoutingSensitiveMaxMaxBytes, s.MaxBytes)
+	}
+	if len(s.Definition) > RoutingSensitiveMaxDefinition {
+		return fmt.Errorf("sensitive.definition must be at most %d bytes", RoutingSensitiveMaxDefinition)
+	}
+	for _, r := range s.Definition {
+		if r < 0x20 && r != 0x0a && r != 0x09 {
+			return fmt.Errorf("sensitive.definition must not contain control characters")
+		}
+	}
+	return nil
 }

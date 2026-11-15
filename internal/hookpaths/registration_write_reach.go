@@ -14,6 +14,8 @@ import (
 	"unicode/utf8"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // registrationWriteReachedAs is RegistrationWriteReached in one reading of
@@ -777,6 +779,32 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 				}
 			}
 		}
+	case "sh", "bash", "dash", "ash", "zsh", "ksh":
+		// A shell body that hands a word of its own to inline code (python -c
+		// CODE "$1") is handed the words the shell was given
+		// (rel-1-0-10:GAP-0365).
+		words := []string{program}
+		for _, word := range operands {
+			words = append(words, inlineWordValue(word, values, cwd, home))
+		}
+		if body, ok := shellCommandBodyIndex(words); ok && words[body] != "$" {
+			if handed, _ := InlineHandedPaths(words[body], cwd, home); InlineHandsDynamic(handed) {
+				for _, word := range words[body+1:] {
+					if actionfacts.InlineHandedWordIsPath(word) {
+						targets = append(targets, word)
+					}
+				}
+			}
+		}
+	default:
+		// An inline interpreter child is handed its argument paths as
+		// possible writes (rel-1-0-10:GAP-0365); a word with no fixed
+		// value is no path.
+		words := []string{program}
+		for _, word := range operands {
+			words = append(words, inlineWordValue(word, values, cwd, home))
+		}
+		targets = append(targets, actionfacts.InlineCodeHandedWords(words)...)
 	}
 	return targets
 }
@@ -814,7 +842,31 @@ func registrationFindActionTargets(args []*syntax.Word, values actionValues, cwd
 				if action == "-execdir" || action == "-okdir" {
 					dir = filepath.Dir(file)
 				}
-				run(registrationFindFileWords(operands, file, home), dir)
+				words := registrationFindFileWords(operands, file, home)
+				run(words, dir)
+				// A child that is no proven reader of the file it is handed (an
+				// option that writes a file or runs a program, a program that
+				// changes it) may change it: the same screens the state reader
+				// applies (actionfacts.FindEmbeddedCommandMayChange,
+				// rel-1-0-10:GAP-0501, GAP-0660).
+				var childWords []string
+				for _, word := range words {
+					text, fixed := StaticWord(word, home)
+					if !fixed {
+						text = "$"
+					}
+					childWords = append(childWords, text)
+				}
+				// Only the programs a find child may not be a reader of: the
+				// wrapper (env, nice, timeout, sudo) is looked through.
+				child, _, _ := actionfacts.InlineChild(childWords)
+				argv := append([]string{"find", action}, child...)
+				if len(child) == 0 || !slices.Contains([]string{"rg", "file", "less", "sort", "chmod", "chown", "chgrp", "touch"}, programBase(child[0])) {
+					continue
+				}
+				if actionfacts.FindEmbeddedCommandMayChange(append(argv, ";")) {
+					targets = append(targets, file)
+				}
 			}
 		default:
 			if len(operands) > 0 {
@@ -1485,7 +1537,7 @@ func registrationCopyReach(file *syntax.File, cwd, home string, protected protec
 // registrationArchivePossibleReachAs is RegistrationArchivePossibleReach in
 // one reading of the command.
 func registrationArchivePossibleReachAs(command, cwd, home string, names []string) string {
-	if !strings.Contains(command, "tar") && !strings.Contains(command, "unzip") {
+	if !strings.Contains(command, "tar") && !strings.Contains(command, "unzip") && !strings.Contains(command, "7z") {
 		return ""
 	}
 	file, ok := parseShell(command)
@@ -1510,8 +1562,38 @@ func registrationArchivePossibleReachAs(command, cwd, home string, names []strin
 			}
 			args = append(args, value)
 		}
+		if words := archiveProgramWords(append([]string{program}, args...)); len(words) > 0 {
+			program, args = words[0], words[1:]
+		}
+		members := ArchiveExtractionMembers(program, args)
+		unknown := archiveMembersUnknown(program, args)
 		for _, dest := range ArchiveExtractionDestinations(program, args) {
 			folder := OperandPath(dest, cwd)
+			// Members the words do not tell may be any file below the folder: a
+			// registered file there is a possible write (rel-1-0-10:GAP-0142).
+			if unknown {
+				for _, name := range names {
+					if strings.HasPrefix(name, folder+string(filepath.Separator)) {
+						found = folder
+						return false
+					}
+				}
+			}
+			// A member lands below the folder by its own name: one that is a
+			// registered file, or holds registered files, is a write of them
+			// (rel-1-0-10:GAP-0142).
+			for _, member := range members {
+				target := archiveMemberPath(folder, member)
+				for _, name := range names {
+					// A member below a registered folder is no reach: the folder is
+					// not replaced by it, only a registered file or a member that
+					// holds one is (rel-1-0-10:GAP-0659).
+					if name == target || strings.HasPrefix(name, target+string(filepath.Separator)) {
+						found = target
+						return false
+					}
+				}
+			}
 			// A generic ancestor such as /tmp is not a registered hook
 			// folder merely because a test home happens to live below it.
 			if !slices.Contains(names, folder) {
@@ -1534,7 +1616,7 @@ func RegistrationWriteCandidate(command string) bool {
 	if strings.ContainsAny(command, ">") {
 		return true
 	}
-	for _, word := range []string{"rm", "mv", "cp", "ln", "sed", "perl", "patch", "chmod", "chown", "chgrp", "setfacl", "chattr", "find", "truncate", "touch", "install", "rsync", "tar", "unzip", "dd", "tee", "sponge", "python", "node", "ruby", "bash", "zsh", "dash", "ksh", "sh"} {
+	for _, word := range []string{"rm", "mv", "cp", "ln", "sed", "perl", "patch", "chmod", "chown", "chgrp", "setfacl", "chattr", "find", "truncate", "touch", "install", "rsync", "tar", "unzip", "7z", "dd", "tee", "sponge", "python", "node", "bun", "ruby", "php", "bash", "zsh", "dash", "ksh", "sh"} {
 		if strings.Contains(command, word) {
 			return true
 		}

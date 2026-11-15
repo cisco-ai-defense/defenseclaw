@@ -60,13 +60,30 @@ func TestOwnStatusCoworkRowStateIsOneWordWithSeparateReason(t *testing.T) {
 // GAP-0574: the own-status answer names routing on or off, the route-only
 // connectors and the caller own budget nearest its limit; users_see none
 // keeps the organization-wide facts and drops the budget.
+//
+// The test owns its runtime, ledger and clock: it gives the same answer on any
+// real day, so it runs on a leap day, either side of a UTC midnight, on a day
+// before and a day after the real today.
 func TestOwnStatusRoutingSummary(t *testing.T) {
+	for _, at := range []time.Time{
+		time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 2, 28, 23, 59, 59, 999999999, time.UTC),
+		time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC),
+		time.Date(2027, 12, 31, 23, 59, 59, 0, time.UTC),
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2031, 6, 30, 12, 0, 0, 0, time.UTC),
+	} {
+		t.Run(at.Format(time.RFC3339Nano), func(t *testing.T) { ownStatusRoutingSummaryAt(t, at) })
+	}
+}
+
+func ownStatusRoutingSummaryAt(t *testing.T, now time.Time) {
+	isolatedRoutingAdminRuntimeAt(t, now)
 	cfg := routingAPIConfig()
 	cfg.Routing.RouteOnly = config.RoutingRouteOnlyConfig{Connectors: []string{"claudecode"}}
 	if routingAdminRuntime.For(cfg) == nil {
 		t.Fatal("evaluator")
 	}
-	now := time.Now()
 	routingAdminRuntime.Ledger().ApplyRemote([]string{"daily", "eng"}, nil, now)
 	routingAdminRuntime.Charge([]string{"user:daily:*:1001"}, 4, now)
 	summary := ownRoutingSummary(cfg, "1001", now)

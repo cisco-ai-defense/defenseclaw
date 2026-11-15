@@ -131,6 +131,25 @@ code_keys: [code, script, source_code, snippet, python, javascript, js, expressi
 # Name tokens that make a tool a code-execution tool.
 code_tool_tokens: [exec, execute, run, eval, evaluate, code, python, script, repl, interpreter, notebook, cell]
 
+# Browser-automation tools by their schema (Puppeteer, Playwright, Chrome
+# DevTools MCP): the tool name (normalised) and the argument that carries the
+# page script or the URL. A generic tool name also needs one of the servers
+# tokens in its server segment or its name. The script is read for a flow of
+# session state to the network (PAGE-SCRIPT-SESSION-EGRESS, GAP-0560).
+page_script:
+  tools:
+    - {names: [browser_evaluate], keys: [function]}
+    - {names: [browser_run_code, browser_run_code_unsafe], keys: [code]}
+    - {names: [evaluate_script], keys: [function]}
+    - {names: [puppeteer_evaluate, playwright_evaluate], keys: [script]}
+    - {names: [evaluate, evaluate_javascript, execute_javascript, page_evaluate, run_javascript], keys: [script, code, expression, javascript, function], servers: [puppeteer, playwright, browser, chrome, devtools, selenium, page, cdp, webdriver]}
+  navigate:
+    - {names: [browser_navigate, puppeteer_navigate, playwright_navigate, navigate_page], keys: [url]}
+    - {names: [navigate, new_page, goto, open_url], keys: [url], servers: [puppeteer, playwright, browser, chrome, devtools, selenium, page, cdp, webdriver]}
+  leave:
+    - {names: [browser_navigate_back, browser_tabs, browser_close, select_page, close_page]}
+  leave_types: [back, forward]
+
 # Security-setting changes. key: normalised argument name (lower-case, - and
 # camelCase become _). when: the value that makes it a downgrade.
 settings:
@@ -177,4 +196,4 @@ command_rules:
 text_rules:
   - {id: CMD-PRIV-PATH-HIJACK, re: "(?i)(^|[;&|][[:space:]]*)PATH=(/tmp|/var/tmp|/dev/shm)[^[:space:]:]*:[$][{]?PATH[}]?[[:space:]]+(sudo|pkexec|su|doas)([[:space:]]|$)"}
 # A shell text without one of these words is not parsed again for the rules above.
-shell_triggers: ["path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron"]
+shell_triggers: ["path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".git-credentials", ".netrc", "_netrc", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron"]

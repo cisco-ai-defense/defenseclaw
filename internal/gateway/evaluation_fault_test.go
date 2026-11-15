@@ -55,6 +55,36 @@ var gap0486Blocked = map[string]string{
 // still block in every pack).
 var gap0486ControlRuleKept = map[string]bool{"B1": false, "B3": true}
 
+// gap0825ProxyUnreadFirst returns, for a row whose unreadable text comes
+// before the control statement (K..b: the fault text first; GP: a lone fi
+// first), that text. The /llm proxy sends no cwd or home, so it reads no
+// parser fault and no syntax-error remainder (rel-1-0-10:GAP-0825, for
+// T-BOUNDS after push 3): on that route such a row is held to the verdict of
+// its unreadable text alone, never below it, until GAP-0825 lands. The hook
+// and inspect/tool routes read those rows in full and block them in every
+// pack (TestGAP0486BlockedCommandWithFaultTextStillBlocks,
+// TestGAP0526BlockedCommandWithSyntaxErrorStillBlocks).
+func gap0825ProxyUnreadFirst(id string) (string, bool) {
+	switch {
+	case strings.HasPrefix(id, "K") && strings.HasSuffix(id, "b"):
+		return gap0437Fault, true
+	case strings.HasPrefix(id, "GP"):
+		return "fi", true
+	}
+	return "", false
+}
+
+// gap0825ProxyHolds reports that a row's combined /llm verdict is not lower
+// than its no-fault control, or, for a GAP-0825 row, not lower than its
+// unreadable text alone.
+func gap0825ProxyHolds(id, control, combined string, rank map[string]int, verdictOf func(string) string) bool {
+	if rank[combined] >= rank[control] {
+		return true
+	}
+	unread, ok := gap0825ProxyUnreadFirst(id)
+	return ok && rank[combined] >= rank[verdictOf(unread)]
+}
+
 func gap0486Combined() map[string]struct{ control, command string } {
 	out := map[string]struct{ control, command string }{}
 	for id, blocked := range gap0486Blocked {
@@ -313,7 +343,7 @@ func TestGAP0486ProxyToolCallsWithFaultTextNeverLower(t *testing.T) {
 		proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), mode)
 		for id, k := range gap0486Combined() {
 			control, combined := verdictOf(proxy, gap0486Blocked[k.control]), verdictOf(proxy, k.command)
-			if rank[combined] < rank[control] {
+			if !gap0825ProxyHolds(id, control, combined, rank, func(command string) string { return verdictOf(proxy, command) }) {
 				t.Errorf("/llm %s %s: %s alone, %s with the fault text", mode, id, control, combined)
 			}
 		}

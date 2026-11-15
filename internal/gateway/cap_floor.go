@@ -5,9 +5,15 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"maps"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -166,7 +172,11 @@ func capFloorJudge(parent context.Context, request trustedActionRequest, finding
 	}
 	cwd, home := request.Input.CWD, request.Input.ActiveHome
 	whole := strings.TrimSpace(command)
-	picked, more := capFloorPick(head, tail, command, cwd, home, analyzed.Any(), capFloorMaxTwins-state.twins)
+	// The project walk of the path screen is the per-user reading: a
+	// managed gateway does not read the user home (its hook client does), so
+	// every path piece of a managed hook call is judged.
+	walk := !request.ProtectedHomeHook
+	picked, more := capFloorPick(head, tail, command, cwd, home, analyzed.Any(), walk, capFloorMaxTwins-state.twins)
 	if more {
 		state.stopped = state.stopped.Union(bounded.Of(bounded.Items))
 	}
@@ -253,11 +263,12 @@ func (p capFloorPiece) text(command string) string {
 // call of thousands of statements costs a pass over its text for each level
 // of the halving. more reports a piece that names one and is left unjudged
 // at the limit: the floor stopped there (a bound the call owner reports).
-func capFloorPick(head, tail []capFloorPiece, command, cwd, home string, anyPath bool, limit int) (picked []capFloorPiece, more bool) {
-	front := newCapFloorRegion(head, command, cwd, home, anyPath)
+func capFloorPick(head, tail []capFloorPiece, command, cwd, home string, anyPath, walk bool, limit int) (picked []capFloorPiece, more bool) {
+	front := newCapFloorRegion(head, command, cwd, home, anyPath, walk)
 	back := front
 	if tail != nil {
-		back = newCapFloorRegion(tail, command, cwd, home, anyPath)
+		back = newCapFloorRegion(tail, command, cwd, home, anyPath, walk)
+		back.paths = front.paths
 	}
 	if limit > 0 {
 		front.find(0, len(head), true, (limit+1)/2)
@@ -287,11 +298,19 @@ type capFloorRegion struct {
 	command   string
 	cwd, home string
 	anyPath   bool
-	reach     []int
-	picked    map[int]bool
+	// walk: the project paths of a piece are read on the disk
+	// (capFloorRegion.mayLeave); paths holds what each path is, read once
+	// per call.
+	walk   bool
+	paths  map[string]capFloorPathKind
+	reach  []int
+	picked map[int]bool
+	// named holds the answer of names for each range read: the search from
+	// the end and the search past the limit read the same ranges again.
+	named map[[2]int]bool
 }
 
-func newCapFloorRegion(pieces []capFloorPiece, command, cwd, home string, anyPath bool) *capFloorRegion {
+func newCapFloorRegion(pieces []capFloorPiece, command, cwd, home string, anyPath, walk bool) *capFloorRegion {
 	// Pieces are in the order of their start; a body lies inside the
 	// statement that runs it, so a range of pieces spans up to the furthest
 	// end before its last piece (reach).
@@ -302,17 +321,117 @@ func newCapFloorRegion(pieces []capFloorPiece, command, cwd, home string, anyPat
 			reach[i] = reach[i-1]
 		}
 	}
-	return &capFloorRegion{pieces: pieces, command: command, cwd: cwd, home: home, anyPath: anyPath, reach: reach, picked: map[int]bool{}}
+	return &capFloorRegion{pieces: pieces, command: command, cwd: cwd, home: home, anyPath: anyPath, walk: walk,
+		paths: map[string]capFloorPathKind{}, reach: reach, picked: map[int]bool{}, named: map[[2]int]bool{}}
 }
 
 func (r *capFloorRegion) names(lo, hi int) bool {
+	key := [2]int{lo, hi}
+	if named, ok := r.named[key]; ok {
+		return named
+	}
+	named := r.rangeNames(lo, hi)
+	r.named[key] = named
+	return named
+}
+
+func (r *capFloorRegion) rangeNames(lo, hi int) bool {
 	text := ""
 	if hi-lo == 1 {
 		text = r.pieces[lo].text(r.command)
 	} else {
 		text = r.command[r.pieces[lo].start:max(r.reach[hi-1], r.pieces[lo].start)]
 	}
-	return text != "" && (hookpaths.BoundCallMayNameProtected(text, r.cwd, r.home) || r.anyPath && capFloorMayNamePath(text))
+	if text == "" {
+		return false
+	}
+	// The path screen first: it reads the text once and the project folders
+	// it names once per call, where the text scan reads every word of the
+	// range again at each level of the halving.
+	if r.anyPath && capFloorMayNamePath(text) && r.mayLeave(text) {
+		return true
+	}
+	return hookpaths.BoundCallMayNameProtected(text, r.cwd, r.home)
+}
+
+// mayLeave reports a text with a word that may name something outside the
+// project folder (rel-1-0-10:GAP-0844): a value built at run time, a quoted,
+// escaped or patterned word, an absolute path, a parent folder, a host or a
+// drive (:), an option glued to a path, or a project path with a link, a
+// special file or an unreadable entry on its way. A piece whose path words
+// are all plain project paths reached without a link names only files inside
+// the project: it is not judged as a call of its own (a full dispatch per
+// piece), and the call stays at least the unknown tier of its pack for the
+// cap it hit. Sixteen such twins made a benign 6 KB && chain 13 times slower
+// than rel (GAP-0844). Off the per-user POSIX reading (Windows, a managed
+// hook call, a relative working directory) every path piece is judged, as
+// before.
+func (r *capFloorRegion) mayLeave(text string) bool {
+	if !r.walk || runtime.GOOS == "windows" || !filepath.IsAbs(r.cwd) ||
+		strings.ContainsAny(text, "~$%\\`*?[{:'\"") || strings.Contains(text, "..") {
+		return true
+	}
+	for _, word := range strings.FieldsFunc(text, capFloorWordSeparator) {
+		if !strings.Contains(word, "/") {
+			continue
+		}
+		if word[0] == '/' || word[0] == '-' || r.linkOnWay(word) {
+			return true
+		}
+	}
+	return false
+}
+
+func capFloorWordSeparator(c rune) bool {
+	return unicode.IsSpace(c) || strings.ContainsRune(";|&()<>=,", c)
+}
+
+// capFloorPathKind is what a project path is on the disk, for mayLeave.
+type capFloorPathKind uint8
+
+const (
+	capFloorPathFolder capFloorPathKind = iota // a folder: read on
+	capFloorPathEnd                            // missing or a plain file: nothing past it
+	capFloorPathLeaves                         // a link, a special file, or unreadable
+)
+
+// linkOnWay reports a project path (relative to the working directory) with
+// a link, a special file or an unreadable entry on its way.
+func (r *capFloorRegion) linkOnWay(word string) bool {
+	path := r.cwd
+	for _, part := range strings.Split(word, "/") {
+		if part == "" || part == "." {
+			continue
+		}
+		path = filepath.Join(path, part)
+		kind, seen := r.paths[path]
+		if !seen {
+			kind = capFloorPathKindOf(path)
+			r.paths[path] = kind
+		}
+		switch kind {
+		case capFloorPathLeaves:
+			return true
+		case capFloorPathEnd:
+			return false
+		}
+	}
+	return false
+}
+
+func capFloorPathKindOf(path string) capFloorPathKind {
+	info, err := hookpaths.Lstat(path)
+	switch {
+	case err != nil && errors.Is(err, fs.ErrNotExist):
+		return capFloorPathEnd
+	case err != nil || info.Mode()&os.ModeSymlink != 0:
+		return capFloorPathLeaves
+	case info.IsDir():
+		return capFloorPathFolder
+	case info.Mode().IsRegular():
+		return capFloorPathEnd
+	}
+	return capFloorPathLeaves
 }
 
 // capFloorMayNamePath reports a text that may name a path or a value built at
@@ -392,6 +511,14 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 	// code again, and its ) returns to the string.
 	var open []byte
 	start := from
+	// stmt is the start of the statement in progress at the current nesting:
+	// a $( or ( starts a statement of its own, and its ) returns to the
+	// statement around it (stmtOpen). The consumer of a here-document or a
+	// quoted script is the COMMAND word of that statement, which a command
+	// substitution inside one of its words does not change (gh pr create
+	// --title "$(git log -1)" --body-file - <<EOF reads its body as data).
+	stmt := from
+	var stmtOpen []int
 	// pipeFrom is the start of the pipeline in progress (-1 for none): a
 	// pipeline is judged whole as well as stage by stage, since what it
 	// proves (a download run by a shell, a credential piped out) needs the
@@ -405,7 +532,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 		if end > start {
 			pieces = append(pieces, capFloorPiece{start: start, end: end})
 		}
-		start = next
+		start, stmt = next, next
 	}
 	cutPipe := func(end, next int) {
 		if pipeFrom < 0 {
@@ -414,7 +541,13 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 		if end > start {
 			pieces = append(pieces, capFloorPiece{start: start, end: end})
 		}
-		start = next
+		start, stmt = next, next
+	}
+	// enter opens a $( or ( at i whose statement starts at next.
+	enter := func(i, next int) {
+		stmtOpen = append(stmtOpen, stmt)
+		cut(i, next)
+		open = append(open, '(')
 	}
 	wordStart := func(i int) bool {
 		j := i - 1
@@ -435,8 +568,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 				open = open[:n-1]
 				i++
 			case c == '$' && i+1 < to && command[i+1] == '(':
-				cut(i, i+2)
-				open = append(open, '(')
+				enter(i, i+2)
 				i += 2
 			case c == '`':
 				cut(i, i+1)
@@ -457,7 +589,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 				i = to
 				continue
 			}
-			if capFloorShellDashC(command[start:i], home) {
+			if capFloorShellDashC(command[stmt:i], home) {
 				pieces = append(pieces, capFloorPiece{start: i, end: end, body: body})
 			}
 			i = end
@@ -482,7 +614,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 		case c == '<' && strings.HasPrefix(command[i:to], "<<"):
 			doc, end, ok := capFloorHeredocAt(command, i, to)
 			if ok {
-				doc.fed = capFloorShellStdin(command[start:i], home)
+				doc.fed = capFloorShellStdin(command[stmt:i], home)
 				pending = append(pending, doc)
 				i = end
 				continue
@@ -517,7 +649,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 				i = min(lineEnd+1, to)
 			}
 			pending = nil
-			start = i
+			start, stmt = i, i
 			continue
 		case c == ';' || c == '`':
 			cut(i, i+1)
@@ -526,14 +658,15 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 			if c == '$' {
 				next++
 			}
-			cut(i, next)
-			open = append(open, '(')
+			enter(i, next)
 			i = next
 			continue
 		case c == ')':
 			cut(i, i+1)
 			if n := len(open); n > 0 && open[n-1] == '(' {
 				open = open[:n-1]
+				stmt = stmtOpen[len(stmtOpen)-1]
+				stmtOpen = stmtOpen[:len(stmtOpen)-1]
 			}
 		case c == '|' || c == '&':
 			if i > from && (command[i-1] == '>' || command[i-1] == '<') || i+1 < to && command[i+1] == '>' {
@@ -705,13 +838,22 @@ func capFloorStripKeywords(text string) string {
 // syntax depth or node bound, the wrapper bound or the fact bound. The facts
 // of such a call hold no, or only some of the, paths and commands of the
 // text, so no reader proved what the call does (rel-1-0-10:GAP-0688,
-// GAP-0689). The input bound is not here: it is the size of one script the
-// shell reading budget grades by target (the owner rule of GAP-0677, a benign
-// 10 KB `bash -c` script is allowed), and a call past the byte bound is
-// truncated by s7/posix-cap (GAP-0382). Other tools keep their own bounds.
+// GAP-0689). The input bound is not here: posixParseTruncation truncates a
+// call that stopped at a byte bound or at the inline program bound
+// (GAP-0382, GAP-0689), with the data-word and padding twins it reads
+// instead. Other tools keep their own bounds.
 func capFloorAnalysisCaps(facts actionfacts.Facts) bounded.CapSet {
 	var set bounded.CapSet
-	if facts.Parse.Status != actionfacts.StatusLimitExceeded || !trustedBashExecutionTool(facts.Tool) {
+	if !trustedBashExecutionTool(facts.Tool) {
+		return set
+	}
+	if prefixWrapperChainPastBound(facts) {
+		// A chain of plain prefix wrappers (sudo -n sudo -n ... rm) longer
+		// than the readers unwrap: the program it runs is not read, whatever
+		// the status of the analysis (rel-1-0-10:GAP-0689).
+		set = set.Union(bounded.Of(bounded.Depth))
+	}
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 		return set
 	}
 	for _, issue := range facts.Parse.Issues {
@@ -725,6 +867,39 @@ func capFloorAnalysisCaps(facts actionfacts.Facts) bounded.CapSet {
 		}
 	}
 	return set
+}
+
+// prefixWrapperChainPastBound reports a command of the facts whose chain of
+// plain prefix wrappers (sudo, env, command, nohup, ...) is longer than the
+// action analysis unwraps (actionfacts.MaxWrapperDepth). A dynamic word
+// after such a chain (a ~ or $HOME operand) stops the analysis at the first
+// wrapper as a partial parse, with no wrapper limit, so the program the
+// chain runs was never read; the readers that unwrap further still prove a
+// block of their own (rel-1-0-10:GAP-0689).
+//
+// A chain the inline hand-off reads to its interpreter child
+// (actionfacts.InlineCodeHandoff, up to actionfacts.InlineChainWrappers
+// wrappers) is read: the hand-off judges the child's code and reports its own
+// cap depth past its bound, so the floor does not stand in for it (the
+// tamper-min lane of rel-1-0-10:GAP-0827 / GAP-0663).
+func prefixWrapperChainPastBound(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if len(command.Argv) <= actionfacts.MaxWrapperDepth || command.Dialect != actionfacts.DialectPOSIX {
+			continue
+		}
+		if handoff := actionfacts.InlineCodeHandoff(command.Argv); !handoff.Caps.Any() &&
+			(handoff.From >= 0 || handoff.ProvenReads) {
+			continue
+		}
+		static := make([]bool, len(command.Argv))
+		for i := range static {
+			static[i] = len(command.Arguments) != len(command.Argv) || !command.Arguments[i].Expands
+		}
+		if run, wrapped := actionfacts.StaticPrefixWrapperChild(command.Argv, static); wrapped && run.Length > actionfacts.MaxWrapperDepth {
+			return true
+		}
+	}
+	return false
 }
 
 // capFloorMayNameProtected reports a call whose command text may name a

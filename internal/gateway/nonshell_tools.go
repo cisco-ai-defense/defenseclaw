@@ -65,6 +65,9 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 		return findings
 	}
 	mapping, err := toolshape.Map(request.Input.Tool, request.Input.Args, mcpServer)
+	if err == nil && (mapping.PageURL != "" || mapping.PageLeaves) {
+		notePageNavigation(request, mapping)
+	}
 	if err != nil || (len(mapping.Effects) == 0 && !mapping.Truncated.Any()) {
 		return findings
 	}
@@ -160,9 +163,22 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 					add(mcpSQLCredentialRuleID, "SQL sets a credential column", false)
 				}
 			}
-		case toolshape.KindExec:
+		case toolshape.KindExec, toolshape.KindPageScript:
 			if toolshape.DecodeExec(e.Code) {
 				add(mcpCodeDecodeExecRuleID, "decoded text is run", false)
+			}
+			if e.Kind == toolshape.KindPageScript {
+				// A script bound (bytes, tokens, sends, definitions, depth) is a
+				// bound of this call: judged unknown at least, never clean.
+				// 1.0.10 ships the check as an alert in every pack: a proven flow
+				// (a literal host that is not the page host, the page known) is not
+				// promoted to a block in strict or managed until a corpus that
+				// navigates before a script measures it (GAP-0560).
+				proven, uncertain, host, caps := pageScriptEgress(request, mapping, e.Code)
+				trunc.Merge(caps)
+				if proven || uncertain {
+					add(pageScriptSessionEgressRuleID, pageScriptNote(proven, host), true)
+				}
 			}
 		case toolshape.KindSetting:
 			add(mcpSettingDowngradeID, e.Setting, false)
@@ -297,6 +313,33 @@ func nonShellPathTwin(ctx context.Context, request trustedActionRequest, e tools
 
 // nonShellContentOf is the text a native file tool call writes, read the way
 // the MCP lane reads it (nested values and edit lists included).
+// applyPatchFileTexts is the text an apply_patch call writes: per file the
+// envelope adds or updates (by the path it names), the lines it adds, and
+// all of them joined. Read as a write tool's content, the envelope named no
+// content, so a rule that reads what is written (a system schedule line,
+// CMD-PERSIST-SYSTEM-SCHEDULE) never matched a Codex or OpenCode patch that
+// Claude Code's Write of the same file raises (rel-1-0-10:GAP-0780).
+func applyPatchFileTexts(raw json.RawMessage) (byPath map[string]string, all string) {
+	parsed, _ := decodeCodeGuardArgsObject(raw)
+	if parsed == nil {
+		return nil, ""
+	}
+	text, _ := exactCodeGuardStringField(parsed, codeGuardBestEffortObject(parsed),
+		"command", "cmd", "patch", "patchText", "patch_text", "input")
+	files, _ := codeGuardPatchFiles(text)
+	byPath = make(map[string]string, len(files))
+	parts := make([]string, 0, len(files))
+	for _, file := range files {
+		if prior, ok := byPath[file.path]; ok {
+			byPath[file.path] = prior + "\n" + file.content
+		} else {
+			byPath[file.path] = file.content
+		}
+		parts = append(parts, file.content)
+	}
+	return byPath, strings.Join(parts, "\n")
+}
+
 func nonShellContentOf(raw json.RawMessage) string {
 	m, err := toolshape.Map("write", raw, "")
 	if err != nil {
@@ -319,11 +362,15 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	// tool and the MCP twin of it alike (an MCP call is never judged harder).
 	command, isShell := trustedBashCommandInput(request.Input)
 	text := command
+	var patchTexts map[string]string
 	if !isShell {
 		if !actionfacts.PathTool(request.Input.Tool) {
 			return findings
 		}
 		text = nonShellContentOf(request.Input.Args)
+		if codeGuardPatchTool(request.Input.Tool) {
+			patchTexts, text = applyPatchFileTexts(request.Input.Args)
+		}
 		if !toolshape.ShellCandidate(string(request.Input.Args)) {
 			return findings
 		}
@@ -360,9 +407,43 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	}
 	for _, p := range facts.Paths {
 		path := firstNonEmpty(p.Resolved, p.Normalized, p.Value)
+		text := text
+		if fileText, ok := patchTexts[p.Value]; ok {
+			text = fileText
+		}
 		for _, id := range toolshape.PathRules(string(p.Access), path, text) {
 			add(id, "")
 		}
+		// The developer-token files of an account's home (the credentials
+		// table's class of PATH-GIT-CREDS) are read by the native file tools as
+		// the shell and MCP lanes read them (rel-1-0-10:GAP-0816). The class
+		// comes from the one table, so each branch's table decides which names
+		// are in it; the home is found by position.
+		if p.Access == actionfacts.PathAccessRead && developerTokenFileOfAccountHome(path) {
+			add("PATH-GIT-CREDS", "")
+		}
 	}
 	return out
+}
+
+// developerTokenFileOfAccountHome reports an absolute path that is a file of
+// the developer-token class directly in an account home, found by its position
+// (isRecognizedHomeRoot: /root, /home/<acct>, /Users/<acct>, <drive>:/Users/<acct>)
+// and never by the name of a folder deeper in the path: a project folder that
+// is only called home, homes or users, and a fixture tree, hold no account home
+// (rel-1-0-10:GAP-0836).
+func developerTokenFileOfAccountHome(value string) bool {
+	value = canonicalSemanticPath(value)
+	if !isAbsoluteSemanticPath(value) || integrityPathHasFixtureSegment(value) {
+		return false
+	}
+	for dir := path.Dir(value); dir != "/" && dir != "." && dir != ""; dir = path.Dir(dir) {
+		if !isRecognizedHomeRoot(dir) {
+			continue
+		}
+		relative := strings.TrimPrefix(value, dir+"/")
+		shape, ok := actionfacts.MatchCredentialFileShape(relative)
+		return ok && shape.Class == actionfacts.CredentialFileDeveloperToken && shape.Relative == relative
+	}
+	return false
 }

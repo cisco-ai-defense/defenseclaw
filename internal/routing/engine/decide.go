@@ -34,15 +34,30 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		return Decision{Outcome: OutcomePassthrough, FailureCode: FailureNone}
 	}
 	pol := e.policyFor(req)
-	signals := e.matcher.Match(req.Text)
+	// The classifier reads routing.context (older turns, tool names); the
+	// routing.sensitive floor and check keep reading the newest turn only,
+	// as documented (merge of s1b/route-context and s1c/pii-local).
+	text, signals, contextWarning := e.classifierText(req)
+	if contextWarning != "" {
+		d.Warnings = append(d.Warnings, contextWarning)
+	}
+	newest := signals
+	if text != req.Text {
+		newest = e.matcher.Match(req.Text)
+	}
+	sens := e.beginSensitive(ctx, req, newest)
+	if sens != nil && sens.cancel != nil {
+		defer sens.cancel()
+	}
 	categories := make([]string, 0, len(pol.Categories))
 	for c := range pol.Categories {
 		categories = append(categories, c)
 	}
 	slices.Sort(categories)
 	in := ClassifyInput{
-		Text: req.Text, APIFamily: req.APIFamily, Connector: req.Connector, RequestedModel: req.RequestedModel,
+		Text: text, APIFamily: req.APIFamily, Connector: req.Connector, RequestedModel: req.RequestedModel,
 		HasTools: req.HasTools, ToolTurn: req.ToolTurn, HasImages: req.HasImages, LongContext: req.LongContext, Signals: signals,
+		ToolLoop:   req.ToolLoop && e.context.ToolNames,
 		Categories: categories,
 	}
 
@@ -68,7 +83,7 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		d.Warnings = append(d.Warnings, verdict.Warnings...)
 		d.RuleIDs, d.ChargeKeys = verdict.RuleIDs, verdict.ChargeKeys
 		if verdict.Deny != nil && e.managed {
-			if e.SensitiveConfigured() && e.sensitiveFloor(req, signals) != "" {
+			if e.SensitiveConfigured() && e.sensitiveFloor(req, newest) != "" {
 				// The refused turn may stay in the agent history: keep the
 				// conversation narrowed (GAP-0576 review r3).
 				e.markSensitiveSticky(req)
@@ -78,21 +93,9 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		}
 	}
 
-	// 3. Sensitive narrowing: guardrail severity or a sensitive signal
-	// (sensitive.go). A narrowed request has only local exits.
-	if s := e.sensitive; s != nil && len(s.Aliases) > 0 {
-		if src := e.sensitiveFloor(req, signals); src != "" || e.sensitiveSticky(req) {
-			if src == "" {
-				src = SensitiveSourceSticky
-			}
-			// Every narrowed turn renews the mark: the history the next turn
-			// carries still holds the sensitive turn.
-			e.markSensitiveSticky(req)
-			pol.AllowedAliases = intersectAliases(pol.AllowedAliases, s.Aliases)
-			d.FilteredBy = "sensitive"
-			d.Sensitive = SensitiveOutcome{Source: src, Reason: "positive"}
-		}
-	}
+	// 3. Sensitive narrowing: the guardrail or signal floor, else the
+	// decision-model check (sensitive.go).
+	e.applySensitive(&pol, &d, sens, req)
 	d.PolicyDigest = pol.Digest()
 
 	// 4. First eligible alias: Force, user override, classifier, defaults.
@@ -116,6 +119,16 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	}
 	narrowed := d.SensitiveNarrowed()
 	req.Narrowed = narrowed
+	if d.Sensitive.Soft {
+		// Prefer the local models (after admin Force); the usual order
+		// follows, so a request no local model can take is never refused.
+		soft := make([]cand, 0, len(e.sensitive.Aliases))
+		for _, a := range e.sensitive.Aliases {
+			soft = append(soft, cand{a, SourceSensitive})
+		}
+		n := len(verdict.Force)
+		order = append(order[:n:n], append(soft, order[n:]...)...)
+	}
 	if narrowed {
 		// A sensitive request tries the local models even when the
 		// classifier and the defaults name only cloud aliases, and even

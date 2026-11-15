@@ -29,6 +29,7 @@ policy metadata for callers to reject unattended or experimental changes.
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 import time
 from collections.abc import Iterable, Mapping
@@ -433,8 +434,50 @@ def _probe_agent_version(name: str, path: str, data_dir: str) -> tuple[str, str]
     spec = agent_discovery._SPECS.get(name)
     version_args = spec.version_args if spec is not None else ("--version",)
     found, error = agent_discovery._version_for_agent_binary(name, path, version_args, data_dir=data_dir or None)
+    if error == agent_discovery.UNTRUSTED_PREFIX_ERROR and _setup_admits_for_probe(name, path, data_dir):
+        found, error = agent_discovery._version_for_agent_binary(
+            name, path, version_args, require_trusted_binary_paths=False, data_dir=data_dir or None
+        )
     _probe_answers[key] = (time.monotonic(), found, error)
     return found, error
+
+
+def _setup_admits_for_probe(name: str, path: str, data_dir: str) -> bool:
+    """Whether Doctor may read the version of *path* the way setup does (GAP-0164).
+
+    The passive probe runs only executables in a system-owned install tree,
+    so it refuses every agent this account installed itself (``~/.local/bin``,
+    the npm global prefix), and Doctor kept the version recorded before an
+    in-place update. Setup admits those with its own rule
+    (``setup_binary_trust_problem``: a built-in or protected-config root, no
+    link, no file or folder another account can write) and probes them; Doctor
+    already starts the Codex executable setup admitted. Doctor reads a version
+    under that same rule, and only from an executable owned by this account or
+    root, so an administrator running Doctor never runs another account's
+    binary. A Claude Desktop engine (setup verifies its signature first) and
+    the Windows OpenCode image (setup admits only the reviewed one) keep the
+    passive probe.
+    """
+
+    from defenseclaw.agent_selection import setup_binary_trust_problem
+    from defenseclaw.inventory import agent_discovery
+
+    if not path or agent_discovery._claude_desktop_engine(path) is not None:
+        return False
+    if os.name == "nt" and name == "opencode":
+        return False
+    try:
+        if setup_binary_trust_problem(path, data_dir, connector=name):
+            return False
+        if os.name != "nt":
+            resolved = os.path.realpath(path)
+            owners = {0, os.geteuid()}
+            for item in (resolved, os.path.dirname(resolved)):
+                if os.stat(item).st_uid not in owners:
+                    return False
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _launch_candidates(name: str, data_dir: str) -> tuple[str, ...]:
@@ -639,9 +682,10 @@ def recheck_installed_versions(
     The discovery cache lives a day and the gateway hook contract lock
     keeps the version setup selected the contract from, so after the agent
     updated both still name the old version. Doctor judged compatibility on
-    it and printed it as ``installed``. This runs the same bounded,
-    trusted-path-only ``--version`` probe discovery uses (never a scan, a
-    write or a terminal) on the executable the evidence names, for every
+    it and printed it as ``installed``. This runs the same bounded
+    ``--version`` probe discovery uses (never a scan, a write or a terminal),
+    at a trusted install path or one setup admits (:func:`_setup_admits_for_probe`),
+    on the executable the evidence names, for every
     connector row that states a version (hook, proxy and Kiro forms alike),
     and returns the evidence with the version found now. A probe that cannot
     run leaves the recorded version in place and says why in ``unchecked``.

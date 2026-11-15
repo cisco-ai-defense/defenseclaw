@@ -1898,8 +1898,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0633", page: "reference/env-vars.mdx", has: ["exported in a shell is dropped when the", "The writers keep writing as usual"], lacks: ["where the profile is standalone, the Linux default"] },
   { gap: "GAP-0669", page: "stories/cursor-secret-exfil.mdx", has: ["defenseclaw setup cursor --yes --mode action --rule-pack default --no-human-approval --restart", "`--yes` re-applies hooks when Cursor is already configured and skips the optional LLM judge prompt", "✓ cursor mode=action"] },
   { gap: "GAP-0520", page: "guardrail/index.mdx", has: ["**Select action connector(s) for LLM judge.**"] },
-  { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["19 DefenseClaw dashboards (20 with the Fleet assets)"] },
-  { gap: "GAP-0388", page: "observability/grafana-dashboards.mdx", has: ["DefenseClaw provisions 19 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
+  { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["20 DefenseClaw dashboards (21 with the Fleet assets)"] },
+  { gap: "GAP-0388", page: "observability/grafana-dashboards.mdx", has: ["DefenseClaw provisions 20 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
   { gap: "GAP-1716", page: "get-started/windows/install-lifecycle.mdx", section: "Upgrade", has: ["exit code 0 means the installer started, not that it finished", "-Rollback -Yes`, which waits and sets the exit code"] },
   { gap: "GAP-1716", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["**Windows upgrade and rollback return before the installer finishes:**"] },
   { gap: "GAP-0922, GAP-0923", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["macOS has no setting that stops a user's sandbox profile", "DefenseClaw does not see or audit its tool calls"], lacks: ["unshare -Urm"] },
@@ -2416,11 +2416,13 @@ describe('Setup properties and the Windows unknown-flag exit match the code (GAP
     const svc = source('internal/cli/windows_enterprise_service.go');
     assert.ok(svc.includes('cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {\n\t\treturn lifecycleArgumentError(c, action, opts.jsonOutput, flagError(c, err))'), 'Windows lifecycle verbs no longer route flag errors through lifecycleArgumentError: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2493)');
     const unix = source('internal/cli/enterprise_unix.go');
-    assert.ok(unix.includes('return withExitCode(err, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))') && unix.includes('return invalidLifecycleArguments(&delegatedUsageError{msg: usageMessage(c, err), err: err})') && unix.includes('result.AddError("invalid_arguments", message)'), 'lifecycle flag errors no longer exit with the invalid-arguments code or print invalid_arguments with --json (GAP-2493)');
+    assert.ok(unix.includes('return cliusage.WithExitCode(err, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))') && unix.includes('return invalidLifecycleArguments(&cliusage.DelegatedUsageError{Msg: cliusage.UsageMessage(c, err), Err: err})') && unix.includes('result.AddError("invalid_arguments", message)'), 'lifecycle flag errors no longer exit with the invalid-arguments code or print invalid_arguments with --json (GAP-2493)');
   });
   it('keeps the enterprise tree out of the root usage-error mapping', () => {
     const exit = source('internal/cli/exit_code.go');
-    assert.ok(exit.includes('var usageFlagErrorExempt = []string{"enterprise", "hook", "notify", "watchdog"}') && exit.includes('\treturn 1\n}'), 'unknown-flag exit for enterprise windows changed: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2171)');
+    // The coded-exit helpers moved to internal/cliusage with the slim hook (W1); the default failure result is still 1.
+    const usage = source('internal/cliusage/cliusage.go');
+    assert.ok(exit.includes('var usageFlagErrorExempt = []string{"enterprise", "hook", "notify", "watchdog"}') && usage.includes('func ExitCode(err error) int {') && usage.includes('\treturn 1\n}'), 'unknown-flag exit for enterprise windows changed: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2171)');
   });
 });
 
