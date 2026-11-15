@@ -292,25 +292,16 @@ func streamTailServeReq(t *testing.T, proxy *GuardrailProxy, req *http.Request) 
 	return rec.Body.String(), log
 }
 
-// streamTailReceivedText is the reply text a client reads from out.
+// streamTailReceivedText is the reply text a client reads from out. On an
+// eventstream the block message the proxy ends a refused stream with is
+// not reply text (streamTailUpstreamEvents).
 func streamTailReceivedText(f streamTailFormat, out string) string {
 	var sb strings.Builder
 	if f.ctype == streamTailEventStream {
-		// The frames carry Anthropic events; a trailing partial frame is
-		// no event to the client.
-		dec, r := eventstream.NewDecoder(), strings.NewReader(out)
-		for {
-			msg, err := dec.Decode(r, nil)
-			if err != nil {
-				return sb.String()
-			}
-			var chunk struct {
-				Bytes []byte `json:"bytes"`
-			}
-			if json.Unmarshal(msg.Payload, &chunk) == nil {
-				sb.WriteString(streamTailEventText("anthropic", string(chunk.Bytes)))
-			}
+		for _, ev := range streamTailUpstreamEvents(out) {
+			sb.WriteString(streamTailEventText("anthropic", ev))
 		}
+		return sb.String()
 	}
 	for _, line := range strings.Split(out, "\n") {
 		if d, ok := strings.CutPrefix(strings.TrimSpace(line), "data: "); ok && d != "[DONE]" {
@@ -318,6 +309,75 @@ func streamTailReceivedText(f streamTailFormat, out string) string {
 		}
 	}
 	return sb.String()
+}
+
+// streamTailUpstreamEvents is the Anthropic events of the eventstream frames
+// in out, without the block tail a refused Bedrock stream ends with
+// (bedrockEventStreamText.writeBlockTail): a text block opened after every
+// block of the reply that carries the DefenseClaw block message, then
+// message_delta and message_stop. A trailing
+// partial frame is no event to the client.
+func streamTailUpstreamEvents(out string) []string {
+	var events []string
+	dec, r := eventstream.NewDecoder(), strings.NewReader(out)
+	for {
+		msg, err := dec.Decode(r, nil)
+		if err != nil {
+			break
+		}
+		var chunk struct {
+			Bytes []byte `json:"bytes"`
+		}
+		if json.Unmarshal(msg.Payload, &chunk) == nil {
+			events = append(events, string(chunk.Bytes))
+		}
+	}
+	type ev struct {
+		Type         string `json:"type"`
+		Index        *int   `json:"index"`
+		ContentBlock struct {
+			Type string `json:"type"`
+		} `json:"content_block"`
+	}
+	read := func(s string) ev {
+		var e ev
+		_ = json.Unmarshal([]byte(s), &e)
+		return e
+	}
+	n := len(events)
+	if n < 5 {
+		return events
+	}
+	start := read(events[n-5])
+	if start.Type != "content_block_start" || start.ContentBlock.Type != "text" || start.Index == nil ||
+		!strings.HasPrefix(streamTailEventText("anthropic", events[n-4]), "[DefenseClaw] ") ||
+		read(events[n-2]).Type != "message_delta" || read(events[n-1]).Type != "message_stop" {
+		return events
+	}
+	for _, e := range events[:n-5] {
+		if i := read(e).Index; i != nil && *i >= *start.Index {
+			return events
+		}
+	}
+	return events[:n-5]
+}
+
+// streamTailSentTerminal reports that the upstream's terminal event reached
+// the client: on an eventstream a message_stop event that is not part of the
+// proxy's block tail.
+func streamTailSentTerminal(f streamTailFormat, out string) bool {
+	if f.ctype != streamTailEventStream {
+		return strings.Contains(out, f.terminal)
+	}
+	for _, e := range streamTailUpstreamEvents(out) {
+		var ev struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(e), &ev) == nil && ev.Type == "message_stop" {
+			return true
+		}
+	}
+	return false
 }
 
 // streamTailEventText is the text of one event of the test formats (read
@@ -442,7 +502,7 @@ func TestStreamTailFinalCheckWithholdsTail(t *testing.T) {
 				if strings.Contains(streamTailReceivedText(f, out), streamTailMarker) || strings.Contains(out, f.delta(last)) {
 					t.Fatalf("the tail marker reached the client")
 				}
-				if strings.Contains(out, f.terminal) {
+				if streamTailSentTerminal(f, out) {
 					t.Fatalf("a blocked stream ended with its terminal event")
 				}
 				if !strings.Contains(out, f.delta(streamTailDeltas(2400, 24)[0])) {
@@ -509,7 +569,7 @@ func TestStreamTailSplitAcrossLastScan(t *testing.T) {
 			if !strings.Contains(out, f.delta(streamTailMarker[:half])) {
 				t.Fatalf("the last scan did not end inside the marker (setup)")
 			}
-			if strings.Contains(out, f.delta(streamTailMarker[half:])) || strings.Contains(out, f.terminal) {
+			if strings.Contains(out, f.delta(streamTailMarker[half:])) || streamTailSentTerminal(f, out) {
 				t.Fatalf("the second half of a split marker or the terminal event was sent")
 			}
 		})
@@ -763,7 +823,7 @@ func TestStreamTailBigLine(t *testing.T) {
 					proxy := streamTailProxy(t, f.provider, insp, "action")
 					out, log := streamTailServeReq(t, proxy, streamTailWithTier(streamTailRequest(t, f, "", up.URL), tier.pack, tier.managed))
 					if tier.blocks {
-						if strings.Contains(out, f.delta(over)) || strings.Contains(out, f.terminal) {
+						if strings.Contains(out, f.delta(over)) || streamTailSentTerminal(f, out) {
 							t.Fatalf("the %s tier sent a line over the text bound: %d bytes", tier.name, len(out))
 						}
 						if !strings.Contains(log, "PASSTHROUGH-STREAM-BLOCK") {
@@ -818,7 +878,7 @@ func TestStreamTailPartialLineBound(t *testing.T) {
 			}
 			out, log := streamTailServeReq(t, proxy, req)
 			if strict {
-				if strings.Contains(out, long[:streamHoldMaxLine]) || strings.Contains(out, f.terminal) {
+				if strings.Contains(out, long[:streamHoldMaxLine]) || streamTailSentTerminal(f, out) {
 					t.Fatalf("strict pack sent a truncated line: %d bytes", len(out))
 				}
 				if !strings.Contains(log, "PASSTHROUGH-STREAM-BLOCK") {
