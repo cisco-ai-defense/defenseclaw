@@ -5795,7 +5795,8 @@ func injectNotificationForPassthrough(raw json.RawMessage, content, path string)
 // toolCallAction is one tool call of a model reply as the trusted action the
 // hook routes judge for the same tool meaning (inspectAgentHookToolCall): the
 // connector's tool and argument projections, the working directory the call
-// names, the caller's home and the strict and managed tiers. The proxy judged the bare name and arguments, so a ~ target
+// names, the caller's home, the strict and managed tiers and the Windows
+// shell dialect. The proxy judged the bare name and arguments, so a ~ target
 // named no home file and an unverifiable argument was never graded strict,
 // and every hook connector blocked what the proxy allowed
 // (rel-1-0-10:GAP-0782). A model reply names no session directory: a
@@ -5823,6 +5824,7 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args stri
 			)
 		},
 	}
+	withWindowsShellDialect(&action, windowsHookHost() && !p.toolCallSecureClient(ctx))
 	return action
 }
 
@@ -5842,7 +5844,7 @@ func (p *GuardrailProxy) toolCallStrictTier(ctx context.Context, cfg *config.Con
 }
 
 // toolCallSecureClient reports a Secure Client install, which keeps its own
-// tool policy.
+// tool policy and the POSIX shell reading.
 func (p *GuardrailProxy) toolCallSecureClient(ctx context.Context) bool {
 	if p.secureClient.Load() {
 		return true

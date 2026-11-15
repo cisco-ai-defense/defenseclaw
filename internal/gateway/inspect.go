@@ -897,6 +897,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		EnforcementCapable: true,
 		sendDestination:    req.sendDestination,
 	}
+	dialectHint := a.agentHookWindowsDialectHint(ctx)
 	if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, req.Args); ok {
 		// OpenClaw's exec tool sends execution controls (yieldMs, timeout,
 		// workdir, ...) next to the command. Left in the arguments they made
@@ -916,10 +917,17 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 				if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, raw); ok {
 					candidate.Args, candidate.CWD = args, inspectToolTrustedShellCWD(dir)
 				}
+				if dialectHint {
+					candidate.DialectHint = agentHookWindowsShellDialect(candidate)
+				}
 				return candidate
 			},
 		}
 	}
+	// A shell call is read in the Windows hook's dialect on a Windows host,
+	// as on the hook routes (rel-1-0-10:GAP-0784: OpenClaw exec read
+	// PowerShell text as POSIX).
+	withWindowsShellDialect(&action, dialectHint)
 	ctx = a.withInstructionStartup(ctx, req.Connector, req.SessionID,
 		a.applyInstructionInspectStartup(ctx, req.Connector, req.SessionID, action.Input.CWD))
 	if trustedShimArgvTool(req.Tool) {
