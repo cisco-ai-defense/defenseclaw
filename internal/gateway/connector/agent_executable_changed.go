@@ -33,7 +33,10 @@ var ErrAgentExecutableChanged = errors.New("the agent executable changed since s
 // agentExecutableChangedError is the refusal of one connector. Its text names
 // the setup step that admits the new executable. It unwraps to
 // ErrAgentExecutableChanged and also matches ErrExecutableAdmission: every
-// check that raises it runs before Setup changes anything.
+// check that raises it runs before Setup changes anything. The same evidence
+// check also runs when Setup publishes the hook contract lock, after Setup
+// wrote the agent files; that one is reported through
+// contractPublicationEvidenceError, so the start rolls the connector back.
 type agentExecutableChangedError struct{ text string }
 
 func (e *agentExecutableChangedError) Error() string { return e.text }
@@ -66,4 +69,14 @@ func AgentExecutableChangedBeforeChange(err error) bool {
 		}
 	}
 	return false
+}
+
+// contractPublicationEvidenceError reports an executable evidence mismatch
+// found while the hook contract lock is published. Setup has already written
+// the agent files by then, so the error must not read as a refusal before any
+// change (ErrAgentExecutableChanged, ErrExecutableAdmission): the start rolls
+// the connector back instead of keeping the files it wrote. The text keeps
+// the setup step the refusal names.
+func contractPublicationEvidenceError(product string, err error) error {
+	return fmt.Errorf("%s contract publication: %s", product, err.Error())
 }

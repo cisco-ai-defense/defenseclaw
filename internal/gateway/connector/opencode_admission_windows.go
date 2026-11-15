@@ -119,7 +119,7 @@ func validateOpenCodeWindowsLockPublication(dataDir string, entry HookContractLo
 		return errors.New("OpenCode contract publication does not match protected executable evidence")
 	}
 	if err := validateOpenCodeExecutableEvidence(entry.AgentExecutable, authority); err != nil {
-		return fmt.Errorf("OpenCode contract publication: %w", err)
+		return contractPublicationEvidenceError("OpenCode", err)
 	}
 	return nil
 }

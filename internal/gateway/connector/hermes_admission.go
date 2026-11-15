@@ -178,7 +178,7 @@ func validateHermesWindowsLockPublication(
 		return errors.New("Hermes contract publication does not match protected executable evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if err := validateHermesExecutableEvidence(ctx, entry.AgentExecutable, authority); err != nil {
-		return fmt.Errorf("Hermes contract publication: %w", err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+		return contractPublicationEvidenceError("Hermes", err)
 	}
 	return nil
 }

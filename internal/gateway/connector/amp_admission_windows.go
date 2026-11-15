@@ -76,7 +76,7 @@ func validateAmpWindowsLockPublication(dataDir string, entry HookContractLockEnt
 		return errors.New("Amp contract publication does not match protected executable evidence")
 	}
 	if err := validateAmpExecutableEvidence(entry.AgentExecutable, authority); err != nil {
-		return fmt.Errorf("Amp contract publication: %w", err)
+		return contractPublicationEvidenceError("Amp", err)
 	}
 	return nil
 }

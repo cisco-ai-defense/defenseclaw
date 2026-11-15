@@ -48,3 +48,23 @@ func TestAgentExecutableChangedRefusalIsScopedAndNamesTheStep(t *testing.T) {
 		}
 	}
 }
+
+// The evidence check that runs when the hook contract lock is published comes
+// after Setup wrote the agent files, so its mismatch is not scoped to "refused
+// before any change": the start must roll that connector back (T-UPGRADE
+// review F1, rel-1-0-10:GAP-0249).
+func TestContractPublicationEvidenceMismatchIsNotARefusalBeforeAnyChange(t *testing.T) {
+	for _, changed := range []error{errAmpExecutableChanged, errHermesExecutableChanged, errOpenCodeExecutableChanged} {
+		inner := fmt.Errorf("selected executable digest does not match protected evidence (%w)", changed)
+		if !errors.Is(inner, ErrExecutableAdmission) || !AgentExecutableChangedBeforeChange(inner) {
+			t.Fatalf("the admission refusal itself must stay scoped: %v", inner)
+		}
+		published := contractPublicationEvidenceError("Hermes", inner)
+		if errors.Is(published, ErrExecutableAdmission) || errors.Is(published, ErrAgentExecutableChanged) || AgentExecutableChangedBeforeChange(published) {
+			t.Fatalf("a publication mismatch reads as a refusal before any change: %v", published)
+		}
+		if !strings.Contains(published.Error(), "run: defenseclaw setup") {
+			t.Fatalf("the publication error lost the setup step: %v", published)
+		}
+	}
+}
