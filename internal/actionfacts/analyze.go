@@ -571,6 +571,22 @@ func analyzeStructuredArgv(
 		}
 		nestedDialect = DialectPOSIX
 		child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
+	case "awk", "gawk", "mawk", "nawk":
+		// An awk program behind an exact wrapper (env, sudo, ...) reaches here as
+		// argv: the shell commands it starts through system(), print | and
+		// | getline are judged as the hook running them directly, as in the
+		// shell parser (posix.go, GAP-0499). A command built at run time is
+		// answered by the gateway at the unknown tier (awkprog.DynamicReason).
+		body := AwkCall(command).Read().Body
+		if body == "" {
+			return out
+		}
+		if wrapperDepth >= maxWrapperDepth {
+			out.markLimit(IssueWrapperLimit)
+			return out
+		}
+		nestedDialect = DialectPOSIX
+		child = parsePOSIX(body, out.nextID, wrapperDepth+1)
 	case "eval":
 		if len(argv) < 2 {
 			return out
