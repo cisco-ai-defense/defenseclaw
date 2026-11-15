@@ -16,7 +16,9 @@ import "testing"
 func TestHomeDeleteSpellingsFiveTiers(t *testing.T) {
 	// The glob spellings are a block in every tier, as the plain delete (int criticalDeleteScope reads them).
 	// An empty home keeps the scan off the real folder.
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	tdetectRunRows(t, []tdetectRow{
 		{"td-del-plain", `rm -rf ~/`, "BBBBB"},
 		{"td-del-nice", `nice rm -rf ~/`, "BBBBB"},
