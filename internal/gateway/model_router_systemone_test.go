@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -97,5 +98,19 @@ func TestSystemOneLowConfidenceFallsBack(t *testing.T) {
 	out := r.RouteDetailed(context.Background(), &ModelRouterInput{Model: "m", Messages: []ChatMessage{{Role: "user", Content: "fix"}}})
 	if out.Result != SemanticRouteFallback || out.FailureCode != SemanticRouteFailureLowConfidence {
 		t.Fatalf("outcome=%+v", out)
+	}
+}
+
+// GAP-0591: an endpoint that refuses the connection is the upstream not
+// answering (upstream_status), not a configuration failure.
+func TestSystemOneUnreachableEndpointIsNotAConfigurationFailure(t *testing.T) {
+	var calls int32
+	srv := systemOneServer(t, "code", 0.9, http.StatusOK, &calls)
+	url := srv.URL
+	srv.Close() // nothing listens any more: connection refused
+	c := newSystemOneClassifier(systemOneConfig(url), "")
+	_, err := c.Classify(context.Background(), engine.ClassifyInput{Text: "x", Categories: []string{"code"}})
+	if classifierCode(err) != engine.FailureUpstreamStatus || !strings.Contains(err.Error(), "unreachable") {
+		t.Fatalf("refused connection = %v (code %q)", err, classifierCode(err))
 	}
 }

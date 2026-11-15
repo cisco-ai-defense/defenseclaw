@@ -452,8 +452,21 @@ func TestStatefulBenchmarkRequiresExactSecretEgressLineage(t *testing.T) {
 		byID[prediction.Profile+"/"+prediction.CaseID] = prediction
 	}
 	for _, profile := range []string{"default", "permissive", "strict"} {
+		// A proven read of a credentials file followed by an upload of the
+		// same resource blocks in the strict pack and alerts in default and
+		// permissive (rel-1-0-10:GAP-0595, owner and lead ruling: the proven
+		// chain is enforcement-eligible only under the strict posture).
+		// The benchmark runner has no managed profile: a managed install
+		// that runs local rules (managed_enterprise, standalone profile)
+		// judges as its pack does (default alerts, strict blocks), and a
+		// secure_client profile hands every decision to AI Defense, which
+		// this runner does not model.
+		sameAction, sameEligible := "alert", false
+		if profile == "strict" {
+			sameAction, sameEligible = "block", true
+		}
 		if got := byID[profile+"/same"]; !got.Detected || got.Severity != "CRITICAL" ||
-			got.Action != "alert" || got.EnforcementEligible || !got.Alerted ||
+			got.Action != sameAction || got.EnforcementEligible != sameEligible || !got.Alerted ||
 			got.AlertFindingCount != got.FindingCount {
 			t.Fatalf("%s same-resource proof=%+v", profile, got)
 		}

@@ -201,10 +201,14 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 					Input: input, LegacyText: string(args), Connector: connectorName,
 					EnforcementCapable: true, ResolvedWriteTargets: resolved, ProtectedHomeHook: managed,
 				})
-				verdict := buildVerdict(findings, "tool_call")
-				if got := verdict.Action == "block"; got != tc.block {
-					t.Fatalf("action %q, want block=%t (findings %v)", verdict.Action, tc.block, findingIDs(findings))
+				// A ninety-alternative chain fills the PowerShell command cap:
+				// it is TRUNCATED (rel-1-0-10:GAP-0589), and what decides here
+				// is what the reading proves beside that floor.
+				judged, _ := withoutBoundedTruncation(findings)
+				if got := buildVerdict(judged, "tool_call").Action == "block"; got != tc.block {
+					t.Fatalf("action %q, want block=%t (findings %v)", buildVerdict(judged, "tool_call").Action, tc.block, findingIDs(findings))
 				}
+				verdict := buildVerdict(findings, "tool_call")
 				if got := api.provenActiveStateMutation(t.Context(), verdict); got != tc.block {
 					t.Fatalf("observe-mode hard block=%t, want %t", got, tc.block)
 				}

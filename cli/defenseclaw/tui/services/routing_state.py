@@ -156,6 +156,8 @@ class RoutingPanelModel:
             return self.error
         if not self.loaded:
             return "Loading routing status..."
+        if self.view == VIEW_USAGE and self.usage.get("error"):
+            return str(self.usage["error"])
         if self.view == VIEW_USAGE:
             scope = "everyone" if (self.usage or {}).get("scope") == "all" else "yours"
             return f"Usage for the last {self.period} ({scope})."
@@ -171,7 +173,9 @@ class RoutingPanelModel:
 
     def empty_state(self) -> str:
         if self.view == VIEW_USAGE:
-            return "No recorded model calls yet. Usage needs observability.tokenomics turned on."
+            hint = str(self.usage.get("hint") or "") if self.usage.get("enabled") is False else ""
+            return f"No recorded model calls yet. {hint}" if hint else (
+                "No recorded model calls yet. Usage needs observability.tokenomics turned on.")
         if self.managed:
             return "Routing is set by your administrator; nothing is shared with you yet."
         return "No models yet. Press a to add one, or run defenseclaw routing setup."

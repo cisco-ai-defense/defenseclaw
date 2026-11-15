@@ -189,6 +189,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodePromptContent(req), "prompt",
 		))
+		if isToolJudgeIntentEvent(req.HookEventName) {
+			a.forgetBlockedPrompt(ctx, req.Prompt, verdict)
+		}
 		if req.HookEventName == "UserPromptExpansion" {
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
 		}
@@ -268,7 +271,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				record:                        toolChainRecorderFromContext(ctx),
 			}, command, commandTool)
 		}
-		verdict = mergeCoworkPageContentVerdict(verdict, a.inspectClaudeCodeCoworkPageContent(ctx, req))
+		verdict = mergeToolInspectVerdicts(verdict, a.inspectClaudeCodeCoworkPageContent(ctx, req))
 		// Cowork's own workspace shell and fetch are no MCP server the user
 		// configured: no MCP admission or server policy applies to them.
 		if !coworkInspected(cfg) || !claudeCodeCoworkNativeTool(req) {
@@ -902,6 +905,11 @@ func (a *APIServer) inspectClaudeCodeToolResult(
 	mode string,
 ) *ToolInspectVerdict {
 	content := claudeCodeToolOutput(req)
+	if req.HookEventName == "PostToolUse" {
+		for _, j := range a.hookSessionJudges(ctx) {
+			j.ObserveToolResult(ctx, content) // decision_model.history_tool_results only
+		}
+	}
 	if sandboxToolResultUntrusted(ctx) || req.HookEventName != "PostToolUse" || req.ToolResponse == nil ||
 		req.ToolCalls != nil || strings.TrimSpace(req.Error) != "" ||
 		strings.TrimSpace(req.ErrorDetails) != "" || strings.TrimSpace(req.ToolName) == "" {
