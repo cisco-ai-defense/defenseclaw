@@ -49,6 +49,10 @@ func TestWorkingFolderResolvesRelativeOperandsAfterACD(t *testing.T) {
 		{"before the cd", "echo x > before && cd .git", "/work/proj/before"},
 		{"absolute operand is untouched", "cd .git/hooks && echo x > /tmp/f", "/tmp/f"},
 		{"no cd", "echo x > pre-push", "/work/proj/pre-push"},
+		{"shell body inherits the cd", "cd .git/hooks && sh -c 'echo x > pre-push'", "/work/proj/.git/hooks/pre-push"},
+		{"shell body then its own cd", "cd .git && bash -c 'cd hooks && echo x > pre-push'", "/work/proj/.git/hooks/pre-push"},
+		{"shell body of an unknown folder", "cd $X && sh -c 'echo x > pre-push'", "/work/proj/pre-push"},
+		{"shell body without a cd", "sh -c 'echo x > pre-push'", "/work/proj/pre-push"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := Analyze(Input{Tool: "Bash", Command: tc.command, CWD: cwd, ActiveHome: home, DialectHint: DialectPOSIX})

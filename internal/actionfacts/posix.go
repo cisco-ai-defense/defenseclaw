@@ -1466,6 +1466,8 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			continue
 		}
 		for i := range child.commands {
+			// The body of a wrapper starts in the folder its caller is in.
+			child.commands[i].workFolder = child.commands[i].workFolder.within(command.workFolder)
 			if child.commands[i].ParentCommandID == 0 {
 				child.commands[i].ParentCommandID = command.ID
 				if posixDescriptorIsUnredirected(child.commands[i], 1) {

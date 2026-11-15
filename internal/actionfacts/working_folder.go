@@ -48,6 +48,16 @@ func (w workFolder) with(step string) workFolder {
 	return workFolder{steps: append(append([]string(nil), w.steps...), step), unknown: w.unknown}
 }
 
+// within is w read inside a nested command text (a `sh -c` body, a `su -c`
+// body, a wrapped call) that the command with folder outer runs: the body starts
+// where its caller is, so its own moves come after the caller's.
+func (w workFolder) within(outer workFolder) workFolder {
+	if len(outer.steps) == 0 && !outer.unknown {
+		return w
+	}
+	return workFolder{steps: append(append([]string(nil), outer.steps...), w.steps...), unknown: outer.unknown || w.unknown}
+}
+
 func (w workFolder) lost() workFolder { return workFolder{steps: w.steps, unknown: true} }
 
 func (w workFolder) same(other workFolder) bool {
