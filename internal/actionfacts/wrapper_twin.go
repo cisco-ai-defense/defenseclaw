@@ -759,6 +759,14 @@ func wrapperChildIndex(name string, value func(int) (string, bool), count, index
 		known = options([]string{"-0", "-r", "-t", "-p", "-x", "--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty"},
 			[]string{"-n", "-P", "-s", "-L", "-l", "-d", "-E", "-a", "--max-args", "--max-procs", "--max-chars", "--max-lines", "--delimiter", "--eof", "--arg-file"},
 			[]string{"-n", "-P", "-s", "-L", "-l", "-d", "-E", "-a", "--max-args=", "--max-procs=", "--max-chars=", "--max-lines=", "--delimiter=", "--eof=", "--arg-file="}, false)
+		// Only a deleter is read behind xargs: the names xargs adds are
+		// operands the plain call does not hold, so a writer (sed -i, tee)
+		// read as the plain call would lose its unresolved operand and be
+		// judged weaker than before.
+		if known && next < count {
+			child, static := value(next)
+			known = static && wrappedDeletePrograms[child[strings.LastIndex(child, "/")+1:]]
+		}
 	}
 	if !known || next >= count {
 		return 0, false
