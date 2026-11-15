@@ -35,10 +35,15 @@ import (
 )
 
 // Hermes ships plugins in its checkout (hermes-agent/plugins). A shipped
-// plugin whose bytes, read in the scan that decides it, match the digest
-// DefenseClaw pins for that Hermes release is vendor code the account did not
+// plugin whose bytes, read in the scan that decides it, match the digest of
+// that plugin in one of the Hermes releases DefenseClaw ships digests for
+// (hermes_vendor_plugin_digests.go: every stable release a hermes-hooks
+// contract covers, regenerated from the release tags by
+// scripts/hermes_vendor_plugin_digests.py) is vendor code the account did not
 // install, so it is reported as informational vendor content and not scanned,
-// as the digest-pinned Hermes bundled skills are not. Nothing about that
+// as the digest-pinned Hermes bundled skills are not. The digest binds the
+// whole tree of one plugin, so a match proves those bytes are the bytes that
+// plugin has in that release; a name or a place alone proves nothing. Nothing about that
 // decision is stored as trust: every scan reads the plugin again, and no
 // baseline carries a mark. The baseline written for vendor content is an
 // ordinary snapshot with no stored scan; it records which bytes were seen, and
@@ -48,9 +53,11 @@ import (
 // plugin that had such a baseline is admitted, so an edit of vendor bytes is
 // refused when HIGH. Change detection for a shipped plugin covers the folders
 // the snapshot leaves out (skippedTreeHash), so a later change anywhere the
-// scanner can read reaches a scan whatever was admitted before. The manifest
-// only grows: an unchanged plugin whose release digest was dropped would be
-// scanned again.
+// scanner can read reaches a scan whatever was admitted before. A Hermes
+// release newer than every release in the table (doctor and status name it),
+// or a main-channel checkout between releases, matches no digest: its shipped
+// plugins are scanned as any other plugin, and the ones with a vendor baseline
+// are admitted.
 
 const (
 	hermesPluginMaxEntries   = 4096
@@ -110,17 +117,15 @@ func (w *InstallWatcher) hermesShippedPlugin(evt InstallEvent) (string, bool) {
 }
 
 // hermesVendorPlugin reads the plugin of evt once and reports whether those
-// bytes match the digest pinned for it.
+// bytes match the digest of that plugin in a Hermes release DefenseClaw
+// ships digests for.
 func (w *InstallWatcher) hermesVendorPlugin(evt InstallEvent) bool {
 	name, ok := w.hermesShippedPlugin(evt)
-	if !ok || hermesPluginVendorDigests[name] == "" {
+	if !ok || len(hermesPluginVendorDigests[name]) == 0 {
 		return false
 	}
 	digest, err := hermesPluginTreeDigest(filepath.Clean(evt.Path), w.manifestLoader())
-	if err != nil || digest != hermesPluginVendorDigests[name] {
-		return false
-	}
-	return true
+	return err == nil && slices.Contains(hermesPluginVendorDigests[name], digest)
 }
 
 // rescanHermesVendorPlugin is the rescan side of hermesVendorPlugin: it
