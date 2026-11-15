@@ -882,6 +882,8 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --gateway-url URL               actor listener URL (default http://<substrate.services.actor> of "
             "--config)\n"
             "  --fail-mode MODE                interactive outage mode: open or closed\n"
+            "  --task-stall DURATION           end a --task run that makes no progress for this long (1m to 24h; "
+            "default 10m)\n"
             "  --no-mcp-static                 do not run mcp-scanner over tool descriptions\n"
             "  --mcp-analyzers LIST            mcp-scanner analyzers (default yara)\n"
             "  --keep-entrypoint               keep the base image ENTRYPOINT and CMD (tests; a real actor image "

@@ -29,11 +29,14 @@ import (
 // egress activity and low CPU, never with a pending ask, never for a --task
 // run unless its profile allows it, and never without a fresh CPU sample (no
 // sample means not idle). Without an ActivitySource nothing is idle.
+//
+// A --task actor whose task ended is suspended TaskEndGrace after the end
+// (taskEnded), so a batch larger than the pool drains through it
+// (GAP-0274). Once it reached the gateway after the end (pull, logs,
+// connect), or was woken again later, it is idle like any other actor
+// (GAP-0288).
 func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, base Event, after time.Duration) error {
 	if after <= 0 || c.o.Activity == nil || a.GetStatus().GetState() != ateapi.ActorStateRunning || st.conflict {
-		return nil
-	}
-	if reg.Task && !reg.IdleSuspendTask {
 		return nil
 	}
 	uid := a.GetMetadata().GetUid()
@@ -41,6 +44,21 @@ func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, 
 		return nil
 	}
 	now := c.o.Now()
+	if reg.Task && !reg.IdleSuspendTask {
+		src, ok := c.o.Activity.(TaskEndSource)
+		if !ok {
+			return nil
+		}
+		ended, ok := src.TaskEnded(uid)
+		if !ok {
+			return nil // the task runs
+		}
+		if ended.After(st.runningAt) {
+			if t, ok := c.o.Activity.LastActivity(uid); !ok || !t.After(ended.Add(taskEndSlack)) {
+				return c.taskEnded(ctx, a, st, reg, base, ended, now)
+			}
+		}
+	}
 	last := st.runningAt
 	if t, ok := c.o.Activity.LastActivity(uid); ok && t.After(last) {
 		last = t
@@ -62,6 +80,28 @@ func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, 
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventIdleSuspend, SeverityInfo, "suspended after "+after.String()+" without activity"
 	ev.Detail = map[string]any{"idle_for": now.Sub(last).Round(1e9).String(), "cpu_cores": cores, "task": reg.Task}
+	c.emit(ev)
+	return nil
+}
+
+// taskEndSlack is how close to the end report other activity may be (the
+// report itself is relay traffic).
+const taskEndSlack = 10 * time.Second
+
+// taskEnded suspends a --task actor TaskEndGrace after its task ended; the
+// caller checked that nothing reached the gateway since.
+func (c *Controller) taskEnded(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, base Event, ended, now time.Time) error {
+	if now.Sub(ended) < c.o.TaskEndGrace {
+		return nil
+	}
+	if _, err := c.o.Client.SuspendActor(ctx, ateapi.RefOf(a.GetMetadata())); err != nil {
+		return fmt.Errorf("%s: task-end suspend: %w", st.key, err)
+	}
+	st.lastState = ateapi.ActorStateSuspended
+	ev := base
+	ev.Type, ev.Severity = EventTaskEndSuspend, SeverityInfo
+	ev.Message = "suspended: its task ended " + now.Sub(ended).Round(time.Second).String() + " ago, so its worker is free; pull, logs and connect wake it"
+	ev.Detail = map[string]any{"task": true, "batch": reg.BatchID}
 	c.emit(ev)
 	return nil
 }

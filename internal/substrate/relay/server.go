@@ -44,7 +44,12 @@ type Options struct {
 	// Warm makes one request to the gateway so the egress path is ready
 	// before the agent gets input (E6); default kit.Transport.Warm.
 	Warm func(ctx context.Context, connector string) error
-	Now  func() time.Time
+	// Report sends a task's end to the gateway (TaskReportPath, GAP-0273,
+	// GAP-0274); default GatewayReport over the kit transport.
+	Report func(ctx context.Context, end TaskEnd) error
+	// Headless tunes the task watchdog (tests); its Warm is Warm.
+	Headless HeadlessOptions
+	Now      func() time.Time
 }
 
 // Server is the relay. NewServer has no side effect: the golden snapshot of
@@ -110,13 +115,18 @@ func (s *Server) init() error {
 			s.log.Warn("relay.signin_warning", "connector", rc.Connector)
 			s.agent.Banner = d.Message
 		}
-		if s.opts.Warm == nil {
+		if s.opts.Warm == nil || s.opts.Report == nil {
 			t, err := kit.NewTransport(s.opts.Config)
 			if err != nil {
 				s.initErr = err
 				return
 			}
-			s.opts.Warm = t.Warm
+			if s.opts.Warm == nil {
+				s.opts.Warm = t.Warm
+			}
+			if s.opts.Report == nil {
+				s.opts.Report = GatewayReport(t)
+			}
 		}
 		s.session = newID()
 		go s.watchResume()

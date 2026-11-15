@@ -81,8 +81,12 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
 			return 1
 		}
-		return RunHeadless(context.Background(), cfg, TaskRequest{Prompt: *prompt}, t.Warm,
+		end := RunHeadless(context.Background(), cfg, TaskRequest{Prompt: *prompt}, HeadlessOptions{Warm: t.Warm},
 			func(e TaskEvent) { e.TS = time.Now().UTC().Format(time.RFC3339Nano); _ = enc.Encode(e) })
+		if err := ReportTaskEnd(context.Background(), GatewayReport(t), end); err != nil {
+			fmt.Fprintln(stderr, "defenseclaw-actor-relay: task-end report:", err)
+		}
+		return end.ExitCode
 	}
 	// No process of the agent's user may trace the relay or open its
 	// descriptors, the agent's PTY master among them (GAP-0048).

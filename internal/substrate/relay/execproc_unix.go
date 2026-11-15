@@ -29,6 +29,17 @@ func killProcessGroup(cmd *exec.Cmd) error {
 
 // exitCodeOf is the exit status, or 128 plus the signal that ended the
 // command, as a shell reports it.
+// termProcessGroup asks the command's process group to stop.
+func termProcessGroup(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return nil
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+	return nil
+}
+
 func exitCodeOf(ps *os.ProcessState) int {
 	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 		return 128 + int(ws.Signal())

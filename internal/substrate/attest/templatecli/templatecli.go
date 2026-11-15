@@ -279,6 +279,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		model         = fs.String("model", "", "default model id")
 		gateway       = fs.String("gateway-url", "", "actor listener URL (default http://<substrate.services.actor> of --config, the in-cluster Service)")
 		failMode      = fs.String("fail-mode", "", "interactive outage mode: open or closed")
+		taskStall     = fs.Duration("task-stall", 0, "end a --task run that makes no progress for this long (1m to 24h; default 10m)")
 		noMCP         = fs.Bool("no-mcp-static", false, "do not run mcp-scanner over tool descriptions")
 		analyzers     = fs.String("mcp-analyzers", "yara", "mcp-scanner analyzers")
 		keepEP        = fs.Bool("keep-entrypoint", false, "keep the base image ENTRYPOINT and CMD (tests; a real actor image starts the relay)")
@@ -368,7 +369,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		*gateway = cfg.Substrate.ActorGatewayURL()
 	}
 	spec, tpl, err := kitspec.Spec(kitspec.Options{Connector: *connectorName, KitVersion: *kitVersion, GatewayURL: *gateway,
-		FailMode: *failMode, Provider: *provider, Model: *model, HookBinary: hook, RelayBinary: relay, SessionKeys: keys,
+		FailMode: *failMode, TaskStall: *taskStall, Provider: *provider, Model: *model, HookBinary: hook, RelayBinary: relay, SessionKeys: keys,
 		SessionIssuer: sessions.Issuer, Audience: sessions.Audience, VerifyURL: sessions.VerifyURL,
 		AgentBinary: agent, Arch: "amd64", Providers: providers(*connectorName, *provider)})
 	if err != nil {

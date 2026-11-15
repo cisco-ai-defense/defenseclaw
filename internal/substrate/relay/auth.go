@@ -317,9 +317,15 @@ func LoadPublicKey(path string) (crypto.PublicKey, error) {
 // route is A2's: POST /api/v1/substrate/relay/verify {"token": ...} ->
 // 200 Session (with task_digest from the registration for a --task actor),
 // any other status refuses.
+//
+// verifyBudget bounds one check, as the hook budget bounds a hook post.
+const verifyBudget = 10 * time.Second
+
 type GatewayVerifier struct {
 	URL    string
 	Client *http.Client
+	// Budget bounds one check; 0 is verifyBudget.
+	Budget time.Duration
 }
 
 // Verify implements Verifier.
@@ -329,6 +335,14 @@ func (g *GatewayVerifier) Verify(ctx context.Context, r *http.Request) (Session,
 		return Session{}, ErrNoToken
 	}
 	body, _ := json.Marshal(map[string]string{"token": tok})
+	// The check has a deadline of its own: a gateway that took the request
+	// and went away must not hold the launcher's attach (GAP-0273).
+	budget := g.Budget
+	if budget <= 0 {
+		budget = verifyBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.URL, bytes.NewReader(body))
 	if err != nil {
 		return Session{}, err

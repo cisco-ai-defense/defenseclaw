@@ -72,6 +72,12 @@ type ActivitySource interface {
 	PendingAsk(uid string) bool
 }
 
+// TaskEndSource is an ActivitySource that also knows when an actor's --task
+// run ended (its relay's report through the gateway, GAP-0274).
+type TaskEndSource interface {
+	TaskEnded(uid string) (time.Time, bool)
+}
+
 // CPUSource reports an actor's recent CPU use in cores and when it was
 // sampled. UsageCPU computes it from Substrate's per-actor usage records
 // (ate.actor.usage_sampled); controllerfake.Activity is the test fake.
@@ -197,6 +203,7 @@ const (
 	EventProfileRefused     = "sandbox.profile_refused"
 	EventFork               = "sandbox.fork"
 	EventIdleSuspend        = "sandbox.idle_suspend"
+	EventTaskEndSuspend     = "sandbox.task_end_suspend"
 	EventWarning            = "sandbox.warning"
 )
 

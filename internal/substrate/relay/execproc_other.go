@@ -21,6 +21,9 @@ func killProcessGroup(cmd *exec.Cmd) error {
 	return cmd.Process.Kill()
 }
 
+// termProcessGroup stops the command: there is no TERM here.
+func termProcessGroup(cmd *exec.Cmd) error { return killProcessGroup(cmd) }
+
 func exitCodeOf(ps *os.ProcessState) int {
 	if c := ps.ExitCode(); c >= 0 {
 		return c

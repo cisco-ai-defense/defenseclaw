@@ -435,12 +435,12 @@ func CheckRouterClients(o Observed) Check {
 
 // actorRoutePrefixes and actorRouteExact are the only routes the actor
 // listener may serve (PLAN 6.1): hooks, notify and inspect, the model proxy,
-// OTLP, and the relay's session check.
+// OTLP, and the relay's session check and task-end report.
 var actorRoutePrefixes = []string{
 	"/api/v1/substrate/hook/", "/api/v1/substrate/notify/", "/api/v1/substrate/inspect/", "/llm/",
 }
 
-var actorRouteExact = []string{"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify"}
+var actorRouteExact = []string{"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify", "/api/v1/substrate/relay/task"}
 
 // ActorListenerProbes are the paths verify asks the actor listener for,
 // without an actor token: one per actor route (they answer 401), and one
@@ -450,7 +450,7 @@ var actorRouteExact = []string{"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1
 // proxy, which has no admin route, so it answers 401 there by design.
 var ActorListenerProbes = []string{
 	"/api/v1/substrate/hook/claudecode", "/api/v1/substrate/notify/codex", "/api/v1/substrate/inspect/tool",
-	"/llm/bedrock", "/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify",
+	"/llm/bedrock", "/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify", "/api/v1/substrate/relay/task",
 	"/", "/health", "/status", "/api/v1/substrate/info", "/api/v1/substrate/actors", "/api/v1/substrate/actors/a/b",
 	"/api/v1/substrate/actors/a/b/attach", "/api/v1/substrate/session-cert", "/api/v1/substrate/batches",
 	"/api/v1/substrate/usage", "/api/v1/substrate/doctor", "/api/v1/substrate/asks", "/api/v1/substrate/decisions",

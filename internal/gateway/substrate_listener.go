@@ -86,7 +86,9 @@ const (
 	substrateNotifyPrefix  = "/api/v1/substrate/notify/"
 	substrateInspectPrefix = "/api/v1/substrate/inspect/"
 	substrateRelayVerify   = "/api/v1/substrate/relay/verify"
-	substrateLLMPrefix     = "/llm/"
+	// substrateRelayTask takes a --task run's end (substrate_task.go).
+	substrateRelayTask = "/api/v1/substrate/relay/task"
+	substrateLLMPrefix = "/llm/"
 
 	substrateShutdownTimeout = 10 * time.Second
 )
@@ -225,10 +227,15 @@ const (
 	SubstrateActivityHook  = "hook"
 	SubstrateActivityModel = "model"
 	SubstrateActivityRelay = "relay"
+	// SubstrateActivityTaskEnd marks the end of an actor's --task run: the
+	// controller frees the actor's worker (GAP-0274).
+	SubstrateActivityTaskEnd = "task_end"
 )
 
 type substrateState struct {
 	cfg SubstrateConfig
+	// taskEnds bounds the task-end audit rows per actor.
+	taskEnds substrateTaskEnds
 	// refusals bounds refusal log lines: a flood of bad tokens is still
 	// refused, not logged line by line.
 	refusals *rate.Limiter
@@ -427,6 +434,8 @@ type substrateActorRoute struct {
 	native    string // the handler's own path (hook, notify, inspect)
 	llm       bool
 	relay     bool
+	// task is the relay's task-end report (relay is set too).
+	task bool
 }
 
 // classifySubstrateActorPath maps a path to its route, or false (404).
@@ -455,6 +464,8 @@ func (a *APIServer) classifySubstrateActorPath(path string) (substrateActorRoute
 		return substrateActorRoute{}, false
 	case path == substrateRelayVerify:
 		return substrateActorRoute{relay: true}, true
+	case path == substrateRelayTask:
+		return substrateActorRoute{relay: true, task: true}, true
 	case strings.HasPrefix(path, substrateLLMPrefix) && len(path) > len(substrateLLMPrefix):
 		return substrateActorRoute{llm: true}, true
 	}
@@ -718,7 +729,7 @@ func (a *APIServer) substrateActorScope(st *substrateState, next http.Handler) h
 		// The verified caller on every actor route, as for /llm: hook
 		// decisions, profiles and audit rows see the same person
 		// (substrate_identity.go).
-		if route.llm || route.class == sandboxauth.RouteHook || route.class == sandboxauth.RouteNotify || route.class == sandboxauth.RouteInspect {
+		if route.llm || route.task || route.class == sandboxauth.RouteHook || route.class == sandboxauth.RouteNotify || route.class == sandboxauth.RouteInspect {
 			ctx = a.attachSubstrateSubject(ctx, reg)
 		}
 		if route.class != "" && route.class != sandboxauth.RouteOTLP {
@@ -755,6 +766,9 @@ func (a *APIServer) serveSubstrateActorRoute(w http.ResponseWriter, r *http.Requ
 	route := substrateRouteFrom(r.Context())
 	st := a.substrateState()
 	switch {
+	case route.task:
+		a.serveSubstrateRelayTask(st, w, r)
+		return
 	case route.relay:
 		a.serveSubstrateRelayVerify(st, w, r)
 		return

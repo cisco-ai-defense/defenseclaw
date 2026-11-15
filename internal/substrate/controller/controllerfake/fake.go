@@ -58,6 +58,7 @@ func (a *Attestor) Attest(_ context.Context, t *ateapi.ActorTemplate) (controlle
 // Activity is a settable ActivitySource.
 type Activity struct {
 	mu    sync.Mutex
+	ended map[string]time.Time
 	last  map[string]time.Time
 	asks  map[string]bool
 	cpu   map[string]float64
@@ -67,6 +68,7 @@ type Activity struct {
 func (f *Activity) init() {
 	if f.last == nil {
 		f.last, f.asks, f.cpu, f.cpuAt = map[string]time.Time{}, map[string]bool{}, map[string]float64{}, map[string]time.Time{}
+		f.ended = map[string]time.Time{}
 	}
 }
 
@@ -76,6 +78,22 @@ func (f *Activity) Touch(uid string, t time.Time) {
 	f.init()
 	f.last[uid] = t
 	f.mu.Unlock()
+}
+
+// EndTask records the end of uid's --task run at t.
+func (f *Activity) EndTask(uid string, t time.Time) {
+	f.mu.Lock()
+	f.init()
+	f.ended[uid] = t
+	f.mu.Unlock()
+}
+
+// TaskEnded implements controller.TaskEndSource.
+func (f *Activity) TaskEnded(uid string) (time.Time, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.ended[uid]
+	return t, ok
 }
 
 // SetAsk sets or clears a pending ask.
