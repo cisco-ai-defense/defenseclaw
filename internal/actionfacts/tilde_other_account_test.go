@@ -19,6 +19,15 @@ func TestOtherAccountTildeResolvesToItsHome(t *testing.T) {
 		{"macOS user", "cat ~bob/.netrc", "/Users/alice", "/Users/bob/.netrc"},
 		{"active user stays with the twin", "cat ~alice/.netrc", "/home/alice", ""},
 		{"home that tells nothing", "cat ~bob/.netrc", "/var/lib/svc", ""},
+		{"Linux dirs entry ~1 is no account", "pushd /srv/a; pushd /srv/b && cat ~1/notes", "/home/alice", "/srv/a/notes"},
+		{"Linux dirs entry ~0 is no account", "pushd /srv/a && cat ~0/notes", "/home/alice", "/srv/a/notes"},
+		{"Linux dirs entry ~+1 is no account", "pushd /srv/a; pushd /srv/b && cat ~+1/notes", "/home/alice", "/srv/a/notes"},
+		{"Linux dirs entry ~-0 is no account", "pushd /srv/a && cat ~-0/notes", "/home/alice", "/home/alice/proj/notes"},
+		{"macOS dirs entry ~1 is no account", "pushd /srv/a; pushd /srv/b && cat ~1/notes", "/Users/alice", "/srv/a/notes"},
+		{"macOS dirs entry ~0 is no account", "pushd /srv/a && cat ~0/notes", "/Users/alice", "/srv/a/notes"},
+		{"macOS dirs entry ~+1 is no account", "pushd /srv/a; pushd /srv/b && cat ~+1/notes", "/Users/alice", "/srv/a/notes"},
+		{"macOS dirs entry ~-0 is no account", "pushd /srv/a && cat ~-0/notes", "/Users/alice", "/home/alice/proj/notes"},
+		{"macOS root", "cat ~root/.netrc", "/Users/alice", "/var/root/.netrc"},
 	} {
 		facts := Analyze(Input{Tool: "Bash", Command: tc.command, CWD: "/home/alice/proj", ActiveHome: tc.home, DialectHint: DialectPOSIX})
 		got := ""
