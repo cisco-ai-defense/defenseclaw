@@ -4067,13 +4067,52 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 // PowerShell reading the selection made of a call it placed in no dialect
 // (selectWindowsShellDialectReading).
 func agentHookWindowsShellDialectReading(input actionfacts.Input) (actionfacts.Dialect, *windowsHintedReading) {
-	var args struct {
-		Command string `json:"command"`
-	}
-	if json.Unmarshal(input.Args, &args) != nil {
+	command, ok := trustedShellCommandArgument(input.Args)
+	if !ok {
 		return "", nil
 	}
-	return selectWindowsShellDialectReading(input.Tool, args.Command, input)
+	return selectWindowsShellDialectReading(input.Tool, command, input)
+}
+
+// trustedShellCommandArgument is the command text of projected shell
+// arguments under any key the trusted-action parser reads as the command
+// (command, cmd, script, CommandLine, ...: conflictingToolArgumentField).
+// The dialect selection read only "command", so agy run_command
+// ({"CommandLine": ...}) was never offered the PowerShell reading on a
+// Windows host and its PowerShell text was judged as POSIX
+// (rel-1-0-10:GAP-0784). Keys that disagree name no command: the conflicting
+// keys check judges that call.
+func trustedShellCommandArgument(raw json.RawMessage) (string, bool) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil {
+		return "", false
+	}
+	command, found := "", false
+	for key, value := range object {
+		if field, _ := conflictingToolArgumentField(key); field != "command" {
+			continue
+		}
+		var text string
+		if json.Unmarshal(value, &text) != nil || (found && text != command) {
+			return "", false
+		}
+		command, found = text, true
+	}
+	return command, found
+}
+
+// withWindowsShellDialect gives a structured shell call the Windows hook's
+// dialect reading when enabled (a Windows host, outside a sandbox and Secure
+// Client): its dialect is inferred from its command, PowerShell when the
+// PowerShell reading holds, never POSIX by default. The hook routes,
+// /inspect/tool and the LLM proxy's tool-call route all use it, so the same
+// PowerShell text is read as PowerShell on every route (rel-1-0-10:GAP-0784).
+func withWindowsShellDialect(action *trustedActionRequest, enabled bool) {
+	if !enabled {
+		return
+	}
+	action.Input.DialectHint, action.windowsPowerShellReading = agentHookWindowsShellDialectReading(action.Input)
+	action.windowsShellDialect, action.windowsDialectReadings = true, true
 }
 
 // inspectAgentHookToolCall judges one structured tool call as the trusted
@@ -4157,35 +4196,30 @@ func (a *APIServer) inspectAgentHookToolCall(
 		CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 	}
 	dialectHint := a.agentHookWindowsDialectHint(ctx)
-	var windowsPowerShellReading *windowsHintedReading
-	if dialectHint {
-		actionInput.DialectHint, windowsPowerShellReading = agentHookWindowsShellDialectReading(actionInput)
-	}
 	var conflictSource *conflictingToolArgumentSource
 	if bytes.Equal(trustedArgs, shellProjectedArgs) {
 		// The conflicting-keys check reads the arguments as the call
 		// carried them and projects each candidate as above (GAP-0678).
 		conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
 	}
-	return a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-		Input:                    actionInput,
-		LegacyText:               string(req.ToolArgs),
-		conflictSource:           conflictSource,
-		Connector:                req.ConnectorName,
-		CopilotSharedLocalFile:   copilotSharedLocalFileCall(ctx, req),
-		EnforcementCapable:       enforcementCapable,
-		StrictPolicy:             a.strictPolicyTierForHook(ctx, req.ConnectorName),
-		ManagedInstall:           a.managedInstallForHook(ctx),
-		ManagedHookOverflowHold:  managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
-		ResolvedWriteTargets:     resolvedWritesFromContext(ctx),
-		patchTarget:              hermesV4APatch,
-		strictPatchLinks:         hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
-		SandboxGuestCWD:          sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
-		windowsShellDialect:      dialectHint,
-		windowsDialectReadings:   dialectHint,
-		windowsPowerShellReading: windowsPowerShellReading,
-		record:                   toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
-	}, command, commandTool, hermesWriteViews)
+	action := trustedActionRequest{
+		Input:                   actionInput,
+		LegacyText:              string(req.ToolArgs),
+		conflictSource:          conflictSource,
+		Connector:               req.ConnectorName,
+		CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
+		EnforcementCapable:      enforcementCapable,
+		StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		ManagedInstall:          a.managedInstallForHook(ctx),
+		ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
+		ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
+		patchTarget:             hermesV4APatch,
+		strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
+		record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
+	}
+	withWindowsShellDialect(&action, dialectHint)
+	return a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, action, command, commandTool, hermesWriteViews)
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for
