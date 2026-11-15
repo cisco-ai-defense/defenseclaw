@@ -419,14 +419,15 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					readOnly = actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) ||
 						actionReaderToUnknownSink(stmt, home)
 				}
-				// The excuse of ActionMentionsNoWriteRole reads a statement as a
-				// reader, or as a program of unknown role, only when every program
-				// it runs is a bare name or one in a system folder: ./ls, ~/bin/cat
-				// or a copied file run by its path can be anything, so the name it
-				// holds keeps the rel reading (rel-1-0-10:GAP-0715 in the excused
-				// scan).
+				// The excuse of ActionMentionsNoWriteRole reads a call as a reader,
+				// or as a program of unknown role, only when the program it runs
+				// (and a bash -c body's) is a bare name or one in a system folder:
+				// ./ls, ~/bin/cat or a copied file run by its path can be anything,
+				// so the name it holds keeps the rel reading (rel-1-0-10:GAP-0715 in
+				// the excused scan). Only the call that holds the name is asked:
+				// ./gradlew beside ls ~/.ssh does not make ls something else.
 				systemPrograms := !memo.nonWritesExcused() || stateOnly ||
-					actionReadersAreSystemPrograms(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0)
+					actionReadersAreSystemPrograms(&syntax.File{Stmts: []*syntax.Stmt{{Cmd: call}}}, home, 0)
 				if !systemPrograms {
 					readOnly = false
 				}
