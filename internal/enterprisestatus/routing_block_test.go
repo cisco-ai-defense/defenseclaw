@@ -112,26 +112,3 @@ func TestRoutingBlockIsAdditiveAndNotForwarded(t *testing.T) {
 		t.Fatalf("a result without routing grew one: %v", doc["routing"])
 	}
 }
-
-// A not-ready route-only connector names a closed cause, never the gateway
-// free text; an unknown code is dropped.
-func TestBuildRoutingNamesTheClosedCauseOfANotReadyConnector(t *testing.T) {
-	health := []byte(`{"routing":{"details":{"route_only":[{"connector":"claudecode","ready":false,"cause":"route_epoch","problem":"the published route epoch file is missing"},{"connector":"codex","ready":false,"cause":"allowed_alias_no_credential","problem":"routing.admin rule fixture-rule allows only fixture-alias"}]}}}`)
-	state := BuildRouting(RoutingInputs{Config: routingConfig(), Health: health})
-	if state.RouteOnly[0].Cause != "route_epoch" || state.RouteOnly[1].Cause != "allowed_alias_no_credential" {
-		t.Fatalf("route_only = %+v", state.RouteOnly)
-	}
-	raw, _ := json.Marshal(state)
-	for _, leak := range []string{"fixture-rule", "fixture-alias", "file is missing"} {
-		if strings.Contains(string(raw), leak) {
-			t.Fatalf("the block names %q: %s", leak, raw)
-		}
-	}
-	if lines := strings.Join(RoutingLines(state), "\n"); !strings.Contains(lines, "claudecode not ready (route_epoch)") || !strings.Contains(lines, "codex not ready (allowed_alias_no_credential)") {
-		t.Fatalf("lines = %s", lines)
-	}
-	unknown := []byte(`{"routing":{"details":{"route_only":[{"connector":"codex","ready":false,"cause":"free text with an account"}]}}}`)
-	if got := BuildRouting(RoutingInputs{Config: routingConfig(), Health: unknown}); got.RouteOnly[1].Cause != "" {
-		t.Fatalf("an unknown cause is kept: %+v", got.RouteOnly)
-	}
-}

@@ -25,7 +25,8 @@ const (
 
 // Closed causes of a route-only connector that is not ready, published next
 // to the free-text problem so status can name the cause without free text
-// (internal/enterprisestatus RoutingCauses lists the same set).
+// (doctor and the TUI read them from /health; the status routing block has
+// no cause member: its schema in packaging/mdm/contract is a published contract).
 const (
 	routeCauseEpoch             = "route_epoch"
 	routeCauseAliasNoCredential = "allowed_alias_no_credential"
