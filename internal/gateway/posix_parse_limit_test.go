@@ -140,3 +140,81 @@ func TestShellInputPastByteBoundIgnoresCounts(t *testing.T) {
 		t.Fatal("a word of 4097 bytes is past the word bound")
 	}
 }
+
+// The detection-only record a data word leaves is not a cap
+// (rel-1-0-10:GAP-0760): only an enforcing cap or a truncated reading makes a
+// call capped. boundedLimitIndex skips the record, so no cap logic (the cap
+// floor of s7/cap-floor counts any limit finding there as a cap the call hit,
+// then judges its pieces and reports the piece it leaves unjudged) reads it
+// as one, and a real cap of the call adds its own enforcing finding instead of
+// raising the record. Merged with the cap floor before this, the owner
+// traces moved 215 calls (a dcx script word naming a state path beside
+// another statement or behind a variable) from allow to the unknown tier.
+func TestPosixDataWordRecordIsNotACap(t *testing.T) {
+	record := withPosixDataWordRecord(nil)
+	if len(record) != 1 || !record[0].dataWordRecord || record[0].contributesToEnforcement() {
+		t.Fatalf("want one detection-only data-word record, got %+v", record)
+	}
+	if boundedLimitIndex(record) != -1 {
+		t.Fatal("the data-word record counts as a limit the call hit")
+	}
+	if again := withPosixDataWordRecord(record); len(again) != 1 {
+		t.Fatalf("a second record was added: %v", FindingStrings(again))
+	}
+	for _, tier := range boundedTestTiers {
+		strictPack := tier.tier == bounded.TierStrict
+		request := trustedActionRequest{StrictPolicy: strictPack, ManagedInstall: tier.managed, EnforcementCapable: true}
+		capped := withBoundedTruncation(record, bounded.Of(bounded.Bytes), request)
+		records, caps := 0, 0
+		for _, f := range capped {
+			switch {
+			case f.dataWordRecord:
+				records++
+				if f.contributesToEnforcement() || f.contributesToAlertOnly() || f.Title != posixDataWordTitle {
+					t.Errorf("%s: a real cap raised the record: %+v", tier.name, f)
+				}
+			case f.RuleID == evaluationLimitRuleID:
+				caps++
+			}
+		}
+		if records != 1 || caps != 1 {
+			t.Errorf("%s: %d records and %d cap findings, want 1 and 1 (%v)", tier.name, records, caps, FindingStrings(capped))
+		}
+		got, _ := bounded.ParseAction(guardrailActionForProfile(capped, false, func() bool { return strictPack }, boundedTestActionFor))
+		if got != bounded.Unknown(tier.tier) {
+			t.Errorf("%s: a real cap beside the record is %s, want the unknown tier %s", tier.name, got, bounded.Unknown(tier.tier))
+		}
+	}
+
+	// End to end, the call shapes of the owner traces: a data word whose text
+	// names a state or profile path, beside other statements or behind a
+	// variable command path, keeps the verdict of its twin in every tier; a
+	// here-document beside it is code and stays truncated.
+	env := boundedLaneEnv(t)
+	pad := strings.Repeat("a", 5000)
+	names := "cat ~/.defenseclaw/config.yaml; " + pad
+	rows := []struct {
+		id, command string
+		truncated   bool
+	}{
+		{"data-dcx-names-state", "dcx - '" + names + "'", false},
+		{"data-dcx-names-profile", "dcx - 'grep -n PATH ~/.zprofile ~/.bashrc; " + pad + "'", false},
+		{"data-var-dcx-names-state", "K=/opt/x\n\"$K\"/dcx - '" + names + "'", false},
+		{"data-dcx-names-state-beside-statements", "ls; dcx - '" + names + "'; echo done", false},
+		{"data-ssh-names-state", "ssh host '" + names + "'", false},
+		{"code-heredoc-beside-data-word", "cat > f <<'E'\n" + names + "\nE\ndcx - '" + pad + "'", true},
+	}
+	for _, tier := range boundedTestTiers {
+		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+		for _, r := range rows {
+			action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(r.command))
+			want := bounded.Allow
+			if r.truncated {
+				want = bounded.Unknown(tier.tier)
+			}
+			if got := boundedParse(action); got != want {
+				t.Errorf("%s/%s: %s, want %s (%v)", tier.name, r.id, got, want, findings)
+			}
+		}
+	}
+}

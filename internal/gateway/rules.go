@@ -98,6 +98,12 @@ type RuleFinding struct {
 	// file. It is private and value-free; guardrailActionForProfile keeps its
 	// block in every profile.
 	omittedOperand bool
+	// dataWordRecord marks the detection-only record of a shell word past the
+	// byte bound that the local shell only passes on (withPosixDataWordRecord).
+	// It is a record, not a cap: boundedLimitIndex skips it, so no cap logic
+	// counts it as a limit the call hit or raises it to an enforcing one
+	// (rel-1-0-10:GAP-0760). Private and value-free.
+	dataWordRecord bool
 	// evaluationFault marks the finding of a call the evaluation failed on:
 	// the shell parser failed on its text (shellparse.ErrParserFault) or a
 	// reader panicked (recoverTrustedActionFault). Nothing proves what the

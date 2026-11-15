@@ -112,14 +112,17 @@ const posixDataWordTitle = "Shell word past the analysis bound is data to the lo
 // withPosixDataWordRecord adds to the findings of a call a detection-only
 // record of the word the analysis did not read: the call keeps the verdict of
 // its twin, and the record is no action raise. A limit finding the call
-// already carries is kept as it is.
+// already carries, or a record a twin left, is kept as it is. The record is
+// marked (dataWordRecord) so no cap logic reads it as a cap the call hit
+// (rel-1-0-10:GAP-0760).
 func withPosixDataWordRecord(findings []RuleFinding) []RuleFinding {
-	if boundedLimitIndex(findings) >= 0 {
+	if boundedLimitIndex(findings) >= 0 || slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.dataWordRecord }) {
 		return findings
 	}
 	record := trustedActionLimitFindings(false)[0]
 	record.Title = posixDataWordTitle
 	record.Evidence = bounded.Of(bounded.Bytes).Reason() + "; operand"
 	record.enforcement = findingEnforcementDetectionOnly
+	record.dataWordRecord = true
 	return append(slices.Clip(findings), record)
 }
