@@ -61,6 +61,11 @@ func TestPowerShellScriptReachScansWalkEachWordOnce(t *testing.T) {
 // statements ask (rel-1-0-10:GAP-0766: on Windows each read is a pinned file
 // open, 0.5 ms); outside a hook call every ask reads again, as before.
 func TestHookCallRemembersItsFileSystemReads(t *testing.T) {
+	// The memory is on by default only on Windows (memoReads, GAP-0844);
+	// its behavior is the same on every host.
+	prev := memoReads
+	memoReads = true
+	t.Cleanup(func() { memoReads = prev })
 	home := t.TempDir()
 	path := home + string(os.PathSeparator) + "work" + string(os.PathSeparator) + "out.txt"
 	ask := func() {

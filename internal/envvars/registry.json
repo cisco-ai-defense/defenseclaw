@@ -390,6 +390,26 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_WRITE_CLI_SNAPSHOT",
+      "category": "test_fixture",
+      "purpose": "Makes the actionfacts CLI-command drift test rewrite its reviewed snapshot of registered command names (testdata/defenseclaw_cli_commands.txt) instead of comparing against it, so a developer can classify a newly added command (GAP-0705).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/actionfacts/defenseclaw_control_drift_test.go",
+          "description": "TestDefenseClawStopVerbsFollowTheCLI rewrites testdata/defenseclaw_cli_commands.txt from the registered command names when the variable is 1"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_AUDIT_DB_LOCK_HELPER_PATH",
       "category": "test_fixture",
       "purpose": "Passes the temporary audit database path to isolated subprocesses that verify SQLite kernel-lock and WAL lifecycle behavior.",

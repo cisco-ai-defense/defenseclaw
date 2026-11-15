@@ -368,7 +368,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 162 test-only variables">
+<Accordion title="Show the 163 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -534,6 +534,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_V2_LOCK_STATE`<br/>Default: `unset`<br/>Values: `absolute test state path`, `unset`<br/>Managed host: `ignore` | Recovery-state directory passed to the native CAS V2 cross-process lock fixture.<br/>**Read by:** `internal/gateway/connector/atomic_transform_v2_exit_windows_test.go` |
 | `DEFENSECLAW_V2_POST_P_REPARSE_TARGET`<br/>Default: `unset`<br/>Values: `absolute test target path`, `unset`<br/>Managed host: `ignore` | Replacement reparse target injected after the CAS V2 publication point for fail-closed topology tests.<br/>**Read by:** `internal/gateway/connector/atomic_transform_v2_exit_windows_test.go` |
 | `DEFENSECLAW_WINDOWS_PROCESS_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Activate the isolated subprocess entry point used by native Windows process-snapshot tests.<br/>**Read by:** `internal/inventory/process_snapshot_windows_test.go` |
+| `DEFENSECLAW_WRITE_CLI_SNAPSHOT`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Makes the actionfacts CLI-command drift test rewrite its reviewed snapshot of registered command names (testdata/defenseclaw_cli_commands.txt) instead of comparing against it, so a developer can classify a newly added command (GAP-0705).<br/>**Read by:** `internal/actionfacts/defenseclaw_control_drift_test.go` |
 
 </Accordion>
 </Accordions>

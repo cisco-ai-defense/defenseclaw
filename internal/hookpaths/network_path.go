@@ -162,7 +162,7 @@ type statAnswer struct {
 // is the same file for the whole decision (rel-1-0-10:GAP-0766). A caller
 // that reads a path again to see whether it changed uses pathStat.
 func callStat(name string) (os.FileInfo, error) {
-	call := currentHookCall()
+	call := memoHookCall()
 	if call == nil {
 		return pathStat(name)
 	}
@@ -216,6 +216,26 @@ func HookCall() (end func()) {
 		delete(hookCalls.calls, id)
 		hookCalls.mu.Unlock()
 	}
+}
+
+// memoReads turns on the file system memory of a hook call (callStat,
+// ResolveWriteTarget, newProtectedFiles). It pays where a read is dear: on
+// Windows each stat asks the share check and the file system, 446,000 reads
+// for 100 PowerShell lines, 27 s (rel-1-0-10:GAP-0766). On a POSIX host a
+// stat costs about a microsecond, while finding the call costs a traceback of
+// the calling goroutine's stack (goroutineID) on every read: the memory made a
+// decision 1.3 to 4.4 times slower than none (rel-1-0-10:GAP-0844). The
+// answers are the same with it or without it (the file system of one decision
+// is the same file system). Tests set it to read the memory on every host.
+var memoReads = runtime.GOOS == "windows"
+
+// memoHookCall is the hook call whose file system memory a read uses: the
+// call the goroutine runs where memoReads is on, nil elsewhere.
+func memoHookCall() *hookCall {
+	if !memoReads {
+		return nil
+	}
+	return currentHookCall()
 }
 
 // currentHookCall is the hook call the calling goroutine runs (nil: none).
