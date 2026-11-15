@@ -132,14 +132,17 @@ func TestToolResultPartsViewIsOnlyForTextBlocks(t *testing.T) {
 	}
 
 	// Benign rows cut in two blocks at every 7th point: no rule fires that the
-	// row as one string does not.
+	// row as one string does not. Both sides are read on the tool-result path
+	// (toolResultRuleFindings, int/r110-b11): a tool result keeps its command,
+	// sensitive-path, cognitive-file and C2 rules on the content itself, so a
+	// rule that path finds in the uncut row is not the joined view's.
 	generation := snapshotRulePackGeneration("")
 	for _, row := range readJSONL[regexCase](t, "regex", "corpus.jsonl") {
 		if row.IsAttack || len(row.Content) < 8 {
 			continue
 		}
 		whole := map[string]bool{}
-		for _, f := range scanContentRuleCategoryWithGeneration(generation, row.Content, "", ruleContentScopeUntrusted, "") {
+		for _, f := range toolResultRuleFindings(generation, row.Content, ruleContentScopeUntrusted, true) {
 			whole[f.RuleID] = true
 		}
 		for i := 1; i < len(row.Content); i += 7 {
@@ -149,7 +152,7 @@ func TestToolResultPartsViewIsOnlyForTextBlocks(t *testing.T) {
 			blocks := partJoinBlocks("text", []string{row.Content[:i], row.Content[i:]})
 			content := structuredHookContentString(blocks)
 			base := map[string]bool{}
-			for _, f := range scanContentRuleCategoryWithGeneration(generation, content, "", ruleContentScopeUntrusted, "") {
+			for _, f := range toolResultRuleFindings(generation, content, ruleContentScopeUntrusted, true) {
 				base[f.RuleID] = true
 			}
 			for _, rule := range partJoinToolResultRules(api, content) {
