@@ -38,6 +38,13 @@ func warmDefenseClawControl(t *testing.T, handler http.HandlerFunc, path string,
 	t.Fatalf("%s: the route never answered the warm-up call", path)
 }
 
+// depthBoundRows are the corpus rows whose call nests deeper than the action
+// parse bound. The self-protection reader finds no DefenseClaw command in
+// them (the actionfacts row wants no finding), and the shared cap floor
+// judges them as truncated, so the gateway answer is the unknown tier of the
+// pack (cap-floor and posix-cap, rel-1-0-10:GAP-0688, GAP-0760).
+var depthBoundRows = map[string]bool{"g596r2-k224": true}
+
 // TestDefenseClawControlFiveTiers is GAP-0596: every row of the actionfacts
 // corpus (loaded by id, not retyped) through the tool-inspect route in the five
 // tiers. A proven stop or disable (owner ruling 2026-11-14) is an alert in
@@ -97,6 +104,20 @@ func TestDefenseClawControlFiveTiers(t *testing.T) {
 				want := bounded.Unknown(bounded.TierOf(p.pack)).String()
 				if action != want || !strings.Contains(string(raw), "tamper.defenseclaw_control_unproven") {
 					t.Errorf("%s: action %q, want %s by tamper.defenseclaw_control_unproven: %s", where, action, want, raw)
+				}
+			case "":
+				if depthBoundRows[r.ID] {
+					// The shared cap floor reads a call that nests past the depth
+					// bound as TRUNCATED (ONE BOUND rule): the unknown tier by the
+					// floor's own rule, not a DefenseClaw reading, in every pack.
+					want := bounded.Unknown(bounded.TierOf(p.pack)).String()
+					if action != want || named || !strings.Contains(string(raw), "ACTION-COMPOUND-LIMIT") {
+						t.Errorf("%s: a call nested past the depth bound is %q, want %s by ACTION-COMPOUND-LIMIT only: %s", where, action, want, raw)
+					}
+					continue
+				}
+				if named || action == "block" {
+					t.Errorf("%s: a benign twin was judged: %s", where, raw)
 				}
 			default:
 				if named || action == "block" {
