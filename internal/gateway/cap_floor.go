@@ -757,9 +757,19 @@ func capFloorAnalysisCaps(facts actionfacts.Facts) bounded.CapSet {
 // wrapper as a partial parse, with no wrapper limit, so the program the
 // chain runs was never read; the readers that unwrap further still prove a
 // block of their own (rel-1-0-10:GAP-0689).
+//
+// A chain the inline hand-off reads to its interpreter child
+// (actionfacts.InlineCodeHandoff, up to actionfacts.InlineChainWrappers
+// wrappers) is read: the hand-off judges the child's code and reports its own
+// cap depth past its bound, so the floor does not stand in for it (the
+// tamper-min lane of rel-1-0-10:GAP-0827 / GAP-0663).
 func prefixWrapperChainPastBound(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if len(command.Argv) <= actionfacts.MaxWrapperDepth || command.Dialect != actionfacts.DialectPOSIX {
+			continue
+		}
+		if handoff := actionfacts.InlineCodeHandoff(command.Argv); !handoff.Caps.Any() &&
+			(handoff.From >= 0 || handoff.ProvenReads) {
 			continue
 		}
 		static := make([]bool, len(command.Argv))
