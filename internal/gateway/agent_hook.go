@@ -147,6 +147,10 @@ type agentHookRequest struct {
 	// ToolArgsAreHookEnvelope marks ToolArgs as the whole hook body, used when
 	// the payload carries no tool-argument object.
 	ToolArgsAreHookEnvelope bool
+	// PromptField is the text of a declared prompt field of the payload
+	// (prompt, user_prompt, userPrompt, initial_prompt, initialPrompt): what the
+	// user typed, as opposed to the fallback fields Content may come from.
+	PromptField string
 	// ToolCallUnparsed: the connector's decoder found no tool call it can
 	// read (connector.HookProfileRequest.ToolCallUnparsed).
 	ToolCallUnparsed bool
@@ -170,6 +174,10 @@ type agentHookRequest struct {
 	Payload            map[string]interface{}
 	toolChain          *toolChainHookCapture
 	alertOnlySQLNotice bool
+	// toolResultInjection marks a tool-result verdict with a prompt-injection
+	// finding: the agent-facing text tells the agent not to follow the
+	// result's instructions (GAP-0605).
+	toolResultInjection bool
 }
 
 func hookActionCommandAuditExtra(req agentHookRequest, home string) map[string]string {
@@ -826,7 +834,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if shouldResetToolJudgeSession(req) {
 			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
 			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ResetToolJudgeSession(judgeSessionKeyFor(ctx, req.SessionID))
+				judge.ResetToolJudgeSession(ctx, judgeSessionKeyFor(ctx, req.SessionID))
 			}
 			a.resetUserDownloadRequests(sessionKey)
 		}
@@ -3409,6 +3417,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		content = stringifyHookValue(firstValue(payload, "tool_response", "toolResponse", "tool_result", "toolResult", "result", "error"))
 	}
 
+	promptField := firstString(payload, "prompt", "user_prompt", "userPrompt", "initial_prompt", "initialPrompt")
 	direction := "tool_call"
 	switch {
 	case isPromptLikeEvent(event):
@@ -3427,6 +3436,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		AgentID:       agentID, AgentName: agentName, AgentType: agentType,
 		RootAgentID: rootAgentID, ParentAgentID: parentAgentID, ChildAgentID: childAgentID,
 		HookEventName:   event,
+		PromptField:     promptField,
 		SemanticEventID: correlationValue(connector.CorrelationTargetSemanticEvent),
 		SessionID:       sessionID, TurnID: turnID, MessageID: correlationValue(connector.CorrelationTargetMessage),
 		ThreadID:      correlationValue(connector.CorrelationTargetThread),
@@ -3640,6 +3650,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
 	}
 	t0 := time.Now()
+	ctx = withCascadeTrace(ctx, a.decisionConfig(ctx), req.ConnectorName)
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
@@ -3665,15 +3676,17 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// lifecycle events) can repeat or contain model-generated material;
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
-		if isToolJudgeIntentEvent(req.HookEventName) {
-			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ObserveSessionPrompt(ctx, req.Content)
-			}
-			a.observeUserDownloadRequest(ctx, req.Content)
-		}
+		intentEvent := isToolJudgeIntentEvent(req.HookEventName)
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
-		if isToolJudgeIntentEvent(req.HookEventName) {
-			a.forgetBlockedPrompt(ctx, req.Content, verdict)
+		if intentEvent {
+			// Only a declared prompt field names scope targets: the generic
+			// fallback also reads descriptions, tool responses and results, and
+			// Hermes and OpenClaw "user" text can come from a remote chat party.
+			scopeText := req.PromptField
+			if req.ConnectorName == "hermes" || req.ConnectorName == "openclaw" {
+				scopeText = ""
+			}
+			a.observeUserTurn(ctx, req.Content, scopeText, req.CWD, verdict)
 		}
 	case isResultLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
@@ -3712,6 +3725,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// onto the context so the downstream emit choke points and the OS
 	// toast honor it (managed_enterprise only; no-op otherwise).
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+	verdict = a.applyCascadeFinal(ctx, req.ConnectorName, hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
@@ -3800,6 +3814,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			req.alertOnlySQLNotice = hasAlertOnlySQLFinding(findings)
 		}
 	}
+	req.toolResultInjection = isToolResultDirection(req.Direction) && verdictHasPromptInjection(verdict)
 	resp := agentHookResponseForProfile(
 		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps, responsePolicy,
 	)
@@ -3828,6 +3843,9 @@ const hookOversizeUninspectedRuleID = "HOOK-OVERSIZE-COMMAND-NOT-INSPECTED"
 
 const oversizeUninspectedReason = "oversize, command not inspected: this hook payload is over DefenseClaw's size cap, " +
 	"so the gateway could read only part of the call."
+
+// contentCutReason is the reason of content cut at maxInspectContentLen.
+const contentCutReason = "content over the 256 KiB inspect cap: only the first 256 KiB were inspected"
 
 // oversizeUninspectedPayload reports a bounded review of an oversized call.
 // Every bounded review lacks part of the call (hookexec.OversizeUninspectedField),
@@ -4862,6 +4880,16 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 	additional := genericHookAdditionalContext(req.ConnectorName, req.HookEventName, mode, rawAction, severity, safeReason, wouldBlock)
 	if req.alertOnlySQLNotice {
 		additional += sqlAlertOnlyHookNotice
+	}
+	if additional != "" && isToolResultDirection(req.Direction) {
+		if req.toolResultInjection {
+			additional = connector.WithToolResultInjectionGuidance(additional)
+		}
+		// An agent with no tool-result block form says so in the note, in
+		// every posture: strict cannot block here (GAP-0605).
+		if !caps.CanBlock || !eventIn(req.HookEventName, caps.BlockEvents) {
+			additional = toolResultAlertOnlyNotice(additional, req.ConnectorName)
+		}
 	}
 	if agent := confirmWithoutAskAgent(req.ConnectorName, rawAction, mode, req.HookEventName); action == "block" && agent != "" {
 		safeReason = agentConfirmUnavailableReason(agent, reason, agentDisplayReason(reason, notificationSinkPolicy(policy)), notificationSinkPolicy(policy))

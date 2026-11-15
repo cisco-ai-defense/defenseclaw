@@ -95,6 +95,7 @@ NEWER_CONFIG_KEYS = (
     ("guardrail.cascade", (1, 0, 10)),
     ("guardrail.secret_flow", (1, 0, 10)),
     ("guardrail.effects_rules_tier", (1, 0, 10)),
+    ("guardrail.judge.intent_scope", (1, 0, 10)),
     ("decision_model.block_risk_score", (1, 0, 10)),
     ("decision_model.escalate_rule_flagged", (1, 0, 10)),
     ("decision_model.flow_guard", (1, 0, 10)),
@@ -119,6 +120,19 @@ NEWER_CONFIG_KEYS = (
     ("routing.route_only", (1, 0, 10)),
     ("routing.sensitive", (1, 0, 10)),
     ("routing.systemone", (1, 0, 10)),
+)
+# More keys added after 1.0.9, in the same path language: a "*" segment is
+# one entry of a map of named entries (a connector, a profile). 1.0.9
+# refuses a cascade block under any scope, as it refuses guardrail.cascade
+# itself (GAP-0544, GAP-0583); a downgrade sets each entry's block aside
+# under its own dotted key. (The System One decision_model keys and the
+# profile routing block are in NEWER_CONFIG_KEYS.)
+NEWER_CONFIG_SUBTREES = (
+    ("guardrail.connectors.*.cascade", (1, 0, 10)),
+    ("guardrail.profiles.*.cascade", (1, 0, 10)),
+    ("guardrail.profiles.*.connectors.*.cascade", (1, 0, 10)),
+    ("application_protection.guardrail.cascade", (1, 0, 10)),
+    ("application_protection.connectors.*.guardrail.cascade", (1, 0, 10)),
 )
 # Values an older release refuses or cannot run, under keys it has
 # (rel-1-0-10:GAP-0767, GAP-0769), with the first release that has them:
@@ -637,7 +651,7 @@ def newer_config_key(path: str) -> tuple[str, tuple[int, int, int]] | None:
     """The NEWER_CONFIG_KEYS entry a concrete key is, or None."""
 
     concrete = _path_segments(path)
-    for pattern, since in NEWER_CONFIG_KEYS:
+    for pattern, since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
         segments = _path_segments(pattern)
         if len(segments) == len(concrete) and all(
             (want is _EVERY_ITEM and isinstance(got, int))
@@ -669,8 +683,11 @@ def _newer_key_values(raw: object, pattern: str) -> tuple[dict[str, object], dic
                 name = item.get("name") if isinstance(item, dict) else None
                 walk(item, rest, key, {**names, key: name} if isinstance(name, str) else names)
         elif head == "*":
-            for name, value in dict(node).items() if isinstance(node, dict) else ():
-                walk(value, rest, f"{path}.{name}", names)
+            for name in sorted(k for k in node if isinstance(k, str)) if isinstance(node, dict) else ():
+                # Connector and profile names have no dots (the schema), so the
+                # dotted key of an entry is never ambiguous.
+                if name and "." not in name:
+                    walk(node[name], rest, f"{path}.{name}", names)
         elif isinstance(node, dict):
             walk(node.get(head), rest, f"{path}.{head}" if path else str(head), names)
 
@@ -709,6 +726,22 @@ def _switched_off(raw: object, target: tuple[int, int, int]) -> dict[str, object
     return {}
 
 
+def newer_config_values(raw: object, target: tuple[int, int, int]) -> dict[str, object]:
+    """The keys of config ``raw`` that release ``target`` does not have, by concrete key."""
+
+    found: dict[str, object] = {}
+    for pattern, since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
+        if target < since:
+            found.update(_newer_key_values(raw, pattern)[0])
+    return found
+
+
+def is_newer_config_key(key: str) -> bool:
+    """Whether ``key`` (a concrete key a downgrade set aside) is one this release has."""
+
+    return newer_config_key(key) is not None
+
+
 def _set_aside_newer_keys(version: str) -> None:
     """Take the keys DefenseClaw ``version`` does not have out of config.yaml.
 
@@ -730,7 +763,7 @@ def _set_aside_newer_keys(version: str) -> None:
         return
     found: dict[str, object] = {}
     items: dict[str, str] = {}
-    for pattern, since in NEWER_CONFIG_KEYS:
+    for pattern, since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
         if target >= since:
             continue
         values, names = _newer_key_values(raw, pattern)

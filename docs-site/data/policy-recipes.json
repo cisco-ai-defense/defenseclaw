@@ -789,6 +789,58 @@
       ]
     },
     {
+      "id": "RECIPE-tamper.defenseclaw_control_disable",
+      "title": "Stop or disable DefenseClaw",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "tamper.defenseclaw_control_disable",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Stop or disable DefenseClaw",
+        "severity": "CRITICAL",
+        "confidence": 0.98,
+        "tags": [
+          "cognitive-tampering",
+          "tampering",
+          "security-state"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering",
+        "tampering",
+        "security-state"
+      ]
+    },
+    {
+      "id": "RECIPE-tamper.defenseclaw_control_unproven",
+      "title": "Change or stop DefenseClaw (unproven)",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "tamper.defenseclaw_control_unproven",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Change or stop DefenseClaw (unproven)",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "cognitive-tampering",
+          "tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering",
+        "tampering"
+      ]
+    },
+    {
       "id": "RECIPE-CMD-REVSHELL-POWERSHELL-TCP",
       "title": "PowerShell TCP command-execution loop",
       "kind": "rule:command",
@@ -6511,6 +6563,56 @@
         ]
       },
       "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-BEARER-BARE",
+      "title": "Bearer credential",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-BEARER-BARE",
+        "pattern": "(?i)\\bbearer\\s+[A-Za-z0-9\\-_.~+/]{20,}=*",
+        "title": "Bearer credential",
+        "severity": "MEDIUM",
+        "confidence": 0.6,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-PASSWORD-ASSIGN",
+      "title": "Password assigned to a password-named key",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-PASSWORD-ASSIGN",
+        "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+        "title": "Password assigned to a password-named key",
+        "severity": "MEDIUM",
+        "confidence": 0.6,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity MEDIUM.",
       "examples": [],
       "counterexamples": [],
       "source": "policies/guardrail/strict/rules/secrets.yaml",

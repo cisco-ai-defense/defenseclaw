@@ -93,9 +93,13 @@ func TestGAP0677NestedShellBodiesAreDecidedWithinTheHookWindow(t *testing.T) {
 		if connector == "codex" {
 			continue
 		}
+		// GAP-0382: a bash -c script in one word past the string bound of the
+		// analysis (4 KiB) has commands the analysis never read; allowing it
+		// broke the ONE BOUND RULE. It is TRUNCATED now (the over-limit
+		// finding: an alert in the default profile, a block in strict).
 		findings, _ = decide(ordinaryBody)
-		if action := buildVerdict(findings, "tool_call").Action; action != guardrailActionAllow {
-			t.Errorf("%s: ordinary bash -c script (%d bytes): %s %v", connector, len(ordinaryBody), action, findingIDs(findings))
+		if ids := findingIDs(findings); len(ids) != 1 || ids[0] != "ACTION-COMPOUND-LIMIT" {
+			t.Errorf("%s: bash -c script in one word past the string bound (%d bytes): %v, want the over-limit finding", connector, len(ordinaryBody), ids)
 		}
 	}
 }

@@ -1229,3 +1229,30 @@ def test_the_rollback_selects_updated_agents_through_the_cli_entry() -> None:
     body = body[: body.index("\n}\n")]
     assert '@("migrate", "--reselect-updated-agents", "--data-dir", $Data)' in body
     assert '"-c"' not in body
+
+
+def test_set_aside_scoped_cascades_are_put_back(data_dir: Path) -> None:
+    """GAP-0583: a downgrade to 1.0.9 set the connector and profile cascades aside by
+    their dotted keys; migrating to a release that has them puts each one back."""
+    import yaml
+
+    config = _write_config(
+        data_dir,
+        "config_version: 9\nguardrail:\n  connectors:\n    codex:\n      block_at: HIGH\n"
+        "  profiles:\n    contractors:\n      block_at: MEDIUM\n",
+    )
+    record = _set_aside_record(
+        data_dir,
+        {
+            "guardrail.connectors.codex.cascade": {"unknown": "block"},
+            "guardrail.profiles.contractors.cascade": {"judge": {"max_action": "alert"}},
+            "guardrail.profiles.contractors.future_key": True,
+        },
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    guardrail = yaml.safe_load(config.read_text(encoding="utf-8"))["guardrail"]
+    assert guardrail["connectors"]["codex"] == {"block_at": "HIGH", "cascade": {"unknown": "block"}}
+    assert guardrail["profiles"]["contractors"]["cascade"] == {"judge": {"max_action": "alert"}}
+    assert json.loads(record.read_text(encoding="utf-8"))["keys"] == {"guardrail.profiles.contractors.future_key": True}

@@ -60,8 +60,8 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.windows_go != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 20
-    # Each part has its own runner: gwN runs shard N of 16 of the gateway
-    # package and shard N of 16 of the connector package, both balanced on
+    # Each part has its own runner: gwN runs shard N of 20 of the gateway
+    # package and shard N of 20 of the connector package, both balanced on
     # recorded Windows test times (scripts/test-timings/go-windows.json);
     # pkN one of fifteen timing-balanced parts of the remaining packages and hxN
     # one of six test-level parts of hookexec (still -p=1 within each part).
@@ -91,6 +91,10 @@ jobs:
           - { shard: gw13, kind: gateway, index: 13 }
           - { shard: gw14, kind: gateway, index: 14 }
           - { shard: gw15, kind: gateway, index: 15 }
+          - { shard: gw16, kind: gateway, index: 16 }
+          - { shard: gw17, kind: gateway, index: 17 }
+          - { shard: gw18, kind: gateway, index: 18 }
+          - { shard: gw19, kind: gateway, index: 19 }
           - { shard: pk0, kind: packages, index: 0 }
           - { shard: pk1, kind: packages, index: 1 }
           - { shard: pk2, kind: packages, index: 2 }
@@ -336,7 +340,7 @@ jobs:
           # and selector-compilation memory.
           $suiteKind = [string]$env:GO_SUITE_KIND
           $matrixShard = [int]$env:GO_SUITE_INDEX
-          $nativeTestShardCount = 16
+          $nativeTestShardCount = 20
           $remainingPackageShardCount = 15
           $hookexecTestShardCount = 6
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'

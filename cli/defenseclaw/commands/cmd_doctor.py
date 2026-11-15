@@ -3206,6 +3206,45 @@ def _human_size(num_bytes: int) -> str:
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
     _check_audit_db_store(cfg, r)
     _check_moved_aside_audit_stores(str(getattr(cfg, "audit_db", "") or ""), r)
+    _check_unread_calls(cfg, r)
+
+
+def _check_unread_calls(cfg, r: _DoctorResult) -> None:
+    """Count the tool calls the gateway read only in part (ACTION-PARSE-FAILURE
+    records, rel-1-0-10:GAP-0526): a shell syntax error or a shell body it could
+    not resolve. Their readable statements were judged; the rest is allowed in
+    the default and permissive packs, so the admin sees how many there are.
+    A warning when there are any; nothing when the audit store is unreadable
+    (its own check reports that)."""
+    import sqlite3
+
+    from defenseclaw.db import UNREAD_CALLS_SQL
+
+    db_path = str(getattr(cfg, "audit_db", "") or "")
+    if not db_path or not os.path.isfile(db_path):
+        return
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            count = int(conn.execute(UNREAD_CALLS_SQL).fetchone()[0] or 0)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return
+    if count == 0:
+        _emit("pass", "Unread tool calls", "none recorded", r=r, check_id="doctor.guardrail.unread-calls")
+        return
+    _emit(
+        "warn",
+        "Unread tool calls",
+        f"{count} tool call(s) were read only in part (ACTION-PARSE-FAILURE): a shell syntax error or a shell "
+        "body that could not be resolved. Their readable statements were checked; the rest was allowed outside "
+        "the strict pack",
+        r=r,
+        check_id="doctor.guardrail.unread-calls",
+        reason_code="unread-tool-calls",
+        remediation="list them: defenseclaw alerts, or search the audit log for ACTION-PARSE-FAILURE",
+    )
 
 
 _CARRY_OVER_NOTE_SUFFIX = ".carryover.json"
@@ -13863,6 +13902,58 @@ def _check_decision_model(cfg, r: _DoctorResult) -> None:
     _emit("pass", "Decision model", detail, r=r)
 
 
+
+def _check_guardrail_cascade(cfg, r: _DoctorResult) -> None:
+    """``Guardrail cascade`` row, only when guardrail.cascade is set at some
+    scope. FAIL when the gateway found it invalid (the guardrail then decides
+    with the last-known-good cascade or the pack defaults, which the row
+    names, and says when that is weaker); WARN on settings that let the
+    guardrail do less than its pack."""
+    from defenseclaw import cascade
+
+    if not cascade.configured(cfg):
+        return
+    payload, error = cascade.gateway_explain()
+    if error:
+        _emit("warn", "Guardrail cascade", f"could not resolve: {error}", r=r,
+              remediation="defenseclaw guardrail cascade explain")
+        return
+    view = (payload or {}).get("cascade") or {}
+    invalid = view.get("invalid")
+    if invalid:
+        fallback = (
+            "the last-known-good cascade" if invalid.get("fallback") == "last_known_good" else "the rule pack defaults"
+        )
+        detail = (
+            f"invalid: {invalid.get('error')}; a running gateway refuses the reload and keeps its current "
+            f"configuration; a gateway started now decides with {fallback}"
+        )
+        if invalid.get("weaker"):
+            detail += "; WEAKER than your configuration: " + "; ".join(invalid["weaker"])
+        _emit("fail", "Guardrail cascade", detail, r=r,
+              remediation="fix the named guardrail.cascade key, then: defenseclaw guardrail cascade explain")
+        return
+    notes = cascade.loosening_notes(view)
+    ignored = view.get("ignored") or []
+    if ignored:
+        # A locked key or an invalid connector/profile cascade: the
+        # administrator's top-level values apply, the narrower one does not.
+        shown = "; ".join(f"{i.get('path')}: {i.get('reason')}" for i in ignored[:5])
+        if len(ignored) > 5:
+            shown += f"; and {len(ignored) - 5} more"
+        notes = [f"{len(ignored)} narrower-scope setting(s) not applied: {shown}", *notes]
+    summary = (
+        f"unknown {(view.get('unknown') or {}).get('action')}, judge {(view.get('judge') or {}).get('runs')}, "
+        f"System One {(view.get('system_one') or {}).get('runs')}, Rego policy "
+        f"{'on' if (view.get('policy') or {}).get('active') else 'off'}, CRITICAL floor {view.get('critical_floor')}"
+    )
+    if notes:
+        _emit("warn", "Guardrail cascade", summary + "; " + "; ".join(notes), r=r,
+              remediation="defenseclaw guardrail cascade explain")
+        return
+    _emit("pass", "Guardrail cascade", summary, r=r)
+
+
 def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     """One-shot ``llm.ping`` against the guardrail's resolved LLM.
 
@@ -16652,6 +16743,7 @@ def doctor(
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
     _check_decision_model(cfg, r)
+    _check_guardrail_cascade(cfg, r)
     _check_private_upstream_refusals(cfg, r)
     if not _check_judge_running(sidecar_health, r):
         _check_judge_calls(cfg, r)
@@ -18751,6 +18843,72 @@ def _prompt_block_capability(connector: str) -> str:
     return _PROMPT_UNKNOWN
 
 
+# Tool-result hook events whose block answer the agent honours (contract
+# block_events, compared without case and punctuation): Claude Code and Codex
+# PostToolUse, Amp tool.result (rel-1-0-10 GAP-0605).
+_TOOL_RESULT_BLOCK_EVENTS = frozenset({"posttooluse", "toolresult"})
+
+
+def tool_result_block_capability(connector: str) -> str:
+    """Whether *connector* has a block form for a tool result, from the hook contract manifest.
+
+    A proxy connector refuses the model call that would carry the output. A
+    hook connector has one when every contract lists a tool-result event in
+    ``block_events``. Every other connector can only alert on a tool-result
+    finding (a prompt injection in a file, page or command output): the
+    output reaches the model. Returns the _PROMPT_* values.
+    """
+    name = normalize_connector(connector)
+    if name in PROXY_CONNECTORS:
+        return _PROMPT_BLOCKS
+    event_sets = [contract.capabilities.get("block_events") for contract in HOOK_CONTRACTS.get(name, ())]
+    if not event_sets:
+        spec = (HOOK_CONTRACT_MANIFEST.get("connectors") or {}).get(name)
+        inventory = spec.get("native_hook_inventory") if isinstance(spec, dict) else None
+        if isinstance(inventory, dict):
+            event_sets = [inventory.get("block_events")]
+    answers = {
+        any(
+            isinstance(event, str) and "".join(ch for ch in event.lower() if ch.isalnum()) in _TOOL_RESULT_BLOCK_EVENTS
+            for event in events
+        )
+        for events in event_sets
+        if isinstance(events, list)
+    }
+    if answers == {True}:
+        return _PROMPT_BLOCKS
+    if answers == {False}:
+        return _PROMPT_NO_HOOK
+    return _PROMPT_UNKNOWN
+
+
+def tool_result_injection_limit(connector: str) -> str:
+    """The documented limit line for a connector with no tool-result block form, else ""."""
+    if tool_result_block_capability(connector) != _PROMPT_NO_HOOK:
+        return ""
+    label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+    return f"tool-result injection: alert only on {label}"
+
+
+def _emit_tool_result_row(connector: str, r: _DoctorResult) -> None:
+    """One row: what a prompt injection in this connector's tool results gets (GAP-0605)."""
+    capability = tool_result_block_capability(connector)
+    label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+    if capability == _PROMPT_BLOCKS:
+        _emit(
+            "pass", "Tool-result injection",
+            "alerts in default and permissive, blocks in strict; the agent is told not to follow it",
+            r=r,
+        )
+    elif capability == _PROMPT_NO_HOOK:
+        _emit(
+            "skip", "Tool-result injection",
+            f"{tool_result_injection_limit(connector)}: {label} has no hook that can block a tool result, "
+            "so the output reaches the model in every posture (see defenseclaw alerts)",
+            r=r,
+        )
+
+
 def _detection_only_prompt_clause(connector: str) -> str:
     """The prompt half of the detection-only rule-pack warning for *connector*.
 
@@ -19223,6 +19381,8 @@ def _check_connector_inventory(
                     "built-in defaults (data_dir unresolved)",
                     r=r,
                 )
+
+    _emit_tool_result_row(connector, r)
 
     # Detection strategy + judge gating for this connector (read-only). This
     # is root #4 in the doctor fix-plan made visible: the judge can be
@@ -19827,6 +19987,7 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
     if acp is None:
         return
     try:
+        from defenseclaw.acp_catalog import own_tools_notice
         from defenseclaw.commands import cmd_acp
 
         data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
@@ -19857,7 +20018,8 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
         except Exception as exc:
             problems, profile, mode = [f"could not be checked: {exc}"], "?", "?"
         if not problems:
-            _emit("pass", label, f"healthy; profile {profile} ({mode})", r=r)
+            notice = own_tools_notice(agent)
+            _emit("pass", label, f"healthy; profile {profile} ({mode})" + (f"; {notice}" if notice else ""), r=r)
             continue
         if all("acp refresh" in problem for problem in problems):
             # The upgraded guard, or an agent the user updated (acp refresh

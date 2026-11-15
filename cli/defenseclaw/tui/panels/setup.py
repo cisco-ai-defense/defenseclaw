@@ -2334,7 +2334,7 @@ def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
             default="kiro",
             options=ACP_AGENT_IDS,
             required=True,
-            hint="ACP agent DefenseClaw sits in front of and guards.",
+            hint="ACP agent DefenseClaw guards. Hermes runs its own tools: alerts only.",
         ),
         WizardFormField(
             "Profile",

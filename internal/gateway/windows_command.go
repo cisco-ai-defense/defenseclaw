@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 func windowsCommandFindingsWithOptions(
@@ -98,6 +100,14 @@ func windowsCommandFindingsWithOptions(
 			add("CMD-WIN-IWR-IEX", "PowerShell download piped to expression execution", "CRITICAL", 0.99, "execution", "download-exec", "windows")
 		}
 	}
+	// The pipe form is one spelling of a download cradle: any PowerShell
+	// chain that runs content a web request or WebClient fetched is the same
+	// action (actionfacts.PowerShellFetchedContentExecuted reads the chain on
+	// the psparse tree, after the static launchers are unwrapped).
+	if !seen["CMD-WIN-IWR-IEX"] &&
+		actionfacts.PowerShellFetchedContentExecuted(command, actionfactsDialect(dialect)) {
+		add("CMD-WIN-IWR-IEX", "PowerShell download piped to expression execution", "CRITICAL", 0.99, "execution", "download-exec", "windows")
+	}
 
 	return findings
 }
@@ -165,6 +175,18 @@ const (
 	windowsDialectPowerShell
 	windowsDialectCMD
 )
+
+// actionfactsDialect is the ActionFacts grammar of a command text read in the
+// Windows recognizer's dialect; a text of unknown dialect is a POSIX shell's.
+func actionfactsDialect(dialect windowsShellDialect) actionfacts.Dialect {
+	switch dialect {
+	case windowsDialectPowerShell:
+		return actionfacts.DialectPowerShell
+	case windowsDialectCMD:
+		return actionfacts.DialectCMD
+	}
+	return actionfacts.DialectPOSIX
+}
 
 func windowsCommandText(text, toolName string) (string, windowsShellDialect, bool) {
 	name := strings.ToLower(strings.TrimSpace(toolName))
