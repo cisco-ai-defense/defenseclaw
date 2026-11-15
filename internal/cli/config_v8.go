@@ -107,6 +107,7 @@ var configV8ValidateCmd = &cobra.Command{
 		}
 		result.Warnings = append(gateway.ConfigHILTWarnings(loaded.runtime), configV8InstalledAdvisories(loaded)...)
 		result.Warnings = append(result.Warnings, configValidateManagedStandaloneWarnings(loaded)...)
+		result.Warnings = append(result.Warnings, configValidateDestinationWarnings(loaded)...)
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetEscapeHTML(false)
 		return encoder.Encode(result)

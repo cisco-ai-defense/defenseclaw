@@ -356,8 +356,12 @@ metrics:
     enabled: false
     labels: {}
 
-# A local OpenTelemetry collector for trying the chart out. Point
-# config.otel at a real backend in production.
+# A local OpenTelemetry collector for trying the chart out (the debug
+# exporter: records show in the collector's log). It also adds an otlp
+# destination chart-collector to config.observability.destinations, unless
+# one with that name is there. In production, put your own backend in
+# config.observability.destinations instead (docs: Agent Substrate,
+# Reference, "Turn on OTLP export").
 observability:
   local:
     enabled: false
@@ -381,6 +385,10 @@ containerSecurityContext:
 
 # The memory emptyDir that holds DEFENSECLAW_HOME (the audit database and
 # local state) in every DefenseClaw pod; it counts against the pod's memory.
+# It is working state, not the audit record: it is lost when the pod is
+# replaced (a rollout, an eviction, a node move), and each gateway replica
+# holds only the requests it handled. Keep the record with an export
+# destination in config.observability.destinations (GAP-0275).
 homeSizeLimit: 256Mi
 
 podAnnotations: {}

@@ -874,6 +874,9 @@ func substrateInfo(c *config.Config) map[string]any {
 // substrateStartupChecks logs the gateway-side doctor checks that fail at
 // start (GAP-0040), so an operator sees them in the pod log too.
 func substrateStartupChecks(c *config.Config) {
+	if line := substrateAuditExportWarning(c); line != "" {
+		fmt.Fprintln(os.Stderr, line)
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -883,6 +886,60 @@ func substrateStartupChecks(c *config.Config) {
 			fmt.Fprintf(os.Stderr, "[substrate] %s: %s; fix: %s\n", chk.ID, chk.Detail, chk.Fix)
 		}
 	}()
+}
+
+// substrateAuditExportWarning says, once at start, that a gateway pod keeps
+// its audit store in a pod volume (the chart's emptyDir): it is lost when the
+// pod restarts, and each replica holds only the records it handled. The
+// durable record on Substrate is an export destination (GAP-0275). "" when
+// the config has an enabled push destination, or cannot be read here (the
+// observability bootstrap reports that).
+func substrateAuditExportWarning(c *config.Config) string {
+	if c == nil || c.ConfigFilePath == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(c.ConfigFilePath)
+	if err != nil {
+		return ""
+	}
+	return substrateAuditExportWarningFor(c.ConfigFilePath, raw, c.DataDir)
+}
+
+// substrateChartCollectorDestination is the destination the chart adds for
+// observability.local.enabled (templates/_helpers.tpl, GAP-0272).
+const substrateChartCollectorDestination = "chart-collector"
+
+func substrateAuditExportWarningFor(source string, raw []byte, dataDir string) string {
+	compiled, err := config.ParseCompileObservabilityV8(source, raw, config.ObservabilityV8CompileOptions{DefaultDataDir: dataDir})
+	if err != nil || compiled == nil || compiled.Plan == nil {
+		return ""
+	}
+	tryOut := false
+	for _, destination := range compiled.Plan.Destinations() {
+		if !destination.Enabled {
+			continue
+		}
+		switch destination.Kind {
+		case config.ObservabilityV8DestinationOTLP, config.ObservabilityV8DestinationSplunkHEC,
+			config.ObservabilityV8DestinationHTTPJSONL:
+			// The chart's try-out collector prints what it gets and keeps
+			// nothing, so it is no audit record (GAP-0286).
+			if destination.Name == substrateChartCollectorDestination {
+				tryOut = true
+				continue
+			}
+			return ""
+		}
+	}
+	if tryOut {
+		return "[substrate] warning: the only export destination is " + substrateChartCollectorDestination +
+			", the chart's try-out collector, which keeps nothing: this pod keeps its audit records in a pod volume, only those it handled, " +
+			"and they are lost when the pod restarts; add a destination that stores them under observability.destinations " +
+			"(docs: Agent Substrate reference, Turn on OTLP export)"
+	}
+	return "[substrate] warning: no export destination: this pod keeps its audit records in a pod volume, only those it handled, " +
+		"and they are lost when the pod restarts; add an otlp, splunk_hec or http_jsonl destination under " +
+		"observability.destinations for a durable record (docs: Agent Substrate reference, Turn on OTLP export)"
 }
 
 // loadChainKey sets the value lineage key every gateway replica shares

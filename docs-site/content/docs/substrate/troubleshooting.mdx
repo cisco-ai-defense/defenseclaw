@@ -199,6 +199,10 @@ skill-scanner does not run in the cluster. A skill in the attested template is t
 
 `pull` compares the agent's work with the folder you sent. It can only do that from the computer you ran `run` on. From another computer, `connect` to the agent and `git push` from inside it.
 
+### The gateway pods restart with `observability v8 bootstrap failed`
+
+The gateway could not start an export destination in `config.observability.destinations`. The error names the destination and the cause after `destination "NAME":`, and the line before it in the log says the same with the path or host. Fix that setting, or remove the destination, then run `helm upgrade` with the fixed values. A destination that only lacks `network_safety.allow_private_networks` does not stop the gateway: it runs without it and logs the option to set. See [Turn on OTLP export](/docs/substrate/reference#turn-on-otlp-export).
+
 ## For agents
 
 This section is for a coding agent, or an LLM working for one, that hits a DefenseClaw refusal inside an actor. A person usually reads the same messages.
