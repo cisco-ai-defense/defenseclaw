@@ -167,6 +167,8 @@ func TestGAP0975RunTimeShellWriteBlocksInEveryTier(t *testing.T) {
 		{"time -p", "time -p " + shell, false},
 		{"assignment prefix", "FOO=$BAR " + shell, false},
 		{"login cluster", `$BASH -lc '` + write + `'`, false},
+		{"option with a value", `"$SHELL" -o pipefail -c '` + write + `'`, false},
+		{"plus option", `"$SHELL" +o posix -c '` + write + `'`, false},
 		{"run-time program without -c", `$T send '` + write + `'`, true},
 	}
 	for _, tier := range boundedTestTiers {
