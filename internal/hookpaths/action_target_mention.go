@@ -254,7 +254,15 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		// function, an echo of an expansion), no statement of the call is
 		// excused as a reader (rel-1-0-10:GAP-0643, GAP-0860). A program of
 		// unknown role keeps its own excuse (GAP-0013, GAP-0708).
-		callKeeps := memo.nonWritesExcused() && !stateOnly && actionCallKeepsMentions(file, home)
+		// Asked only when a statement would be excused, once per walk.
+		callKeepsRead, callKeepsValue := false, false
+		callKeeps := func() bool {
+			if !callKeepsRead {
+				callKeepsRead = true
+				callKeepsValue = memo.nonWritesExcused() && !stateOnly && actionCallKeepsMentions(file, home)
+			}
+			return callKeepsValue
+		}
 		if memo.nonWritesExcused() && !stateOnly {
 			// A pipeline of readers (sudo sha256sum KEYS | sed -n 1,5p | tail) prints
 			// to the terminal: its statements read like a direct reader does.
@@ -435,7 +443,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// ./gradlew beside ls ~/.ssh does not make ls something else.
 				systemPrograms := !memo.nonWritesExcused() || stateOnly ||
 					actionReadersAreSystemPrograms(&syntax.File{Stmts: []*syntax.Stmt{{Cmd: call}}}, home, 0)
-				if !systemPrograms || callKeeps {
+				if readOnly && (!systemPrograms || callKeeps()) {
 					readOnly = false
 				}
 				readsReplaced := len(replacedEntries) > 0 && readOnly
