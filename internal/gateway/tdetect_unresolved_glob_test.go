@@ -19,11 +19,14 @@ import (
 // key in a folder named .ssh below a parent of the home or beside it, and a
 // write to DefenseClaw state spelled from the home get the unknown tier:
 // alert in default, permissive and managed, block in strict and
-// managed-strict, never above the in-home verdict or that tier. The
-// controls are the three spellings the narrowing of 9db03c4c5d removed
-// (a bare config, a read of a shell profile, a project folder named
-// credentials, a source file beside a credential) and patterns that name
-// nothing: they stay allowed.
+// managed-strict, never above the in-home verdict or that tier. A glob copy
+// (cp of a pattern) has a floor only: its copy reading belongs to the
+// GAP-0944 family (s7/wred2 gives every glob copy rel's reading back for
+// push 4), and a block there equals rel 644d23fa3b. The controls are the
+// spellings the narrowing of 9db03c4c5d removed (a bare config, a read of a
+// shell profile, a project folder named credentials, a source file beside a
+// credential) and patterns that name nothing: they stay allowed. The rows of
+// unresolvedFolderPendingGlobCopyRows are never above rel's verdict.
 func TestUnresolvedFolderPatternsAndFolderSpellingsAreTheUnknownTier(t *testing.T) {
 	home, project := cdFirstFixture(t)
 	user := filepath.Base(home)
@@ -31,39 +34,44 @@ func TestUnresolvedFolderPatternsAndFolderSpellingsAreTheUnknownTier(t *testing.
 		".ssh/id_*", ".ss?/id_rsa", ".ssh/id_r*a", ".ssh/id_[er]*", ".aws/*", ".aws/cred*",
 		user + "/.ssh/id_rsa", "home/" + user + "/.ssh/id_rsa", "../x/.ssh/id_ed25519", user + "/.ss?/id_*",
 	}
-	var cells [][3]string // cwd, command, in-home form
+	type cell struct {
+		cwd, command, inHome string
+		floorOnly            bool // a glob copy: GAP-0944 family, at least the tier
+	}
+	var cells []cell
 	for _, operand := range reads {
 		for _, verb := range []string{"cat %s", "cp %s /tmp/staged", "base64 %s"} {
 			inner := strings.Replace(verb, "%s", operand, 1)
+			globCopy := strings.HasPrefix(verb, "cp ") && strings.ContainsAny(operand, "*?[")
 			cells = append(cells,
-				[3]string{project, "cd \"$TD327_UNSET\" && " + inner, inner},
-				[3]string{"", inner, inner})
+				cell{project, "cd \"$TD327_UNSET\" && " + inner, inner, globCopy},
+				cell{"", inner, inner, globCopy})
 		}
 	}
 	for _, inner := range []string{
 		"echo x >> .defenseclaw/config.yaml", "echo x > .defenseclaw/hooks/h.sh", "rm -f .defenseclaw/guardrail_runtime.json",
 	} {
-		cells = append(cells, [3]string{project, "cd \"$TD327_UNSET\" && " + inner, inner})
+		cells = append(cells, cell{project, "cd \"$TD327_UNSET\" && " + inner, inner, false})
 	}
 	controls := []string{
 		"cat config", "cat .zshrc", "cat src/credentials/x.go", "cat credentials.py", "cat .defenseclaw/config.yaml",
-		"cat *", "rm -f *", "cp ./* /tmp/staged", "cat */*", "cat *.go", "echo x >> out.txt",
+		"cat *", "rm -f *", "cat */*", "cat *.go", "echo x >> out.txt",
 	}
-	for _, p := range gap0437Packs {
+	for pack, p := range gap0437Packs {
 		a := gap0437Server(t, p, "claudecode", "action")
 		tier := "L"
 		if strings.Contains(p.name, "strict") {
 			tier = "B"
 		}
-		for _, cell := range cells {
-			oracle := cdFirstVerdict(t, a, "td-glob-"+p.name, home, cell[2])
+		for _, c := range cells {
+			oracle := cdFirstVerdict(t, a, "td-glob-"+p.name, home, c.inHome)
 			ceiling := oracle
-			if cdFirstRank[tier] > cdFirstRank[ceiling] {
-				ceiling = tier
+			if cdFirstRank[tier] > cdFirstRank[ceiling] || c.floorOnly {
+				ceiling = "B"
 			}
-			got := cdFirstVerdict(t, a, "td-glob-"+p.name, cell[0], cell[1])
+			got := cdFirstVerdict(t, a, "td-glob-"+p.name, c.cwd, c.command)
 			if cdFirstRank[got] < cdFirstRank[tier] || cdFirstRank[got] > cdFirstRank[ceiling] {
-				t.Errorf("%s: %q (cwd %q) is %s, want %s to %s (in the home %s)", p.name, cell[1], cell[0], got, tier, ceiling, oracle)
+				t.Errorf("%s: %q (cwd %q) is %s, want %s to %s (in the home %s)", p.name, c.command, c.cwd, got, tier, ceiling, oracle)
 			}
 		}
 		for _, control := range controls {
@@ -72,5 +80,27 @@ func TestUnresolvedFolderPatternsAndFolderSpellingsAreTheUnknownTier(t *testing.
 				t.Errorf("%s control %q is %s, want allow", p.name, command, got)
 			}
 		}
+		for _, row := range unresolvedFolderPendingGlobCopyRows {
+			want := string(row.rel[pack])
+			if got := cdFirstVerdict(t, a, "td-glob-"+p.name, project, row.command); cdFirstRank[got] > cdFirstRank[want] {
+				t.Errorf("%s pending %q is %s, above rel's %s (%s)", p.name, row.command, got, want, row.reason)
+			}
+		}
 	}
+}
+
+// unresolvedFolderPendingGlobCopyRows are the control rows whose glob-copy
+// false-block removal (e62373df1e, a glob copy source read as one more name)
+// is reverted for push 4 (s7/wred2 8f4da425ec, rel-1-0-10:GAP-0944): composed
+// with it they get rel 644d23fa3b's verdict, on this branch alone the allow.
+// They expect at most rel's verdict, one letter per pack in the order
+// default, strict, permissive, managed, managed-strict (A allow, L alert,
+// B block); a verdict above rel's is a new false block.
+var unresolvedFolderPendingGlobCopyRows = []struct {
+	command, rel, reason string
+}{
+	// Composed with s7/wred2 dd22fb56c7: alert, block, alert, block, block
+	// (= rel); on this branch alone: allow in every pack.
+	{"cd \"$TD327_UNSET\" && cp ./* /tmp/staged", "LBLBB",
+		"GAP-0966: glob-copy FP removal reverted for push 4; restored by the s7/wred2-widen redesign in push 5"},
 }
