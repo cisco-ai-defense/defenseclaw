@@ -567,7 +567,8 @@ func analyzeStructuredArgvWords(
 		if !ok {
 			return out
 		}
-		if wrapperDepth >= maxWrapperDepth {
+		cost := staticPOSIXWrapperDepthCost(argv)
+		if wrapperDepth+cost > maxWrapperDepth {
 			out.markLimit(IssueWrapperLimit)
 			return out
 		}
@@ -575,7 +576,7 @@ func analyzeStructuredArgvWords(
 			nestedArgv,
 			staticPOSIXWrappedWords(command.Arguments, argv, nestedArgv),
 			out.nextID,
-			wrapperDepth+1,
+			wrapperDepth+cost,
 			DialectPOSIX,
 		)
 	case "su":
