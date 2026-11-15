@@ -307,11 +307,56 @@ func overLimitInterpreterOperandIsData(argv []string, start, at int) bool {
 
 // overLimitAfterDestination reports whether argv[at] lies after the
 // destination of a remote program called with argv.
+//
+// An -o option the egress reading does not model (BatchMode=yes) makes its
+// scan invalid; here that only means the destination is unknown. A connection
+// setting that runs nothing locally and names no path is dropped before the
+// scan, so the remote command after the destination stays DATA (ssh -o
+// BatchMode=yes host '<script>': the lead ruling on GAP-0382 and GAP-0760 for
+// TestWindowsLauncherSpellingsPastTheBoundAreNeverACleanAllow). Any other -o
+// (ProxyCommand, LocalCommand, KnownHostsCommand, Match, a path) keeps the
+// scan invalid, and the word is CODE.
 func overLimitAfterDestination(argv []string, at int, program string) bool {
+	kept := make([]string, 0, len(argv))
+	keptAt := -1
+	for i := 0; i < len(argv); i++ {
+		if i > 0 && i < at {
+			if argv[i] == "-o" && i+1 < at && overLimitInertSSHOption(argv[i+1]) {
+				i++
+				continue
+			}
+			if len(argv[i]) > 2 && strings.HasPrefix(argv[i], "-o") && overLimitInertSSHOption(argv[i][2:]) {
+				continue
+			}
+		}
+		if i == at {
+			keptAt = len(kept)
+		}
+		kept = append(kept, argv[i])
+	}
 	out := newParseOutput(DialectPOSIX, 1)
-	command := CommandFact{ID: 1, Argv: argv}
+	command := CommandFact{ID: 1, Argv: kept}
 	scan := classifySSHOptionPaths(&out, &command, program)
-	return scan.valid && scan.destinationIndex > 0 && at > scan.destinationIndex
+	return keptAt >= 0 && scan.valid && scan.destinationIndex > 0 && keptAt > scan.destinationIndex
+}
+
+// overLimitInertSSHOption reports an ssh -o setting that runs no local
+// command and names no local path: a connection, keep-alive, host-key check
+// or authentication-method setting with a plain value.
+func overLimitInertSSHOption(value string) bool {
+	key, optionValue, ok := splitSSHConfigOption(value)
+	if !ok || strings.ContainsAny(optionValue, "\x00\x01/\\%$`;|&<>(){} \t") {
+		return false
+	}
+	switch strings.ToLower(key) {
+	case "batchmode", "connecttimeout", "connectionattempts", "stricthostkeychecking",
+		"serveraliveinterval", "serveralivecountmax", "tcpkeepalive", "loglevel",
+		"compression", "port", "user", "identitiesonly", "requesttty", "addressfamily",
+		"checkhostip", "preferredauthentications", "passwordauthentication",
+		"pubkeyauthentication", "kbdinteractiveauthentication", "numberofpasswordprompts":
+		return true
+	}
+	return false
 }
 
 // staticWordTailName is the file name a word ends with when the word is a

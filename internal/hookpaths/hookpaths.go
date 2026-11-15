@@ -1368,6 +1368,14 @@ func protectedAuthorizedKeysPaths(home string, memo *TargetMemo) []string {
 // client does: links are followed, including one whose final file does not
 // exist yet. ok is false when the target cannot be resolved.
 func ResolveWriteTarget(path string) (string, bool) {
+	// A hook call is one decision: a path resolved once is the same path for
+	// the rest of the call, as for every evaluation that carries a TargetMemo.
+	// The reach scans of a shell call ask for every word of it again for each
+	// statement, 446,000 file system reads for 100 PowerShell lines, 27 s on a
+	// Windows host (rel-1-0-10:GAP-0766).
+	if call := currentHookCall(); call != nil {
+		return call.targets().resolveWriteTarget(path)
+	}
 	return resolveWritePath(path, 0)
 }
 
@@ -1428,6 +1436,13 @@ func (p protectedFiles) keysOnlyWith(home string, memo *TargetMemo) protectedFil
 }
 
 func newProtectedFiles(home string) protectedFiles {
+	// Within one hook call the protected set is read once: the reach scans of a
+	// shell call ask for it for every statement, and each read walks every key
+	// file path and reads each file (rel-1-0-10:GAP-0766). The files are the
+	// same files for the whole decision.
+	if call := currentHookCall(); call != nil {
+		return call.targets().protectedFiles(home)
+	}
 	return newProtectedFilesWith(home, nil)
 }
 
@@ -1468,7 +1483,7 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 		}
 		if info == nil {
 			var err error
-			if info, err = pathStat(resolved); err != nil || !info.Mode().IsRegular() {
+			if info, err = callStat(resolved); err != nil || !info.Mode().IsRegular() {
 				return resolved, true
 			}
 		}
