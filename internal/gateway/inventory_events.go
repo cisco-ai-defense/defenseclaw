@@ -1298,21 +1298,29 @@ func endpointInventoryScopeKey(path string) string {
 }
 
 // endpointInventoryScopeFromEvidence extracts the scope key from a
-// signal produced by the AI-Discovery walker. The walker's evidence[0]
-// is always the parent-surface row and carries the PathHash of the
-// full home-prefixed path (see signalFromDirectoryChildren and
-// signalFromMCPConfigPath) — reusing that hash means report-derived
-// component IDs are stable across walker restarts even when the raw
-// path-hash key rotates, and it costs zero extra hashing. Returns ""
-// when the signal has no evidence (walker bug guard).
+// signal produced by the AI-Discovery walker: the PathHash of the
+// parent-surface row, the full home-prefixed path (see
+// signalFromDirectoryChildren and signalFromMCPConfigPath) — reusing
+// that hash means report-derived component IDs are stable across walker
+// restarts even when the raw path-hash key rotates, and it costs zero
+// extra hashing. Evidence is sorted by type and hash, so an entry row
+// ("skill_entry" sorts before "skill") can come first; it is skipped,
+// or every id in a folder would move when a sibling entry is added or
+// removed. Returns "" when the signal has no evidence (walker bug guard).
 func endpointInventoryScopeFromEvidence(evidence []inventory.AIEvidence) string {
 	if len(evidence) == 0 {
 		return ""
 	}
+	h := evidence[0].PathHash
+	for _, ev := range evidence {
+		if !strings.HasSuffix(ev.Type, "_entry") {
+			h = ev.PathHash
+			break
+		}
+	}
 	// Trim the "hmac-sha256:" / "sha256:" prefix — the identity
 	// hasher folds this token into the wider digest so the prefix
 	// adds no information beyond length.
-	h := evidence[0].PathHash
 	if i := strings.LastIndex(h, ":"); i >= 0 {
 		h = h[i+1:]
 	}
