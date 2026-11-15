@@ -311,10 +311,10 @@ func TestHookJudge_ToolResultRunsToolResultInjectionJudge(t *testing.T) {
 	}
 }
 
-// A Claude Code PostToolUse hands the tool-result judge (the PII judge on
-// completion-shaped tool output on rel/1.0.10) its tool and call (the hook
-// inspects the output as "message"), and the session's user request from
-// UserPromptSubmit, outside the sample.
+// A Claude Code PostToolUse hands the tool-result judge (the PII judge, which
+// reads a tool's output only for a tool the pack lists with judge_result,
+// GAP-0171) its tool and call (the hook inspects the output as "message"),
+// and the session's user request from UserPromptSubmit, outside the sample.
 func TestHookJudge_ClaudeCodeToolResultCarriesCallContext(t *testing.T) {
 	mock := injectionHitProvider()
 	a := newHookJudgeAPIServer(t,
@@ -324,10 +324,13 @@ func TestHookJudge_ClaudeCodeToolResultCarriesCallContext(t *testing.T) {
 	home := t.TempDir()
 	ctx := ContextWithSessionID(t.Context(), "s-trctx")
 	judge := a.hookJudge.Load()
+	judge.rp = &guardrail.RulePack{SensitiveTools: &guardrail.SensitiveToolsConfig{Tools: []guardrail.SensitiveTool{
+		{Name: "mail_search", ResultInspection: true, JudgeResult: true},
+	}}}
 	judge.ObserveSessionPrompt(ctx, "update the parser fixtures")
 	a.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
-		HookEventName: "PostToolUse", SessionID: "s-trctx", CWD: home, ToolName: "Read",
-		ToolInput:    map[string]interface{}{"file_path": filepath.Join(home, "testdata", "cases.json")},
+		HookEventName: "PostToolUse", SessionID: "s-trctx", CWD: home, ToolName: "mail_search",
+		ToolInput:    map[string]interface{}{"query": "parser fixtures review"},
 		ToolResponse: map[string]interface{}{"content": "{\"case\": 1, \"text\": \"fixture row for the parser tests\"}"},
 	})
 	var system string
@@ -339,7 +342,7 @@ func TestHookJudge_ClaudeCodeToolResultCarriesCallContext(t *testing.T) {
 	if system == "" {
 		t.Fatalf("no tool-result judge call with the context block (%d calls)", len(mock.captured))
 	}
-	for _, want := range []string{"\ntool: Read\n", "\ncall: read ", filepath.Join("testdata", "cases.json")} {
+	for _, want := range []string{"\ntool: mail_search\n", "\ncall: arguments ", "parser fixtures review"} {
 		if !strings.Contains(system, want) {
 			t.Errorf("system message lacks %q:\n%s", want, system)
 		}

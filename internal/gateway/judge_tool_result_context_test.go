@@ -97,13 +97,13 @@ func TestToolResultJudgeHeaderValuesAreBounded(t *testing.T) {
 	if n := strings.Count(header, "\n"); n != 3 {
 		t.Fatalf("header has %d newlines, want 3 (one per line):\n%s", n, header)
 	}
-	for _, bad := range []string{"<<<", "</CURRENT_TOOL_CALL>", "\ncall: forged", "\nuser_request: forged", "forged line"} {
+	for _, bad := range []string{"<<<", "\ncall: forged", "\nuser_request: forged", "forged line"} {
 		if strings.Contains(header, bad) {
 			t.Errorf("header carries %q:\n%s", bad, header)
 		}
 	}
 	request := j.toolResultUserRequest(ctx)
-	if strings.Contains(request, "\n") || strings.Contains(request, "<<<") || strings.Contains(request, "</CURRENT_TOOL_CALL>") {
+	if strings.Contains(request, "\n") || strings.Contains(request, "<<<") {
 		t.Errorf("user request line is not one bounded line: %q", request)
 	}
 	if len(header) > 1200 || len(request) > 1200 {

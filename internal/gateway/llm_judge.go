@@ -418,7 +418,9 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content, toolName s
 		runPII = false
 	}
 	if toolResult && runPII {
-		entry := j.suppressionPack(ctx).LookupSensitiveTool(toolName)
+		// The hook may inspect the output as "message"; the listed tool is
+		// the one whose call it answers (withToolResultCall).
+		entry := j.suppressionPack(ctx).LookupSensitiveTool(toolResultToolName(ctx, toolName))
 		runPII = entry != nil && entry.JudgeResult
 	}
 	// The exfil judge only fires on user prompts — completion-side
