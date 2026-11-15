@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -34,6 +35,7 @@ import (
 
 func newWindowsHookImageRetireCommand() *cobra.Command {
 	var jsonOutput bool
+	var skipProfiles []string
 	command := &cobra.Command{
 		Use:          "retire",
 		Short:        "Point every agent hook back at bin\\defenseclaw-hook.exe before an older release's Setup runs",
@@ -41,23 +43,26 @@ func newWindowsHookImageRetireCommand() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			report := runWindowsHookImageRetire()
+			report := runWindowsHookImageRetire(skipProfiles)
 			summary := "every agent hook names the transition image again; the launch folders stay"
 			return writeWindowsHookImageReport(cmd.OutOrStdout(), jsonOutput, report, summary, report.OK, report.Reason, report.Error)
 		},
 	}
 	command.Flags().BoolVar(&jsonOutput, "json", false, "print the JSON report (otherwise one summary line)")
+	command.Flags().StringArrayVar(&skipProfiles, "skip-profile", nil,
+		"SID of an enrolled profile whose own agent configs still name a launch folder to leave unconverted (repeatable; audited, and listed by status and verify until converted)")
 	return command
 }
 
-func runWindowsHookImageRetire() windowsHookImageRetireReport {
+func runWindowsHookImageRetire(skipProfiles []string) windowsHookImageRetireReport {
 	refused := func(err error) windowsHookImageRetireReport {
 		return windowsHookImageRetireReport{
-			SchemaVersion: windowsHookImageReportSchema,
-			Reason:        windowsHookImageRetireRefused,
-			Error:         err.Error(),
-			Rewritten:     []string{},
-			StillNamed:    []windowsHookImageNamedFile{},
+			SchemaVersion:   windowsHookImageReportSchema,
+			Reason:          windowsHookImageRetireRefused,
+			Error:           err.Error(),
+			Rewritten:       []string{},
+			StillNamed:      []windowsHookImageNamedFile{},
+			SkippedProfiles: []windowsHookImageSkippedProfile{},
 		}
 	}
 	if !windowsEnterpriseIsElevated() {
@@ -112,10 +117,70 @@ func runWindowsHookImageRetire() windowsHookImageRetireReport {
 			}
 			return managedRouteOnlyConnectors(cfg), nil
 		},
-		Now:   time.Now,
-		Sleep: time.Sleep,
-		Wait:  windowsHookImageRetireWait,
-		Poll:  windowsHookImageRetirePoll,
+		SkipProfiles: skipProfiles,
+		Profiles: func() (map[string]windowsHookImageProfile, error) {
+			return windowsHookImageEnrolledProfiles(roots)
+		},
+		Actor:      windowsHookImageRetireActor,
+		Audit:      postWindowsHookImageRetireSkip,
+		ReadMarker: os.ReadFile,
+		Now:        time.Now,
+		Sleep:      time.Sleep,
+		Wait:       windowsHookImageRetireWait,
+		Poll:       windowsHookImageRetirePoll,
+	})
+}
+
+// windowsHookImageEnrolledProfiles is every enabled account of the
+// guardian's manifest by SID.
+func windowsHookImageEnrolledProfiles(roots winpath.EnterpriseRoots) (map[string]windowsHookImageProfile, error) {
+	manifest, err := enterprisehooks.LoadManifest(filepath.Join(roots.StateRoot, "hook-guardian", "targets.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	profiles := map[string]windowsHookImageProfile{}
+	for _, target := range manifest.Targets {
+		sid := strings.TrimSpace(target.SID)
+		if sid == "" || (target.Enabled != nil && !*target.Enabled) {
+			continue
+		}
+		profiles[sid] = windowsHookImageProfile{Account: strings.TrimSpace(target.User), Home: strings.TrimSpace(target.UserHome)}
+	}
+	return profiles, nil
+}
+
+// windowsHookImageRetireActor names the account that runs retire:
+// "DOMAIN\user (SID)", or the SID alone when it has no name.
+func windowsHookImageRetireActor() string {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return "unknown account"
+	}
+	sid := user.User.Sid.String()
+	if account, domain, _, err := user.User.Sid.LookupAccount(""); err == nil && account != "" {
+		if domain != "" {
+			account = domain + `\` + account
+		}
+		return account + " (" + sid + ")"
+	}
+	return sid
+}
+
+// postWindowsHookImageRetireSkip writes the HIGH audit row of one skipped
+// profile through the managed gateway: who skipped it and when, the SID and
+// the files that still name a launch folder (GAP-0794 review F4). It is an
+// operator mutation of the managed hook state, so the config-update action.
+func postWindowsHookImageRetireSkip(profile windowsHookImageSkippedProfile) error {
+	return writeWindowsEnterpriseAuditRow(func() error {
+		return postWindowsManagedObservability(map[string]any{"kind": "activity", "activity": map[string]any{
+			"actor":       profile.SkippedBy,
+			"action":      string(audit.ActionConfigUpdate),
+			"target_type": "hook-image-retire-skip",
+			"target_id":   profile.SID,
+			"severity":    "HIGH",
+			"before":      map[string]any{"account": profile.Account, "still_named": profile.Files},
+			"after":       map[string]any{"skipped_at": profile.SkippedAt, "retired": false},
+		}})
 	})
 }
 
@@ -402,7 +467,7 @@ func windowsHookImageConfigFiles(roots winpath.EnterpriseRoots) ([]windowsHookIm
 	accountFiles, accountProblems := enterprisehooks.WindowsManagedHookConfigFiles(
 		filepath.Join(roots.StateRoot, "hook-guardian", "targets.yaml"))
 	for _, file := range accountFiles {
-		files = append(files, windowsHookImageConfigFile{Path: file.Path, User: file.User, Home: file.Home})
+		files = append(files, windowsHookImageConfigFile{Path: file.Path, User: file.User, Home: file.Home, SID: file.SID})
 	}
 	problems = append(problems, accountProblems...)
 	return files, problems

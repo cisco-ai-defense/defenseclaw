@@ -32,6 +32,8 @@ type WindowsHookConfigFile struct {
 	Path string
 	User bool
 	Home string
+	// SID is the enrolled account of an account file (User).
+	SID string
 }
 
 // WindowsManagedHookConfigFiles lists, for every enabled target of the
@@ -85,7 +87,7 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 		for _, path := range paths {
 			file := WindowsHookConfigFile{Path: path}
 			if windowsPathWithin(home, path) {
-				file.User, file.Home = true, home
+				file.User, file.Home, file.SID = true, home, strings.TrimSpace(target.SID)
 			}
 			files = append(files, file)
 		}

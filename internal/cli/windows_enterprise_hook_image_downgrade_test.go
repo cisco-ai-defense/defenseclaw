@@ -62,7 +62,7 @@ func TestHookImageScanSeesALaunchFolderInsideAnEncodedCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range [][]byte{other, []byte(`powershell.exe -EncodedCommand !!!notbase64 -EncodedCommand`)} {
+	for _, text := range [][]byte{other, []byte(`cmd.exe /d /c echo -EncodedCommand !!!notbase64`)} {
 		if got := windowsHookImageFoldersNamedIn(text, hookImageTestBin); len(got) != 0 {
 			t.Fatalf("folders named = %v", got)
 		}

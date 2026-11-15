@@ -1450,6 +1450,17 @@ The standalone profile runs its transaction on PowerShell 7, which must be insta
 | `--attest-claude-effective-policy` | Install, upgrade, repair: record that an administrator confirmed that Claude Code runs DefenseClaw's managed hooks |
 | `--json` | Print the result as JSON |
 
+Before an older release's Setup, the gateway runs one more step from an elevated prompt:
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise windows hook-image retire [--skip-profile <SID>]... [--json]`.
+It points every agent hook back at `bin\defenseclaw-hook.exe` and ends `ok` only when no machine file and no
+enrolled account's agent config names a launch folder; otherwise `hook_image_retire_pending` lists each file in
+`still_named` ([Roll back](/docs/enterprise/lifecycle#roll-back)). `--skip-profile <SID>` (repeatable, no blanket
+form) leaves one enrolled profile's own configs unconverted: the SID must be an enrolled profile that still holds
+`retire` back, or `retire` refuses with nothing changed. Each skip writes a HIGH `config-update` audit row
+(target `hook-image-retire-skip`: who, when, the SID and its files), is listed in `skipped_profiles`, and
+`enterprise windows status` and `verify` report it as `hook_image_profile_not_retired` until none of its files
+names a launch folder.
+
 Exit codes: standalone `0`, `1603` failure, `1618` busy, `1639` invalid
 arguments, `5` when run from a standard account (`status` and `verify` need an elevated prompt; the JSON error code is `elevation_required`), and `3010` (reserved). Secure Client: `0` and `1603`.
 
