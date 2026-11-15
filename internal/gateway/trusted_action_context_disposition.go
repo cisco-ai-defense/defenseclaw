@@ -188,9 +188,27 @@ func applyTrustedActionContextDisposition(
 }
 
 func trustedActionActiveSSHPrivateKeyContentRead(facts actionfacts.Facts) bool {
+	return sshPrivateKeyContentReadBy(facts, matchesActiveSSHPrivateKey)
+}
+
+// trustedActionOtherHomeSSHPrivateKeyContentRead is the same proof for a key
+// that is not the active user's: another account's home, a mounted or alternate
+// home (matchesContextualSSHPrivateKey minus the active one). The proof is the
+// same; the strict pack blocks it as it blocks the active key, the other packs
+// keep the alert of the path rule (GAP-0810).
+func trustedActionOtherHomeSSHPrivateKeyContentRead(facts actionfacts.Facts) bool {
+	return sshPrivateKeyContentReadBy(facts, func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		return !matchesActiveSSHPrivateKey(facts, candidate) && matchesContextualSSHPrivateKey(facts, candidate)
+	})
+}
+
+func sshPrivateKeyContentReadBy(
+	facts actionfacts.Facts,
+	isKey func(actionfacts.Facts, actionfacts.PathFact) bool,
+) bool {
 	for _, candidate := range facts.Paths {
 		if candidate.Access != actionfacts.PathAccessRead ||
-			!matchesActiveSSHPrivateKey(facts, candidate) {
+			!isKey(facts, candidate) {
 			continue
 		}
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
