@@ -31,6 +31,13 @@ const (
 	// the CLI: the same effect as a write to config.yaml, which the state
 	// rule blocks.
 	DefenseClawControlConfig DefenseClawControlKind = "config"
+	// DefenseClawControlSubstrate is a Substrate command that changes
+	// DefenseClaw's own state, configuration, credentials or session, or
+	// starts, connects to or changes an agent runtime DefenseClaw governs
+	// (defenseclaw substrate run, login, secrets set, template build; the
+	// gateway's substrate-controller). A Substrate command that only reports
+	// adds nothing.
+	DefenseClawControlSubstrate DefenseClawControlKind = "substrate"
 	// DefenseClawControlUnproven is a DefenseClaw command whose effect the
 	// parse could not resolve (a changing verb that is not a known stop or
 	// disable, a dynamic operand, an unparsed nested shell, a reading the
@@ -1393,26 +1400,63 @@ var (
 	// that the guardrail, its judge, its state, the connectors' hooks or the
 	// managed policy rest on: `config set` or `config unset` of a key under
 	// one is the same effect as a write to config.yaml, which the state rule
-	// blocks. A drift test requires every section of the Config schema to be
-	// listed here or in its reviewed neutral list (observability, webhooks,
-	// notifications, routing, update, ai_discovery), so a new section is
-	// classified when it is added. The config writer checks a key against the
-	// schema before it writes, so a key under no section changes nothing.
+	// blocks. observability is a guard section too: changing or turning off
+	// the audit and OTLP export hides the evidence of what the agent did
+	// (lead ruling 2026-11-15, after GAP-0753). A drift test requires every
+	// section of the Config schema to be listed here or in its reviewed
+	// neutral list (webhooks, notifications, routing, update, ai_discovery),
+	// so a new section is classified when it is added. The config writer
+	// checks a key against the schema before it writes, so a key under no
+	// section changes nothing.
 	defenseClawGuardConfigRoots = map[string]bool{
 		"config_version": true, "llm": true, "default_llm_api_key_env": true, "default_llm_model": true,
 		"decision_model": true, "data_dir": true, "audit_db": true, "judge_bodies_db": true,
 		"quarantine_dir": true, "plugin_dir": true, "policy_dir": true, "environment": true,
 		"tenant_id": true, "workspace_id": true, "deployment_mode": true, "discovery_source": true,
 		"claw": true, "agent": true, "acp": true, "inspect_llm": true, "cisco_ai_defense": true,
-		"scanners": true, "openshell": true, "watch": true, "firewall": true, "guardrail": true,
+		"scanners": true, "openshell": true, "substrate": true, "watch": true, "firewall": true, "guardrail": true,
 		"gateway": true, "cloud_auth": true, "asset_policy": true, "registries": true,
 		"claude_code": true, "codex": true, "connector_hooks": true, "application_protection": true,
 		"managed": true, "enterprise": true, "fleet": true, "connectors": true, "admission": true,
-		"llm_providers": true,
+		"llm_providers": true, "observability": true,
 	}
 	// defenseClawWeakValues are the values of a mode option that move a guard to
 	// a weaker state.
 	defenseClawWeakValues = map[string]bool{"observe": true, "open": true}
+	// defenseClawSubstrateCommands are the Substrate commands: the
+	// `substrate` group of both CLIs and the gateway's substrate-* components
+	// (the controller, the egress callout, the bundle tool and the chart and
+	// volume steps). Their verbs are classified by the tables below, not by
+	// the verbs above, so a Substrate `set`, `run` or `apply` is not read as
+	// some other group's verb.
+	defenseClawSubstrateCommands = map[string]bool{
+		"substrate": true, "substrate-bundle": true, "substrate-chart": true, "substrate-controller": true,
+		"substrate-datadir": true, "substrate-extproc": true,
+	}
+	// defenseClawSubstrateGroups are the Substrate subcommand groups; the verb
+	// is the word after them.
+	defenseClawSubstrateGroups = map[string]bool{"policy": true, "bundle": true, "secrets": true, "template": true}
+	// defenseClawSubstrateReadVerbs only report: status, lists, logs, usage,
+	// the signed-in name, pending approvals, a policy explanation or offline
+	// test, the setup checks, and the template verify and scan. Under
+	// `secrets` only `list` is read (it prints names, scope, hosts and status,
+	// never a value; api.Secret has no value field).
+	defenseClawSubstrateReadVerbs = map[string]bool{
+		"status": true, "list": true, "show": true, "logs": true, "usage": true, "whoami": true,
+		"approvals": true, "explain": true, "verify": true, "doctor": true, "test": true, "scan": true,
+		"info": true, "describe": true,
+	}
+	// defenseClawSubstrateStopVerbs change DefenseClaw's state, configuration,
+	// credentials or session, or start, connect to or change an agent runtime.
+	// A Substrate verb in neither table is judged the same way (an ambiguous
+	// verb is a control); this table names the registered ones so the CLI
+	// drift test can tell a new verb from a reviewed one.
+	defenseClawSubstrateStopVerbs = map[string]bool{
+		"run": true, "connect": true, "pull": true, "checkpoint": true, "undo": true, "delete": true,
+		"migrate": true, "approve": true, "reject": true, "login": true, "logout": true, "set": true,
+		"rm": true, "reset": true, "setup": true, "apply": true, "rollback": true, "build": true,
+		"publish": true, "keygen": true, "serve": true,
+	}
 )
 
 // defenseClawConfigValueOptions and defenseClawConfigFlagOptions are the
@@ -1429,8 +1473,8 @@ var (
 // after the verb, options included: click takes an option anywhere, so the
 // key is the first word that is not an option or an option's value
 // (GAP-0787, `config set --expect-sha256 HEX KEY VALUE`). A key under a guard
-// section is the configuration change; a key under a neutral section (an
-// observability sink, routing, a webhook) is not a guard change; a key or an
+// section (observability among them) is the configuration change; a key
+// under a neutral section (routing, a webhook) is not a guard change; a key or an
 // option the parse left open is a reading the rules cannot prove either way.
 func configChangeKind(args []string, unset bool) (DefenseClawControlKind, bool) {
 	var keys []string
@@ -1468,25 +1512,40 @@ func configChangeKind(args []string, unset bool) (DefenseClawControlKind, bool) 
 	if len(keys) == 0 {
 		return "", false
 	}
-	open := false
 	for _, key := range keys {
-		if key == "" {
-			open = true
-			continue
-		}
-		key = strings.ToLower(strings.Trim(key, `"'`))
-		root := key
-		if cut := strings.IndexAny(key, ".["); cut >= 0 {
-			root = key[:cut]
-		}
-		if defenseClawGuardConfigRoots[root] {
+		// A first segment that is not a plain section name is one the CLI path
+		// parser may read as any section (["guardrail"].enabled), so it is not
+		// proven neutral: it is the configuration change, as on rel
+		// (rel-1-0-10:GAP-0923).
+		if root, plain := plainConfigRoot(key); !plain || defenseClawGuardConfigRoots[root] {
 			return DefenseClawControlConfig, true
 		}
 	}
-	if open {
+	return "", true
+}
+
+// plainConfigRoot is the first segment of a config key when that segment is a
+// plain section name: lower-case ASCII letters, digits and underscores, not
+// starting with a digit, followed by the end of the key, a dot or a bracket.
+// Every other first segment (a bracket or a quote, an empty key, white space,
+// an escape, upper case, a non-ASCII letter) is one config_writer.parse_path
+// may normalise to a section name, so it is reported as not plain
+// (rel-1-0-10:GAP-0923). The reader does not port parse_path: it only proves
+// the plain spelling.
+func plainConfigRoot(key string) (string, bool) {
+	end := 0
+	for end < len(key) {
+		char := key[end]
+		if char >= 'a' && char <= 'z' || char == '_' || end > 0 && char >= '0' && char <= '9' {
+			end++
+			continue
+		}
+		break
+	}
+	if end == 0 || end < len(key) && key[end] != '.' && key[end] != '[' {
 		return "", false
 	}
-	return "", true
+	return key[:end], true
 }
 
 // isNumberWord reports a word that is a number (a negative value, not an
@@ -1518,6 +1577,43 @@ func guardGroupBefore(lower []string, index int) bool {
 		}
 	}
 	return false
+}
+
+// judgeDefenseClawSubstrate classifies a Substrate command (ok is false for
+// any other command). The verb is the first word after the command and an
+// optional group: a read verb adds nothing, every other verb, and a verb the
+// tables do not name, is a Substrate control. A bare `substrate` or
+// `substrate GROUP`, and the bare bundle and chart tools, only print their
+// help; the bare controller, callout and volume step run.
+func judgeDefenseClawSubstrate(lower []string) (kind DefenseClawControlKind, ok bool) {
+	if len(lower) == 0 || !defenseClawSubstrateCommands[lower[0]] {
+		return "", false
+	}
+	group, verb := "", ""
+	for _, word := range lower[1:] {
+		if group == "" && verb == "" && lower[0] == "substrate" && defenseClawSubstrateGroups[word] {
+			group = word
+			continue
+		}
+		verb = word
+		break
+	}
+	switch {
+	case verb == "":
+		switch lower[0] {
+		case "substrate", "substrate-bundle", "substrate-chart":
+			return "", true
+		}
+		return DefenseClawControlSubstrate, true
+	case group == "secrets":
+		if verb == "list" {
+			return "", true
+		}
+		return DefenseClawControlSubstrate, true
+	case defenseClawSubstrateReadVerbs[verb]:
+		return "", true
+	}
+	return DefenseClawControlSubstrate, true
 }
 
 // weakensMode reports a mode set to a weaker value through a verb
@@ -1568,6 +1664,9 @@ func judgeDefenseClawCLI(args []string, program string, dynamic bool) (kind Defe
 	}
 	if weakensMode(args) {
 		return DefenseClawControlDisable, true
+	}
+	if kind, ok := judgeDefenseClawSubstrate(lower); ok {
+		return kind, true
 	}
 	for index, word := range lower {
 		if found, ok := defenseClawStopVerbs[word]; ok {

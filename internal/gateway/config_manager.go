@@ -1180,6 +1180,13 @@ func (m *ConfigManager) activationInput() (enterprisebundle.ActivationInput, boo
 // A bundle must verify against installed anchors, or against the anchors
 // staged for that receipt before their first promotion.
 func (m *ConfigManager) startupActivationRefusal(raw []byte) *enterprisebundle.ActivationRefusal {
+	// Agent Substrate (GAP-0135): a managed gateway in a pod has no laptop
+	// lifecycle; its activated config is the one the chart mounts. The
+	// check below is registered only by `serve --substrate` in a cluster, so
+	// every host keeps the lifecycle and signed-bundle rules unchanged.
+	if accept := substrateClusterActivation.Load(); accept != nil && (*accept)(m.path, raw) == nil {
+		return nil
+	}
 	in, anchored := m.activationInput()
 	state, err := configwrite.ReadGenerationState(m.path)
 	recorded := err == nil && strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw))
@@ -1487,18 +1494,23 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		m.recordLoadError(ctx, "schema_version", nil)
 		return fmt.Errorf("config reload: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
-	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) && !managed.IsManagedEnterprise(next.DeploymentMode) {
-		m.recordLoadError(ctx, "managed_downgrade", nil)
-		return fmt.Errorf("config reload cannot downgrade deployment_mode from managed_enterprise")
+	// A managed downgrade and a change between two managed profiles (a
+	// reinstall) are refused; the Substrate config watch refuses the same
+	// (config.ManagedReloadRefusal, GAP-0294). An unmanaged config has no
+	// profile, so switching it to managed_enterprise keeps its pre-profile
+	// behavior: deployment_mode is restart-required below.
+	if reason, err := config.ManagedReloadRefusal(oldCfg, next); err != nil {
+		m.recordLoadError(ctx, reason, nil)
+		return err
 	}
-	// Only a change between two managed profiles is a reinstall. An unmanaged
-	// config has no profile, so switching it to managed_enterprise keeps its
-	// pre-profile behavior: deployment_mode is restart-required below.
-	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) &&
-		managed.IsManagedEnterprise(next.DeploymentMode) &&
-		oldCfg.EnterpriseProfile() != next.EnterpriseProfile() {
-		m.recordLoadError(ctx, "enterprise_profile_change", nil)
-		return fmt.Errorf("config reload cannot change the enterprise profile from %q to %q; reinstall through the lifecycle", oldCfg.EnterpriseProfile(), next.EnterpriseProfile())
+	// A Substrate pod never takes a deployment_mode change live, in its own
+	// file reload either: the Substrate config watch refuses the whole edit,
+	// so this reload must not apply part of it (GAP-0307).
+	if oldCfg != nil && oldCfg.Substrate.Enabled {
+		if reason, err := config.LiveReloadRefusal(oldCfg, next); err != nil {
+			m.recordLoadError(ctx, reason, nil)
+			return err
+		}
 	}
 	// Once trust anchors are installed, a managed standalone gateway can
 	// serve a refused boot edit only after a verified signed bundle replaces

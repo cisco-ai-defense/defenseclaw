@@ -131,7 +131,7 @@ func TestStreamTailMatchesWholeTextCheck(t *testing.T) {
 					}
 					// Blocked mid-stream, or before any output when the match
 					// completes in the initial buffer: no terminal event either way.
-					if strings.Contains(out, f.terminal) {
+					if streamTailSentTerminal(f, out) {
 						t.Fatalf("a matching stream was not blocked (%d bytes)", len(out))
 					}
 				})
@@ -206,7 +206,7 @@ func TestStreamTailMatchesWholeTextCheckAcrossLanes(t *testing.T) {
 		if strings.Contains(out, streamSpanEnd) {
 			t.Fatalf("the client received the end of a match in candidate 0 (%d mid-stream checks)", insp.midChecks)
 		}
-		if strings.Contains(out, f.terminal) {
+		if streamTailSentTerminal(f, out) {
 			t.Fatalf("a matching stream was not blocked (%d bytes)", len(out))
 		}
 	})

@@ -1,0 +1,22 @@
+# A private OIDC issuer (GAP-0191): its CA from a ConfigMap, administrators
+# by group, one added flag, and an extra environment variable; the default
+# serve flags stay. The chain egress action is the alert opt-in, in config
+# (GAP-0250).
+config:
+  substrate:
+    chain_egress_action: alert
+    identity:
+      issuer: https://idp.cluster-o.example
+      oidc:
+        issuer: https://keycloak.lab.example/realms/dc
+        client_id: defenseclaw-launcher
+    launcher_atespaces:
+      engineering: [eng-web]
+gateway:
+  adminGroups: [dc-admins, platform-admins]
+  oidcCA:
+    configMap: lab-oidc-ca
+  extraArgs: [--chain-retention=48h]
+  extraEnv:
+  - name: GODEBUG
+    value: tlsrsakex=0

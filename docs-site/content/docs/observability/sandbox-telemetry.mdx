@@ -204,6 +204,41 @@ The labels below are the ones the local Prometheus shows. In OTLP they are
 | `defenseclaw.sandbox.transitions` (counter) | `connector`, phase from and to | One per phase change. |
 | `defenseclaw.egress.events` (counter) | `connector`, `source` (`openshell`, `dc-egress-proxy`), `decision` | One per decision; none for the end of a connection. A refusal that is audited only does not count. |
 
+## Agent Substrate
+
+An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenShell sandbox, with `defenseclaw.sandbox.runtime` set to `substrate` and `defenseclaw.sandbox.driver` set to `gvisor` or `microvm`. `defenseclaw.sandbox.id` is the actor UID. The records carry the sandbox correlation plus these attributes. None of them is ever a metric label.
+
+| Attribute | Meaning |
+| --- | --- |
+| `defenseclaw.sandbox.substrate.atespace`, `.actor` | The atespace and the actor name. They are unique only together |
+| `defenseclaw.sandbox.substrate.actor_uid`, `ate.actor.uid` | The actor UID. The second is the name Substrate uses on its own records, so the two join. A fork has a new UID |
+| `defenseclaw.sandbox.substrate.template`, `.worker_pool`, `.kit_version` | The template the actor came from, the pool that runs it (absent while suspended) and the DefenseClaw kit release inside |
+| `defenseclaw.sandbox.substrate.batch_id` | The batch an unattended actor belongs to |
+| `defenseclaw.sandbox.substrate.parent_uid` | The actor a fork was made from |
+| `k8s.cluster.name`, `k8s.namespace.name` | Resource attributes of the DefenseClaw component, from the chart. `host.name` is the pod, never the actor |
+| `defenseclaw.user.id_kind=oidc_subject` or `k8s_user` | The person is an OIDC subject, or a Kubernetes user the gateway verified (open-source clusters without OIDC). `defenseclaw.user.identity.source` is `oidc` for a person or `workload_oidc` for CI. `defenseclaw.user.principal.assurance` is `verified` only for a person or workload the gateway verified and bound to a live actor UID; anything the actor says about itself is `claimed` |
+
+**Lifecycle.** `sandbox.lifecycle` records use the actor phases `resuming`, `ready` (Substrate's RUNNING), `suspending`, `suspended`, `crashed`, `deleting` and `reverting`, and these triggers: `attest` (a template was attested or refused), `policy_lag`, `resume_recheck`, `fork`, `drift` (a foreign change to the egress policy was reverted), `policy_conflict`, `idle_suspend` and `migrate`.
+
+**Egress.** `egress.allowed` and `egress.blocked` from the callout add `defenseclaw.network.body_inspected` (the callout read the body of an MCP or listed-host POST) and `defenseclaw.network.body_over_cap` (the body was over the cap and was not read).
+
+**Secrets.** `secret.injected` records the secret name and the host, never a value, a prefix or the placeholder.
+
+**Metrics.** None has an identity label.
+
+| Metric | Type | Notes |
+| --- | --- | --- |
+| `defenseclaw.substrate.policy_lag` | histogram, seconds | A policy change to the egress policy being active |
+| `defenseclaw.substrate.hook_rtt` | histogram, ms | Hook round trip from the kit to the gateway |
+| `defenseclaw.substrate.first_hook_after_resume` | histogram, ms | The first hook call after a resume |
+| `defenseclaw.substrate.leader_observe_latency` | histogram, ms | A stateless replica waiting for the leader |
+| `defenseclaw.substrate.unattested_templates` | gauge | Templates seen without a valid attestation |
+| `defenseclaw.substrate.idle_suspends` | counter | Actors suspended for being idle |
+| `defenseclaw.substrate.policy_conflicts` | counter | Actors marked `policy_conflict` |
+| `defenseclaw.substrate.rate_limited` | counter | Calls refused by the fair-share limit |
+
+The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability, policy lag, conflicts and unattested templates.
+
 ## What to trust
 
 DefenseClaw reports a sandbox from several sources. Some it measures itself. Some are what OpenShell or the sandboxed program says about itself.

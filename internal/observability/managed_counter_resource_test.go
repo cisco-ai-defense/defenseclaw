@@ -48,11 +48,11 @@ func TestRestrictedMetricResourceMatchesTheBundledCollector(t *testing.T) {
 	if strings.Join(collector, ",") != strings.Join(gateway, ",") {
 		t.Fatalf("collector keeps %v, the gateway keeps %v", collector, gateway)
 	}
-	if !strings.Contains(string(raw), `IsMatch(metric.name, "^defenseclaw[.]sandbox[.]managed[.]")`) {
-		t.Fatal("the collector no longer restricts defenseclaw.sandbox.managed.*")
+	if !strings.Contains(string(raw), `IsMatch(metric.name, "^defenseclaw[.](sandbox[.]managed|substrate)[.]")`) {
+		t.Fatal("the collector no longer restricts defenseclaw.sandbox.managed.* and defenseclaw.substrate.*")
 	}
 	for name := range resourceRestrictedMetrics {
-		if !strings.HasPrefix(name, "defenseclaw.sandbox.managed.") {
+		if !strings.HasPrefix(name, "defenseclaw.sandbox.managed.") && !strings.HasPrefix(name, "defenseclaw.substrate.") {
 			t.Fatalf("restricted metric %s is outside the collector branch", name)
 		}
 	}

@@ -8,13 +8,18 @@
 # defenseclaw_harden_env. Host hook directories never contain this file.
 #
 # Everything a hook needs to reach DefenseClaw is baked here at image build:
-# the ingress address (host.openshell.internal, relayed by the OpenShell
+{{if .SandboxSubstrate}}# the ingress address (the DefenseClaw gateway's actor Service, reached
+# through Agent Substrate egress) and the request budgets. An actor holds no
+# DefenseClaw credential: every request carries the actor header with a
+# placeholder, which the actor's egress rule to the gateway replaces with
+# the actor's signed token, and never an Authorization header.
+{{else}}# the ingress address (host.openshell.internal, relayed by the OpenShell
 # supervisor to the host-loopback hook ingress) and the request budgets. The
 # only runtime input is the per-sandbox binding token in
 # DEFENSECLAW_SANDBOX_TOKEN: by default a provider placeholder OpenShell
 # swaps for the real credential only on the ingress endpoint, with
 # openshell.token_delivery: env the token itself.
-
+{{end}}
 # The workload shapes the environment every hook inherits: Claude Code
 # applies the env block of user and project settings to hook processes, and
 # whatever the agent exports reaches them as well. bash -p has already
@@ -271,7 +276,11 @@ defenseclaw_sandbox_post() {
   done
   case "$auth" in
     *$'\n'*|*$'\r'*) return 1 ;;
-  esac
+  esac{{if .SandboxSubstrate}}
+  # Agent Substrate: the actor header, never a bearer. Its egress rule to
+  # the gateway replaces the placeholder with the actor's signed token.
+  auth=""
+  curl_args+=(-H {{.SandboxActorHeaderSH}}){{end}}
   if [ -n "$auth" ]; then
     # The two characters a quoted curl configuration value escapes.
     auth="${auth//\\/\\\\}"
@@ -286,7 +295,7 @@ defenseclaw_sandbox_post() {
   while :; do
     status=0
     out="$(printf '%s' "$body" | curl -q -s --noproxy '*' -w '\n%{http_code}' -X POST \
-      "http://${DC_SANDBOX_INGRESS}${path}" \
+      "{{if .SandboxSubstrate}}{{.SandboxScheme}}{{else}}http{{end}}://${DC_SANDBOX_INGRESS}${path}"{{if .SandboxCAFileSH}} --cacert {{.SandboxCAFileSH}}{{end}} \
       "${key_args[@]+"${key_args[@]}"}" \
       "${curl_args[@]+"${curl_args[@]}"}" \
       "${auth_args[@]+"${auth_args[@]}"}" \
