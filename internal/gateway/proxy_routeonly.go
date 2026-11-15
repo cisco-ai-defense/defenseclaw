@@ -54,6 +54,10 @@ type routeOnlyServer struct {
 	// APIServer.SetRouteOnly); goos selects the credential custody rule.
 	api  *APIServer
 	goos string
+	// metrics is the generated-metric runtime of the sidecar (nil until it
+	// is wired): the route-only listener records its routing decisions
+	// through it like the guardrail proxy does.
+	metrics func() hookLifecycleMetricV8Runtime
 
 	mu        sync.Mutex
 	inflight  map[string]int
@@ -217,16 +221,18 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// restarts there); the gateway uses its own credential for the target.
 	custody := s.custody(cfg)
 	subject := caller.Subject
-	if cfg.StandaloneEnterprise() {
-		// Managed: the proved account is the subject downstream (profile
-		// matching, audit). OSS: the gateway owner, as before.
-		r = r.WithContext(attachVerifiedSubject(r.Context(), nil, subject, sanitizeLLMEventUser(userScopedIdentityName(subject)), subjectSourceKernelPeer))
-	}
 	if !s.acquire(subject) {
 		routeOnlyError(w, http.StatusTooManyRequests, "rate_limit_error", "too many concurrent model calls through DefenseClaw")
 		return
 	}
 	defer s.release(subject)
+	if cfg.StandaloneEnterprise() {
+		// Managed: the proved account is the subject downstream (profile
+		// matching, audit), attached after the per-account bound because
+		// the profile resolution can wait on a directory lookup. OSS: the
+		// gateway owner, as before.
+		r = r.WithContext(routeOnlyManagedContext(r.Context(), subject, connector))
+	}
 
 	original := routeOnlyAttempt{base: upstream.BaseURL, native: native, keepInbound: true, signer: signer}
 	// A gateway-signed call carries the gateway identity (the inbound AWS
@@ -308,7 +314,8 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	original.usage = routeOnlyUsageFacts(connector, native, family, body)
 	// The verified caller (OSS gateway owner or managed kernel peer).
 	original.usage.Subject = subject
-	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body, engine.Caller{Verified: true, Key: subject, Source: subjectSourceKernelPeer})
+	routeCaller, routeProfiles := routeOnlyCaller(r.Context(), subject)
+	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body, routeCaller, routeProfiles)
 	original.usage.Route = usageDecision(usageRouteFacts(routedOutcome, true), false)
 	if routedOutcome.Result == "" {
 		original.usage.Route.Decision = modelusage.DecisionPassthrough
@@ -332,6 +339,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if routedOutcome.Result == SemanticRouteDenied {
 		auditRouteDeny(r.Context(), s.router.logger, "/r/"+connector, routedOutcome.Deny)
+		s.recordDecision(r, connector, routedOutcome, false)
 		routeOnlyErrorFor(w, family, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
 		return
 	}
@@ -352,6 +360,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.recordDecision(r, connector, routedOutcome, attempt != nil)
 	if attempt == nil {
 		s.forward(w, r, original, body, nil)
 		return
@@ -383,6 +392,17 @@ func routeOnlyTooLargeToCheck(w http.ResponseWriter) {
 	routeOnlyError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "the request is larger than DefenseClaw can check for sensitive data (routing.sensitive), so it was not sent")
 }
 
+// recordDecision records the routing decision metric of one request with
+// what the listener finally did: routed is true only when the call goes to the
+// routed model. A request the router never looked at (no outcome) records
+// nothing.
+func (s *routeOnlyServer) recordDecision(r *http.Request, connector string, outcome SemanticRouteOutcome, routed bool) {
+	if outcome.Result == "" || s.metrics == nil {
+		return
+	}
+	recordSemanticRoutingDecisionMetricsV8(r.Context(), s.metrics(), connector, "route_only", routedMetricOutcome(outcome, routed))
+}
+
 // routeOnlyOverloaded answers a signed call the buffer budget cannot hold.
 func routeOnlyOverloaded(w http.ResponseWriter) {
 	w.Header().Set("Retry-After", "1")
@@ -396,6 +416,15 @@ func (s *routeOnlyServer) enrolledRouteUsers(connector string) (int, bool) {
 		return 0, false
 	}
 	return s.api.userScopedCredentials.routeEnrolledCount(connector)
+}
+
+// routeEpochUnpublished is the managed Windows route epoch problem ("" when
+// published, and off Windows managed hosts).
+func (s *routeOnlyServer) routeEpochUnpublished() string {
+	if s == nil || s.api == nil || s.api.userScopedCredentials == nil {
+		return ""
+	}
+	return s.api.userScopedCredentials.routeEpoch.unpublished()
 }
 
 func (s *routeOnlyServer) acquire(subject string) bool {
@@ -533,7 +562,31 @@ func routeOnlyConversationID(h http.Header) string {
 // decide asks the router and returns the routed attempt (nil: send the
 // original), the outcome, and whether the admin gate allows the original
 // request as a fallback target.
-func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, signer *bedrockSigner, body []byte, caller engine.Caller) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
+// routeOnlyManagedContext attaches the proved account of a managed
+// route-only request and the guardrail profile it resolves to, so the
+// routing.admin rules (users, groups) and the profile routing overlay match
+// this account, as on the hook and proxy paths (rel-1-0-10:GAP-0764).
+func routeOnlyManagedContext(ctx context.Context, subject, connector string) context.Context {
+	ctx = attachVerifiedSubject(ctx, nil, subject, sanitizeLLMEventUser(userScopedIdentityName(subject)), subjectSourceKernelPeer)
+	return withGuardrailProfile(ctx, pinnedProfileSet(ctx), connector)
+}
+
+// routeOnlyCaller is the routing caller of a verified route-only request.
+// Managed: the proved account with its directory matcher and resolved
+// profiles (routeCallerFromContext, the hook and proxy paths' caller), so
+// routing.admin user and group rules and guardrail.profiles.*.routing tell
+// accounts apart; before, the caller had no matcher and no profiles, so
+// every user rule matched every caller and a group rule left every caller
+// unconfirmed (rel-1-0-10:GAP-0764). OSS: the gateway owner (identity
+// selectors do not apply on a per-user gateway).
+func routeOnlyCaller(ctx context.Context, subject string) (engine.Caller, []string) {
+	if fromContext, profiles := routeCallerFromContext(ctx); fromContext.Verified && fromContext.Key == subject {
+		return fromContext, profiles
+	}
+	return engine.Caller{Verified: true, Key: subject, Source: subjectSourceKernelPeer}, nil
+}
+
+func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, signer *bedrockSigner, body []byte, caller engine.Caller, profiles []string) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
 	if s.router == nil {
 		return nil, SemanticRouteOutcome{}, true
 	}
@@ -562,7 +615,7 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 		Model: model, RequestModel: model, APIFamily: family, Connector: connector,
 		Listener: engine.ListenerRouteOnly, RequestedProvider: inProvider, CredentialClass: inClass,
 		ConversationID: routeOnlyConversationID(r.Header), Text: text, HasImages: images, ToolTurn: toolTurn,
-		Caller: caller,
+		Caller: caller, Profiles: profiles, Body: body,
 	}
 	if hasTools {
 		in.Tools = []interface{}{true}
@@ -823,7 +876,77 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 		routeOnlySendError(w, err, msg)
 		return
 	}
+	if o := routed.sensitive; o != nil && o.Route != nil && o.Route.Backend != nil {
+		if msg, refused := routeOnlySensitiveLocalRefusal(resp, o.Route.Backend.Alias); refused {
+			// Recorded as the routing.sensitive refusal it is, like an
+			// unreachable local model (code and path only, no provider text).
+			out := *o
+			out.Result, out.Decision = SemanticRouteDenied, nil
+			out.Deny = engine.SensitiveLocalDeny(o.Route.Sensitive.Source, "the local model refused the request")
+			amendRoutingDecision(r.Context(), out)
+			auditRouteDeny(r.Context(), s.router.logger, r.URL.Path, out.Deny)
+			call.End(errRouteOnlySensitiveLocalRefused)
+			routeOnlyErrorFor(w, routeOnlyAPIFamily(routed.native), http.StatusBadRequest, "invalid_request_error", msg)
+			return
+		}
+	}
 	call.End(copyRouteOnlyResponse(w, resp, call, routed.usage.Streaming))
+}
+
+var errRouteOnlySensitiveLocalRefused = errors.New("the local model of a sensitive request refused it")
+
+// routeOnlySensitiveLocalRefusal is the DefenseClaw message for a request
+// routing.sensitive kept on a local model that refused it (HTTP 400 JSON);
+// the caller answers it in the agent API shape. It names routing.sensitive,
+// the alias and the model's own reason (bounded), says nothing went to the
+// cloud and how to fix it.
+// Before, the agent printed the raw provider body, for example Ollama's
+// "unknown input item type additional_tools" for a Codex catalog entry in
+// the Responses lite tool mode (rel-1-0-10:GAP-0757). Fail closed is
+// unchanged: the cloud model is never tried.
+func routeOnlySensitiveLocalRefusal(resp *http.Response, alias string) (string, bool) {
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "json") {
+		return "", false
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	msg := "routing.sensitive kept this request on the local model " + boundedRouterLabel(alias, 64) + ", and that model refused it"
+	if reason := routeOnlyProviderErrorText(raw); reason != "" {
+		msg += " (" + reason + ")"
+	}
+	msg += ". Nothing was sent to the cloud model. Use a local model that accepts this request (Codex: a model catalog entry without use_responses_lite for the model), or send it without the sensitive data."
+	return msg, true
+}
+
+// routeOnlyProviderErrorText is the error message of a provider error body
+// ({"error":{"message"}}, {"error":"..."} or {"message"}), printable ASCII
+// only and at most 160 bytes; "" when there is none.
+func routeOnlyProviderErrorText(raw []byte) string {
+	var body struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+	}
+	if json.Unmarshal(raw, &body) != nil {
+		return ""
+	}
+	text := body.Message
+	var nested struct {
+		Message string `json:"message"`
+	}
+	var plain string
+	switch {
+	case json.Unmarshal(body.Error, &nested) == nil && nested.Message != "":
+		text = nested.Message
+	case json.Unmarshal(body.Error, &plain) == nil && plain != "":
+		text = plain
+	}
+	out := make([]byte, 0, 160)
+	for i := 0; i < len(text) && len(out) < 160; i++ {
+		if c := text[i]; c >= 0x20 && c < 0x7f {
+			out = append(out, c)
+		}
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (s *routeOnlyServer) forward(w http.ResponseWriter, r *http.Request, a routeOnlyAttempt, body []byte, rest io.Reader) {
@@ -927,7 +1050,9 @@ func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response, call mode
 				}
 			}
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return werr
+				// The caller went away: the upstream did not fail
+				// (modelusage.ErrClientGone records it as cancelled).
+				return fmt.Errorf("%w: %v", modelusage.ErrClientGone, werr)
 			}
 			if flusher != nil {
 				flusher.Flush()

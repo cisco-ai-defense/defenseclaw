@@ -413,12 +413,14 @@ func (c *call) build(err error) Record {
 	end := time.Now()
 	rec := Record{Facts: c.f, Status: c.status, Outcome: "completed", TTFB: c.ttfb, Total: end.Sub(c.start), EndedAt: end}
 	switch {
-	case errors.Is(err, context.Canceled):
+	case c.status >= 400:
+		// The upstream answered with a failure: it stays failed even when
+		// the client then went away while the body was written.
+		rec.Outcome, rec.ErrorType = "failed", "http_"+itoa(c.status)
+	case errors.Is(err, context.Canceled), errors.Is(err, ErrClientGone):
 		rec.Outcome, rec.ErrorType = "cancelled", "cancelled"
 	case err != nil:
 		rec.Outcome, rec.ErrorType = "failed", "upstream_error"
-	case c.status >= 400:
-		rec.Outcome, rec.ErrorType = "failed", "http_"+itoa(c.status)
 	}
 	if c.parser != nil {
 		c.streamUse = c.parser.Usage()
@@ -426,6 +428,7 @@ func (c *call) build(err error) Record {
 	u := c.pickUsage()
 	rec.Usage = u
 	rec.Cost = c.s.price(c.f, c.status, u, nil)
+	rec.Cost.BaselineUSD = c.s.baseline(c.f, u, rec.Cost)
 	c.s.bound(&rec)
 	return rec
 }
@@ -467,6 +470,25 @@ func (s *snapshot) price(f CallFacts, status int, u Usage, reported *float64) Co
 		}
 	}
 	return Resolve(s.table, nil, "", reported, s.keepRep, u.Partial)
+}
+
+// baseline prices the same usage on the model the client asked for, from the
+// same table. It exists only for an agent call whose own cost is known, so
+// baseline and cost always compare the same calls; the other token counts of a
+// different model's tokenizer are not modelled (the same counts are priced).
+func (s *snapshot) baseline(f CallFacts, u Usage, c Cost) *float64 {
+	if !s.cost || c.USD == nil || f.CallRole != RoleAgent || f.RequestedModel == "" {
+		return nil
+	}
+	provider := f.RequestedProvider
+	if provider == "" {
+		provider = f.SelectedProvider
+	}
+	usd, _, ok := s.table.Compute(provider, f.RequestedModel, u)
+	if !ok {
+		return nil
+	}
+	return &usd
 }
 
 // bound sets the bounded model and provider of a record and its metric

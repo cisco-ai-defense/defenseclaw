@@ -1,0 +1,52 @@
+// Recorder of testdata/outage-golden.json (kept as text: not compiled).
+// Copy it, with outage_golden_shapes_test.go (package line changed to cli),
+// into internal/cli of the full-CLI tree (rel/1.0.10 9efb4f1799) and run
+//   W1_OUTAGE_OUT=<json> W1_OUTAGE_PACKS=<this testdata/outage-packs> go test -run TestW1RecordOutageGolden ./internal/cli
+
+package cli
+
+// Scratch (S8 W1, never committed): record the outage-mode golden from the full-CLI code.
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+)
+
+func TestW1RecordOutageGolden(t *testing.T) {
+	out, packs := os.Getenv("W1_OUTAGE_OUT"), os.Getenv("W1_OUTAGE_PACKS")
+	if out == "" {
+		t.Skip("recorder")
+	}
+	for _, pack := range []string{"default", "permissive", "strict", "bad-cel"} {
+		dir := filepath.Join(packs, pack)
+		got := outagePackDigest(t, dir)
+		real, err := guardrail.RulePackDigest(dir)
+		t.Logf("pack %s: formula %s loader %s err %v", pack, got, real, err)
+		if err == nil && got != "sha256:"+real {
+			t.Fatalf("pack %s: formula pin %s, loader pin sha256:%s", pack, got, real)
+		}
+	}
+	saved := []any{secureClientHost, managedHostWindowsStandalone, managedHostWindowsMarkerUncertain, managedHostDescriptorPath}
+	_ = saved
+	secureClientHost = func() bool { return false }
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	managedHostWindowsMarkerUncertain = func() bool { return false }
+	missing := filepath.Join(t.TempDir(), "no-runtime-descriptor")
+	managedHostDescriptorPath = func() string { return missing }
+	results := runOutageShapes(t, packs, func(connector, hookDir string) string {
+		mode := hookOutageFailModeNow(connector, hookDir)
+		_, _, err := loadHookRuntimeConfig(filepath.Join(filepath.Dir(hookDir), "config.yaml"))
+		t.Logf("%s %s -> %s (load err: %v)", connector, filepath.Base(filepath.Dir(hookDir)), mode, err)
+		return mode
+	})
+	body, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out, append(body, 10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

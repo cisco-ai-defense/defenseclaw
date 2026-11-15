@@ -213,6 +213,12 @@ func (a *APIServer) ownUnprotectedAgents(cfg *config.Config, caller ownStatusCal
 	}
 	scan := ownScan{known: true, mine: make(map[string][]enterprisehooks.UnprotectedAgent), unresolved: make(map[string]bool)}
 	for _, agent := range agents {
+		if agent.InstallScanGap() {
+			// A part of the install scan that did not finish says nothing
+			// about the managed hook: the hook evidence decides the row, as
+			// the administrator status does (rel-1-0-10 GAP-0802).
+			continue
+		}
 		switch caller.match(agent) {
 		case ownMine:
 			scan.mine[agent.Connector] = append(scan.mine[agent.Connector], agent)

@@ -392,6 +392,14 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 	// code again, and its ) returns to the string.
 	var open []byte
 	start := from
+	// stmt is the start of the statement in progress at the current nesting:
+	// a $( or ( starts a statement of its own, and its ) returns to the
+	// statement around it (stmtOpen). The consumer of a here-document or a
+	// quoted script is the COMMAND word of that statement, which a command
+	// substitution inside one of its words does not change (gh pr create
+	// --title "$(git log -1)" --body-file - <<EOF reads its body as data).
+	stmt := from
+	var stmtOpen []int
 	// pipeFrom is the start of the pipeline in progress (-1 for none): a
 	// pipeline is judged whole as well as stage by stage, since what it
 	// proves (a download run by a shell, a credential piped out) needs the
@@ -405,7 +413,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 		if end > start {
 			pieces = append(pieces, capFloorPiece{start: start, end: end})
 		}
-		start = next
+		start, stmt = next, next
 	}
 	cutPipe := func(end, next int) {
 		if pipeFrom < 0 {
@@ -414,7 +422,13 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 		if end > start {
 			pieces = append(pieces, capFloorPiece{start: start, end: end})
 		}
-		start = next
+		start, stmt = next, next
+	}
+	// enter opens a $( or ( at i whose statement starts at next.
+	enter := func(i, next int) {
+		stmtOpen = append(stmtOpen, stmt)
+		cut(i, next)
+		open = append(open, '(')
 	}
 	wordStart := func(i int) bool {
 		j := i - 1
@@ -435,8 +449,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 				open = open[:n-1]
 				i++
 			case c == '$' && i+1 < to && command[i+1] == '(':
-				cut(i, i+2)
-				open = append(open, '(')
+				enter(i, i+2)
 				i += 2
 			case c == '`':
 				cut(i, i+1)
@@ -457,7 +470,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 				i = to
 				continue
 			}
-			if capFloorShellDashC(command[start:i], home) {
+			if capFloorShellDashC(command[stmt:i], home) {
 				pieces = append(pieces, capFloorPiece{start: i, end: end, body: body})
 			}
 			i = end
@@ -482,7 +495,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 		case c == '<' && strings.HasPrefix(command[i:to], "<<"):
 			doc, end, ok := capFloorHeredocAt(command, i, to)
 			if ok {
-				doc.fed = capFloorShellStdin(command[start:i], home)
+				doc.fed = capFloorShellStdin(command[stmt:i], home)
 				pending = append(pending, doc)
 				i = end
 				continue
@@ -517,7 +530,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 				i = min(lineEnd+1, to)
 			}
 			pending = nil
-			start = i
+			start, stmt = i, i
 			continue
 		case c == ';' || c == '`':
 			cut(i, i+1)
@@ -526,14 +539,15 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 			if c == '$' {
 				next++
 			}
-			cut(i, next)
-			open = append(open, '(')
+			enter(i, next)
 			i = next
 			continue
 		case c == ')':
 			cut(i, i+1)
 			if n := len(open); n > 0 && open[n-1] == '(' {
 				open = open[:n-1]
+				stmt = stmtOpen[len(stmtOpen)-1]
+				stmtOpen = stmtOpen[:len(stmtOpen)-1]
 			}
 		case c == '|' || c == '&':
 			if i > from && (command[i-1] == '>' || command[i-1] == '<') || i+1 < to && command[i+1] == '>' {

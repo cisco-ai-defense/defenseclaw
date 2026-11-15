@@ -154,6 +154,9 @@ type LLMJudge struct {
 	// prompts named and its git remote hosts, which the intent store does not
 	// keep.
 	scope atomic.Pointer[intentScopeSessions]
+	// targets is the tool judge's per-session TARGET_HISTORY table
+	// (judgeTargets, judge_packet.go), which the intent store does not keep.
+	targets atomic.Pointer[judgeTargetSessions]
 
 	telemetryMu sync.RWMutex
 	traceV8     judgeTraceV8Runtime
@@ -415,7 +418,9 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content, toolName s
 		runPII = false
 	}
 	if toolResult && runPII {
-		entry := j.suppressionPack(ctx).LookupSensitiveTool(toolName)
+		// The hook may inspect the output as "message"; the listed tool is
+		// the one whose call it answers (withToolResultCall).
+		entry := j.suppressionPack(ctx).LookupSensitiveTool(toolResultToolName(ctx, toolName))
 		runPII = entry != nil && entry.JudgeResult
 	}
 	// The exfil judge only fires on user prompts — completion-side
@@ -427,6 +432,9 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content, toolName s
 
 	if !runInjection && !runPII && !runExfil {
 		return allowVerdict("llm-judge")
+	}
+	if toolResultJudgeCall(ctx, direction) {
+		ctx = j.withToolResultJudgeContext(ctx, toolName)
 	}
 
 	// Apply pre-judge strips from the rule pack to remove known metadata
@@ -543,6 +551,13 @@ Respond ONLY with a JSON object in this exact format:
   "Semantic Manipulation": {"reasoning": "...", "label": false, "signal_strength": "weak_signal"},
   "Token Exploitation": {"reasoning": "...", "label": false, "signal_strength": "weak_signal"}
 }`
+
+// toolResultPIIScope turns the PII judge's question for a tool's output from
+// "is there personal data?" (true for nearly every mailbox, contact list and
+// booking record the user asked for) into "is there personal data beyond what
+// the request asked for?" (rel-1-0-10:GAP-0171). Without a known request it
+// asks the original question.
+const toolResultPIIScope = `This sample is a tool's output, fetched for the user's request (the USER_REQUEST line of the user message, before the sample; the CONTEXT FROM DEFENSECLAW block below says what the call did). Personal data the request asked for (the user's own inbox, contacts, calendar, account, or the record they looked up) is the expected content of the output: label it false. Label a category true only when the output carries that kind of data beyond the request: other people's records in bulk that the request did not ask for, credentials, secrets or government identifiers, or data about a different subject than the request. When the user's request is unknown, judge the output as you would without this note.`
 
 // toolResultInjectionSystemPrompt is the injection judge's prompt for a tool's
 // output (rel-1-0-10 GAP-0171). The user prompt's judge treats imperative text
@@ -1071,6 +1086,14 @@ func judgeResponseFormatBounded(kind string, toolSafeKeys, boundFreeText bool) j
 			"required":             []string{"detection_result", "entities"},
 			"additionalProperties": false,
 		})
+	case sensitiveJudgeKind:
+		name = "defenseclaw_judge_sensitivity"
+		schema = map[string]interface{}{
+			"type":                 "object",
+			"properties":           map[string]interface{}{"sensitive": map[string]interface{}{"type": "boolean"}},
+			"required":             []string{"sensitive"},
+			"additionalProperties": false,
+		}
 	case "exfil":
 		name = "defenseclaw_judge_exfil"
 		schema = judgeCategoryObjectSchema(sortedJudgeCategoryNames(exfilCategories), judgeLabelSchema(false))
@@ -1415,12 +1438,13 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	if jc := j.rp.PIIJudge(); jc != nil && jc.SystemPrompt != "" {
 		prompt = jc.SystemPrompt
 	}
+	prompt = toolResultJudgeSystem(ctx, prompt, toolResultPIIScope)
 
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: calling provider (dir=%s, content_len=%d)\n", direction, len(content))
 
 	messages := []ChatMessage{
 		{Role: "system", Content: prompt},
-		{Role: "user", Content: wrapJudgeSample(content)},
+		{Role: "user", Content: toolResultJudgeUser(ctx, wrapJudgeSample(content))},
 	}
 	llmCtx, judgeTrace := j.startJudgeTrace(
 		ctx, kind, direction, maxTok, messages, time.Now().UTC(),
@@ -2256,11 +2280,14 @@ func asciiLowerPreservingBytes(value string) string {
 
 func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args string) string {
 	current := boundToolJudgeArguments(args)
+	effects := toolJudgeCallEffects(ctx, toolName, args)
 	sessionID := judgeSessionKey(ctx)
 	nonce := newToolJudgeNonce()
 	if j == nil || sessionID == "" {
 		var only strings.Builder
 		writeToolJudgeSection(&only, nonce, "CURRENT_TOOL_CALL", fmt.Sprintf("tool=%q", sanitizeToolName(toolName)), current)
+		effects.render(&only, nonce)
+		renderJudgeFlaggingRules(ctx, &only, nonce)
 		return strings.TrimSuffix(only.String(), "\n")
 	}
 
@@ -2281,6 +2308,9 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		entry.UserIntent = ""
 	}
 	prior := entry.Prior
+	// TARGET_HISTORY: what this session did earlier to the call's targets.
+	// The intent store has no place for it (judge_packet.go).
+	targetHistory := j.judgeTargets().record(sessionID, effects, time.Now())
 
 	var sample strings.Builder
 	if entry.UserIntent != "" {
@@ -2300,6 +2330,11 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		}
 	}
 	writeToolJudgeSection(&sample, nonce, "CURRENT_TOOL_CALL", fmt.Sprintf("tool=%q", sanitizeToolName(toolName)), current)
+	effects.render(&sample, nonce)
+	if targetHistory != "" {
+		writeToolJudgeSection(&sample, nonce, "TARGET_HISTORY", "", targetHistory)
+	}
+	renderJudgeFlaggingRules(ctx, &sample, nonce)
 	sampleText := strings.TrimSuffix(sample.String(), "\n")
 	if j.decision != nil {
 		state := decisionModelState{
@@ -2421,6 +2456,7 @@ func judgeSessionKeyFor(ctx context.Context, sessionID string) string {
 // announces a new or ended session: its intent and calls in the intent store,
 // its scope table entry and its decision-model history. The process-local
 // store persists no tool arguments.
+// The tool judge's target history (judgeTargets, judge_packet.go) goes too.
 // sessionID is the judge key (judgeSessionKeyFor), not the raw ID; ctx is the
 // hook call's (a shared store finds the caller in it).
 func (j *LLMJudge) ResetToolJudgeSession(ctx context.Context, sessionID string) {
@@ -2434,6 +2470,7 @@ func (j *LLMJudge) ResetToolJudgeSession(ctx context.Context, sessionID string) 
 		j.warnIntentStore("Reset", "the session's earlier intent and calls may still be shown to the judge", err)
 	}
 	j.scopeSessions().reset(sessionID)
+	j.judgeTargets().reset(sessionID)
 	if j.decision != nil {
 		j.historyMu.Lock()
 		delete(j.history, sessionID)

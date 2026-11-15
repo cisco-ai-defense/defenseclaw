@@ -48,6 +48,12 @@ type Agent struct {
 	RegistryID  string   `json:"registry_id,omitempty" yaml:"registry_id,omitempty"`
 	SourceURL   string   `json:"source_url,omitempty" yaml:"source_url,omitempty"`
 	Notes       string   `json:"notes,omitempty" yaml:"notes,omitempty"`
+	// RunsOwnTools marks an agent that runs its tools itself and asks the
+	// editor a permission only for what its own approval policy names, so the
+	// guard sees most of its tool calls in reports after they ran and cannot
+	// refuse them (rel-1-0-10:GAP-0619). The gateway judges those reports and
+	// answers an alert that would have blocked.
+	RunsOwnTools bool `json:"runs_own_tools,omitempty" yaml:"runs_own_tools,omitempty"`
 }
 
 // Client describes an editor that can spawn an ACP agent.
@@ -77,7 +83,7 @@ var builtinCatalog = Catalog{
 		{ID: "kiro", Name: "Kiro", Command: "kiro-cli", Args: []string{"acp"}, Support: SupportTested, ConnectorID: "kiro", Kind: "native", SourceURL: "https://kiro.dev/docs/cli/acp/"},
 		{ID: "cursor", Name: "Cursor Agent", Command: "agent", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "cursor", Kind: "native", RegistryID: "cursor", SourceURL: "https://cursor.com/docs/cli/acp"},
 		{ID: "opencode", Name: "OpenCode", Command: "opencode", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "opencode", Kind: "native", RegistryID: "opencode", SourceURL: "https://opencode.ai/docs/cli/"},
-		{ID: "hermes", Name: "Hermes Agent", Command: "hermes", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "hermes", Kind: "native", SourceURL: "https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/programmatic-integration.md"},
+		{ID: "hermes", Name: "Hermes Agent", Command: "hermes", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "hermes", Kind: "native", RunsOwnTools: true, SourceURL: "https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/programmatic-integration.md"},
 		{ID: "copilot", Name: "GitHub Copilot CLI", Command: "copilot", Args: []string{"--acp", "--stdio"}, Support: SupportCataloged, ConnectorID: "copilot", Kind: "native", RegistryID: "github-copilot-cli", SourceURL: "https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server"},
 		{ID: "devin", Name: "Devin", Command: "devin", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "devin", Kind: "native", RegistryID: "devin", SourceURL: "https://agentclientprotocol.com/get-started/registry"},
 	},

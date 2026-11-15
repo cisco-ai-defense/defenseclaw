@@ -81,6 +81,11 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # Every key the schema has and the previous release's schema lacks is listed
 # (test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade); 1.0.9 refuses
 # each 1.0.10 key below, at gateway start and on every config write.
+# A key inside a list item or a map value is named with [] (every item of
+# the list) or * (every value of the map), for example routing.models[].bedrock
+# and guardrail.profiles.*.routing; the set-aside names each concrete key
+# (routing.models[0].bedrock) and the name of the item it came from, so
+# migrate puts it back only on that item (rel-1-0-10:GAP-0644).
 NEWER_CONFIG_KEYS = (
     ("openshell.trusted_ca_bundle", (1, 0, 3)),
     ("guardrail.internal_domains", (1, 0, 6)),
@@ -90,12 +95,14 @@ NEWER_CONFIG_KEYS = (
     ("guardrail.cascade", (1, 0, 10)),
     ("guardrail.secret_flow", (1, 0, 10)),
     ("guardrail.effects_rules_tier", (1, 0, 10)),
+    ("guardrail.judge.intent_scope", (1, 0, 10)),
     ("decision_model.block_risk_score", (1, 0, 10)),
     ("decision_model.escalate_rule_flagged", (1, 0, 10)),
     ("decision_model.flow_guard", (1, 0, 10)),
     ("decision_model.history_tool_results", (1, 0, 10)),
     ("decision_model.history_turns", (1, 0, 10)),
     ("decision_model.protocol", (1, 0, 10)),
+    ("guardrail.profiles.*.routing", (1, 0, 10)),
     ("observability.local.keep_rejected_records", (1, 0, 10)),
     ("observability.local.rejected_records_max_rows", (1, 0, 10)),
     ("observability.pricing", (1, 0, 10)),
@@ -104,15 +111,48 @@ NEWER_CONFIG_KEYS = (
     ("routing.allow_user_override", (1, 0, 10)),
     ("routing.categories", (1, 0, 10)),
     ("routing.classifier", (1, 0, 10)),
+    ("routing.context", (1, 0, 10)),
     ("routing.default_alias", (1, 0, 10)),
     ("routing.min_confidence", (1, 0, 10)),
+    ("routing.models[].apis", (1, 0, 10)),
+    ("routing.models[].bedrock", (1, 0, 10)),
+    ("routing.models[].credential", (1, 0, 10)),
     ("routing.on_classifier_error", (1, 0, 10)),
     ("routing.route_only", (1, 0, 10)),
     ("routing.sensitive", (1, 0, 10)),
     ("routing.systemone", (1, 0, 10)),
 )
+# More keys added after 1.0.9, in the same path language: a "*" segment is
+# one entry of a map of named entries (a connector, a profile). 1.0.9
+# refuses a cascade block under any scope, as it refuses guardrail.cascade
+# itself (GAP-0544, GAP-0583); a downgrade sets each entry's block aside
+# under its own dotted key. (The System One decision_model keys and the
+# profile routing block are in NEWER_CONFIG_KEYS.)
+NEWER_CONFIG_SUBTREES = (
+    ("guardrail.connectors.*.cascade", (1, 0, 10)),
+    ("guardrail.profiles.*.cascade", (1, 0, 10)),
+    ("guardrail.profiles.*.connectors.*.cascade", (1, 0, 10)),
+    ("application_protection.guardrail.cascade", (1, 0, 10)),
+    ("application_protection.connectors.*.guardrail.cascade", (1, 0, 10)),
+)
+# Values an older release refuses or cannot run, under keys it has
+# (rel-1-0-10:GAP-0767, GAP-0769), with the first release that has them:
+# - a routing.decisions item with a condition type other than these (1.0.10
+#   adds connector, api_family and request): the whole decision is set aside
+#   (by its name and place) and migrate puts it back where it was;
+# - routing.enabled true with routing.classifier rules or systemone: the
+#   classifier is set aside (NEWER_CONFIG_KEYS), so the older release would
+#   start the vLLM Semantic Router, which needs Docker; routing is switched
+#   off for it and migrate switches it back on.
+OLDER_DECISION_CONDITION_TYPES = ("keyword",)
+NEWER_DECISION_CONDITIONS_SINCE = (1, 0, 10)
+IN_PROCESS_CLASSIFIERS = ("rules", "systemone")
+IN_PROCESS_CLASSIFIERS_SINCE = (1, 0, 10)
 # Where a downgrade keeps the keys it set aside, in the data folder:
-# {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
+# {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value},
+#  "items": {"<list item key>": "<its name>"},  (keys inside a list item)
+#  "decisions": [{"index": N, "value": {...}}],  (routing.decisions items set aside whole)
+#  "switched": {"routing.enabled": true}}        (values switched off for the older release)
 SET_ASIDE_FILE = "config-set-aside.json"
 _TIMEOUT = 30
 
@@ -577,67 +617,130 @@ def _active_config_path() -> str:
     return os.path.expanduser(override) if override else os.path.join(_data_home(), "config.yaml")
 
 
-# More keys added after 1.0.9, read like NEWER_CONFIG_KEYS, where a "*"
-# segment is one entry of a map of named entries (a connector, a profile).
-# 1.0.9 refuses a cascade block under any scope, as it refuses
-# guardrail.cascade itself (GAP-0544, GAP-0583); a downgrade sets each
-# entry's block aside under its own dotted key. The decision_model keys are
-# System One's (s7/sysone); a profile's routing block is the router's.
-NEWER_CONFIG_SUBTREES = (
-    ("guardrail.connectors.*.cascade", (1, 0, 10)),
-    ("guardrail.profiles.*.cascade", (1, 0, 10)),
-    ("guardrail.profiles.*.connectors.*.cascade", (1, 0, 10)),
-    ("application_protection.guardrail.cascade", (1, 0, 10)),
-    ("application_protection.connectors.*.guardrail.cascade", (1, 0, 10)),
-    ("decision_model.flow_guard", (1, 0, 10)),
-    ("decision_model.history_tool_results", (1, 0, 10)),
-    ("decision_model.history_turns", (1, 0, 10)),
-    ("guardrail.profiles.*.routing", (1, 0, 10)),
-)
+# Every item of a list ([]) in a NEWER_CONFIG_KEYS entry; * is every value of a map.
+_EVERY_ITEM = None
 
 
-def _expand_dotted(node: object, parts: list[str], prefix: tuple[str, ...] = ()):
-    """Yield (dotted key, value) for each key ``parts`` names in ``node``; "*" is every entry."""
+def _path_segments(path: str) -> list[str | int | None]:
+    """``a.b[0].c`` as ``["a", "b", 0, "c"]``; ``[]`` is ``_EVERY_ITEM``."""
 
-    if not parts:
-        yield ".".join(prefix), node
-        return
-    if not isinstance(node, dict):
-        return
-    head, rest = parts[0], parts[1:]
-    if head != "*":
-        if head in node:
-            yield from _expand_dotted(node[head], rest, (*prefix, head))
-        return
-    for name in sorted(k for k in node if isinstance(k, str)):
-        # Connector and profile names have no dots (the schema), so the
-        # dotted key of an entry is never ambiguous.
-        if name and "." not in name:
-            yield from _expand_dotted(node[name], rest, (*prefix, name))
+    segments: list[str | int | None] = []
+    for part in path.split("."):
+        name, bracket, rest = part.partition("[")
+        if name:
+            segments.append(name)
+        while bracket:
+            index, _, after = rest.partition("]")
+            segments.append(int(index) if index.isdigit() else _EVERY_ITEM)
+            _, bracket, rest = after.partition("[")
+    return segments
+
+
+def config_value(raw: object, path: str) -> object:
+    """The value at a concrete key (``routing.models[0].bedrock``) of a loaded config.yaml, or None."""
+
+    node = raw
+    for segment in _path_segments(path):
+        if isinstance(segment, int):
+            node = node[segment] if isinstance(node, list) and segment < len(node) else None
+        else:
+            node = node.get(segment) if isinstance(node, dict) else None
+    return node
+
+
+def newer_config_key(path: str) -> tuple[str, tuple[int, int, int]] | None:
+    """The NEWER_CONFIG_KEYS entry a concrete key is, or None."""
+
+    concrete = _path_segments(path)
+    for pattern, since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
+        segments = _path_segments(pattern)
+        if len(segments) == len(concrete) and all(
+            (want is _EVERY_ITEM and isinstance(got, int))
+            or (want == "*" and isinstance(got, str))
+            or (isinstance(want, str) and want != "*" and want == got)
+            for want, got in zip(segments, concrete)
+        ):
+            return pattern, since
+    return None
+
+
+def _newer_key_values(raw: object, pattern: str) -> tuple[dict[str, object], dict[str, str]]:
+    """The concrete keys of ``raw`` a NEWER_CONFIG_KEYS entry names, set to a value, and the name of
+    every list item on the way to one (so it can be put back on the same item)."""
+
+    found: dict[str, object] = {}
+    items: dict[str, str] = {}
+
+    def walk(node: object, segments: list[str | int | None], path: str, names: dict[str, str]) -> None:
+        if not segments:
+            if node not in (None, ""):
+                found[path] = node
+                items.update(names)
+            return
+        head, rest = segments[0], segments[1:]
+        if head is _EVERY_ITEM:
+            for index, item in enumerate(node if isinstance(node, list) else []):
+                key = f"{path}[{index}]"
+                name = item.get("name") if isinstance(item, dict) else None
+                walk(item, rest, key, {**names, key: name} if isinstance(name, str) else names)
+        elif head == "*":
+            for name in sorted(k for k in node if isinstance(k, str)) if isinstance(node, dict) else ():
+                # Connector and profile names have no dots (the schema), so the
+                # dotted key of an entry is never ambiguous.
+                if name and "." not in name:
+                    walk(node[name], rest, f"{path}.{name}", names)
+        elif isinstance(node, dict):
+            walk(node.get(head), rest, f"{path}.{head}" if path else str(head), names)
+
+    walk(raw, _path_segments(pattern), "", {})
+    return found, items
+
+
+def _newer_decisions(raw: object, target: tuple[int, int, int]) -> list[dict[str, object]]:
+    """The routing.decisions items the older release ``target`` refuses: a condition type it lacks."""
+
+    if target >= NEWER_DECISION_CONDITIONS_SINCE:
+        return []
+    routing = raw.get("routing") if isinstance(raw, dict) else None
+    decisions = routing.get("decisions") if isinstance(routing, dict) else None
+    out: list[dict[str, object]] = []
+    for index, item in enumerate(decisions if isinstance(decisions, list) else []):
+        conditions = item.get("conditions") if isinstance(item, dict) else None
+        if any(
+            isinstance(c, dict) and str(c.get("type") or "").lower() not in OLDER_DECISION_CONDITION_TYPES
+            for c in (conditions if isinstance(conditions, list) else [])
+        ):
+            out.append({"index": index, "value": item})
+    return out
+
+
+def _switched_off(raw: object, target: tuple[int, int, int]) -> dict[str, object]:
+    """Values the older release ``target`` cannot run, to switch off for it: routing on with an
+    in-process classifier it does not have (it would start the Docker vLLM Semantic Router)."""
+
+    if target >= IN_PROCESS_CLASSIFIERS_SINCE:
+        return {}
+    routing = raw.get("routing") if isinstance(raw, dict) else None
+    in_process = isinstance(routing, dict) and routing.get("classifier") in IN_PROCESS_CLASSIFIERS
+    if in_process and routing.get("enabled") is True:
+        return {"routing.enabled": True}
+    return {}
 
 
 def newer_config_values(raw: object, target: tuple[int, int, int]) -> dict[str, object]:
-    """The keys of config ``raw`` that release ``target`` does not have, by dotted key."""
+    """The keys of config ``raw`` that release ``target`` does not have, by concrete key."""
 
     found: dict[str, object] = {}
-    for dotted, since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
-        if target >= since:
-            continue
-        for key, node in _expand_dotted(raw, dotted.split(".")):
-            if node not in (None, ""):
-                found[key] = node
+    for pattern, since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
+        if target < since:
+            found.update(_newer_key_values(raw, pattern)[0])
     return found
 
 
 def is_newer_config_key(key: str) -> bool:
-    """Whether ``key`` (a dotted key a downgrade set aside) is one this release has."""
+    """Whether ``key`` (a concrete key a downgrade set aside) is one this release has."""
 
-    parts = key.split(".")
-    for dotted, _since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
-        pattern = dotted.split(".")
-        if len(pattern) == len(parts) and all(p in ("*", k) for p, k in zip(pattern, parts)):
-            return True
-    return False
+    return newer_config_key(key) is not None
 
 
 def _set_aside_newer_keys(version: str) -> None:
@@ -659,13 +762,33 @@ def _set_aside_newer_keys(version: str) -> None:
             raw = yaml.safe_load(stream)
     except Exception:  # noqa: BLE001 - no config or one that does not parse: the installer's check names it
         return
-    found = newer_config_values(raw, target)
-    if not found:
+    found: dict[str, object] = {}
+    items: dict[str, str] = {}
+    for pattern, since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
+        if target >= since:
+            continue
+        values, names = _newer_key_values(raw, pattern)
+        found.update(values)
+        items.update(names)
+    decisions = _newer_decisions(raw, target)
+    switched = _switched_off(raw, target)
+    if not found and not decisions and not switched:
         return
-    names = ", ".join(found)
+    names = ", ".join(
+        [*found]
+        + [f"routing decision {d['value'].get('name')}" for d in decisions if isinstance(d["value"], dict)]
+        + (["routing on with the classifier " + str(raw["routing"]["classifier"])] if switched else [])
+    )
+    # In the order the validated writer accepts: a decision of a newer condition type needs
+    # the classifier that is about to go.
+    fixes = ["remove the routing.decisions entries whose conditions are not keyword ones"] if decisions else []
+    if switched:
+        fixes.append("defenseclaw routing disable")
+    if found:
+        fixes.append(f"defenseclaw config unset {' '.join(found)}")
     stop = (
-        f"DefenseClaw {version} does not have {names}, so its installer would refuse config.yaml; "
-        f"remove it with 'defenseclaw config unset {' '.join(found)}' and run the upgrade again"
+        f"DefenseClaw {version} does not have {names}, so its installer would refuse config.yaml "
+        f"or its gateway could not run it; {'; '.join(fixes)}, and run the upgrade again"
     )
     held = os.path.join(_data_home(), SET_ASIDE_FILE)
     try:
@@ -673,23 +796,47 @@ def _set_aside_newer_keys(version: str) -> None:
     except Exception as exc:  # noqa: BLE001 - a broken install: say what to remove by hand
         raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
     previous: bytes | None = None
+    document: object = {}
     try:
         with open(held, "rb") as stream:
             previous = stream.read()
-        kept = json.loads(previous.decode("utf-8")).get("keys")
+        document = json.loads(previous.decode("utf-8"))
     except FileNotFoundError:
-        kept = None
-    except (OSError, ValueError, AttributeError):
-        kept = None
+        pass
+    except (OSError, ValueError):
+        document = {}
+    if not isinstance(document, dict):
+        document = {}
+    kept, kept_items = document.get("keys"), document.get("items")
+    kept_decisions, kept_switched = document.get("decisions"), document.get("switched")
     keys = dict(kept) if isinstance(kept, dict) else {}
     keys.update(found)
+    record: dict[str, object] = {"version": 1, "for": version, "keys": keys}
+    named = dict(kept_items) if isinstance(kept_items, dict) else {}
+    named.update(items)
+    if named:
+        record["items"] = named
+    held_decisions = [d for d in kept_decisions if isinstance(d, dict)] if isinstance(kept_decisions, list) else []
+    held_decisions += decisions
+    if held_decisions:
+        record["decisions"] = held_decisions
+    held_switched = dict(kept_switched) if isinstance(kept_switched, dict) else {}
+    held_switched.update(switched)
+    if held_switched:
+        record["switched"] = held_switched
+    changes = [Change(key, unset=True) for key in found]
+    if decisions:
+        drop = {d["index"] for d in decisions}
+        left = [item for index, item in enumerate(raw["routing"]["decisions"]) if index not in drop]
+        changes.append(Change("routing.decisions", left) if left else Change("routing.decisions", unset=True))
+    changes += [Change(key, False) for key in switched]
     try:
-        _write_private_json(held, {"version": 1, "for": version, "keys": keys})
+        _write_private_json(held, record)
     except OSError as exc:
         raise ShimError(f"{stop} (could not write {held}: {exc})") from None
     try:
         apply(
-            [Change(key, unset=True) for key in found],
+            changes,
             ACTOR_MIGRATION,
             f"set aside for the downgrade to {version}",
             path=config,
@@ -704,6 +851,11 @@ def _set_aside_newer_keys(version: str) -> None:
             pass
         raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
     print(f"  → DefenseClaw {version} does not have {names}: set aside in {held}.")
+    if switched:
+        print(
+            f"    Routing is switched off for {version}: without the classifier above it would need Docker "
+            "(the vLLM Semantic Router). Turn it on there with 'defenseclaw routing setup' if you want it."
+        )
     print(
         "    Installing a release that has it puts it back. If the installer stops, "
         "or after a rollback, put it back with: defenseclaw migrate"

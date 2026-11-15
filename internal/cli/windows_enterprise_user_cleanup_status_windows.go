@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // windowsEnterpriseUserCleanupFailureMin is how many failed guardian passes
@@ -21,7 +22,7 @@ const windowsEnterpriseUserCleanupFailureMin = 3
 // windowsEnterpriseUserCleanupsForStatus reads the guardian's per-user
 // cleanup ledger; tests replace it.
 var windowsEnterpriseUserCleanupsForStatus = func() ([]enterpriseHookUserCleanup, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return nil, err
 	}

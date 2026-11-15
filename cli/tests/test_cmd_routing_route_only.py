@@ -55,6 +55,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         raise AssertionError(f"asked the stopped gateway {method} {path}")
 
     monkeypatch.setattr(cmd_routing, "_ask_gateway", gateway_down)
+    # No gateway answers /health either: enable reports "not applied yet" at once.
+    monkeypatch.setattr(cmd_routing, "_health_routing", lambda app: {"state": "unreachable"})
     return tmp_path
 
 
@@ -71,8 +73,101 @@ def test_enable_connector_records_the_upstream(home: Path) -> None:
     result = _run("enable", "--connector", "claudecode")
     assert result.exit_code == 0, result.output
     assert _route_only(home) == {"connectors": ["claudecode"], "upstreams": {"claudecode": UPSTREAM}}
-    assert "https://llm.corp.example" in result.output
+    assert "not applied yet" in result.output
+    assert "Routing claudecode model calls through DefenseClaw" not in result.output
+
+
+def _live_health(problem: str = "", signing: dict | None = None, ready: bool = False) -> dict:
+    state = {"connector": "claudecode", "ready": ready, "problem": problem}
+    if signing:
+        state["signing"] = signing
+    return {"routing": {"state": "running", "details": {"route_only": [state]}}}
+
+
+def _rendered(monkeypatch: pytest.MonkeyPatch, ok: bool) -> None:
+    from defenseclaw import doctor_route_only as dro
+
+    row = dro.Row("pass" if ok else "warn", "Route-only claudecode agent config", "not rendered", "restart it")
+    monkeypatch.setattr(dro, "agent_config_row", lambda cfg, connector, upstream, **kw: row)
+
+
+def test_enable_connector_success_line_only_once_the_gateway_rendered(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(home)
+    _rendered(monkeypatch, True)
+    monkeypatch.setattr(cmd_routing, "_health_routing", lambda app: _live_health(ready=True)["routing"])
+    result = _run("enable", "--connector", "claudecode")
+    assert result.exit_code == 0, result.output
+    assert "Routing claudecode model calls through DefenseClaw (upstream https://llm.corp.example)." in result.output
     assert "Restart claudecode" in result.output
+
+
+def test_enable_connector_names_the_cause_when_the_gateway_cannot_render(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(home)
+    _rendered(monkeypatch, False)
+    health = _live_health("gateway Bedrock signing is not ready")["routing"]
+    monkeypatch.setattr(cmd_routing, "_health_routing", lambda app: health)
+    clock = iter(range(0, 1000))
+    monkeypatch.setattr("time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    result = _run("enable", "--connector", "claudecode")
+    assert result.exit_code == 1
+    assert "gateway Bedrock signing is not ready" in result.output
+    assert "still calls its model directly" in result.output
+    assert "routing disable --connector claudecode" in result.output
+    assert "Routing claudecode model calls through DefenseClaw" not in result.output
+    assert "Restart claudecode to pick it up." not in result.output
+
+
+def test_enable_connector_does_not_report_the_not_ready_row_from_before_the_save(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # /health has no config generation: the first answers can still be the
+    # failure of the previous config; the render that follows is a success.
+    from defenseclaw import doctor_route_only as dro
+
+    _write_config(home)
+    answers = [_live_health("gateway Bedrock signing is not ready")["routing"]] * 2
+    rows = iter([False, False, True, True, True])
+
+    def row(cfg, connector, upstream, **kw):
+        ok = next(rows)
+        return dro.Row("pass" if ok else "warn", "Route-only claudecode agent config", "not rendered", "restart it")
+
+    monkeypatch.setattr(dro, "agent_config_row", row)
+    monkeypatch.setattr(cmd_routing, "_health_routing", lambda app: answers.pop(0) if answers else _live_health(ready=True)["routing"])
+    clock = iter(range(0, 1000))
+    monkeypatch.setattr("time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    result = _run("enable", "--connector", "claudecode")
+    assert result.exit_code == 0, result.output
+    assert "Routing claudecode model calls through DefenseClaw" in result.output
+    assert "still calls its model directly" not in result.output
+
+
+def test_enable_connector_wait_is_bounded_when_the_gateway_never_renders(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(home)
+    _rendered(monkeypatch, False)
+    polls: list[int] = []
+
+    def health(app):
+        polls.append(1)
+        return {"state": "running"}  # up, but reports no route-only state
+
+    clock = iter(range(0, 1000, 4))
+    monkeypatch.setattr(cmd_routing, "_health_routing", health)
+    monkeypatch.setattr("time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    result = _run("enable", "--connector", "claudecode")
+    assert result.exit_code == 0, result.output
+    assert 1 < len(polls) <= 4
+    assert "not applied yet" in result.output
+    assert "Routing claudecode model calls through DefenseClaw" not in result.output
 
 
 def test_enable_connector_refusal_is_a_plain_error(home: Path) -> None:

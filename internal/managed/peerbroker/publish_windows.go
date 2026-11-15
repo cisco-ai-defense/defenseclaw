@@ -16,9 +16,13 @@ import (
 
 // publishPipeName writes the published-name record to path (in the machine
 // <data dir>\hooks folder): a temp file next to it with the owner-only
-// protection plus a BUILTIN\Users read entry, renamed over the old record.
-// Only LocalSystem and Administrators can write it; the gateway and users
-// read it.
+// protection (the guardian, LocalSystem and Administrators), renamed over
+// the old record. Only LocalSystem and Administrators can read or write it;
+// the gateway (LocalSystem) reads it, and no ordinary account can (before,
+// a BUILTIN\Users read entry gave every account the record,
+// rel-1-0-10:GAP-0106). Pipe names can still be listed by any account, so
+// the boundary is the gateway's server-identity check (verifyPipeServer):
+// a pipe created under the name by anyone but the guardian is refused.
 func publishPipeName(path string, names Names, pipe string) error {
 	raw, err := names.EncodePublished(Published{Version: ProtocolVersion, Pipe: pipe, PID: windows.GetCurrentProcessId()})
 	if err != nil {
@@ -46,9 +50,6 @@ func publishPipeName(path string, names Names, pipe string) error {
 		return err
 	}
 	if err := safefile.ProtectFile(name); err != nil {
-		return err
-	}
-	if err := safefile.GrantUsersRead(name); err != nil {
 		return err
 	}
 	return os.Rename(name, path)

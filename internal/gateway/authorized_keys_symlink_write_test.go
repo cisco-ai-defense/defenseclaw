@@ -868,9 +868,18 @@ func TestAuthorizedKeys2LinkWriteMatchesDirectWrite(t *testing.T) {
 					recorder := httptest.NewRecorder()
 					api.handleAgentHook(connector).ServeHTTP(recorder, req)
 					got := recorder.Body.String()
-					if !strings.HasPrefix(got, row.want) ||
-						row.want == block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
-						t.Fatalf("append after %d targets = %.400s, want %s", count, got, row.want)
+					want := row.want
+					if want == allow && count == 31 {
+						// 31 terms of a && list are past the analysis depth
+						// bound: the unknown tier whatever the call names
+						// (rel-1-0-10:GAP-0688), an alert in this default pack
+						// (as TestResolvedWriteHeaderNeverDropsTarget pins in
+						// strict).
+						want = `{"action":"alert"`
+					}
+					if !strings.HasPrefix(got, want) ||
+						want == block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						t.Fatalf("append after %d targets = %.400s, want %s", count, got, want)
 					}
 				})
 			}

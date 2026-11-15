@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -50,7 +51,7 @@ func TestWindowsBundleMarkerSyncWritesOnlyTheTestSandbox(t *testing.T) {
 		t.Fatalf("the fixture bundle was not confirmed: confirmed=%t error=%v", confirmed, err)
 	}
 
-	marker, _, err := registry.CreateKey(windowsEnterpriseMachineRegistry, WindowsEnterpriseMarkerKey,
+	marker, _, err := registry.CreateKey(windowsEnterpriseMachineRegistry, hookcli.WindowsEnterpriseMarkerKey,
 		registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		t.Fatalf("create the sandbox marker: %v", err)

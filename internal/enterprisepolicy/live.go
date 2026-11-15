@@ -30,8 +30,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookevidence"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -64,12 +64,12 @@ type LiveOptions struct {
 	UID         int
 	GID         int
 	Timeout     time.Duration
-	// AuditDB is the gateway's audit database; its v8 event history holds
-	// the record a DefenseClaw hook leaves when it reports a tool call.
-	AuditDB string
-	// HookRecords searches that event history; nil uses AuditDB. Tests
-	// replace it.
-	HookRecords func(context.Context, audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error)
+	// HookRecords searches the v8 event history of the gateway audit
+	// database for the record a DefenseClaw hook leaves when it reports a
+	// tool call; nil when no audit database is configured. The caller binds
+	// it to the store (audit.FindHookToolInvocation), so this package does
+	// not link the audit store into the hook binary.
+	HookRecords func(context.Context, hookevidence.Query) (hookevidence.Evidence, error)
 	// Credential applies the target user's credentials to cmd (unix
 	// setuid when running as root); nil runs as the current process.
 	Credential func(cmd *exec.Cmd) error
@@ -438,16 +438,11 @@ func verifyClaudeLive(ctx context.Context, opts Options, lo LiveOptions, result 
 	}
 	result.evidence("Claude Code sent %d Messages requests to the local stub", stub.requests())
 	find := lo.HookRecords
-	if find == nil && strings.TrimSpace(lo.AuditDB) != "" {
-		find = func(ctx context.Context, query audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error) {
-			return audit.FindHookToolInvocation(ctx, lo.AuditDB, query)
-		}
-	}
 	if find == nil {
 		result.problem("no gateway audit database configured; search its event history for the tool.invocation.requested record with tool call id %s to confirm hook contact", toolCallID)
 		return nil
 	}
-	evidence, err := find(ctx, audit.HookToolInvocationQuery{
+	evidence, err := find(ctx, hookevidence.Query{
 		Connector: ConnectorClaudeCode, ToolCallID: toolCallID, Since: started, UserID: liveTargetUID(lo),
 	})
 	switch {

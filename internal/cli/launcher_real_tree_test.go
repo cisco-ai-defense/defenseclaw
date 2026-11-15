@@ -29,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -49,8 +50,8 @@ func TestLauncherRealTreeHelperProcess(t *testing.T) {
 	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	managedHostDescriptorPath = func() string { return descriptor }
-	managedHostRecordTrusted = func(string) error { return nil }
+	hookcli.ManagedHostDescriptorPath = func() string { return descriptor }
+	hookcli.ManagedHostRecordTrusted = func(string) error { return nil }
 	launcherArgv0 = func() string { return "/usr/bin/defenseclaw" }
 	os.Args = []string{"/usr/bin/defenseclaw"}
 	if raw != "" {

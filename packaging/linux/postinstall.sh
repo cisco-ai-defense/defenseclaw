@@ -114,8 +114,18 @@ lifecycle_started=0
 output_saved=0
 result_tmp=""
 log_tmp=""
-if result_tmp=$(mktemp "$state/.last-package-result.json.XXXXXX") && \
-    log_tmp=$(mktemp "$state/.last-package-result.log.XXXXXX"); then
+# mktemp's error says why no file could be created (a full disk names
+# disk_full in the result below).
+mktemp_error=""
+if ! result_tmp=$(mktemp "$state/.last-package-result.json.XXXXXX" 2>&1); then
+    mktemp_error=$result_tmp
+    result_tmp=""
+elif ! log_tmp=$(mktemp "$state/.last-package-result.log.XXXXXX" 2>&1); then
+    mktemp_error=$log_tmp
+    log_tmp=""
+fi
+[ -z "$mktemp_error" ] || printf "%s\n" "$mktemp_error" >&2
+if [ -z "$mktemp_error" ]; then
     lifecycle_started=1
     # Capture JSON in memory so a partial disk write cannot replace the last
     # complete result. The subshell also contains a file-size-limit signal.
@@ -145,7 +155,29 @@ if [ "$status" = 0 ] && [ -z "$result" ]; then
     status=1
 fi
 if [ "$output_saved" != 1 ]; then
-    echo "defenseclaw-enterprise: the current package result could not be saved (disk full or storage write failure); last-package-result.json was not replaced." >&2
+    # last-package-result.json holds an earlier run's result, often the
+    # previous version's ok:true, which MDM detection and administrators read
+    # as this package's (GAP-0057). This run's result goes over it in place:
+    # the truncation frees its blocks, so the short document fits where no new
+    # file could be created. When even that fails, the old result is removed.
+    if [ "$lifecycle_started" = 1 ] && [ -n "$result" ]; then
+        current=$result
+    else
+        code=package_result_unsaved
+        case "$mktemp_error" in
+            *"No space left"* | *"quota exceeded"* | *"Disk quota"*) code=disk_full ;;
+        esac
+        current="{\"schema_version\":2,\"ok\":false,\"action\":\"ensure\",\"errors\":[{\"code\":\"$code\",\"message\":\"the package's install run did not start: it could not create its result file in $state (disk full or storage write failure); free space on that filesystem, then run: sudo $gateway enterprise linux ensure --from-package$downgrade\"}],\"warnings\":[]}"
+    fi
+    if (printf "%s\n" "$current" >"$state/last-package-result.json") 2>/dev/null; then
+        saved="last-package-result.json now records this run"
+        # The log beside it is an earlier run's standard error.
+        [ "$lifecycle_started" = 1 ] || (: >"$state/last-package-result.log") 2>/dev/null || true
+    else
+        rm -f "$state/last-package-result.json" "$state/last-package-result.log"
+        saved="the previous last-package-result.json was removed, because it described an earlier run"
+    fi
+    echo "defenseclaw-enterprise: the current package result could not be saved (disk full or storage write failure); $saved." >&2
     echo "  Free disk space or correct the storage problem, then run: sudo $gateway enterprise linux ensure --from-package$downgrade" >&2
 fi
 unescape() {
