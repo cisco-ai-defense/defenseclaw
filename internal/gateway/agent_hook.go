@@ -147,6 +147,10 @@ type agentHookRequest struct {
 	// ToolArgsAreHookEnvelope marks ToolArgs as the whole hook body, used when
 	// the payload carries no tool-argument object.
 	ToolArgsAreHookEnvelope bool
+	// PromptField is the text of a declared prompt field of the payload
+	// (prompt, user_prompt, userPrompt, initial_prompt, initialPrompt): what the
+	// user typed, as opposed to the fallback fields Content may come from.
+	PromptField string
 	// ToolCallUnparsed: the connector's decoder found no tool call it can
 	// read (connector.HookProfileRequest.ToolCallUnparsed).
 	ToolCallUnparsed bool
@@ -1205,6 +1209,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// No answer leaves this process unjournaled. The 503
 				// closes the managed hook before the proposal is offered.
 				resp = pendingFailureHookDecision(resp)
+				// A journal failure is a store problem, not load: no
+				// capacity outcome.
 				persistCtx := telemetryPersistenceCtx
 				var cancelPersist context.CancelFunc
 				if persistCtx == nil {
@@ -1216,7 +1222,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 						cancelFinalPersistence = cancelPersist
 					}
 				}
-				finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
+				finalization := a.finalizeAgentHookAnswer(
+					context.WithValue(a.pendingHookDecidedContext(persistCtx, pending, resp), hookCapacityExcludedContextKey{}, true),
 					connectorName, req, resp, rawEventIDs, b, time.Since(t0), panicked, auditExtra, false)
 				a.settlePendingHook(persistCtx, pending, finalization)
 				if cancelPersist != nil && finalPersistenceCtx == nil {
@@ -1263,6 +1270,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 			return a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
 		}
+		var capacityReceipt *hookCapacityReceipt
 		if delivery != nil {
 			preKey, preNoted = a.notePreToolDecision(ctx, req, wireResp)
 			body := a.hookAnswerBody(ctx, profile, connectorName, req,
@@ -1279,6 +1287,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				resp = unreceipted(resp)
 			} else {
 				resp = a.deliveredHookDecision(connectorName, resp, receipt)
+				capacityReceipt = &hookCapacityReceipt{line: receipt}
 			}
 			delivered := resp
 			answered = &delivered
@@ -1312,6 +1321,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// The receipt decided what the agent got (delivered or
 			// unconfirmed); a hang-up after it is not a missed answer.
 			persistCtx = context.WithValue(persistCtx, hookDeliveryReceiptContextKey{}, true)
+		}
+		if capacityReceipt != nil {
+			// What the receipt said is the deadline evidence of the call.
+			persistCtx = context.WithValue(persistCtx, hookCapacityReceiptContextKey{}, *capacityReceipt)
 		}
 		// A managed answer offered on the receipt channel is already on the
 		// wire: finalization records it as delivered and cannot replace it.
@@ -1587,6 +1600,11 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// acknowledgement is a live answer even though it reuses the pending
 	// occurrence IDs to deduplicate audit writes.
 	live := !req.pendingRecovery || req.sandboxReceiptAcknowledgment
+	if live {
+		// The overload signal (DESIGN 18); recovers its own panics, so it
+		// never changes this answer.
+		a.noteHookCallCapacity(ctx, connectorName, resp, clientLeft)
+	}
 	safeSection := func(section string, fn func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -3413,6 +3431,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		content = stringifyHookValue(firstValue(payload, "tool_response", "toolResponse", "tool_result", "toolResult", "result", "error"))
 	}
 
+	promptField := firstString(payload, "prompt", "user_prompt", "userPrompt", "initial_prompt", "initialPrompt")
 	direction := "tool_call"
 	switch {
 	case isPromptLikeEvent(event):
@@ -3431,6 +3450,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		AgentID:       agentID, AgentName: agentName, AgentType: agentType,
 		RootAgentID: rootAgentID, ParentAgentID: parentAgentID, ChildAgentID: childAgentID,
 		HookEventName:   event,
+		PromptField:     promptField,
 		SemanticEventID: correlationValue(connector.CorrelationTargetSemanticEvent),
 		SessionID:       sessionID, TurnID: turnID, MessageID: correlationValue(connector.CorrelationTargetMessage),
 		ThreadID:      correlationValue(connector.CorrelationTargetThread),
@@ -3644,6 +3664,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
 	}
 	t0 := time.Now()
+	ctx = withCascadeTrace(ctx, a.decisionConfig(ctx), req.ConnectorName)
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
@@ -3669,15 +3690,17 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// lifecycle events) can repeat or contain model-generated material;
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
-		if isToolJudgeIntentEvent(req.HookEventName) {
-			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ObserveSessionPrompt(ctx, req.Content)
-			}
-			a.observeUserDownloadRequest(ctx, req.Content)
-		}
+		intentEvent := isToolJudgeIntentEvent(req.HookEventName)
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
-		if isToolJudgeIntentEvent(req.HookEventName) {
-			a.forgetBlockedPrompt(ctx, req.Content, verdict)
+		if intentEvent {
+			// Only a declared prompt field names scope targets: the generic
+			// fallback also reads descriptions, tool responses and results, and
+			// Hermes and OpenClaw "user" text can come from a remote chat party.
+			scopeText := req.PromptField
+			if req.ConnectorName == "hermes" || req.ConnectorName == "openclaw" {
+				scopeText = ""
+			}
+			a.observeUserTurn(ctx, req.Content, scopeText, req.CWD, verdict)
 		}
 	case isResultLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
@@ -3716,6 +3739,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// onto the context so the downstream emit choke points and the OS
 	// toast honor it (managed_enterprise only; no-op otherwise).
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+	verdict = a.applyCascadeFinal(ctx, req.ConnectorName, hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
@@ -3833,6 +3857,9 @@ const hookOversizeUninspectedRuleID = "HOOK-OVERSIZE-COMMAND-NOT-INSPECTED"
 
 const oversizeUninspectedReason = "oversize, command not inspected: this hook payload is over DefenseClaw's size cap, " +
 	"so the gateway could read only part of the call."
+
+// contentCutReason is the reason of content cut at maxInspectContentLen.
+const contentCutReason = "content over the 256 KiB inspect cap: only the first 256 KiB were inspected"
 
 // oversizeUninspectedPayload reports a bounded review of an oversized call.
 // Every bounded review lacks part of the call (hookexec.OversizeUninspectedField),

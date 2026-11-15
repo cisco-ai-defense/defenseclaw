@@ -64,15 +64,18 @@ const boundedTruncatedTitle = "Input exceeds policy evaluation limit, judged as 
 // a member of its profile meet that enforces on the hook path is
 // (shareBodyStrictTier, as the shell limit and share-body paths read it),
 // else the posture of the connector's pack.
+//
+// guardrail.cascade.unknown replaces the pack's tier when it is set (alert,
+// confirm, block; cascadeBoundedTier).
 func (a *APIServer) boundedTier(ctx context.Context, connectorName string) bounded.Tier {
-	if a.shareBodyStrictTier(ctx, connectorName) {
-		return bounded.TierStrict
-	}
 	cfg := a.decisionConfig(ctx)
+	if a.shareBodyStrictTier(ctx, connectorName) {
+		return cascadeBoundedTier(cfg, connectorName, bounded.TierStrict)
+	}
 	if cfg == nil {
 		return bounded.TierDefault
 	}
-	return bounded.TierOf(cfg.HookPolicyTierForConnector(connectorName))
+	return cascadeBoundedTier(cfg, connectorName, bounded.TierOf(cfg.HookPolicyTierForConnector(connectorName)))
 }
 
 // boundedTruncatedFinding is the evaluation-limit finding of an input read up
@@ -80,11 +83,19 @@ func (a *APIServer) boundedTier(ctx context.Context, connectorName string) bound
 // (enforcementCapable false) still alerts: a truncated input is never a
 // silent allow.
 func boundedTruncatedFinding(set bounded.CapSet, enforcementCapable bool) RuleFinding {
-	finding := trustedActionLimitFindings(enforcementCapable)[0]
-	reason := set.Reason()
-	finding.Title = boundedTruncatedTitle + " (" + reason + ")"
-	finding.Evidence = reason
+	finding := unknownReasonFinding(boundedTruncatedTitle, set.Reason(), enforcementCapable)
 	finding.boundedCaps = set
+	return finding
+}
+
+// unknownReasonFinding is the evaluation-limit finding of an input the
+// readers cannot judge, with a ship-authored title and a reason from a closed
+// set (a cap name, awkprog.DynamicReason). The profile maps it to the
+// unknown tier of the pack.
+func unknownReasonFinding(title, reason string, enforcementCapable bool) RuleFinding {
+	finding := trustedActionLimitFindings(enforcementCapable)[0]
+	finding.Title = title + " (" + reason + ")"
+	finding.Evidence = reason
 	if !enforcementCapable {
 		finding.enforcement = findingEnforcementAlertOnly
 	}
@@ -132,7 +143,15 @@ func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request t
 	if set.Misuse() && request.recordTelemetry != nil {
 		request.recordTelemetry(trustedActionTelemetry{ParserUncertaintyCount: 1})
 	}
-	bound := boundedTruncatedFinding(set, request.EnforcementCapable)
+	return withUnknownFinding(findings, boundedTruncatedFinding(set, request.EnforcementCapable))
+}
+
+// withUnknownFinding adds the unknown-tier finding bound to what was read
+// before it, which keeps deciding on its own (the profile maps the result to
+// at least the unknown tier of the pack and never below those findings). An
+// evaluation-limit finding the call already carries is kept, title included,
+// and gains the reason, so a call has one limit finding.
+func withUnknownFinding(findings []RuleFinding, bound RuleFinding) []RuleFinding {
 	index := boundedLimitIndex(findings)
 	if index < 0 {
 		return append(slices.Clip(findings), bound)
@@ -140,7 +159,7 @@ func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request t
 	out := slices.Clone(findings)
 	existing := &out[index]
 	withBoundedReason(existing, bound.Evidence)
-	existing.boundedCaps = existing.boundedCaps.Union(set)
+	existing.boundedCaps = existing.boundedCaps.Union(bound.boundedCaps)
 	if !existing.contributesToEnforcement() && !existing.contributesToAlertOnly() {
 		// A detection-only limit finding would leave the call allowed.
 		existing.enforcement = bound.enforcement

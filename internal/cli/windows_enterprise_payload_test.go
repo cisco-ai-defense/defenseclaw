@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	windowspayload "github.com/defenseclaw/defenseclaw/packaging/windows"
 )
 
@@ -36,7 +37,7 @@ func TestWindowsEnterpriseEmbeddedPayloadStagingWithRestrictedEnvironment(t *tes
 		if _, present := os.LookupEnv("ProgramData"); present {
 			t.Fatal("restricted staging helper inherited ProgramData")
 		}
-		expectedParent, err := trustedWindowsEnterpriseProgramData()
+		expectedParent, err := hookcli.TrustedWindowsEnterpriseProgramData()
 		if err != nil {
 			t.Fatalf("resolve ProgramData from fixed machine registration: %v", err)
 		}

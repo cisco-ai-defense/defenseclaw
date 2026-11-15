@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // GAP-1174: a corrupt config.yaml used to make restart stop a healthy gateway
@@ -90,9 +91,9 @@ func TestDaemonConfigLoadErrorNamesTheConfig(t *testing.T) {
 // Secure Client keeps the config load failure from main when its config is absent.
 func TestDaemonConfigLoadErrorMissingSecureClientConfigMatchesMain(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-	previous := secureClientHost
-	secureClientHost = func() bool { return true }
-	t.Cleanup(func() { secureClientHost = previous })
+	previous := hookcli.SecureClientHost
+	hookcli.SecureClientHost = func() bool { return true }
+	t.Cleanup(func() { hookcli.SecureClientHost = previous })
 
 	loadErr := os.ErrNotExist
 	want := "cannot start the gateway: " + config.ConfigPath() +

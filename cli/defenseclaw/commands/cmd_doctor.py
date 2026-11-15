@@ -7772,6 +7772,84 @@ def _check_windows_gateway_diagnostics(
     return True
 
 
+def _capacity_count(counts, key: str) -> int:
+    value = counts.get(key) if isinstance(counts, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _check_hook_capacity(cfg, health: dict | None, r: _DoctorResult) -> None:
+    """The Hook capacity row on every OS (S8 DESIGN 18, review P2-2).
+
+    A managed gateway gives its administrator the window in /health. A
+    per-user gateway serves it only in its authenticated /status, because
+    its /health needs no credential and the counts are this account load
+    (review P3-2), so it is read there with the gateway token, the way the
+    runtime rows are. No row without a credential or on an older gateway.
+    """
+    capacity = health.get("hook_capacity") if isinstance(health, dict) else None
+    if not isinstance(capacity, dict):
+        document, _problem, _checked = _authenticated_gateway_status_document(cfg)
+        capacity = document.get("hook_capacity") if isinstance(document, dict) else None
+    _emit_hook_capacity_row(capacity, r)
+
+
+def _emit_hook_capacity_row(capacity, r: _DoctorResult) -> None:
+    """Hook capacity: tool calls that ended at their answer budget (S8 DESIGN 18).
+
+    The gateway counts, per minute over its last hour, the hook calls it
+    answered in time and the ones that ran out of their answer budget: a
+    deadline deny (the hook blocked the call, the managed and strict
+    answer) or a late allow (the call ran without a check, the default
+    per-user answer). Any of them means the host got more tool calls than it
+    can check in time; the sizing page gives the measured rate per host.
+    """
+    if not isinstance(capacity, dict):
+        return
+    window = capacity.get("window") if isinstance(capacity.get("window"), dict) else {}
+    peak = capacity.get("peak_minute") if isinstance(capacity.get("peak_minute"), dict) else {}
+    minutes = _capacity_count(capacity, "window_minutes") or 60
+    doc = str(capacity.get("sizing_doc") or "")[:200]
+    carried = _capacity_count(capacity, "answered_per_minute_peak")
+    denies, late = _capacity_count(window, "deadline_denies"), _capacity_count(window, "late_allows")
+    shed = _capacity_count(window, "shed")
+    if denies + late + shed == 0:
+        detail = (
+            f"no tool call ran out of its answer budget in the last {minutes} min "
+            f"(peak {carried} calls answered in one minute)"
+        )
+        _emit("pass", "Hook capacity", detail, r=r)
+        return
+    start = str(capacity.get("peak_minute_start") or "")[:40]
+    peak_denies = _capacity_count(peak, "deadline_denies")
+    peak_late = _capacity_count(peak, "late_allows")
+    peak_shed = _capacity_count(peak, "shed")
+    peak_answered = _capacity_count(peak, "answered")
+    clauses = []
+    if denies + late:
+        clauses.append(
+            f"{denies} tool call(s) were denied and {late} ran unchecked "
+            "because DefenseClaw could not check them in time"
+        )
+    if shed:
+        # A refused call is blocked by its hook when its budget ends unless a
+        # resend is admitted (review P2-3).
+        clauses.append(f"{shed} call(s) refused by the admission limits; their hooks block them when the budget ends")
+    verdict = (
+        "This host is over its hook capacity"
+        if denies + late
+        else "An account is over its hook budget or this host is over its hook capacity"
+    )
+    detail = (
+        f"in the last {minutes} min " + "; and ".join(clauses) + f" (busiest minute {start}: "
+        f"{peak_denies} denied, {peak_late} unchecked, {peak_shed} refused, "
+        f"{peak_answered} answered). {verdict}, not a policy result; "
+        f"run fewer agents at once or use a larger host"
+    )
+    if doc:
+        detail += f" (sizing: {doc})"
+    _emit("warn", "Hook capacity", detail, r=r)
+
+
 def _emit_route_peer_broker_row(broker, r: _DoctorResult) -> None:
     """Managed Windows route-only: the hook guardian peer SID broker.
 
@@ -10840,10 +10918,25 @@ _OPENCODE_PLUGIN_SUFFIXES = (".js", ".ts")
 def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
     """The gateway's health from its authenticated ``/status`` document.
 
+    Returns ``(health, "", True)``, or ``(None, reason, checked)`` as
+    ``_authenticated_gateway_status_document`` does.
+    """
+    document, problem, checked = _authenticated_gateway_status_document(cfg)
+    if document is None:
+        return None, problem, checked
+    health = document.get("health")
+    if not isinstance(health, dict):
+        return None, "authenticated status health is malformed", True
+    return health, "", True
+
+
+def _authenticated_gateway_status_document(cfg) -> tuple[dict | None, str, bool]:
+    """The gateway's authenticated ``/status`` document.
+
     The document counts only when the listener is this profile's gateway
     process and the runtime it reports binds back to it, the same trust as
     ``cmd_status._fetch_runtime_bound_health``. Returns
-    ``(health, "", True)``, or ``(None, reason, checked)``: ``checked`` is
+    ``(document, "", True)``, or ``(None, reason, checked)``: ``checked`` is
     False when no gateway runs.
     """
     gateway = getattr(cfg, "gateway", None)
@@ -10879,12 +10972,11 @@ def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
         return None, runtime_detail, True
     try:
         document = json.loads(body)
-        health = document.get("health") if isinstance(document, dict) else None
     except (json.JSONDecodeError, TypeError):
-        health = None
-    if not isinstance(health, dict):
+        document = None
+    if not isinstance(document, dict):
         return None, "authenticated status health is malformed", True
-    return health, "", True
+    return document, "", True
 
 
 def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
@@ -13902,6 +13994,58 @@ def _check_decision_model(cfg, r: _DoctorResult) -> None:
     _emit("pass", "Decision model", detail, r=r)
 
 
+
+def _check_guardrail_cascade(cfg, r: _DoctorResult) -> None:
+    """``Guardrail cascade`` row, only when guardrail.cascade is set at some
+    scope. FAIL when the gateway found it invalid (the guardrail then decides
+    with the last-known-good cascade or the pack defaults, which the row
+    names, and says when that is weaker); WARN on settings that let the
+    guardrail do less than its pack."""
+    from defenseclaw import cascade
+
+    if not cascade.configured(cfg):
+        return
+    payload, error = cascade.gateway_explain()
+    if error:
+        _emit("warn", "Guardrail cascade", f"could not resolve: {error}", r=r,
+              remediation="defenseclaw guardrail cascade explain")
+        return
+    view = (payload or {}).get("cascade") or {}
+    invalid = view.get("invalid")
+    if invalid:
+        fallback = (
+            "the last-known-good cascade" if invalid.get("fallback") == "last_known_good" else "the rule pack defaults"
+        )
+        detail = (
+            f"invalid: {invalid.get('error')}; a running gateway refuses the reload and keeps its current "
+            f"configuration; a gateway started now decides with {fallback}"
+        )
+        if invalid.get("weaker"):
+            detail += "; WEAKER than your configuration: " + "; ".join(invalid["weaker"])
+        _emit("fail", "Guardrail cascade", detail, r=r,
+              remediation="fix the named guardrail.cascade key, then: defenseclaw guardrail cascade explain")
+        return
+    notes = cascade.loosening_notes(view)
+    ignored = view.get("ignored") or []
+    if ignored:
+        # A locked key or an invalid connector/profile cascade: the
+        # administrator's top-level values apply, the narrower one does not.
+        shown = "; ".join(f"{i.get('path')}: {i.get('reason')}" for i in ignored[:5])
+        if len(ignored) > 5:
+            shown += f"; and {len(ignored) - 5} more"
+        notes = [f"{len(ignored)} narrower-scope setting(s) not applied: {shown}", *notes]
+    summary = (
+        f"unknown {(view.get('unknown') or {}).get('action')}, judge {(view.get('judge') or {}).get('runs')}, "
+        f"System One {(view.get('system_one') or {}).get('runs')}, Rego policy "
+        f"{'on' if (view.get('policy') or {}).get('active') else 'off'}, CRITICAL floor {view.get('critical_floor')}"
+    )
+    if notes:
+        _emit("warn", "Guardrail cascade", summary + "; " + "; ".join(notes), r=r,
+              remediation="defenseclaw guardrail cascade explain")
+        return
+    _emit("pass", "Guardrail cascade", summary, r=r)
+
+
 def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     """One-shot ``llm.ping`` against the guardrail's resolved LLM.
 
@@ -16615,6 +16759,7 @@ def doctor(
         _check_guardrail_profile(cfg, r)
         _check_agent_identity_ledger(sidecar_health, r)
         _check_live_audit_store(sidecar_health, r)
+        _check_hook_capacity(cfg, sidecar_health, r)
     _check_policy_state(cfg, r, live_health=sidecar_health)
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)
@@ -16691,6 +16836,7 @@ def doctor(
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
     _check_decision_model(cfg, r)
+    _check_guardrail_cascade(cfg, r)
     _check_private_upstream_refusals(cfg, r)
     if not _check_judge_running(sidecar_health, r):
         _check_judge_calls(cfg, r)
@@ -19934,6 +20080,7 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
     if acp is None:
         return
     try:
+        from defenseclaw.acp_catalog import own_tools_notice
         from defenseclaw.commands import cmd_acp
 
         data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
@@ -19964,7 +20111,8 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
         except Exception as exc:
             problems, profile, mode = [f"could not be checked: {exc}"], "?", "?"
         if not problems:
-            _emit("pass", label, f"healthy; profile {profile} ({mode})", r=r)
+            notice = own_tools_notice(agent)
+            _emit("pass", label, f"healthy; profile {profile} ({mode})" + (f"; {notice}" if notice else ""), r=r)
             continue
         if all("acp refresh" in problem for problem in problems):
             # The upgraded guard, or an agent the user updated (acp refresh

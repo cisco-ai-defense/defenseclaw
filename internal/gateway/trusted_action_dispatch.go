@@ -420,6 +420,12 @@ func dispatchTrustedAction(
 			findings = withPosixDataWordRecord(findings)
 		}
 	}()
+	// One dispatch is one hook call whichever surface carries the action (the
+	// hook request, an ACP frame, a direct evaluation): the file system reads
+	// of its reach scans are remembered for the decision (hookpaths.HookCall;
+	// nested in the handler's own call, or in a twin of this dispatch, it
+	// begins nothing more, rel-1-0-10:GAP-0766).
+	defer hookpaths.HookCall()()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	defer recoverTrustedActionFault(request, &findings)
 	if trustedActionFaultHook != nil {
@@ -620,6 +626,13 @@ func dispatchTrustedAction(
 					withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
 						posixParseTruncation(request, facts), request)))
 		}
+		if awkCommandDynamic(facts) {
+			// An awk command built at run time has no text to judge
+			// (GAP-0499): the call is unknown, never an allow.
+			defer func() {
+				findings = withAwkDynamicCommand(findings, request.EnforcementCapable)
+			}()
+		}
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
@@ -710,6 +723,31 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// The commands an awk program starts through system(), print | and
+	// | getline, written as string literals, are run by the shell as the
+	// hook would run them directly (GAP-0499): that reading is judged too,
+	// and only its block counts.
+	twin, awkReading, awkTwin := awkCommandTwinRequest(request)
+	awkCaps := awkReading.Truncated
+	if awkTwin {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	if awkProgramFilesUnknown(request, awkReading) {
+		// A program file the call runs could not be read, or starts a command
+		// built at run time: the call is unknown (GAP-0499, GAP-0652).
+		defer func() {
+			findings = withAwkDynamicCommand(findings, request.EnforcementCapable)
+		}()
+	}
+	if awkCaps.Any() {
+		// An awk program in shell STRINGs nested past the bound is not read:
+		// the call is truncated (bound rule, cap depth).
+		defer func() {
+			findings = withBoundedTruncation(findings, awkCaps, request)
+		}()
+	}
 
 	if !analyzed {
 		facts = analyzeWithPatchHeaderAnswers(&request)
@@ -743,6 +781,16 @@ func dispatchTrustedAction(
 	// upload) is the unknown tier of the one bound rule: the profile decides,
 	// an alert in the default and permissive packs, a block in strict
 	// (GAP-0595).
+	// A cap the sender reader hit (its nesting depth, its reading bounds) is
+	// TRUNCATED, whatever it read before the cap still judged: at least the
+	// unknown tier of the pack (the one bound rule, GAP-0721).
+	var senderCaps bounded.Truncated
+	actionfacts.ReadSenders(facts).Bound(&senderCaps)
+	if set := senderCaps.Set(); set.Any() {
+		defer func() {
+			findings = withBoundedTruncation(findings, set, request)
+		}()
+	}
 	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
 		defer func() {
 			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)

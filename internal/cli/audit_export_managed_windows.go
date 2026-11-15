@@ -9,6 +9,7 @@ package cli
 import (
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -24,5 +25,5 @@ func platformAuditExportCallerIsAdministrator() bool {
 }
 
 func platformAuditExportManagedLayout() (managed.StandaloneLayout, error) {
-	return windowsManagedLayout.standalone()
+	return hookcli.WindowsManagedLayout.Standalone()
 }

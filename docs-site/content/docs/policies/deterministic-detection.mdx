@@ -281,7 +281,7 @@ mutated sequences cannot complete an enforcement proof.
 | Permission denied → runtime bypass | Same session, five-minute window | Alert-only |
 | Privilege discovery → elevation | Same session, system/root semantics | Alert-only |
 | Secret-manager read → external egress | Same session, bounded result | Alert-only |
-| Secret read → external egress | Exact artifact identity and mutation barrier | Alert-only |
+| Secret read → external egress | Exact artifact identity and mutation barrier; a sender the reader cannot read in full, or a reading cap, joins any exact credentials read at the unknown tier | Alert in the default and permissive packs, block in strict |
 | Workload identity read → lateral execution | Same workload identity context | Alert-only |
 | Download → decode → execute | Exact derived artifact identity and mutation barrier | Alert-only |
 | Download → execute | Exact artifact identity and mutation barrier | Alert-only |
@@ -463,7 +463,7 @@ An agent's own tool (`Read`, `Edit`, `Grep`, `WebFetch`, ...) opens this walk on
 
 Shell calls use the same table for rules that need no CEL: `CMD-SECRET-REVEAL` (`--reveal`, `--show-secrets`), `CMD-SECRET-LOOKUP`, `CMD-GIT-SHOW-SECRET`, `CMD-PRIV-SETUID`, `CMD-PRIV-PATH-HIJACK`, `CMD-PERSIST-SYSTEM-SCHEDULE` and writes of a uid-0 line to `/etc/passwd`. They run in Go on the parsed ActionFacts, because the rule catalog's CEL cost budget is spent, and the pack keeps the rule's title, severity and tags.
 
-The whole lane (these effects and the table rules on shell and native file-tool calls) has one switch, `guardrail.cascade.lanes.nonshell` (`on`, the default, `shadow` or `off`, in any case; any other value is refused when the configuration loads). Only `on` is live: in `shadow` and in `off` the lane computes nothing and adds nothing, and the verdicts are those of rel/1.0.10.
+The whole lane (these effects and the table rules on shell and native file-tool calls) has one switch, `guardrail.cascade.lanes.nonshell` (`on`, the default, `shadow` or `off`, written exactly so, at the top level only; any other value or spelling is refused when the configuration loads). Only `on` is live: in `shadow` and in `off` the lane computes nothing and adds nothing, and the verdicts are those of rel/1.0.10.
 
 ## Action-mode rule details
 

@@ -1,0 +1,11 @@
+version: 1
+category: command
+rules:
+  - id: W1-FIXTURE-BAD-CEL
+    expression: >-
+      f.no_such_field == 1
+    pattern: bw1-fixture-toolb
+    title: "W1 outage golden fixture rule with an expression that does not type-check"
+    severity: HIGH
+    confidence: 0.9
+    tags: [fixture]

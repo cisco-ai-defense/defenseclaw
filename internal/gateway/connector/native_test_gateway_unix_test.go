@@ -102,7 +102,7 @@ func installNativeGatewayForHookTest(t *testing.T, home string, hookDirs ...stri
 		}
 		nativeGatewayForHookTests.accountHome = accountHome
 		cmd := exec.Command("go", "build", "-ldflags",
-			"-X github.com/defenseclaw/defenseclaw/internal/cli.outageAccountHomeBake="+accountHome,
+			"-X github.com/defenseclaw/defenseclaw/internal/hookcli.outageAccountHomeBake="+accountHome,
 			"-o", nativeGatewayForHookTests.path, "./cmd/defenseclaw")
 		cmd.Dir = filepath.Join("..", "..", "..")
 		if output, buildErr := cmd.CombinedOutput(); buildErr != nil {

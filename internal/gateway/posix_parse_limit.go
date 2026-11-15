@@ -122,6 +122,7 @@ func withPosixDataWordRecord(findings []RuleFinding) []RuleFinding {
 	record := trustedActionLimitFindings(false)[0]
 	record.Title = posixDataWordTitle
 	record.Evidence = bounded.Of(bounded.Bytes).Reason() + "; operand"
+	record.Severity = "INFO" // a record is no CRITICAL on an allowed call
 	record.enforcement = findingEnforcementDetectionOnly
 	record.dataWordRecord = true
 	return append(slices.Clip(findings), record)

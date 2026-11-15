@@ -31,7 +31,9 @@ import (
 	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -172,7 +174,7 @@ with --output json it prints the pull's result.`
 
 func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cmd.Annotations[sandboxConfigOptional] == "true"); err != nil {
-		return withExitCode(managedWindowsSandboxRefusal(err), 3)
+		return cliusage.WithExitCode(managedWindowsSandboxRefusal(err), 3)
 	}
 	// A nested `sandbox run` inside a sandbox runs the harness natively and
 	// needs no configuration (there is none inside the sandbox).
@@ -198,7 +200,7 @@ func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 			err = fmt.Errorf("%w; an administrator reads a pack's digest with `%s enterprise %s sandbox pack-digest <pack>`",
 				err, managedHostGatewayCommand(), platform)
 		}
-		return withExitCode(err, 3)
+		return cliusage.WithExitCode(err, 3)
 	}
 	if err := loadGatewayCommandConfigOnly(); err != nil {
 		if cmd.Annotations[sandboxConfigOptional] == "true" {
@@ -273,7 +275,7 @@ func sandboxHostRefusal(goos, goarch string, cleanup bool) error {
 // Windows computer the one sandbox view there is, the administrator's list
 // of the account's registrations: it named no next step (GAP-0523).
 func managedWindowsSandboxRefusal(err error) error {
-	if _, managed := managedHostWindowsStandalone(); !managed {
+	if _, managed := hookcli.ManagedHostWindowsStandalone(); !managed {
 		return err
 	}
 	return fmt.Errorf("%w. %s", err, windowsManagedStandardUserViewAnswer("The sandbox registrations",
@@ -300,15 +302,15 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 			if exit.Err != nil && !errors.As(exit.Err, &silent) {
 				fmt.Fprintln(cmd.ErrOrStderr(), Style("✗", "fg=red", "bold")+" "+exit.Err.Error())
 			}
-			return withExitCode(err, exit.Code)
+			return cliusage.WithExitCode(err, exit.Code)
 		case errors.As(err, &silent):
-			return withExitCode(err, 1)
+			return cliusage.WithExitCode(err, 1)
 		case errors.Is(err, context.Canceled):
-			return withExitCode(err, 130)
+			return cliusage.WithExitCode(err, 130)
 		case sandboxcli.IsInterrupted(err):
 			// Ctrl-C at a question a command did not explain itself.
 			fmt.Fprintln(cmd.ErrOrStderr(), Style("✗", "fg=red", "bold")+" interrupted at a question: what it asked about was not done; run the command again to finish")
-			return withExitCode(err, 130)
+			return cliusage.WithExitCode(err, 130)
 		}
 		var disabled *sandboxcli.DisabledError
 		if errors.As(err, &disabled) && sandboxJSONOutput(cmd) {
@@ -319,9 +321,9 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 		}
 		fmt.Fprintln(cmd.ErrOrStderr(), Style("✗", "fg=red", "bold")+" "+err.Error())
 		if errors.Is(err, sandboxcli.ErrUnsupported) {
-			return withExitCode(err, 3)
+			return cliusage.WithExitCode(err, 3)
 		}
-		return withExitCode(err, 1)
+		return cliusage.WithExitCode(err, 1)
 	}
 }
 

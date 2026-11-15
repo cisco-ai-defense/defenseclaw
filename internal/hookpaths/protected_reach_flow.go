@@ -59,6 +59,13 @@ func registrationFlowMembers(file *syntax.File, command, cwd, home string, prote
 	}
 	text := registrationHomeText(command, home)
 	words := registrationStaticWords(file, home)
+	// resolved holds each distinct word of the command as the hook resolves it,
+	// read once for the whole registration set: the answer for a word does not
+	// depend on the member it is compared with, and a long script cost one
+	// file system walk of every word for every member (446,000 lstat calls
+	// for 100 lines, 27 s on a Windows host, rel-1-0-10:GAP-0766).
+	var resolved []string
+	resolvedWords := false
 	for index, entry := range protected {
 		if registrationIsFolder(entry, protected) {
 			continue
@@ -73,9 +80,22 @@ func registrationFlowMembers(file *syntax.File, command, cwd, home string, prote
 			named[index] = true
 		default:
 			// A word that is a link the hook resolves.
+			if !resolvedWords {
+				resolvedWords = true
+				seen := make(map[string]bool, len(words))
+				for _, word := range words {
+					if seen[word] {
+						continue
+					}
+					seen[word] = true
+					if path, ok := ResolveWriteTarget(OperandPath(word, cwd)); ok {
+						resolved = append(resolved, path)
+					}
+				}
+			}
 			single := protectedFiles{entry}
-			for _, word := range words {
-				if protectedReachPath(OperandPath(word, cwd), single, "") {
+			for _, path := range resolved {
+				if protectedReachResolved(path, single, "") {
 					named[index] = true
 					break
 				}
