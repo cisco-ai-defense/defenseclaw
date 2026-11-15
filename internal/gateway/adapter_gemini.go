@@ -155,14 +155,6 @@ func geminiTextParts(rawParts []json.RawMessage) []string {
 	return parts
 }
 
-// extractGeminiSystemInstructionText pulls the text out of a Gemini
-// `systemInstruction` field, which accepts either a plain string
-// shorthand OR a {role,parts[]} object: the text parts joined with a line
-// feed. Returns "" on unknown shapes.
-func extractGeminiSystemInstructionText(raw json.RawMessage) string {
-	return strings.Join(extractGeminiSystemInstructionParts(raw), "\n")
-}
-
 // extractGeminiSystemInstructionParts is the text parts of a Gemini
 // `systemInstruction` field: the string shorthand as one part, or the text of
 // each part of the object form. Returns nil on unknown shapes.

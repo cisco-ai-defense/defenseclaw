@@ -155,6 +155,8 @@ MDM_CONTRACT_SCHEMAS = (
     "identity-refresh.schema.json",
     "lifecycle-result.schema.json",
     "secret-result.schema.json",
+    "substrate-status.schema.json",
+    "substrate-verify.schema.json",
     "version.schema.json",
 )
 
@@ -1110,6 +1112,8 @@ MDM_FORWARD_SCHEMAS = {
     "bundle-status-forward.schema.json": "bundle-status.schema.json",
     "bundle-receipt-forward.schema.json": "bundle-receipt.schema.json",
     "identity-refresh-forward.schema.json": None,
+    "substrate-status-forward.schema.json": "substrate-status.schema.json",
+    "substrate-verify-forward.schema.json": "substrate-verify.schema.json",
 }
 # Member names a forward schema must never list: they name accounts, hold
 # free text or local detail.

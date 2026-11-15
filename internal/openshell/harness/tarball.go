@@ -110,6 +110,18 @@ func (p tarballPin) installRun(root, version string) (string, error) {
 	return b.String(), nil
 }
 
+// tarballPins are the reviewed releases of one archive harness (see npmPins).
+type tarballPins []tarballPin
+
+func (ps tarballPins) installRun(root, version string) (string, error) {
+	for _, p := range ps {
+		if p.Version == version {
+			return p.installRun(root, version)
+		}
+	}
+	return ps[0].installRun(root, version)
+}
+
 // binaryPin pins one vendor-hosted single-executable release per Linux
 // architecture: the https download and its sha256. It is tarballPin for a
 // vendor that ships the executable itself rather than an archive (Claude

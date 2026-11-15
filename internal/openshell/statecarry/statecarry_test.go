@@ -242,6 +242,47 @@ func TestRollbackThenUpgradeKeepsTheSandboxSetupOfARunningSandbox(t *testing.T) 
 	}
 }
 
+// A rollback from a release with Substrate profile assignments carries only
+// the openshell: section: the install brought back keeps its own guardrail:
+// section, so an older release never gets a guardrail.profile_assignments
+// item that matches Substrate actors (its match has no substrate key;
+// substrate-1 GAP-0333, whose downgrade side is the upgrade shim's).
+func TestRollbackCarriesNoSubstrateProfileAssignment(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	live := newInstall(t, root, "live", "")
+	newer := newInstall(t, root, "previous-data", openShellAfterSetup)
+	plantSandboxState(t, newer.data, "run-1", "b-1")
+	raw, err := os.ReadFile(newer.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withAssignment := strings.Replace(string(raw), "guardrail:\n  mode: observe\n",
+		"guardrail:\n  mode: observe\n  profiles:\n    ci: {}\n  profile_assignments:\n"+
+			"    - profile: ci\n      match:\n        substrate:\n          atespaces: [ci-runs]\n", 1)
+	if withAssignment == string(raw) {
+		t.Fatal("fixture: no guardrail section to extend")
+	}
+	write(t, newer.config, withAssignment, 0o600)
+
+	res, err := Carry(context.Background(), Options{
+		FromDataDir: newer.data, FromConfig: newer.config, DataDir: live.data, Config: live.config,
+	})
+	if err != nil || !res.Carried {
+		t.Fatalf("Carry = %+v, %v; want the sandbox setup carried", res, err)
+	}
+	got, err := os.ReadFile(live.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "profile_assignments") || strings.Contains(string(got), "substrate") {
+		t.Fatalf("the install brought back got the Substrate assignment:\n%s", got)
+	}
+	if section := openShellOf(t, live.config); section["enabled"] != true {
+		t.Fatalf("openshell = %v, want the carried setup", section)
+	}
+}
+
 // An install left with sandboxes off has no setup a running sandbox needs:
 // the restored install keeps its own.
 func TestCarryLeavesTheLiveInstallAloneWhenTheInstallLeftHasSandboxesOff(t *testing.T) {

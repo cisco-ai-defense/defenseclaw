@@ -300,7 +300,8 @@ type trustedActionRequest struct {
 	parentPatch *actionfacts.Input
 	// SandboxGuestCWD is a sandbox call's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
-	// the authorized-keys proofs read it, and only to add a match.
+	// the authorized-keys proofs and the guest reading
+	// (sandboxGuestPlacedInput) read it, and only to add findings.
 	SandboxGuestCWD string
 	// windowsShellDialect is set when Input.DialectHint is inferred from
 	// the call's command (agentHookWindowsShellDialect, Windows host hooks):
@@ -509,7 +510,7 @@ func dispatchTrustedAction(
 	if shellReason == hookpaths.UnprovenParserFault {
 		defer func() { findings = withParserFaultFinding(findings, request.EnforcementCapable) }()
 	}
-	if ManagedEnterpriseActive() {
+	if ManagedEnterpriseActive() && !isSubstrateActorRequest(parent) {
 		return nil
 	}
 	// A script body the hook call kept unread because its network share
@@ -902,14 +903,24 @@ func dispatchTrustedAction(
 			unreadDataWord = true
 		}()
 	}
-	// Only the Git hook rule uses the hook client's bounded directory. Parse
-	// that view when the action already names a possible active hook mutation;
-	// a text mention or an inactive .sample path needs no second reading.
-	var gitHookFacts *actionfacts.Facts
-	if hasGitHookMutationCandidate(facts) {
-		if twin, ok := protectedHomeGitHookTwinRequest(request); ok {
-			placed := actionfacts.Analyze(twin.Input)
-			gitHookFacts = &placed
+	// The call is read once more where the agent's working directory is
+	// known but the request's is not, and that reading can only add
+	// semantic findings: a sandbox call in the guest's own directory, by
+	// every semantic owner (sandboxGuestPlacedInput, GAP-0264, GAP-0282); a
+	// managed peer's call in the hook client's bounded directory, by the
+	// rules whose owner places a path by the working directory itself
+	// (protectedHomeCWDPlacedInput, cwdPlacedRule). The managed view is
+	// parsed only when the action already names a possible active mutation
+	// of what those rules own; a text mention or an inactive .sample path
+	// needs no second reading.
+	placed := placedReading{}
+	if input, ok := sandboxGuestPlacedInput(request, facts); ok {
+		analyzed := actionfacts.Analyze(input)
+		placed = placedReading{facts: &analyzed, everyOwner: true, children: sandboxGuestPlacedChildren(input, analyzed)}
+	} else if hasGitHookMutationCandidate(facts) || hasGitReadOutputWrite(facts) {
+		if input, ok := protectedHomeCWDPlacedInput(request); ok {
+			analyzed := actionfacts.Analyze(input)
+			placed = placedReading{facts: &analyzed}
 		}
 	}
 	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
@@ -968,7 +979,7 @@ func dispatchTrustedAction(
 		if budget == nil {
 			budget = newTrustedActionBudget(false)
 		}
-		return dispatchTrustedActionWith(parent, request, facts, gitHookFacts, generation, budget, &telemetry)
+		return dispatchTrustedActionWith(parent, request, facts, placed, generation, budget, &telemetry)
 	}
 	// A strictest combination of profiles judges the call with each
 	// member's own rules within one budget. Each finding keeps its member for
@@ -978,7 +989,7 @@ func dispatchTrustedAction(
 	}
 	for i, member := range generation.members {
 		var memberTelemetry trustedActionTelemetry
-		found := dispatchTrustedActionWith(parent, request, facts, gitHookFacts, member, budget, &memberTelemetry)
+		found := dispatchTrustedActionWith(parent, request, facts, placed, member, budget, &memberTelemetry)
 		if i < len(generation.memberNames) {
 			for j := range found {
 				found[j].profile = generation.memberNames[i]
@@ -997,7 +1008,7 @@ func dispatchTrustedActionWith(
 	ctx context.Context,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
-	gitHookFacts *actionfacts.Facts,
+	placed placedReading,
 	generation *compiledRulePackCategories,
 	budget *trustedActionBudget,
 	telemetry *trustedActionTelemetry,
@@ -1494,14 +1505,20 @@ func dispatchTrustedActionWith(
 		clear(excluded)
 		semanticFindings = semanticFindings[:0]
 	}
-	// The managed Git-hook reading shares this dispatch and budget. Its CWD
-	// can add only the Git-hook rule's positive semantic finding; all other
-	// rules and fallback lanes keep the gateway's original facts.
-	if gitHookFacts != nil && gitHookFacts.Authoritative() {
-		if projection, code := semantic.Project(*gitHookFacts); code == semantic.ProjectionOK {
-			evaluateSemanticRules(4, *gitHookFacts, projection,
+	// The working-directory reading (placedReading) shares this dispatch and
+	// budget. It can add only positive semantic findings, of every owner for
+	// a sandbox and of cwdPlacedRule rules for a managed peer; all other
+	// lanes keep the gateway's original facts.
+	for index, view := range placed.views() {
+		if !view.Authoritative() {
+			continue
+		}
+		if projection, code := semantic.Project(view); code == semantic.ProjectionOK {
+			// Each view has its own pair of budget keys (the view and its
+			// enforcement projection), after the fixed views 0 to 5.
+			evaluateSemanticRules(placedReadingFirstView+2*index, view, projection,
 				func(candidate compiledSemanticRule) bool {
-					return candidate.rule.ID == "persistence.git_hook_write"
+					return placed.everyOwner || cwdPlacedRule(candidate.rule.ID)
 				}, true, nil)
 		}
 	}
@@ -1578,6 +1595,9 @@ func dispatchTrustedActionWith(
 		// findings, never the state-write proof a stateProofOnly reading keeps.
 		finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
 		finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
+		if placed.everyOwner && placed.provesSSHPrivateKeyContentRead() {
+			finalized = withProvedPrivateKeyRead(finalized, generation, request)
+		}
 		finalized = appendWindowsPathUnverifiedFinding(finalized, request, facts)
 	}
 	if staticTargetTwin == nil {
@@ -4078,21 +4098,164 @@ func hasGitHookMutationCandidate(facts actionfacts.Facts) bool {
 	return false
 }
 
-// protectedHomeGitHookTwinRequest places a managed action in the hook
-// client's project directory only when the action names a .git path. The
-// verified peer's home bounds that directory (protectedHomeClientDirectory).
-// The caller retains only persistence.git_hook_write from this reading.
-func protectedHomeGitHookTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+// hasGitReadOutputWrite avoids a second parse for every call but a git
+// show, log, diff or whatchanged that writes its output to a file: the
+// reading gitReadOutputConfigPrerequisite places by the working directory.
+func hasGitReadOutputWrite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		invocation, ok := parseIntegrityGitInvocation(command)
+		if ok && oneOfFold(invocation.subcommand, "show", "log", "diff", "whatchanged") &&
+			hasOperation(command, actionfacts.OperationWrite) {
+			return true
+		}
+	}
+	return false
+}
+
+// cwdPlacedRule names the rules whose semantic owner decides that a path is
+// active by the call's working directory itself, not only by where a relative
+// operand resolves: persistence.git_hook_write (matchesActiveGitHook:
+// <cwd>/.git/hooks/<name>, or the git directory of a git show/log --output)
+// and source.git_config_exec (its --output into the active <git dir>/config,
+// integrityGitDirectory). A managed peer's reading in the hook client's
+// directory keeps only these (protectedHomeCWDPlacedInput). Every other owner
+// still resolves a relative operand against the working directory; a sandbox
+// call therefore gets the guest reading of every owner (sandboxGuestPlacedInput).
+func cwdPlacedRule(ruleID string) bool {
+	switch ruleID {
+	case "persistence.git_hook_write", "source.git_config_exec":
+		return true
+	}
+	return false
+}
+
+// protectedHomeCWDPlacedInput is a managed hook peer's call placed in the
+// hook client's project directory (protectedHomeClientDirectory, which the
+// verified peer's home bounds), when the call names a .git path and may
+// resolve local paths. The reading is lexical (actionfacts.Analyze reads no
+// files) and the caller keeps only the positive findings of cwdPlacedRule
+// rules from it.
+func protectedHomeCWDPlacedInput(request trustedActionRequest) (actionfacts.Input, bool) {
 	cwd, ok := protectedHomeClientDirectory(request)
 	if !ok || request.SkipLocalFilesystemResolution ||
 		!strings.Contains(strings.ToLower(trustedActionInputText(request.Input, request.LegacyText)), ".git") {
-		return trustedActionRequest{}, false
+		return actionfacts.Input{}, false
 	}
-	twin := request
-	twin.record, twin.recordTelemetry = nil, nil
-	twin.conflictSource = nil
-	twin.Input.CWD = cwd
-	return twin, true
+	input := request.Input
+	input.CWD = cwd
+	return input, true
+}
+
+// placedReading is the call read in the working directory the agent ran it
+// in (dispatchTrustedAction): facts nil when there is none, everyOwner when
+// every semantic owner may add a finding from it, not only cwdPlacedRule.
+// children are the simple commands of a sandbox call that a static cd moved
+// to another directory, each read there (sandboxGuestPlacedChildren).
+type placedReading struct {
+	facts      *actionfacts.Facts
+	everyOwner bool
+	children   []actionfacts.Facts
+}
+
+// placedReadingFirstView is the budget view number of the first placed view;
+// the dispatch's own views are 0 to 5 (evaluateSemanticRules).
+const placedReadingFirstView = 6
+
+// maxSandboxGuestPlacedChildren bounds the simple-command readings of one
+// sandbox call; they share the call's semantic budget.
+const maxSandboxGuestPlacedChildren = 16
+
+// views returns the placed facts, then each child's.
+func (placed placedReading) views() []actionfacts.Facts {
+	if placed.facts == nil {
+		return nil
+	}
+	return append([]actionfacts.Facts{*placed.facts}, placed.children...)
+}
+
+// provesSSHPrivateKeyContentRead reports a placed view that reads an active
+// SSH private key's content by its lexical facts alone, the proof
+// appendTrustedPrivateKeyReaderFinding makes on the call's own facts: a
+// relative read of the guest home's key (cat .ssh/id_ed25519 from the home,
+// cat ../sandbox/.ssh/id_ed25519 from /work) is then the laptop's block.
+func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
+	for _, view := range placed.views() {
+		if view.Authoritative() && view.EnforcementEligible() &&
+			trustedActionActiveSSHPrivateKeyContentRead(view.EnforcementProjection()) {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxGuestPlacedChildren reads, lexically, each simple command of a
+// sandbox call that a static cd moved out of the guest working directory in
+// the directory it runs in: cd ../sandbox && echo x >> .profile writes the
+// guest home's .profile. The dispatch's own simple-command pass places the
+// command in the request's working directory, which a copy-mode actor does
+// not have, so the cd led nowhere there.
+func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts) []actionfacts.Facts {
+	var children []actionfacts.Facts
+	for _, simple := range actionfacts.SimpleCommands(input, facts) {
+		if simple.EvaluationFailure != "" || simple.OpaqueValueAssignment || simple.LiteralOutputOnly ||
+			simple.LoginGuess || !path.IsAbs(simple.CWD) || simple.CWD == input.CWD {
+			continue
+		}
+		if len(children) == maxSandboxGuestPlacedChildren {
+			break
+		}
+		child := input
+		child.Command, child.CWD = simple.Text, simple.CWD
+		child.Args, child.Argv = nil, nil
+		children = append(children, actionfacts.Analyze(child))
+	}
+	return children
+}
+
+// sandboxGuestPlacedInput is a sandbox call (every Substrate actor, an
+// OpenShell sandbox) placed in the guest's own working directory
+// (SandboxGuestCWD), the directory the agent resolves its relative operands
+// against. The request's working directory is none in copy mode (the
+// payload's has no host counterpart) and the host mount in mount mode, so
+// every owner that resolves an operand by it lost the guest's placement:
+// echo x >> .bashrc from the guest home, cat ../sandbox/.ssh/id_ed25519 or
+// rm .defenseclaw/audit.db from the project, and the active Git hook of the
+// guest project even when named absolutely (GAP-0264, GAP-0282). "~" is
+// already the guest home there (hookActiveHome).
+//
+// Only the semantic owners judge this reading, over lexical facts
+// (actionfacts.Analyze reads no files), with the lexical private-key read
+// proof (placedReading.provesSSHPrivateKeyContentRead): the other lanes read
+// files under the request's working directory on this host (a script a shell
+// runs, a file a tool edits), and a guest path there names a host file the
+// sandbox never reaches (TestSandboxIngressCopyModeNeverTouchesHostFS). The reading only
+// adds findings, so it reaches the verdict a laptop reaches in that directory
+// and never removes one. It is read only when the guest directory may change
+// a judgment: a relative operand, or a Git hook or config candidate the git
+// owners place by the working directory itself.
+func sandboxGuestPlacedInput(request trustedActionRequest, facts actionfacts.Facts) (actionfacts.Input, bool) {
+	guestCWD := request.SandboxGuestCWD
+	if guestCWD == "" || guestCWD == request.Input.CWD {
+		return actionfacts.Input{}, false
+	}
+	if !hasRelativePathOperand(facts) && !hasGitHookMutationCandidate(facts) && !hasGitReadOutputWrite(facts) {
+		return actionfacts.Input{}, false
+	}
+	input := request.Input
+	input.CWD = guestCWD
+	return input, true
+}
+
+// hasRelativePathOperand reports a path the call names relative to its
+// working directory: not absolute and not under "~".
+func hasRelativePathOperand(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		value := strings.TrimSpace(candidate.Value)
+		if value != "" && !candidate.Absolute && !strings.HasPrefix(value, "~") && !path.IsAbs(value) {
+			return true
+		}
+	}
+	return false
 }
 
 // stateLinkResolver resolves a path through links: the hook's resolved

@@ -988,6 +988,43 @@ func TestInspectToolMessageMarginBandStillBlocksTheKey(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("POSIX home fixture requires an unprivileged Unix user")
 	}
+	// The shapes below are built by a size search. Each probe builds and marshals
+	// a whole body, so the search must stay near the API limit: a fixed upper
+	// bound of 200000 units built multi-GB bodies on its first probes and took
+	// the test to 8.6 GB plain and 26 GB under -race (max RSS), which killed the
+	// 16 GB CI runner of gateway shard 20. The product handler needs 0.23 GB for
+	// the same bodies. The heap bound below keeps the test from growing back.
+	peakHeap := make(chan uint64, 1)
+	stopSampling := make(chan struct{})
+	go func() {
+		var peak uint64
+		var ms runtime.MemStats
+		for tick := time.NewTicker(5 * time.Millisecond); ; {
+			runtime.ReadMemStats(&ms)
+			peak = max(peak, ms.HeapInuse)
+			select {
+			case <-stopSampling:
+				tick.Stop()
+				peakHeap <- peak
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+	defer func() {
+		close(stopSampling)
+		peak := <-peakHeap
+		// The race detector inflates instrumented allocations and delays
+		// collection, so its bound is three times larger; the plain bound is the
+		// one CI relies on.
+		limit := uint64(1 << 30)
+		if hookAnswerRaceBuild {
+			limit *= 3
+		}
+		if peak > limit {
+			t.Errorf("peak heap in use was %d MiB, over the %d MiB bound: the size search must not build bodies far past the API limit", peak>>20, limit>>20)
+		}
+	}()
 	prose := func(n int) string { return strings.Repeat("the quarterly plan is attached for review. ", n/43+1)[:n] }
 	keyText := prose(7000) + " key: " + messageTestSecret + " " + prose(7000)
 	rows := func(n int) []any {
@@ -1009,13 +1046,16 @@ func TestInspectToolMessageMarginBandStillBlocksTheKey(t *testing.T) {
 		return b
 	}
 	// exact grows coarse(n) to the largest that fits, then fills to target bytes with small numbers.
-	exact := func(target int, coarse func(n int) map[string]any) []byte {
+	// minItem is the fewest bytes one more unit of n adds to the encoded body, so
+	// target/minItem bounds n and no probe builds a body much past the target.
+	exact := func(target, minItem int, coarse func(n int) map[string]any) []byte {
 		sized := func(n, pad int) int {
 			params := coarse(n)
 			params["pad"] = make([]int, pad)
 			return len(wrap(params))
 		}
-		lo, hi := 0, 200000
+		bound := target/minItem + 1
+		lo, hi := 0, bound
 		for lo < hi {
 			mid := (lo + hi + 1) / 2
 			if sized(mid, 0) <= target-4 {
@@ -1024,7 +1064,11 @@ func TestInspectToolMessageMarginBandStillBlocksTheKey(t *testing.T) {
 				hi = mid - 1
 			}
 		}
-		count, top := 0, target
+		if lo == bound {
+			t.Fatalf("the search bound %d is too small for %d bytes", bound, target)
+		}
+		// A pad entry is at least "0," (2 bytes), so no more than target/2+1 fit.
+		count, top := 0, target/2+1
 		for count < top {
 			mid := (count + top + 1) / 2
 			if sized(lo, mid) <= target {
@@ -1052,21 +1096,23 @@ func TestInspectToolMessageMarginBandStillBlocksTheKey(t *testing.T) {
 		}
 	}
 	target := int(apiRequestBodyMaxBytes) - 1024
+	note := strings.Repeat("y", 100)
+	filler := strings.Repeat("y", len(keyText))
 	shapes := map[string][]byte{
-		"band-body-numtable-1b": exact(target+1, table("body")),
-		"band-body-numtable":    exact(target+100, table("body")),
-		"band-content-numtable": exact(target+100, table("content")),
-		"band-body-short": exact(target+200, func(n int) map[string]any {
+		"band-body-numtable-1b": exact(target+1, 21, table("body")),
+		"band-body-numtable":    exact(target+100, 21, table("body")),
+		"band-content-numtable": exact(target+100, 21, table("content")),
+		"band-body-short": exact(target+200, len(note), func(n int) map[string]any {
 			notes := make([]string, n)
 			for i := range notes {
-				notes[i] = strings.Repeat("y", 100)
+				notes[i] = note
 			}
 			return map[string]any{"action": "send", "to": "+15550001111", "body": keyText, "notes": notes}
 		}),
-		"band-body-eqstrings": exact(target+150, func(n int) map[string]any {
+		"band-body-eqstrings": exact(target+150, len(filler), func(n int) map[string]any {
 			params := map[string]any{"action": "send", "to": "+15550001111", "body": keyText}
 			for i := 0; i < n; i++ {
-				params["f"+strconv.Itoa(i)] = strings.Repeat("y", len(keyText))
+				params["f"+strconv.Itoa(i)] = filler
 			}
 			return params
 		}),
