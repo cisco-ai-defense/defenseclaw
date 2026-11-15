@@ -651,8 +651,8 @@ read:
 					break read
 				}
 			}
-			if s.bedrock == nil && framer.Broken() && !framerReported {
-				framerReported = true
+			if s.bedrock == nil && framer.Broken() {
+				// Decided once: either way the read loop ends here.
 				if !sseOversize() {
 					stopped = true
 					break read
