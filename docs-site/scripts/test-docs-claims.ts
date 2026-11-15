@@ -2420,11 +2420,13 @@ describe('Setup properties and the Windows unknown-flag exit match the code (GAP
     const svc = source('internal/cli/windows_enterprise_service.go');
     assert.ok(svc.includes('cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {\n\t\treturn lifecycleArgumentError(c, action, opts.jsonOutput, flagError(c, err))'), 'Windows lifecycle verbs no longer route flag errors through lifecycleArgumentError: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2493)');
     const unix = source('internal/cli/enterprise_unix.go');
-    assert.ok(unix.includes('return withExitCode(err, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))') && unix.includes('return invalidLifecycleArguments(&delegatedUsageError{msg: usageMessage(c, err), err: err})') && unix.includes('result.AddError("invalid_arguments", message)'), 'lifecycle flag errors no longer exit with the invalid-arguments code or print invalid_arguments with --json (GAP-2493)');
+    assert.ok(unix.includes('return cliusage.WithExitCode(err, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))') && unix.includes('return invalidLifecycleArguments(&cliusage.DelegatedUsageError{Msg: cliusage.UsageMessage(c, err), Err: err})') && unix.includes('result.AddError("invalid_arguments", message)'), 'lifecycle flag errors no longer exit with the invalid-arguments code or print invalid_arguments with --json (GAP-2493)');
   });
   it('keeps the enterprise tree out of the root usage-error mapping', () => {
     const exit = source('internal/cli/exit_code.go');
-    assert.ok(exit.includes('var usageFlagErrorExempt = []string{"enterprise", "hook", "notify", "watchdog"}') && exit.includes('\treturn 1\n}'), 'unknown-flag exit for enterprise windows changed: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2171)');
+    // The coded-exit helpers moved to internal/cliusage with the slim hook (W1); the default failure result is still 1.
+    const usage = source('internal/cliusage/cliusage.go');
+    assert.ok(exit.includes('var usageFlagErrorExempt = []string{"enterprise", "hook", "notify", "watchdog"}') && usage.includes('func ExitCode(err error) int {') && usage.includes('\treturn 1\n}'), 'unknown-flag exit for enterprise windows changed: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2171)');
   });
 });
 

@@ -136,7 +136,7 @@ guardrail:
       module: {path: /etc/defenseclaw/cascade.rego, digest: "sha256:<hex of the file>"}
 ```
 
-```rego
+```text
 package defenseclaw.cascade
 import rego.v1
 
@@ -170,7 +170,7 @@ A judge block on a call System One did not confidently block asks the person ins
 
 One module, with a rule per team, keyed on the verified profile:
 
-```rego
+```text
 package defenseclaw.cascade
 import rego.v1
 
