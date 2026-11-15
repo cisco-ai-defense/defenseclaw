@@ -18,20 +18,23 @@ package scanner
 
 import "testing"
 
+func credentialRule(t *testing.T) rule {
+	t.Helper()
+	for _, candidate := range builtinRules {
+		if candidate.id == "CG-CRED-001" {
+			return candidate
+		}
+	}
+	t.Fatal("CG-CRED-001 is not a built-in rule")
+	return rule{}
+}
+
 // A test fixture or a document that names its key as a fake is no hardcoded
 // secret; a long random value, a value that only contains a placeholder word
 // inside a longer word, and a vendor test key stay findings
 // (rel-1-0-10:GAP-0018).
 func TestHardcodedCredentialRuleIgnoresPlaceholderValues(t *testing.T) {
-	var credential rule
-	for _, candidate := range builtinRules {
-		if candidate.id == "CG-CRED-001" {
-			credential = candidate
-		}
-	}
-	if credential.id == "" {
-		t.Fatal("CG-CRED-001 is not a built-in rule")
-	}
+	credential := credentialRule(t)
 	for _, tc := range []struct {
 		name, line string
 		fires      bool
@@ -45,14 +48,62 @@ func TestHardcodedCredentialRuleIgnoresPlaceholderValues(t *testing.T) {
 		{"placeholder word inside a longer word", `api_key = "fakirjewelrysecretvalue12"`, true},
 		{"vendor test key", "api_key = \"sk" + "_test_" + "4eC39HqLyjWDarjtT1zdp7dc\"", true},
 		{"placeholder beside a real key", `a = {api_key: "fake_value_for_docs_only", secret_key: "9f8e7d6c5b4a39281706f5e4d3c2b1a0"}`, true},
-		{"three or more words read as a stand-in", `secret_key = "correct-horse-battery-staple"`, false},
-		{"two pieces are one random string", `secret_key = "abcdefghijklmnop-qrstuvwxyz"`, true},
+		{"words without a stand-in word are a passphrase", `secret_key = "correct-horse-battery-staple"`, true},
+		{"the alphabet in two pieces is a sequence", `secret_key = "abcdefghijklmnop-qrstuvwxyz"`, false},
 		{"a piece with a digit and a letter mix is a key", `api_key = "build.number.7f3a9c.release"`, true},
 		{"short value", `api_key = "short"`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := credential.matches(tc.line); got != tc.fires {
 				t.Fatalf("matches(%q) = %t, want %t", tc.line, got, tc.fires)
+			}
+		})
+	}
+}
+
+// Only a low-entropy shape is a placeholder: a repeated or sequential run, a
+// stand-in word, a template slot. A random letters-only value after a key
+// prefix is a finding at every length and case, as on rel (GAP-0942). The
+// values below are made up for the test.
+func TestHardcodedCredentialRuleLowEntropyPlaceholdersOnly(t *testing.T) {
+	credential := credentialRule(t)
+	const prefix = "codeguard-private-value-"
+	for _, tc := range []struct {
+		name, value string
+		fires       bool
+	}{
+		{"random letters mixed case", prefix + "QwhTzrPkvMbnXcLsdGyFjRea", true},
+		{"random letters lower case", prefix + "qhtzrpkvmbnxclsdgyfjreaw", true},
+		{"random letters upper case", prefix + "QHTZRPKVMBNXCLSDGYFJREAW", true},
+		{"random letters long", prefix + "pXrTqWzKmNbVcLsDfGhJyUiOeAqWsEdRfTgYhUjIkOlPz", true},
+		{"random letters long alone", "pXrTqWzKmNbVcLsDfGhJyUiOeAqWsEdRfTgYhUjIkOlPzQ", true},
+		{"random letters short", prefix + "QwhTzrPkvM", true},
+		{"random letters short lower", prefix + "qhtzrpkv", true},
+		{"random letters twelve", prefix + "hjkqwzxvbnmt", true},
+		{"random letters after a stand-in word", "test-QwhTzrPkvMbnXcLsdGyFjRea", true},
+		{"random letters long after a stand-in word", "example_qhtzrpkvmbnxclsdgyfjreaw", true},
+		{"repeated character", prefix + "qqqqqqqqqqqqqqqqqqqqqqqq", false},
+		{"repeated unit", "abcabcabcabcabcabcabc", false},
+		{"sequential letters", prefix + "abcdefghijklmnopqrstuvwx", false},
+		{"sequential digits", "0123456789012345"[:10] + "-abcdefghij", false},
+		{"descending run", "zyxwvutsrqponmlk", false},
+		{"word example", "example-key-for-the-docs", false},
+		{"word your", "your-secret-key-goes-here", false},
+		{"word xxx", "sk-xxx-replace-with-real", false},
+		{"word changeme", "changeme-before-production", false},
+		{"word placeholder", "placeholder_secret_value", false},
+		{"word dummy", "dummy-access-token-value", false},
+		{"word sample", "sample.access.token.value", false},
+		{"word test", "test_secret_key_for_ci_only", false},
+		{"word redacted", "REDACTED-REDACTED-REDACTED", false},
+		{"angle template", "<your-api-key-here>", false},
+		{"angle template upper", "<PRIVATE_KEY_VALUE_GOES_HERE>", false},
+		{"dollar template", "${OPENAI_API_KEY_FROM_ENV}", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "api_key = \"" + tc.value + "\""
+			if got := credential.matches(line); got != tc.fires {
+				t.Fatalf("matches(%q) = %t, want %t", line, got, tc.fires)
 			}
 		})
 	}
