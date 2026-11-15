@@ -63,8 +63,9 @@ const (
 	// finding on a call the parser does not model (MCP and other tools)
 	// keeps its alert (GAP-0397); off makes it audit-only like a modeled call.
 	CascadeLaneJudgeUnmodeledAlert = "judge_unmodeled_alert"
-	// CascadeLaneJudgeToolResultContext: the tool-result judges get the tool,
-	// what its call did and the user's request next to the output.
+	// CascadeLaneJudgeToolResultContext: the tool-result judges (injection,
+	// and PII for a listed tool) get the tool, its call, what the call did
+	// and the user's request next to the output, in nonce sections.
 	CascadeLaneJudgeToolResultContext = "judge_tool_result_context"
 )
 
@@ -79,7 +80,7 @@ func init() {
 	})
 	RegisterCascadeLane(CascadeLane{
 		Name: CascadeLaneJudgeToolResultContext, Default: CascadeLaneOn,
-		Description: "LLM judge (when on for the connector): the tool-result judges see the tool, what its call did (arguments redacted) and the user's request next to the output; off judges the output alone",
+		Description: "LLM judge (when on for the connector): the tool-result judges (injection, and PII for a listed tool) see the tool, its call (arguments redacted), what the call did and the user's request next to the output; off judges the output alone",
 	})
 }
 

@@ -111,7 +111,7 @@ Risk is `1 - P(allow)` from the model's answer.
 | The model says | Cascade 2 (no judge) | Cascade 3 (with the judge) |
 | --- | --- | --- |
 | allow, risk at or below `allow_threshold` (0.30) | Allow. | Allow; the judge does not run. |
-| block, risk at or above `block_threshold` (0.75), and the risk score answer at or above `block_risk_score` (1.5 of 2), on a call the rules did not flag | A CRITICAL `JUDGE-DECISION-MODEL` finding: blocked at every built-in `block_at`. | A HIGH `JUDGE-DECISION-MODEL` finding, and the judge always runs and can raise it: a decision-model block is never final. |
+| block, risk at or above `block_threshold` (0.75), and the risk score answer at or above `block_risk_score` (1.5 of 2), on a call the rules did not flag | A CRITICAL `JUDGE-DECISION-MODEL` finding: blocked at every built-in `block_at`. | The same CRITICAL block. The judge still runs and can add findings, but never lowers it: turning the judge on never weakens System One. |
 | anything else (confirm, or a weaker allow or block) | A HIGH `JUDGE-DECISION-MODEL` finding that asks for confirmation (below). | The judge decides. |
 
 A cascade-2 confirmation:
@@ -133,7 +133,7 @@ Measured on real owner sessions and spliced attacks (S7 S1FLOW, Gemini Decision 
 
 ### When the judge is late, failing or busy (cascade 3)
 
-The decision model answers before the judge takes one of its slots. A confident block is a HIGH `JUDGE-DECISION-MODEL` finding that stands whenever the judge gives no verdict: it fails, misses the hook answer window, has no free slot, or the hook's judge time is spent. A judge that answers late is ignored; it can never remove the finding. Any other answer (an escalation) keeps the rule verdict when the judge cannot run. The decision model's finding does not replace a fail-closed refusal: under `hook_fail_mode: closed` a call the rules escalated to the judge as CRITICAL is still refused when the judge gives no verdict.
+The decision model answers before the judge takes one of its slots. A confident block is the CRITICAL `JUDGE-DECISION-MODEL` block of cascade 2, and it stands whenever the judge gives no verdict: it fails, misses the hook answer window, has no free slot, or the hook's judge time is spent. A judge that answers late is ignored; it can never remove the finding. Any other answer (an escalation) keeps the rule verdict when the judge cannot run. The decision model's finding does not replace a fail-closed refusal: under `hook_fail_mode: closed` a call the rules escalated to the judge as CRITICAL is still refused when the judge gives no verdict.
 
 ## When it is down
 

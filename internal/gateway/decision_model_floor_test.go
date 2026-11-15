@@ -47,8 +47,9 @@ func TestDecisionFloorSurvivesALateJudge(t *testing.T) {
 	if elapsed := time.Since(t0); elapsed > 2*time.Second {
 		t.Fatalf("the hook held the answer %s past its window", elapsed)
 	}
-	if v == nil || v.Severity != "HIGH" || !hasFinding(v.Findings, decisionModelFindingID) {
-		t.Fatalf("late judge: verdict = %+v, want the HIGH decision-model floor", v)
+	// The floor is System One's own block (rel-1-0-10:GAP-0867).
+	if v == nil || v.Severity != "CRITICAL" || v.Action != guardrailActionBlock || !hasFinding(v.Findings, decisionModelFindingID) {
+		t.Fatalf("late judge: verdict = %+v, want the CRITICAL decision-model block", v)
 	}
 	select {
 	case <-p.finished:

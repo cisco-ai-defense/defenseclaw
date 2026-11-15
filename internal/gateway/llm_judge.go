@@ -557,7 +557,7 @@ Respond ONLY with a JSON object in this exact format:
 // booking record the user asked for) into "is there personal data beyond what
 // the request asked for?" (rel-1-0-10:GAP-0171). Without a known request it
 // asks the original question.
-const toolResultPIIScope = `This sample is a tool's output, fetched for the user's request (the USER_REQUEST line of the user message, before the sample; the CONTEXT FROM DEFENSECLAW block below says what the call did). Personal data the request asked for (the user's own inbox, contacts, calendar, account, or the record they looked up) is the expected content of the output: label it false. Label a category true only when the output carries that kind of data beyond the request: other people's records in bulk that the request did not ask for, credentials, secrets or government identifiers, or data about a different subject than the request. When the user's request is unknown, judge the output as you would without this note.`
+const toolResultPIIScope = `This sample is a tool's output, fetched for the user's request (the SESSION_USER_INTENT section of the user message, before the sample; the CURRENT_TOOL_CALL and CALL_EFFECTS sections say what the call did). Personal data the request asked for (the user's own inbox, contacts, calendar, account, or the record they looked up) is the expected content of the output: label it false. Label a category true only when the output carries that kind of data beyond the request: other people's records in bulk that the request did not ask for, credentials, secrets or government identifiers, or data about a different subject than the request. When the user's request is unknown, judge the output as you would without this note.`
 
 // toolResultInjectionSystemPrompt is the injection judge's prompt for a tool's
 // output (rel-1-0-10 GAP-0171). The user prompt's judge treats imperative text
@@ -734,13 +734,17 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string, toolRe
 		prompt = jc.SystemPrompt
 	}
 	emitDirection := gatewaylog.DirectionPrompt
+	user := wrapJudgeSample(content)
 	if toolResult {
-		prompt, emitDirection = toolResultInjectionSystemPrompt, gatewaylog.DirectionToolResult
+		// The tool, its call and the user's request, as the PII judge gets
+		// them (rel-1-0-10:GAP-0847).
+		prompt, emitDirection = toolResultJudgeSystem(ctx, toolResultInjectionSystemPrompt, ""), gatewaylog.DirectionToolResult
+		user = toolResultJudgeUser(ctx, user)
 	}
 
 	messages := []ChatMessage{
 		{Role: "system", Content: prompt},
-		{Role: "user", Content: wrapJudgeSample(content)},
+		{Role: "user", Content: user},
 	}
 	llmCtx, judgeTrace := j.startJudgeTrace(
 		ctx, kind, string(emitDirection), maxTok, messages, time.Now().UTC(),
@@ -2282,7 +2286,7 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	current := boundToolJudgeArguments(args)
 	effects := toolJudgeCallEffects(ctx, toolName, args)
 	sessionID := judgeSessionKey(ctx)
-	nonce := newToolJudgeNonce()
+	nonce := toolJudgeNonceFor(sessionID + "\x00" + toolName + "\x00" + args)
 	if j == nil || sessionID == "" {
 		var only strings.Builder
 		writeToolJudgeSection(&only, nonce, "CURRENT_TOOL_CALL", fmt.Sprintf("tool=%q", sanitizeToolName(toolName)), current)

@@ -2109,6 +2109,13 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		// System One's abstention (the flow guard, cascade 2) is no answer.
 		if (out == nil || out.decisionAbstain) && !observeAnswer && cfg.ResolveCascade(connector).JudgeNoVerdict == config.CascadeNoVerdictUnknown {
 			out = cascadeNoVerdict(cfg, connector, a.boundedTier(ctx, connector))
+		} else if out != nil && out.decisionFloorOnly && !observeAnswer && cfg.ResolveCascade(connector).JudgeNoVerdict == config.CascadeNoVerdictUnknown {
+			// The judge gave no verdict and System One's own answer stands
+			// (GAP-0867, GAP-0868): the unknown tier still applies when it
+			// is stronger, never weaker.
+			if nv := cascadeNoVerdict(cfg, connector, a.boundedTier(ctx, connector)); nv != nil && normalizedGuardrailAction(nv.Action) != normalizedGuardrailAction(out.Action) && strongerGuardrailAction(nv.Action, out.Action) == nv.Action {
+				out = nv
+			}
 		}
 	}()
 
@@ -2502,7 +2509,16 @@ func reviewOnlyUnmodeledAlerts(cfg *config.Config, connector string) bool {
 // for these lanes: they add or skip a judge question and have no verdict of
 // their own to record. A nil configuration takes the lane's default.
 func judgeLaneOn(cfg *config.Config, connector, lane string) bool {
-	return cfg.ResolveCascade(connector).LaneMode(lane) == config.CascadeLaneOn
+	return judgeLaneMode(cfg, connector, lane) == config.CascadeLaneOn
+}
+
+// judgeLaneMode is a judge stage lane's value for the connector in cfg. Every
+// judge decision reads it from the configuration of its own request (the
+// pinned generation, else the live one: decisionConfig), never from a copy
+// taken at start, so a hot reload turns the stage on or off from the next
+// request on (rel-1-0-10:GAP-0845).
+func judgeLaneMode(cfg *config.Config, connector, lane string) string {
+	return cfg.ResolveCascade(connector).LaneMode(lane)
 }
 
 // hookJudgeLaneVerdict is the hook-lane verdict of judge result v: nil when
