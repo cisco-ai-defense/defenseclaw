@@ -1456,7 +1456,7 @@ It points every agent hook back at `bin\defenseclaw-hook.exe` and ends `ok` only
 enrolled account's agent config names a launch folder; otherwise `hook_image_retire_pending` lists each file in
 `still_named`, each machine file with the `cause` that kept it from being rewritten; do not run the older Setup then
 ([Roll back](/docs/enterprise/lifecycle#roll-back)). The account files are every connector's hook configs and the
-files its managed install writes beside them (the Copilot VS Code Local hook file and plugin hooks, the Hermes
+files its [managed install](/docs/enterprise/managed-commands) writes beside them (the Copilot VS Code Local hook file and plugin hooks, the Hermes
 allowlist, the Kiro `defenseclaw` agent). An account file `retire` could not read or verify (a link on its path below
 the account home, access denied, too large, no answer within 5 seconds, an agent home moved out of the profile, or the
 Hermes home of a signed-out account, whose `HERMES_HOME` cannot be read while it is signed out) also holds it back: it
