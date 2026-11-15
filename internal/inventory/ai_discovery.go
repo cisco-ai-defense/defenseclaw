@@ -629,6 +629,7 @@ type ContinuousDiscoveryService struct {
 	skillFactsMu   sync.Mutex
 	skillFactsSeen map[string]AISkillFacts
 	skillBytesRead int64
+	skillManifests map[string]string // SKILL.md hash -> skill folder
 	// modelAPIProbeCursor rotates origins and catalogs across bounded passes so
 	// a stalled or over-cap loopback provider cannot starve later providers.
 	modelAPIProbeCursor  atomic.Uint64

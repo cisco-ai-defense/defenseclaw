@@ -122,6 +122,13 @@ type endpointInventoryComponent struct {
 	skillPlugin          string
 	skillPluginVersion   string
 	skillPluginEnabled   *bool
+	// skillManifestHash names the skill's SKILL.md; skillManifest carries
+	// part skillManifestPart of skillManifestParts of its text
+	// (managed_skill_manifest.go).
+	skillManifestHash  string
+	skillManifest      string
+	skillManifestPart  int
+	skillManifestParts int
 }
 
 // endpointInventoryCarrier is an atomic, typed snapshot split into parallel
@@ -266,6 +273,9 @@ func emitEndpointInventory(
 			discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill"),
 			skillScanComplete(discoveryReport),
 		)
+		if cfg != nil && cfg.AIDiscovery.IncludeSkillManifests {
+			publish.cycle.attachSkillManifests(skillEntries)
+		}
 		if err := emitEndpointInventorySnapshot(
 			ctx, emitter, endpointSkillInventorySource, skillEntries, false,
 			config.ObservabilityV8ManagedSkillInventoryAction, publish,
@@ -915,7 +925,7 @@ func emitInventorySnapshot(
 	switch {
 	case gated:
 		digest = managedInventoryComponentsDigest(source, components)
-		if !publish.cycle.shouldPublish(source, digest) && !hasRemovedSkill(components) {
+		if !publish.cycle.shouldPublish(source, digest) && !hasRemovedSkill(components) && !hasSkillManifest(components) {
 			// Unchanged since the last successful publish and no bundle due:
 			// emit neither the summary nor any component record.
 			return nil
@@ -1227,6 +1237,14 @@ func emitEndpointInventoryComponent(
 		if len(component.skillAgents) > 0 {
 			input.DefenseClawInventorySkillAgents = observability.Present(component.skillAgents)
 		}
+		if component.skillManifestHash != "" {
+			input.DefenseClawInventorySkillManifestHash = observability.Present(component.skillManifestHash)
+		}
+		if component.skillManifest != "" {
+			input.DefenseClawInventorySkillManifest = observability.Present(component.skillManifest)
+			input.DefenseClawInventorySkillManifestPart = observability.Present(int64(component.skillManifestPart))
+			input.DefenseClawInventorySkillManifestParts = observability.Present(int64(component.skillManifestParts))
+		}
 		inventoryIdentityFor(component.userID, component.userName).applyTo(&input)
 		return builder.BuildLogAIComponentObserved(input)
 	})
@@ -1533,6 +1551,7 @@ func discoveredEntriesFromReport(
 				row := &components[len(components)-1]
 				row.skillContentHash, row.skillContentStatus = facts.ContentHash, facts.ContentStatus
 				row.skillScope, row.skillLocation = facts.Scope, facts.Location
+				row.skillManifestHash = facts.ManifestHash
 				applySkillPublisher(row, signal.Vendor, *facts)
 			}
 		}

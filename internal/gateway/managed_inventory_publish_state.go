@@ -91,6 +91,9 @@ type managedInventoryPublishFile struct {
 	Collections  map[string]managedInventoryPublishRecord `json:"collections"`
 	// Skills is the last published state of each skill (managed_skill_state.go).
 	Skills map[string]managedSkillState `json:"skills,omitempty"`
+	// SkillManifests is how much of each SKILL.md, by hash, AI Defense has
+	// (managed_skill_manifest.go).
+	SkillManifests map[string]managedSkillManifest `json:"skill_manifests,omitempty"`
 }
 
 // managedInventoryPublishState is the durable, process-wide publish memory. It
@@ -109,6 +112,8 @@ type managedInventoryPublishState struct {
 	cycleScanID string
 	cycleKnown  bool
 	cycleForced bool
+
+	readSkillManifest func(hash string) ([]byte, bool)
 }
 
 // newManagedInventoryPublishState returns nil outside managed_enterprise. A nil
@@ -234,6 +239,7 @@ type managedInventoryPublishCycle struct {
 	degraded    bool
 	published   map[string]managedInventoryPublishRecord
 	skills      map[string]managedSkillState
+	manifests   map[string]managedSkillManifest
 }
 
 // forcedBundle reports whether this cycle ignores digests and publishes
@@ -331,6 +337,9 @@ func (cycle *managedInventoryPublishCycle) commit() {
 	}
 	if _, ok := cycle.published[endpointSkillInventorySource]; ok && cycle.skills != nil {
 		state.file.Skills = cycle.skills
+		if cycle.manifests != nil {
+			state.file.SkillManifests = cycle.manifests
+		}
 	}
 	if stampBundle {
 		state.file.FullBundleAt = cycle.now.UTC()
