@@ -91,7 +91,8 @@ type Options struct {
 	Retention time.Duration
 	// PurgeAfter purges the state of an actor suspended, or silent, that
 	// long (default 7 days), unless its window still holds a secret read
-	// (GAP-0292). A deleted actor is purged at once.
+	// (GAP-0292) and Deleted does not confirm it gone (GAP-0311). A deleted
+	// actor is purged at once.
 	PurgeAfter time.Duration
 	// MaxActors bounds the actors with state per atespace (default 4,096):
 	// a new actor past it evicts a retired actor first, else the one used
@@ -106,7 +107,10 @@ type Options struct {
 	// Deleted reports whether the actor's registration is marked deleted
 	// (true also when it has none). A deleted event purges only then: the
 	// controller marks the registration first, and a peer that cannot write
-	// registrations cannot wipe a live actor's chains (GAP-0142).
+	// registrations cannot wipe a live actor's chains (GAP-0142). Sweep asks
+	// it too, for an actor past PurgeAfter whose window holds a secret read:
+	// a delete the controller never sent (GAP-0311). Nil, or an error,
+	// keeps the actor.
 	Deleted func(ctx context.Context, atespace, uid string) (bool, error)
 	// Current reports whether uid is the live incarnation of the actor
 	// atespace/name: its name's newest registration, not deleted. An egress
@@ -1531,10 +1535,18 @@ type SweepResult struct {
 // Sweep retires actors suspended past the retention (the atespace cap
 // evicts them first) and purges actors suspended, or silent, past
 // PurgeAfter whose window holds no secret read (GAP-0292).
-func (s *Service) Sweep(_ context.Context) (SweepResult, error) {
+//
+// A window that holds a secret read is purged past PurgeAfter only for an
+// actor Deleted confirms gone: a delete the controller never sent (it keeps
+// its actor list in memory, so an actor deleted while it was down or
+// restarting is never reported). Such an actor makes no requests, so its
+// clock is frozen and its window would hold forever (GAP-0311). An actor
+// that exists, or one the lookup cannot answer for, is kept.
+func (s *Service) Sweep(ctx context.Context) (SweepResult, error) {
 	now := s.opts.Now()
 	var res SweepResult
 	var retired []*actorEntry
+	var held []Actor
 	s.mu.Lock()
 	for _, e := range s.actors {
 		if e.refs != 0 {
@@ -1544,16 +1556,22 @@ func (s *Service) Sweep(_ context.Context) (SweepResult, error) {
 		if e.state.SinceUnixNano != 0 {
 			since = time.Unix(0, e.state.SinceUnixNano)
 		}
+		old := now.Sub(since) > s.opts.PurgeAfter
 		switch {
-		case now.Sub(since) > s.opts.PurgeAfter && !s.holdsEgressLocked(e):
+		case old && !s.holdsEgressLocked(e):
 			s.purgeLocked(e)
 			res.Purged++
-		case e.state.SinceUnixNano != 0 && !e.state.Retired && now.Sub(since) > s.opts.Retention:
+			continue
+		case old && s.opts.Deleted != nil:
+			held = append(held, e.actor)
+		}
+		if e.state.SinceUnixNano != 0 && !e.state.Retired && now.Sub(since) > s.opts.Retention {
 			e.state.Retired = true
 			retired = append(retired, e)
 		}
 	}
 	s.mu.Unlock()
+	res.Purged += s.purgeDeleted(ctx, held)
 	s.runPurges()
 	for _, e := range retired {
 		if err := s.writeState(e); err != nil {
@@ -1562,6 +1580,32 @@ func (s *Service) Sweep(_ context.Context) (SweepResult, error) {
 		res.Retired++
 	}
 	return res, nil
+}
+
+// purgeDeleted purges the actors in held whose registration Deleted
+// confirms gone, as their delete event would have (GAP-0311). The lookups
+// run outside mu; an actor in use again since, or one the lookup fails
+// for, is kept.
+func (s *Service) purgeDeleted(ctx context.Context, held []Actor) int {
+	n := 0
+	for _, a := range held {
+		gone, err := s.opts.Deleted(ctx, a.Atespace, a.UID)
+		if err != nil {
+			s.warnf("sweep: %s/%s kept, its registration could not be read: %v", a.Atespace, a.UID, err)
+			continue
+		}
+		if !gone {
+			continue
+		}
+		s.mu.Lock()
+		if e := s.actors[a.key()]; e != nil && e.refs == 0 {
+			s.goneLocked(a.key())
+			s.purgeLocked(e)
+			n++
+		}
+		s.mu.Unlock()
+	}
+	return n
 }
 
 // Run sweeps every 10 minutes until ctx ends.
