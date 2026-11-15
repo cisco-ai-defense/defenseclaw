@@ -90,6 +90,7 @@ NEWER_CONFIG_KEYS = (
     ("guardrail.cascade", (1, 0, 10)),
     ("guardrail.secret_flow", (1, 0, 10)),
     ("guardrail.effects_rules_tier", (1, 0, 10)),
+    ("guardrail.judge.intent_scope", (1, 0, 10)),
     ("decision_model.block_risk_score", (1, 0, 10)),
     ("decision_model.escalate_rule_flagged", (1, 0, 10)),
     ("decision_model.flow_guard", (1, 0, 10)),
