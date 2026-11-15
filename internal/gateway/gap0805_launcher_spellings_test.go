@@ -16,8 +16,7 @@ import (
 // tool spells it, as an argv array or as one string: at an install path with a
 // blank (rel-1-0-10:GAP-0804), behind a wrapper the over-limit screen reads
 // (start "", wsl, wsl -e, xargs, env -i, sudo -u, nohup, timeout;
-// rel-1-0-10:GAP-0805; an operand spelled as a launcher name and a start
-// title, rel-1-0-10:GAP-0857), and past the 64 KiB command bound
+// rel-1-0-10:GAP-0805), and past the 64 KiB command bound
 // (rel-1-0-10:GAP-0807). The attack unit is the authorized_keys redirect
 // fixture (overLimitWindowsRedirect). In every tier the redirect blocks, an
 // ordinary script is allowed, and argv and string agree.
@@ -38,8 +37,12 @@ var gap0805Wrappers = []gap0805Wrapper{
 	{"nohup", []string{"nohup"}, "nohup "},
 	{"timeout 5", []string{"timeout", "5"}, "timeout 5 "},
 	{"xargs", []string{"xargs"}, "echo x | xargs "},
-	// A wrapper operand spelled as a launcher name, and a start title, are
-	// read both ways: the launcher after them is read (rel-1-0-10:GAP-0857).
+}
+
+// gap0857Wrappers are wrappers whose operand is spelled as a launcher name,
+// and start titles: the word is read both as the operand and as the
+// launcher, so the launcher after it is read (rel-1-0-10:GAP-0857).
+var gap0857Wrappers = []gap0805Wrapper{
 	{"sudo -u cmd", []string{"sudo", "-u", "cmd"}, "sudo -u cmd "},
 	{"env -u pwsh", []string{"env", "-u", "pwsh"}, "env -u pwsh "},
 	{"timeout -s sh 5", []string{"timeout", "-s", "sh", "5"}, "timeout -s sh 5 "},
@@ -140,6 +143,57 @@ func gap0805LauncherSpellings(t *testing.T, tierIndex int) {
 					if argv != text {
 						t.Errorf("%s/%s/%s/%s: argv %s differs from the same command as a string, %s", tier.name, w.name, l.name, r.id, argv, text)
 					}
+				}
+			}
+		}
+	}
+}
+
+// A wrapper operand spelled as a launcher name and a start title
+// (gap0857Wrappers) do not hide the launcher after them: the authorized_keys
+// redirect fixture blocks behind each, an ordinary script is allowed, and
+// argv and string agree, for a PowerShell and a CMD launcher in every tier
+// (rel-1-0-10:GAP-0857).
+func TestGAP0857LauncherOperandsDefault(t *testing.T)    { gap0857LauncherOperands(t, 0) }
+func TestGAP0857LauncherOperandsPermissive(t *testing.T) { gap0857LauncherOperands(t, 1) }
+func TestGAP0857LauncherOperandsStrict(t *testing.T)     { gap0857LauncherOperands(t, 2) }
+func TestGAP0857LauncherOperandsManaged(t *testing.T)    { gap0857LauncherOperands(t, 3) }
+func TestGAP0857LauncherOperandsManagedStrict(t *testing.T) {
+	gap0857LauncherOperands(t, 4)
+}
+
+func gap0857LauncherOperands(t *testing.T, tierIndex int) {
+	gap0589WindowsHost(t)
+	cwd := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tier := boundedTestTiers[tierIndex]
+	api := gap0589TierAPI(t, "codex", tier.posture, tier.managed, tier.tier)
+	decide := func(command interface{}) string {
+		return api.evaluateCodexHook(t.Context(), codexHookRequest{
+			HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+			ToolInput: map[string]interface{}{"command": command},
+		}).Action
+	}
+	launchers := []gap0711Launcher{gap0805Launchers[1], gap0805Launchers[3]}
+	for _, w := range gap0857Wrappers {
+		for _, l := range launchers {
+			for _, r := range []struct {
+				id, body string
+				want     bounded.Action
+			}{
+				{"redirect", overLimitWindowsRedirect, bounded.Block},
+				{"benign-git", `git log --oneline -5`, bounded.Allow},
+			} {
+				argv, text := decide(gap0805Argv(w, l, r.body)), decide(gap0805Text(w, l, r.body))
+				for form, got := range map[string]string{"argv": argv, "string": text} {
+					if boundedParse(got) != r.want {
+						t.Errorf("%s/%s/%s/%s %s: action %s, want %s", tier.name, w.name, l.name, r.id, form, got, r.want)
+					}
+				}
+				if argv != text {
+					t.Errorf("%s/%s/%s/%s: argv %s differs from the same command as a string, %s", tier.name, w.name, l.name, r.id, argv, text)
 				}
 			}
 		}
