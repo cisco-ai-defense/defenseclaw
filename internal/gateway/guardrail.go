@@ -741,8 +741,17 @@ func promptRecheckTexts(content, raw string, more []string) []string {
 // does not see (substrate-1:GAP-0258); the line-feed join of shown stays the
 // display text and is inspected as before. It returns the reading as it is
 // and with the OpenClaw untrusted envelope stripped, as shown is inspected.
-func promptReadTexts(read, shown string) []string {
-	if strings.TrimSpace(read) == "" || read == shown {
+func promptReadTexts(messages []ChatMessage, read, shown string) []string {
+	split := false
+	for _, message := range messages {
+		if message.ContentJoined != "" {
+			split = true
+			break
+		}
+	}
+	// Only a turn some client split over parts has another reading; any other
+	// request is inspected once (one managed AID call per request).
+	if !split || strings.TrimSpace(read) == "" || read == shown {
 		return nil
 	}
 	return []string{promptInspectionText(read), read}

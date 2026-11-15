@@ -1439,7 +1439,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// trigger a block; we keep the stricter verdict, as one evaluation
 		// (GAP-2288).
 		verdict := inspectPromptWithRawRecheck(r.Context(), p.inspector, inspectionText, inspectRaw, partial.Messages, label, mode,
-			promptReadTexts(promptTurnTextRead(partial.Messages), turnText)...)
+			promptReadTexts(partial.Messages, promptTurnTextRead(partial.Messages), turnText)...)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		if deferManagedPrompt {
 			// AID directive from this prompt's inspection is now known;
@@ -3331,7 +3331,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		// trigger a block; we keep the stricter verdict, as one evaluation
 		// (GAP-2288).
 		verdict := inspectPromptWithRawRecheck(agentCtx, p.inspector, inspectionText, inspectText, req.Messages, req.Model, mode,
-			promptReadTexts(promptInspectTextRead(req.Messages), inspectText)...)
+			promptReadTexts(req.Messages, promptInspectTextRead(req.Messages), inspectText)...)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		promptEmitContext := r.Context()
 		if deferManagedPrompt {
