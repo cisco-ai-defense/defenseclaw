@@ -267,6 +267,19 @@ func nonShellFinding(rule *PatternRule, note, tool string, hard bool) RuleFindin
 	return f
 }
 
+// nonShellFindingStronger reports whether candidate is a stronger finding of
+// its rule than existing: it may enforce where existing only alerts, or it
+// carries a higher severity.
+func nonShellFindingStronger(candidate, existing RuleFinding) bool {
+	if candidate.enforcement == findingEnforcementAllowed && existing.enforcement != findingEnforcementAllowed {
+		return true
+	}
+	if existing.enforcement == findingEnforcementAllowed && candidate.enforcement != findingEnforcementAllowed {
+		return false
+	}
+	return guardrailSeverityRank(candidate.Severity) > guardrailSeverityRank(existing.Severity)
+}
+
 // nonShellPathTwin judges the file effect of an MCP call as the native file
 // tool of the same effect would be judged, so every protected-target rule of
 // the pack applies to the path the MCP argument names.
@@ -339,14 +352,24 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	hard := request.StrictPolicy || request.ManagedInstall
 	out := append([]RuleFinding(nil), findings...)
 	add := func(ruleID, note string) {
-		if slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }) {
-			return
-		}
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
 		if !ok {
 			return
 		}
-		out = append(out, nonShellFinding(rule, note, request.Input.Tool, hard))
+		finding := nonShellFinding(rule, note, request.Input.Tool, hard)
+		// A finding of the same rule the call already carries is kept unless
+		// this one is stronger: the regex fallback of a credential-file rule
+		// judges another account's home at a lower severity and alert-only, and
+		// it used to shut out the table finding the same file of the active
+		// home gets, so a copy of another account's .git-credentials or .netrc
+		// was weaker than a copy of one's own (rel-1-0-10:GAP-0834).
+		if index := slices.IndexFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }); index >= 0 {
+			if nonShellFindingStronger(finding, out[index]) {
+				out[index] = finding
+			}
+			return
+		}
+		out = append(out, finding)
 	}
 	if isShell {
 		for _, id := range toolshape.TextRules(command) {
