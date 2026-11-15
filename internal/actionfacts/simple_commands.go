@@ -568,7 +568,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					text = resolved
 					changed, resolvedVariable = true, true
 				}
-				if resolved, ok := simpleResolvedDirectoryStackTildes(text, &state); ok {
+				if resolved, ok := simpleResolvedDirectoryStackTildes(text, &state, home); ok {
 					text = resolved
 					changed = true
 				}
@@ -1931,8 +1931,11 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 // pushd /tmp the word ~1 is ~/.ssh, and grep -r . ~1 read the keys while
 // the reading saw a literal ~1 (GAP-2480). A tilde whose directory is not
 // known, or whose index is outside the list (bash keeps it literal), is
-// left as written.
-func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState) (string, bool) {
+// left as written. The tilde-prefix of another account (~bob, ~root) is
+// written as that account's home when the home of the active account tells
+// where homes sit (simpleOtherAccountHome); one it cannot place stays as
+// written, an operand the call does not resolve (rel-1-0-10:GAP-0837).
+func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState, activeHome string) (string, bool) {
 	if !strings.Contains(source, "~") {
 		return "", false
 	}
@@ -1948,6 +1951,9 @@ func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState) 
 		case "~-":
 			dir, known := state.vars["OLDPWD"]
 			return dir, known && dir != ""
+		}
+		if other, ok := simpleOtherAccountHome(prefix[1:], activeHome); ok {
+			return other, true
 		}
 		digits := strings.TrimLeft(prefix[1:], "+-")
 		if digits == "" || len(digits) > 3 || strings.Trim(digits, "0123456789") != "" ||
@@ -2013,6 +2019,38 @@ func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState) 
 		source = source[:r.start] + r.text + source[r.end:]
 	}
 	return source, true
+}
+
+// simpleOtherAccountHome is the home that the tilde-prefix ~name names, for an
+// account other than the active one, found by the position of the active home:
+// homes sit side by side below /home, /Users or <drive>:/Users, so another
+// account's home is the folder of that name beside the active home. ~root is
+// /root where homes sit below /home (and the other accounts of a root agent are
+// the folders of /home). The name of the active account is
+// left to ActiveUserTildeTwin, which also reads the logins of the OS identity.
+// A home that does not sit in such a folder tells nothing, and the prefix stays
+// unresolved.
+func simpleOtherAccountHome(name, activeHome string) (string, bool) {
+	home := strings.TrimRight(activeHome, "/")
+	if home == "" || !activeUserTildeName.MatchString(name) || strings.EqualFold(name, path.Base(home)) {
+		return "", false
+	}
+	parent := path.Dir(home)
+	if strings.EqualFold(home, "/root") {
+		// root's home sits outside the folder that holds the others.
+		parent = "/home"
+	}
+	switch lower := strings.ToLower(parent); {
+	case lower == "/home":
+		if name == "root" {
+			return "/root", true
+		}
+	case lower == "/users":
+	case len(parent) >= 3 && parent[1] == ':' && lower[2:] == "/users":
+	default:
+		return "", false
+	}
+	return parent + "/" + name, true
 }
 
 // simpleNestedScript returns a static shell -c or eval body. eval shares the
