@@ -1,0 +1,254 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package hookcli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/nativeinstallstate"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
+)
+
+const gatewayStartDiagnosticMaxBytes = 4 << 10
+
+var (
+	NativePreparedHookRuntimeRevalidator = hookruntime.RevalidatePreparedGenerationForExecutable
+	NativeGatewayStartLock               = hookruntime.WithGatewayStartLock
+	NativeGatewayStartRunner             = RunTrustedNativeGatewayStart
+	nativeGatewayInstallStateReader      = nativeinstallstate.LoadForExecutable
+	PerUserGatewayStartRunner            = runPerUserGatewayStart
+)
+
+func TrustedNativeGatewayRecovery() func(context.Context, error) error {
+	executable := nativeHookExecutable()
+	state, recognized, err, prepared := preparedNativeHookRuntime(executable)
+	if !prepared {
+		state, recognized, err = NativeHookRuntimeReader(executable)
+	}
+	if err != nil || !recognized || !state.ColdStartCapable() {
+		return nil
+	}
+	return func(ctx context.Context, _ error) error {
+		return recoverTrustedNativeGateway(ctx, executable)
+	}
+}
+
+func recoverTrustedNativeGateway(ctx context.Context, executable string) error {
+	return NativeGatewayStartLock(ctx, func() error {
+		// Setup publishes and disables state under this same lock. Re-read only
+		// after acquisition so an invocation queued behind uninstall cannot start
+		// a removed gateway from its earlier in-memory snapshot.
+		state, recognized, err := RefreshedNativeHookRuntimeForRecovery(executable)
+		if err != nil {
+			return fmt.Errorf("revalidate protected hook runtime: %w", err)
+		}
+		if !recognized || !state.ColdStartCapable() {
+			return errors.New("protected hook runtime no longer authorizes gateway cold start")
+		}
+		return NativeGatewayStartRunner(ctx, state)
+	})
+}
+
+func RefreshedNativeHookRuntimeForRecovery(executable string) (hookruntime.State, bool, error) {
+	preparedState, preparedRecognized, preparedErr, prepared := preparedNativeHookRuntime(executable)
+	if prepared {
+		if preparedErr != nil || !preparedRecognized {
+			return preparedState, preparedRecognized, preparedErr
+		}
+		if preparedState.DelegationCapable() && preparedState.DelegatesTo(executable) {
+			current, err := NativePreparedHookRuntimeRevalidator(executable, preparedState)
+			return current, true, err
+		}
+	}
+	// Legacy full launchers and callers that did not enter through main retain
+	// the complete executable admission path. Only an already-admitted
+	// trampoline child can use the exact-generation refresh above.
+	return NativeHookRuntimeReader(executable)
+}
+
+func RunTrustedNativeGatewayStart(ctx context.Context, state hookruntime.State) error {
+	if !state.ColdStartCapable() {
+		return errors.New("protected hook runtime does not authorize gateway cold start")
+	}
+	info, err := os.Stat(state.DataRoot)
+	if err != nil {
+		return fmt.Errorf("protected DefenseClaw data root is unavailable: %w", err)
+	}
+	if !info.IsDir() {
+		return errors.New("protected DefenseClaw data root is not a directory")
+	}
+	if !windowsHookPathHasNoReparsePoints(state.DataRoot) {
+		return errors.New("protected DefenseClaw data root traverses an unsafe reparse point")
+	}
+
+	lockedGateway, err := hookruntime.LockVerifiedGateway(state)
+	if err != nil {
+		return err
+	}
+	defer lockedGateway.Close()
+
+	cmd, err := NewTrustedNativeGatewayStartCommand(ctx, state)
+	if err != nil {
+		return fmt.Errorf("prepare installer-owned gateway start: %w", err)
+	}
+	output, err := cmd.CombinedOutput()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("gateway cold start exceeded the hook deadline: %w", ctxErr)
+	}
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if len(detail) > gatewayStartDiagnosticMaxBytes {
+			detail = detail[len(detail)-gatewayStartDiagnosticMaxBytes:]
+		}
+		if detail == "" {
+			return fmt.Errorf("installer-owned gateway start failed: %w", err)
+		}
+		return fmt.Errorf("installer-owned gateway start failed: %w: %s", err, detail)
+	}
+	return nil
+}
+
+func NewTrustedNativeGatewayStartCommand(ctx context.Context, state hookruntime.State) (*exec.Cmd, error) {
+	cmd := processutil.CommandContext(ctx, state.GatewayPath, "start")
+	cmd.Dir = filepath.Dir(filepath.Clean(state.GatewayPath))
+	environment, err := trustedNativeGatewayStartEnvironment(os.Environ(), state)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = environment
+	return cmd, nil
+}
+
+func trustedNativeGatewayStartEnvironment(environ []string, runtimeState hookruntime.State) ([]string, error) {
+	clean := make([]string, 0, len(environ)+3)
+	for _, entry := range environ {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		upper := strings.ToUpper(strings.TrimSpace(name))
+		if strings.HasPrefix(upper, "DEFENSECLAW_") || strings.HasPrefix(upper, "OPENCLAW_") ||
+			upper == "PYTHONHOME" || upper == "PYTHONPATH" || upper == "PYTHONIOENCODING" || upper == "PYTHONUTF8" {
+			continue
+		}
+		clean = append(clean, entry)
+	}
+	installState, recognized, err := nativeGatewayInstallStateReader(runtimeState.GatewayPath)
+	if err != nil {
+		return nil, fmt.Errorf("load native install state for gateway recovery: %w", err)
+	}
+	if recognized {
+		if !sameHookRecoveryPath(installState.DataRoot, runtimeState.DataRoot) {
+			return nil, errors.New("native install state data root does not match protected hook runtime")
+		}
+		clean = installState.Environment(clean)
+	} else {
+		clean = append(clean, "DEFENSECLAW_HOME="+filepath.Clean(runtimeState.DataRoot))
+	}
+	return append(
+		clean,
+		"PYTHONUTF8=1",
+		"PYTHONIOENCODING=utf-8",
+	), nil
+}
+
+func sameHookRecoveryPath(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	return strings.EqualFold(left, right)
+}
+
+// perUserGatewayRecovery is the cold start of a PowerShell (install.ps1)
+// per-user hook, which has no protected hook runtime: on a refused connect it
+// runs the defenseclaw-gateway.exe installed beside it with `start
+// --hook-cold-start`, and the hook retries once. Nothing else started a
+// per-user Windows gateway after a sign-out ended it, so an action-mode agent
+// was blocked and an observe-mode one ran unchecked (GAP-0377). The start
+// command refuses after `defenseclaw-gateway stop`, during an install and for
+// a minute after a failed start, and serializes concurrent starts.
+// DEFENSECLAW_GATEWAY_AUTOSTART=0 turns it off, as for the shell hooks.
+func perUserGatewayRecovery() func(context.Context, error) error {
+	switch strings.ToLower(strings.TrimSpace(envvars.Getenv("DEFENSECLAW_GATEWAY_AUTOSTART"))) {
+	case "0", "false", "no", "off":
+		return nil
+	}
+	executable, err := filepath.Abs(nativeHookExecutable())
+	if err != nil || !strings.EqualFold(filepath.Base(executable), NativeHookLauncherName) {
+		return nil
+	}
+	commandDir := filepath.Dir(executable)
+	state, ok := readNativeHookInstallState(filepath.Join(commandDir, PowerShellHookStateName))
+	if !ok || state.InstallKind != "powershell-windows" || state.InstallScope != "user" ||
+		!SameWindowsHookPath(state.InstallRoot, commandDir) || !SameWindowsHookPath(state.CommandDir, commandDir) ||
+		!filepath.IsAbs(state.DataRoot) || !windowsHookPathHasNoReparsePoints(state.DataRoot) {
+		return nil
+	}
+	gateway := filepath.Join(commandDir, NativeHookGatewayName)
+	if info, err := os.Lstat(gateway); err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	dataRoot := filepath.Clean(state.DataRoot)
+	return func(ctx context.Context, _ error) error {
+		// install.ps1 stops the gateway like an operator does and starts it
+		// again when it is done, holding .install.lock meanwhile. That is a
+		// restart: no start, and the hook keeps sending the call within the
+		// restart budget, then names the restart, not an operator stop
+		// (GAP-0196; the shell hooks do the same, GAP-0140).
+		if HookInstallInProgress(dataRoot) {
+			return nil
+		}
+		return PerUserGatewayStartRunner(ctx, gateway, dataRoot)
+	}
+}
+
+func runPerUserGatewayStart(ctx context.Context, gateway, dataRoot string) error {
+	cmd := processutil.CommandContext(ctx, gateway, "start", "--"+HookColdStartFlag)
+	cmd.Dir = filepath.Dir(gateway)
+	cmd.Env = perUserGatewayStartEnvironment(os.Environ(), dataRoot)
+	output, err := cmd.CombinedOutput()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("gateway cold start exceeded the hook deadline: %w", ctxErr)
+	}
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if len(detail) > gatewayStartDiagnosticMaxBytes {
+			detail = detail[len(detail)-gatewayStartDiagnosticMaxBytes:]
+		}
+		if detail == "" {
+			return fmt.Errorf("per-user gateway start failed: %w", err)
+		}
+		return fmt.Errorf("per-user gateway start failed: %w: %s", err, detail)
+	}
+	return nil
+}
+
+// perUserGatewayStartEnvironment is the agent's environment without the
+// DefenseClaw, OpenClaw and Python settings a project could set, with the
+// install's data root.
+func perUserGatewayStartEnvironment(environ []string, dataRoot string) []string {
+	clean := make([]string, 0, len(environ)+3)
+	for _, entry := range environ {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		upper := strings.ToUpper(strings.TrimSpace(name))
+		if strings.HasPrefix(upper, "DEFENSECLAW_") || strings.HasPrefix(upper, "OPENCLAW_") ||
+			strings.HasPrefix(upper, "PYTHON") {
+			continue
+		}
+		clean = append(clean, entry)
+	}
+	return append(clean, "DEFENSECLAW_HOME="+dataRoot, "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
+}

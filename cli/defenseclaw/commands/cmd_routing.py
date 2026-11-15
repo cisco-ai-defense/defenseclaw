@@ -33,7 +33,51 @@ DEFAULT_CLASSIFIER = "vllm_sr"
 PERIODS = ("day", "week", "month")
 SCOPES = ("user", "group", "connector")
 SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+# The gateway serves usage at GET /usage (docs: gateway-api, tokenomics); it is
+# not under /api/v1 (GAP-0569).
+USAGE_PATH = "/usage"
+# Provider names the gateway routes (mapProviderKey in internal/gateway/provider_bifrost.go,
+# matched case-insensitively there): the recognized LLM providers plus the aliases it accepts.
+ROUTING_PROVIDER_ALIASES = {
+    "amazon-bedrock": "bedrock",
+    "vertex": "vertex_ai",
+    "vertexai": "vertex_ai",
+    "fireworks": "fireworks_ai",
+    "fireworksai": "fireworks_ai",
+    "together": "together_ai",
+    "togetherai": "together_ai",
+    "lmstudio": "lm_studio",
+}
+ROUTING_PROVIDERS = frozenset(
+    {
+        "openai", "openai-compatible", "custom-openai", "anthropic", "bedrock", "azure", "gemini", "gemini-openai",
+        "vertex_ai", "openrouter", "groq", "mistral", "ollama", "vllm", "cohere", "perplexity", "cerebras",
+        "fireworks_ai", "xai", "deepseek", "together_ai", "lm_studio", "huggingface", "replicate",
+        *ROUTING_PROVIDER_ALIASES,
+    }
+)
 USAGE_BY = ("model", "connector", "route", "user", "group", "profile")
+# Starting keyword rules that routing setup --route writes (GAP-0565). The
+# rules classifier matches each list as case-insensitive substrings on the
+# bounded request text; edit routing.signals and routing.decisions to tune.
+ROUTE_CATEGORIES: dict[str, tuple[int, list[str]]] = {
+    "coding": (
+        80,
+        ["debug", "implement", "refactor", "function", "compile", "bug", "traceback", "stack trace",
+         "unit test", "regex", "sql", "python", "golang", "javascript", "typescript", "in rust", "bash", "dockerfile",
+         "terraform", "git diff"],
+    ),
+    "reasoning": (
+        70,
+        ["prove that", "prove it", "theorem", "puzzle", "probability", "derive", "complexity", "big-o", "optimal",
+         "trade-off", "tradeoff", "step by step", "design a system", "constraints", "riddle"],
+    ),
+    "summarize": (
+        60,
+        ["summarize", "summarise", "summary", "tl;dr", "tldr", "key points", "condense", "recap", "bullet points",
+         "main takeaways"],
+    ),
+}
 # Provider -> conventional API key environment variable, for setup hints.
 KEY_ENV_HINTS = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -106,6 +150,17 @@ def _list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
+def _dicts(value: Any) -> list[dict[str, Any]]:
+    """The mappings of a gateway JSON list: null, a missing key or a stray
+    non-mapping entry reads as empty (the gateway answers a list with no
+    entries as null; GAP-0561)."""
+    return [x for x in _list(value) if isinstance(x, dict)]
+
+
+def _strs(value: Any) -> list[str]:
+    return [str(x) for x in _list(value)]
+
+
 def _locked(doc: dict[str, Any]) -> set[str]:
     """Routing keys the user may not change: all of them on a managed device,
     else the ones routing.admin.locked names."""
@@ -148,6 +203,45 @@ def _write(app: AppContext, changes: dict[str, Any], *, unset: list[str] | None 
             parse_path(key)
         written = _write_config_change(app, [Change(k, unset=True) for k in unset], expect, "unset") or written
     return written
+
+
+def _check_provider(provider: str, *, option: str = "--provider") -> str:
+    """The provider name, if the gateway knows it (the provider registry the
+    judge and the decision model use). An unknown name was written and failed
+    on the first call (GAP-0600)."""
+    name = provider.strip().lower()
+    if name not in ROUTING_PROVIDERS:
+        raise click.UsageError(
+            f"{option}: unknown provider {provider!r}. Use one of: " + ", ".join(sorted(ROUTING_PROVIDERS))
+        )
+    # The canonical spelling: the config reads the API families and the
+    # bedrock block by it (routing.models[].provider bedrock, not amazon-bedrock).
+    return ROUTING_PROVIDER_ALIASES.get(name, name)
+
+
+def _route_rules(routing: dict[str, Any], routes: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """routing.signals and routing.decisions with one keyword decision per
+    category in routes (category -> alias) added or re-pointed. A signal or
+    decision the user already wrote under the same name keeps its keywords."""
+    signals = copy.deepcopy(routing.get("signals")) if isinstance(routing.get("signals"), dict) else {}
+    keywords = _dicts(signals.get("keywords"))
+    decisions = copy.deepcopy(_dicts(routing.get("decisions")))
+    for category, alias in routes.items():
+        priority, words = ROUTE_CATEGORIES[category]
+        name = f"{category}-keywords"
+        if not any(k.get("name") == name for k in keywords):
+            keywords.append({"name": name, "operator": "OR", "keywords": list(words)})
+        decision = next((d for d in decisions if d.get("name") == category), None)
+        if decision is None:
+            decision = {
+                "name": category,
+                "priority": priority,
+                "conditions": [{"type": "keyword", "name": name}],
+            }
+            decisions.append(decision)
+        decision["model_refs"] = [alias]
+    signals["keywords"] = keywords
+    return signals, decisions
 
 
 def _aliases(doc: dict[str, Any]) -> list[str]:
@@ -261,6 +355,60 @@ def _health_routing(app: AppContext) -> dict[str, Any]:
     return live if isinstance(live, dict) else {}
 
 
+def _startup_cause(app: AppContext) -> str:
+    """Why the running gateway could not start routing, in its words (what
+    doctor shows on the FAIL Semantic routing row); empty when it reports none."""
+    live = _health_routing(app)
+    if live.get("state") != "error":
+        return ""
+    return " ".join(str(live.get("last_error") or "").split())[:300]
+
+
+def _cause_fix(cause: str) -> str:
+    """The way out of a routing startup failure that the CLI can name."""
+    if "docker" in cause.lower():
+        return "start Docker, or use the built-in classifier: defenseclaw routing setup --classifier rules"
+    return "run defenseclaw doctor, then restart the gateway: defenseclaw-gateway restart"
+
+
+def _routing_not_applied(error: str) -> bool:
+    """Whether a gateway answer says routing is off or not running there yet
+    (the gateway answers 503 until it has reloaded config.yaml)."""
+    return "routing is" in error
+
+
+def _with_cause(app: AppContext, error: str) -> str:
+    """error, plus the startup cause and fix the gateway reports for it."""
+    cause = _startup_cause(app) if _routing_not_applied(error) else ""
+    if not cause:
+        return error
+    return f"{error}\nThe gateway reports: {cause}\nFix: {_cause_fix(cause)}"
+
+
+def _docker_problem() -> str:
+    """Why the managed vllm_sr router cannot run here (no Docker CLI, or its
+    daemon does not answer); empty when Docker is up. The wording is doctor's
+    and setup's (observability.local_stack)."""
+    import shutil
+    import subprocess
+
+    from defenseclaw import platform_support
+    from defenseclaw.observability.local_stack import docker_cli_missing_message, docker_daemon_unreachable_message
+
+    docker = shutil.which("docker")
+    if docker is None:
+        return docker_cli_missing_message(platform_support.host_os())
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [docker, "info"], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"Docker did not answer ({exc.__class__.__name__})"
+    if proc.returncode == 0:
+        return ""
+    return docker_daemon_unreachable_message((proc.stderr or proc.stdout or "").strip(), platform_support.host_os())
+
+
 # --------------------------------------------------------------------------
 # the group
 
@@ -325,8 +473,12 @@ def _status_data(app: AppContext) -> dict[str, Any]:
     data["effective"] = effective if isinstance(effective, dict) else None
     if error and data.get("enabled"):
         warnings.append(f"no live routing view: {error}")
-    for budget in (effective or {}).get("budgets", []) if isinstance(effective, dict) else []:
-        if isinstance(budget, dict) and budget.get("exceeded"):
+    if data.get("enabled") and (data["health"] or {}).get("state") == "error":
+        cause = " ".join(str((data["health"] or {}).get("last_error") or "").split())[:300]
+        if cause:
+            warnings.append(f"routing is on but the gateway could not start it: {cause} ({_cause_fix(cause)})")
+    for budget in _dicts(effective.get("budgets")) if isinstance(effective, dict) else []:
+        if budget.get("exceeded"):
             warnings.append(
                 f"budget {budget.get('id')} is used up for this {budget.get('period')} "
                 f"({budget.get('on_exceed')}; resets {budget.get('resets_at')})"
@@ -362,13 +514,13 @@ def routing_status(app: AppContext, as_json: bool) -> None:
             click.echo("Managed:    routing settings are set by your administrator")
     effective = data.get("effective") or {}
     if effective:
-        allowed = effective.get("allowed_aliases")
+        allowed = _strs(effective.get("allowed_aliases"))
         click.echo(
             "For you:    "
             + (f"allowed {', '.join(allowed)}" if allowed else "all models allowed")
             + (f"; profile {effective['profile']}" if effective.get("profile") else "")
         )
-        for d in effective.get("recent", [])[:5]:
+        for d in _dicts(effective.get("recent"))[:5]:
             click.echo(
                 f"  {str(d.get('time', ''))[11:19]} {d.get('connector', ''):<11} {d.get('category') or '-':<10} "
                 f"{d.get('requested_model') or '?'} -> {d.get('selected_alias') or d.get('outcome')}"
@@ -386,6 +538,42 @@ def _gateway_binary() -> str | None:
     return path_gateway(honor_override=False)
 
 
+# How long routing enable --connector waits for the running gateway to reload
+# config.yaml and render the agent settings (it polls the agent file and /health).
+RENDER_WAIT_SECONDS = 10.0
+RENDER_POLL_SECONDS = 0.5
+# /health route-only rows carry no config generation: a not-ready row seen
+# right after the save can be the one from before it. A failure is reported
+# only once it has held this long (or at the end of the wait).
+RENDER_FAILED_SETTLE_SECONDS = 5.0
+
+
+def _await_render(app: AppContext, cfg: Any, connector: str, upstream: dict[str, Any]) -> tuple[str, str, str]:
+    """(state, cause, fix) once the gateway has rendered the connector, has
+    said why it cannot, or the bounded wait ends ("pending"). A gateway that
+    is not running ends the wait at once: it renders when it starts."""
+    import time
+
+    from defenseclaw import doctor_route_only as dro
+
+    deadline = time.monotonic() + RENDER_WAIT_SECONDS
+    failing_since: float | None = None
+    while True:
+        live = _health_routing(app)
+        health = None if not live or live.get("state") == "unreachable" else {"routing": live}
+        state, cause, fix = dro.render_outcome(cfg, connector, upstream, health)
+        now = time.monotonic()
+        if state == dro.RENDER_FAILED:
+            failing_since = now if failing_since is None else failing_since
+            if now - failing_since >= RENDER_FAILED_SETTLE_SECONDS or now >= deadline:
+                return state, cause, fix
+        elif state != dro.RENDER_PENDING or health is None or now >= deadline:
+            return state, cause, fix
+        else:
+            failing_since = None
+        time.sleep(RENDER_POLL_SECONDS)
+
+
 def _route_only_change(app: AppContext, connector: str, *, enable: bool) -> None:
     """Route one hook connector (or stop) through routing_route_only, owned
     by the routing core. Its helpers take the loaded config and save
@@ -399,7 +587,22 @@ def _route_only_change(app: AppContext, connector: str, *, enable: bool) -> None
     except ro.RouteOnlyError as exc:
         raise click.ClickException(str(exc)) from exc
     if enable:
+        state, cause, fix = _await_render(app, cfg, connector, out.get("upstream") or {})
         base = str((out.get("upstream") or {}).get("base_url") or "")
+        if state == "failed":
+            raise click.ClickException(
+                f"{connector} is set to route through DefenseClaw in config.yaml, but the gateway did not render "
+                f"it, so {connector} still calls its model directly: {cause}"
+                + (f"\nFix: {fix}" if fix else "")
+                + f"\nTo undo: defenseclaw routing disable --connector {connector}"
+            )
+        if state == "pending":
+            ux.warn(
+                f"{connector} routing is saved in config.yaml but not applied yet: {cause}"
+                + (f" ({fix})" if fix else "")
+            )
+            click.echo(f"Check it with: defenseclaw doctor. Restart {connector} once the gateway applies it.")
+            return
         click.echo(f"Routing {connector} model calls through DefenseClaw" + (f" (upstream {base})." if base else "."))
     else:
         click.echo(f"Stopped routing {connector}." if out.get("changed") else f"{connector} was not routed.")
@@ -436,7 +639,26 @@ def routing_enable(app: AppContext, connector: str) -> None:
             "routing needs at least one model; add one first: defenseclaw "
             "routing models add NAME --provider P --model M"
         )
+    routing = _routing(doc)
+    classifier = str(routing.get("classifier") or "")
+    remote = routing.get("remote")
+    remote_endpoint = str(remote.get("endpoint") or "").strip() if isinstance(remote, dict) else ""
+    needs_docker = (classifier or DEFAULT_CLASSIFIER) == "vllm_sr" and not remote_endpoint
+    docker_problem = _docker_problem() if needs_docker else ""
     _write(app, {"routing.enabled": True})
+    if classifier:
+        click.echo(f"Classifier: {classifier}")
+    else:
+        click.echo(
+            f"Classifier: {DEFAULT_CLASSIFIER} (the default: the vLLM Semantic Router in Docker; "
+            "use the built-in one with defenseclaw routing setup --classifier rules)"
+        )
+    if docker_problem:
+        ux.warn(
+            f"the {DEFAULT_CLASSIFIER} classifier needs Docker and it is not usable here ({docker_problem}), "
+            "so the gateway will leave routing off. Use the built-in classifier instead: "
+            "defenseclaw routing setup --classifier rules"
+        )
 
 
 @routing_cmd.command("disable")
@@ -511,6 +733,7 @@ def routing_models_add(
 ) -> None:
     """Add a model alias."""
     _refuse_on_managed(["routing.models"])
+    provider = _check_provider(provider)
     doc = _document()
     models = copy.deepcopy(_list(_routing(doc).get("models")))
     if name in _aliases(doc):
@@ -619,7 +842,7 @@ def routing_rules_list(app: AppContext, profile: str, as_json: bool) -> None:
         answer, error = _ask_gateway(app, "GET", "/api/v1/routing/effective")
         if error:
             raise click.ClickException(error)
-        rules = answer.get("rules", []) if isinstance(answer, dict) else []
+        rules = _dicts(answer.get("rules")) if isinstance(answer, dict) else []
         if as_json:
             _emit_json({"rules": rules, "scope": "own"})
         else:
@@ -849,7 +1072,7 @@ def routing_budgets() -> None:
 def routing_budgets_list(app: AppContext, as_json: bool) -> None:
     """List budgets with the spend so far in this period (yours, or everyone's for an administrator)."""
     answer, error = _ask_gateway(app, "GET", "/api/v1/routing/budgets")
-    spend = {b.get("id"): b for b in (answer or {}).get("budgets", [])} if isinstance(answer, dict) else {}
+    spend = {b.get("id"): b for b in _dicts(answer.get("budgets"))} if isinstance(answer, dict) else {}
     try:
         configured = _list(_admin(_document()).get("budgets"))
     except click.ClickException:
@@ -878,7 +1101,7 @@ def routing_budgets_list(app: AppContext, as_json: bool) -> None:
             else (f"{r['percent_used']:.0f}%" if isinstance(r.get("percent_used"), (int, float)) else "?")
         )
         click.echo(
-            f"{r.get('id', ''):<16} {r.get('scope')}:{r.get('subject'):<14} "
+            f"{r.get('id', ''):<16} {r.get('scope')}:{str(r.get('subject') or ''):<14} "
             f"{used}/{r.get('limit_usd')} USD per {r.get('period')}"
             f" -> {r.get('on_exceed')}" + (f"  resets {r['resets_at']}" if r.get("resets_at") else "")
         )
@@ -1071,11 +1294,11 @@ def routing_test(app: AppContext, prompt: str, connector: str, as_profile: str, 
     payload = {"prompt": prompt, "connector": connector, "profile": as_profile, "user": as_user}
     answer, error = _ask_gateway(app, "POST", "/api/v1/routing/test", json=payload, timeout=10)
     if error:
-        raise click.ClickException(error)
+        raise click.ClickException(_with_cause(app, error))
     if as_json:
         _emit_json(answer)
         return
-    a = answer or {}
+    a = answer if isinstance(answer, dict) else {}
     click.echo(
         f"Category:   {a.get('category') or '-'}"
         + (
@@ -1086,9 +1309,8 @@ def routing_test(app: AppContext, prompt: str, connector: str, as_profile: str, 
     )
     click.echo(f"Candidate:  {a.get('candidate_alias') or '-'}")
     if a.get("filtered_by"):
-        click.echo(
-            f"Narrowed:   by {a['filtered_by']}" + (f" (rules {', '.join(a['rule_ids'])})" if a.get("rule_ids") else "")
-        )
+        rules_text = f" (rules {', '.join(_strs(a['rule_ids']))})" if a.get("rule_ids") else ""
+        click.echo(f"Narrowed:   by {a['filtered_by']}{rules_text}")
     click.echo(
         f"Result:     {a.get('outcome')}"
         + (f" -> {a['selected_alias']} ({a.get('selected_model', '')})" if a.get("selected_alias") else "")
@@ -1098,9 +1320,34 @@ def routing_test(app: AppContext, prompt: str, connector: str, as_profile: str, 
             f"Est. cost:  {a['estimated_cost_usd']:.4f} USD (estimate from the prompt length; no model was called)"
         )
     if a.get("simulated"):
-        click.echo(f"Simulated:  {', '.join(a['simulated'])}")
-    for w in a.get("warnings", []):
+        click.echo(f"Simulated:  {', '.join(_strs(a['simulated']))}")
+    for w in _strs(a.get("warnings")):
         ux.warn(w)
+    cause = _classifier_failure_cause(app, a)
+    if cause:
+        ux.warn(cause)
+
+
+def _classifier_failure_cause(app: AppContext, answer: dict) -> str:
+    """Why the classifier gave no answer, when the CLI can name it: a System One
+    classifier without routing.categories never calls its endpoint, so the
+    reason is configuration_failure whether or not the endpoint is up
+    (rel-1-0-10:GAP-0591); an unreachable endpoint is upstream_status or
+    timeout and doctor names it."""
+    if answer.get("failure") != "configuration_failure" or answer.get("source") != "systemone":
+        return ""
+    try:
+        routing = getattr(_loaded_cfg(app), "routing", None)
+    except Exception:  # noqa: BLE001 - no readable config: the doctor names it
+        return ""
+    categories = getattr(routing, "categories", None)
+    if isinstance(categories, dict) and categories:
+        return "System One gave no answer (configuration_failure): run defenseclaw doctor for the cause"
+    return (
+        "System One was not asked: routing.categories is empty, so it has nothing to choose from. "
+        "Add categories with defenseclaw routing setup --classifier systemone --route coding=<alias>, "
+        "or use defenseclaw routing setup --classifier rules"
+    )
 
 
 @routing_cmd.command("explain")
@@ -1117,7 +1364,7 @@ def routing_explain(app: AppContext, request_id: str, as_json: bool) -> None:
     if as_json:
         _emit_json(answer)
         return
-    a = answer or {}
+    a = answer if isinstance(answer, dict) else {}
     click.echo(f"{a.get('time')}  {a.get('connector', '')}  {a.get('api_family', '')}")
     click.echo(f"Requested:  {a.get('requested_model') or '-'}")
     click.echo(
@@ -1129,7 +1376,7 @@ def routing_explain(app: AppContext, request_id: str, as_json: bool) -> None:
             click.echo(f"{label + ':':<12}{a[key]}")
     for label, key in (("Reasons", "reasons"), ("Rules", "rule_ids"), ("Warnings", "warnings")):
         if a.get(key):
-            click.echo(f"{label + ':':<12}{', '.join(a[key])}")
+            click.echo(f"{label + ':':<12}{', '.join(_strs(a[key]))}")
 
 
 def _since(value: str) -> str:
@@ -1152,28 +1399,69 @@ def _since(value: str) -> str:
 @pass_ctx
 def routing_usage(app: AppContext, group_by: str, since: str, as_json: bool) -> None:
     """Tokens, calls and cost (yours, or everyone's for an administrator)."""
-    answer, error = _ask_gateway(app, "GET", "/api/v1/usage", params={"by": group_by, "since": since})
+    answer, error = _ask_gateway(app, "GET", USAGE_PATH, params={"by": group_by, "since": since})
     if error:
         raise click.ClickException(error)
     if as_json:
         _emit_json(answer)
         return
-    rows = (answer or {}).get("rows", []) if isinstance(answer, dict) else []
-    scope = (answer or {}).get("scope", "own") if isinstance(answer, dict) else "own"
+    rows = _dicts(answer.get("rows")) if isinstance(answer, dict) else []
+    scope = answer.get("scope", "own") if isinstance(answer, dict) else "own"
     click.echo(f"Usage by {group_by}, last {since} ({'everyone' if scope == 'all' else 'yours'}):")
     if not rows:
-        click.echo("  no recorded calls (usage recording is observability.tokenomics)")
+        hint = str(answer.get("hint") or "") if isinstance(answer, dict) and answer.get("enabled") is False else ""
+        click.echo("  no recorded calls" + (f": {hint}" if hint else " (usage recording is observability.tokenomics)"))
     for r in rows:
         cost = r.get("cost_usd")
         cost_text = f"{cost:.4f} USD" if isinstance(cost, (int, float)) else "cost unknown"
         basis = f" ({r['cost_basis']})" if r.get("cost_basis") else ""
         click.echo(
-            f"  {str(r.get('key', '-')):<28} {r.get('calls', 0):>6} calls  in {r.get('input_tokens', 0):>9}  "
-            f"out {r.get('output_tokens', 0):>8}  {cost_text}{basis}"
+            f"  {str(r.get('key', '-')):<28} {r.get('calls') or 0:>6} calls  in {r.get('input_tokens') or 0:>9}  "
+            f"out {r.get('output_tokens') or 0:>8}  {cost_text}{basis}"
         )
 
 
 # ---------------- setup (guided)
+
+
+# How long routing setup waits for a running gateway to reload config.yaml and
+# turn routing on before it runs the test (the gateway answers 503 until then).
+SETUP_TEST_WAIT_SECONDS = 12.0
+SETUP_TEST_POLL_SECONDS = 1.0
+
+
+def _setup_test(app: AppContext) -> tuple[Any, str]:
+    """(answer, error) of the setup test prompt. While the gateway has not
+    applied the change yet it is asked again for a bounded time, stopping at
+    once when the gateway reports why routing cannot start; a gateway that is
+    not running is not waited for."""
+    import time
+
+    deadline = time.monotonic() + SETUP_TEST_WAIT_SECONDS
+    waited = False
+    while True:
+        answer, error = _ask_gateway(
+            app,
+            "POST",
+            "/api/v1/routing/test",
+            json={"prompt": "Write a Python function that reverses a list."},
+            timeout=10,
+        )
+        if not error or not _routing_not_applied(error):
+            return answer, error
+        if _startup_cause(app) or time.monotonic() >= deadline:
+            break
+        waited = True
+        time.sleep(SETUP_TEST_POLL_SECONDS)
+    cause = _startup_cause(app)
+    if cause:
+        return None, f"{error} ({cause}); {_cause_fix(cause)}"
+    seconds = int(SETUP_TEST_WAIT_SECONDS)
+    return None, (
+        f"the gateway has not applied the change yet ({error}"
+        + (f"; waited {seconds} s" if waited else "")
+        + "); it reloads config.yaml by itself, or restart it: defenseclaw-gateway restart"
+    )
 
 
 @routing_cmd.command("setup")
@@ -1188,9 +1476,18 @@ def routing_usage(app: AppContext, group_by: str, since: str, as_json: bool) -> 
     metavar="ALIAS=PROVIDER/MODEL",
     help="Add a model alias without prompting (repeat for more).",
 )
+@click.option(
+    "--route",
+    "route_specs",
+    multiple=True,
+    metavar="CATEGORY=ALIAS",
+    help="Send a kind of work to a model alias (coding, reasoning or summarize); writes starting keyword rules.",
+)
 @pass_ctx
-def routing_setup(app: AppContext, classifier: str | None, yes: bool, add_models: tuple[str, ...]) -> None:
-    """Guided setup: models, classifier and default model, then a test."""
+def routing_setup(
+    app: AppContext, classifier: str | None, yes: bool, add_models: tuple[str, ...], route_specs: tuple[str, ...]
+) -> None:
+    """Guided setup: models, classifier, default model and route rules, then a test."""
     _refuse_on_managed(["routing"])
     doc = _document()
     routing = _routing(doc)
@@ -1202,6 +1499,7 @@ def routing_setup(app: AppContext, classifier: str | None, yes: bool, add_models
             raise click.UsageError(
                 f"--model {spec}: use ALIAS=PROVIDER/MODEL, for example fast=anthropic/claude-haiku-4-5"
             )
+        provider = _check_provider(provider, option=f"--model {spec}")
         if alias not in [str(m.get("name")) for m in models if isinstance(m, dict)]:
             models.append({"name": alias, "provider": provider, "model": model_id})
     interactive = not yes and sys.stdin.isatty()
@@ -1214,6 +1512,11 @@ def routing_setup(app: AppContext, classifier: str | None, yes: bool, add_models
     while interactive and click.confirm("Add a model alias?", default=not models):
         name = click.prompt("  Alias (for example fast or coder)")
         provider = click.prompt("  Provider", default="anthropic")
+        try:
+            provider = _check_provider(provider, option="Provider")
+        except click.UsageError as exc:
+            ux.warn(exc.message)
+            continue
         model_id = click.prompt("  Model id")
         env = click.prompt("  API key environment variable", default=KEY_ENV_HINTS.get(provider, ""), show_default=True)
         entry = {"name": name, "provider": provider, "model": model_id}
@@ -1232,21 +1535,43 @@ def routing_setup(app: AppContext, classifier: str | None, yes: bool, add_models
         default = click.prompt(
             "Default model", type=click.Choice(aliases), default=default if default in aliases else aliases[0]
         )
+    routes: dict[str, str] = {}
+    for spec in route_specs:
+        category, _, alias = spec.partition("=")
+        category, alias = category.strip(), alias.strip()
+        if category not in ROUTE_CATEGORIES or alias not in aliases:
+            raise click.UsageError(
+                f"--route {spec}: use CATEGORY=ALIAS with a category of {', '.join(ROUTE_CATEGORIES)} "
+                f"and an alias of {', '.join(aliases)}"
+            )
+        routes[category] = alias
+    if interactive and classifier == "rules" and len(aliases) > 1 and not routes:
+        for category in ROUTE_CATEGORIES:
+            choice = click.prompt(
+                f"Model for {category} work (empty keeps the default)",
+                type=click.Choice(["", *aliases]),
+                default="",
+                show_default=False,
+            )
+            if choice:
+                routes[category] = choice
     changes: dict[str, Any] = {
         "routing.classifier": classifier,
         "routing.models": models,
         "routing.default_alias": default,
         "routing.enabled": True,
     }
+    if routes:
+        changes["routing.signals"], changes["routing.decisions"] = _route_rules(routing, routes)
     if not _write(app, changes):
         click.echo("Routing already has these settings.")
-    answer, error = _ask_gateway(
-        app,
-        "POST",
-        "/api/v1/routing/test",
-        json={"prompt": "Write a Python function that reverses a list."},
-        timeout=10,
-    )
+    if classifier == "rules" and not (routes or _dicts(routing.get("decisions"))):
+        other = next((a for a in aliases if a != default), "ALIAS")
+        click.echo(
+            f"No route rules yet: every request goes to {default}. Send a kind of work elsewhere: "
+            f"defenseclaw routing setup --route coding={other} (also reasoning and summarize)."
+        )
+    answer, error = _setup_test(app)
     if error:
         click.echo(f'Test skipped: {error}. Run later: defenseclaw routing test "<prompt>"')
     elif isinstance(answer, dict):

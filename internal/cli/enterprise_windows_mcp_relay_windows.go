@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 )
 
@@ -38,7 +39,7 @@ func newEnterpriseWindowsMCPRelayCommand() *cobra.Command {
 			code := runEnterpriseWindowsMCPRelay(cmd.Context(), request, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 			if code != 0 {
 				// The server's own exit code, for the scanner's message.
-				return withExitCode(fmt.Errorf("MCP server exited with code %d", code), code)
+				return cliusage.WithExitCode(fmt.Errorf("MCP server exited with code %d", code), code)
 			}
 			return nil
 		},

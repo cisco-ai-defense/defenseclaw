@@ -5,6 +5,7 @@ package config
 
 import (
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -63,7 +64,7 @@ const (
 )
 
 // RoutingRequestConditions are the names a request condition accepts.
-var RoutingRequestConditions = []string{"has_tools", "tool_turn", "has_images", "long_context"}
+var RoutingRequestConditions = []string{"has_tools", "tool_turn", "has_images", "long_context", RoutingRequestToolLoop}
 
 // RoutingLockableKeys are the names routing.admin.locked accepts. The
 // first three are the keys a guardrail profile overlay may otherwise set;
@@ -71,7 +72,7 @@ var RoutingRequestConditions = []string{"has_tools", "tool_turn", "has_images", 
 var RoutingLockableKeys = []string{
 	"default_alias", "categories", "allow_user_override",
 	"classifier", "models", "min_confidence", "on_classifier_error",
-	"sensitive", "systemone", "route_only",
+	"sensitive", "systemone", "route_only", "context",
 }
 
 // RoutingPolicyConfig is the tighten-only overlay of
@@ -140,12 +141,87 @@ func (a *RoutingAdminConfig) IsLocked(key string) bool {
 }
 
 // RoutingSensitiveConfig narrows the allowed set to Aliases when the
-// pre-call guardrail verdict is at or above SeverityAtLeast or one of the
-// keyword Signals matches (best effort: neither catches prose PII).
+// pre-call guardrail verdict is at or above SeverityAtLeast, one of the
+// keyword Signals matches, or the optional decision-model check says the
+// request holds sensitive data. The first two are a floor that the check
+// never weakens; regex and keywords miss prose personal data (GAP-0003).
 type RoutingSensitiveConfig struct {
 	SeverityAtLeast string   `mapstructure:"severity_at_least" yaml:"severity_at_least,omitempty"`
 	Signals         []string `mapstructure:"signals"           yaml:"signals,omitempty"`
 	Aliases         []string `mapstructure:"aliases"           yaml:"aliases,omitempty"`
+	// Check asks one bounded yes/no question per request: does it contain
+	// sensitive data (personal data, secrets, customer or internal data).
+	// off (default), decision_model (the System One or Decisions endpoint),
+	// judge (the guardrail judge model) or auto (decision model when one is
+	// configured, else the judge).
+	Check string `mapstructure:"check" yaml:"check,omitempty"`
+	// OnUnavailable is what a check that failed, timed out or was
+	// unreadable does: local (default) routes to Aliases when the caller
+	// has one, ignore keeps the floor-only decision. Never a block.
+	OnUnavailable string `mapstructure:"on_unavailable" yaml:"on_unavailable,omitempty"`
+	// TimeoutMs caps one check (0 = 1000, 50..5000).
+	TimeoutMs int `mapstructure:"timeout_ms" yaml:"timeout_ms,omitempty"`
+	// MaxBytes caps the text sent to the check (0 = 8192, 256..65536).
+	MaxBytes int `mapstructure:"max_bytes" yaml:"max_bytes,omitempty"`
+	// Definition is the operator definition of sensitive data added to the
+	// question (at most 1024 bytes).
+	Definition string `mapstructure:"definition" yaml:"definition,omitempty"`
+}
+
+// routing.sensitive.check values and on_unavailable values.
+const (
+	RoutingSensitiveCheckOff           = "off"
+	RoutingSensitiveCheckAuto          = "auto"
+	RoutingSensitiveCheckDecisionModel = "decision_model"
+	RoutingSensitiveCheckJudge         = "judge"
+
+	RoutingSensitiveUnavailableLocal  = "local"
+	RoutingSensitiveUnavailableIgnore = "ignore"
+
+	RoutingSensitiveDefaultTimeoutMs = 1000
+	RoutingSensitiveMinTimeoutMs     = 50
+	RoutingSensitiveMaxTimeoutMs     = 5000
+	RoutingSensitiveDefaultMaxBytes  = 8192
+	RoutingSensitiveMinMaxBytes      = 256
+	RoutingSensitiveMaxMaxBytes      = 65536
+	RoutingSensitiveMaxDefinition    = 1024
+)
+
+// EffectiveCheck returns check with its default (off).
+func (s *RoutingSensitiveConfig) EffectiveCheck() string {
+	if s == nil || s.Check == "" {
+		return RoutingSensitiveCheckOff
+	}
+	return s.Check
+}
+
+// CheckEnabled reports whether the decision-model check runs at all.
+func (s *RoutingSensitiveConfig) CheckEnabled() bool {
+	return s.EffectiveCheck() != RoutingSensitiveCheckOff
+}
+
+// EffectiveOnUnavailable returns on_unavailable with its default (local).
+func (s *RoutingSensitiveConfig) EffectiveOnUnavailable() string {
+	if s == nil || s.OnUnavailable == "" {
+		return RoutingSensitiveUnavailableLocal
+	}
+	return s.OnUnavailable
+}
+
+// EffectiveCheckTimeoutMs returns timeout_ms with its default.
+func (s *RoutingSensitiveConfig) EffectiveCheckTimeoutMs() int {
+	if s == nil || s.TimeoutMs <= 0 {
+		return RoutingSensitiveDefaultTimeoutMs
+	}
+	return s.TimeoutMs
+}
+
+// EffectiveMaxBytes returns max_bytes with its default.
+func (s *RoutingSensitiveConfig) EffectiveMaxBytes() int {
+	if s == nil || s.MaxBytes <= 0 {
+		return RoutingSensitiveDefaultMaxBytes
+	}
+	return s.MaxBytes
 }
 
 // RoutingSystemOneConfig configures the optional System One classifier.
@@ -221,6 +297,12 @@ func (r RoutingRouteOnlyConfig) IsZero() bool {
 // RouteOnlyCapableConnectors are the connectors with routing capability
 // base_url in 1.0.10.
 var RouteOnlyCapableConnectors = []string{"claudecode", "codex"}
+
+// RouteOnlyRouted reports whether routing routes connectorName through the
+// route-only listener (routing on and the connector listed).
+func (c *Config) RouteOnlyRouted(connectorName string) bool {
+	return c != nil && c.Routing.Enabled && slices.Contains(c.Routing.RouteOnly.Connectors, strings.ToLower(strings.TrimSpace(connectorName)))
+}
 
 // RoutingCredential returns the value of the protected credential name on a
 // standalone managed host ("" elsewhere, when unset or unreadable).

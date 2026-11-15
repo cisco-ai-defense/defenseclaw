@@ -68,11 +68,33 @@ type Request struct {
 	HasImages         bool
 	LongContext       bool
 	ConversationID    string
+	// SensitiveText is the bounded text the decision-model check reads
+	// (user and tool turns, newest first; never system prompts), and
+	// SensitiveTruncated says a cap cut it (ONE BOUND RULE). StrictTier is
+	// the posture of the caller guardrail profile: a truncated input is
+	// judged at least at the unknown tier, which routes local only under
+	// strict.
+	SensitiveText      string
+	SensitiveTruncated bool
+	StrictTier         bool
+	// ContextTurns, FirstTurn, ToolNames and ToolLoop are the
+	// routing.context facts (ContextCollector.Fill): older human-typed user
+	// turns newest first, the first turn when the window does not hold it,
+	// the names of the tools the loop called, and whether it called any.
+	// Empty unless routing.context is on.
+	ContextTurns []string
+	FirstTurn    string
+	ToolNames    []string
+	ToolLoop     bool
 	// Profiles are the guardrail profiles the caller resolved to, in
 	// assignment order (several when the profile meet combined them).
 	Profiles      []string
 	ProfileDigest string
 	Caller        Caller
+	// Narrowed is set by Decide while it tries candidates: routing.sensitive
+	// narrowed the request (CredentialOK may relax for a keyless local
+	// model then). Callers leave it false.
+	Narrowed bool
 }
 
 // Backend is one routing.models entry.
@@ -105,7 +127,27 @@ const (
 	SourceSticky       = "sticky"
 	SourceForce        = "force"
 	SourceDefault      = "default"
+	// SourceSensitive is a routing.sensitive.aliases candidate tried
+	// because the request is sensitive (GAP-0576).
+	SourceSensitive = "sensitive"
 )
+
+// DenyCodeSensitiveLocal refuses a sensitive request that no allowed
+// routing.sensitive.aliases model can serve. Such a request is never sent
+// to the original provider or to another alias (GAP-0576), on OSS and on
+// managed hosts.
+const DenyCodeSensitiveLocal = "routing_sensitive_local_unavailable"
+
+// SensitiveLocalDeny is the refusal of a sensitive request: source is what
+// found it sensitive, cause why no local model can take it.
+func SensitiveLocalDeny(source, cause string) *DenyReason {
+	if source == "" {
+		source = "routing.sensitive"
+	}
+	return &DenyReason{Code: DenyCodeSensitiveLocal, Message: "this request holds sensitive data (found by " + source +
+		"), so routing.sensitive keeps it on a local model (routing.sensitive.aliases); " + cause +
+		", so DefenseClaw refused it instead of sending it to a cloud model"}
+}
 
 // Failure codes (closed set; metric labels).
 const (
@@ -120,7 +162,8 @@ const (
 	FailureNoCandidate    = "no_candidate"
 )
 
-// DenyReason is a managed-only refusal.
+// DenyReason is a routing refusal: a managed admin rule, or a sensitive
+// request no local model can serve (DenyCodeSensitiveLocal, every host).
 type DenyReason struct {
 	Code    string
 	Message string
@@ -143,12 +186,22 @@ type Decision struct {
 	ChargeKeys   []string
 	PolicyDigest string
 	Latency      time.Duration
+	// Sensitive records how the sensitive-data narrowing was decided.
+	Sensitive SensitiveOutcome
 
 	verdict AdminVerdict
 }
 
+// SensitiveNarrowed reports whether routing.sensitive narrowed the decision:
+// its only allowed exits are then the routing.sensitive.aliases models. A
+// soft decision (the check could not answer, or a strict truncated input)
+// prefers the local models but is never refused for lacking one.
+func (d Decision) SensitiveNarrowed() bool { return d.Sensitive.Source != "" && !d.Sensitive.Soft }
+
 // ClassifyInput is what a classifier sees: no identity, no credentials.
 type ClassifyInput struct {
+	// Text is the newest human-typed user turn, or with routing.context
+	// the bounded context text (ClassifierTextLimit at most).
 	Text           string
 	APIFamily      string
 	Connector      string
@@ -157,7 +210,9 @@ type ClassifyInput struct {
 	ToolTurn       bool
 	HasImages      bool
 	LongContext    bool
-	// Signals are the keyword signals that matched Text.
+	ToolLoop       bool
+	// Signals are the keyword signals that matched Text (and, with
+	// routing.context, the tool-name line).
 	Signals map[string]bool
 	// Categories are the category names of the effective policy, sorted
 	// (the choices a category classifier such as systemone picks from).
@@ -193,3 +248,47 @@ func (e *ClassifierError) Error() string {
 }
 
 func (e *ClassifierError) Unwrap() error { return e.Err }
+
+// Sources of a sensitive narrowing (SensitiveOutcome.Source).
+const (
+	SensitiveSourceGuardrail = "guardrail"
+	SensitiveSourceSignal    = "signal"
+	// SensitiveSourceSticky: an earlier turn of the same conversation (same
+	// caller, connector and agent session id) was sensitive, and the later
+	// turns carry it in their history.
+	SensitiveSourceSticky = "sticky"
+)
+
+// SensitiveOutcome says what decided the sensitive narrowing of one
+// request. Source is empty when nothing narrowed; otherwise guardrail (the
+// regex and rule floor), signal (a routing keyword signal), sticky (an
+// earlier positive of the conversation), or the checker name
+// (decision_model or judge). Reason is positive, unavailable:<code>,
+// truncated or clear. Checked is true when the checker ran.
+type SensitiveOutcome struct {
+	Source       string
+	Reason       string
+	Checked      bool
+	CheckFailure string
+	CheckLatency time.Duration
+	// Soft: the local models are preferred, not required (an unavailable
+	// check under on_unavailable: local, or a strict truncated input).
+	Soft bool
+}
+
+// SensitiveInput is what a sensitivity checker sees: bounded text, no
+// identity, no credentials.
+type SensitiveInput struct {
+	Text       string
+	Truncated  bool
+	Definition string
+	Connector  string
+}
+
+// SensitiveChecker answers one question: does the text hold sensitive
+// data. It returns a ClassifierError with a closed failure code when it
+// cannot answer; the engine then applies routing.sensitive.on_unavailable.
+type SensitiveChecker interface {
+	Name() string
+	Check(ctx context.Context, in SensitiveInput) (bool, error)
+}

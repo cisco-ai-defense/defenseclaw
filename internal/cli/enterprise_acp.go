@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -962,7 +963,7 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 		if err != nil {
 			// The JSON on stdout names the cause; stderr added a generic
 			// "Error: enterprise ACP operation failed" (GAP-0688).
-			coded := withExitCode(err, 1)
+			coded := cliusage.WithExitCode(err, 1)
 			silenceJSONReportedError(cmd, true, coded)
 			return coded
 		}

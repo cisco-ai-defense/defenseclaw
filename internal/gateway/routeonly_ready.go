@@ -34,9 +34,14 @@ type routeOnlyReadiness struct {
 	Custody    bool                       `json:"custody"`
 	Credential string                     `json:"credential"`
 	Signing    *routeOnlySigningReadiness `json:"signing,omitempty"`
-	Ready      bool                       `json:"ready"`
-	Problem    string                     `json:"problem,omitempty"`
-	Fix        string                     `json:"fix,omitempty"`
+	// EnrolledUsers counts the enrolled accounts of a managed host whose
+	// route credential the gateway accepts (one per protected ledger row,
+	// whether or not that account's route settings were written; verify
+	// reports a missing render); nil off managed hosts.
+	EnrolledUsers *int   `json:"enrolled_users,omitempty"`
+	Ready         bool   `json:"ready"`
+	Problem       string `json:"problem,omitempty"`
+	Fix           string `json:"fix,omitempty"`
 }
 
 // routeOnlySigningReadiness is the gateway Bedrock signing check.
@@ -66,7 +71,7 @@ func readinessError(err error) string {
 // of cfg (none when routing is off). Signing is checked with one bounded
 // credential fetch through signers (the cache the listener signs with).
 // It is published only while the route-only listener is mounted.
-func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSigners) []routeOnlyReadiness {
+func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSigners, enrolled func(connector string) (int, bool)) []routeOnlyReadiness {
 	names := routeOnlyConnectorsOf(cfg)
 	if len(names) == 0 {
 		return nil
@@ -109,6 +114,18 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 			r.Fix = "set routing.models[].credential for " + r.Provider + " (base_url " + r.Upstream + ") in the policy bundle"
 		default:
 			r.Credential, r.Ready = routeCredentialAgent, true
+		}
+		if managedHost && enrolled != nil {
+			if n, ok := enrolled(name); ok {
+				r.EnrolledUsers = &n
+				if n == 0 && r.Problem == "" {
+					// Nothing is routed until the guardian renders an
+					// enrolled account (rel-1-0-10 GAP-0568: this was silent).
+					r.Ready = false
+					r.Problem = "no enrolled account has " + name + " protected yet, so no " + name + " call is routed"
+					r.Fix = "enroll users with " + name + " installed (enterprise.enrollment), wait for the hook guardian pass (about 2 minutes) and restart the agent; enterprise verify lists route_config_drift for an account whose route settings are missing"
+				}
+			}
 		}
 		out = append(out, r)
 	}
@@ -196,7 +213,7 @@ func (s *Sidecar) runRouteOnlyReadiness(ctx context.Context, ro *routeOnlyServer
 	defer tick.Stop()
 	for {
 		if cfg := s.currentConfig(); cfg != last || time.Since(lastAt) >= routeOnlyReadinessEvery {
-			s.health.SetRouteOnlyReadiness(routeOnlyReadinessFor(cfg, ro.goos, &ro.signers))
+			s.health.SetRouteOnlyReadiness(withRouteEpochReadiness(routeOnlyReadinessFor(cfg, ro.goos, &ro.signers, ro.enrolledRouteUsers), ro.routeEpochUnpublished()))
 			last, lastAt = cfg, time.Now()
 		}
 		select {
@@ -205,4 +222,22 @@ func (s *Sidecar) runRouteOnlyReadiness(ctx context.Context, ro *routeOnlyServer
 		case <-tick.C:
 		}
 	}
+}
+
+// withRouteEpochReadiness marks every route-only connector not ready while
+// the managed Windows route epoch is not published: the guardian derives
+// each account's route credential from it, so nothing can be rendered
+// (rel-1-0-10:GAP-0800). problem "" changes nothing.
+func withRouteEpochReadiness(out []routeOnlyReadiness, problem string) []routeOnlyReadiness {
+	if problem == "" {
+		return out
+	}
+	for i := range out {
+		if out[i].Problem == "" {
+			out[i].Problem = problem + ", so the hook guardian cannot render route-only for any account"
+			out[i].Fix = "check gateway.log for 'route epoch not published' (the machine data dir hooks folder must be writable by the gateway service), then restart DefenseClawGateway"
+		}
+		out[i].Ready = false
+	}
+	return out
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // A user's own Hermes pre_tool_call hook placed after
@@ -63,14 +64,14 @@ func TestForeignHookCheckBlocksAUserHermesHookAfterDefenseClaws(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	check := func(event, session string) foreignHookCheckResult {
+	check := func(event, session string) hookcli.ForeignHookCheckResult {
 		t.Helper()
 		payload := `{"hook_event_name":"` + event + `","session_id":"` + session + `","cwd":"` + fixture.project + `","tool_name":"terminal","tool_input":{"command":"echo benign"}}`
 		var out bytes.Buffer
-		if code := runForeignHookCheck("hermes", strings.NewReader(payload), &out); code != 0 {
+		if code := hookcli.RunForeignHookCheck("hermes", strings.NewReader(payload), &out); code != 0 {
 			t.Fatalf("the check always exits 0, got %d", code)
 		}
-		var result foreignHookCheckResult
+		var result hookcli.ForeignHookCheckResult
 		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
 			t.Fatalf("the answer must be JSON: %v: %q", err, out.String())
 		}
@@ -146,8 +147,8 @@ func TestForeignHookCheckBlocksAUserHermesHookAfterDefenseClaws(t *testing.T) {
 		fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
 		fixture.loadErr = os.ErrPermission
 		var out bytes.Buffer
-		runForeignHookCheck("hermes", strings.NewReader(`{"hook_event_name":"pre_tool_call"}`), &out)
-		var result foreignHookCheckResult
+		hookcli.RunForeignHookCheck("hermes", strings.NewReader(`{"hook_event_name":"pre_tool_call"}`), &out)
+		var result hookcli.ForeignHookCheckResult
 		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
 			t.Fatal(err)
 		}
@@ -156,7 +157,7 @@ func TestForeignHookCheckBlocksAUserHermesHookAfterDefenseClaws(t *testing.T) {
 			t.Fatalf("untrusted summary: %+v %+v", result, result.HookOutput)
 		}
 		out.Reset()
-		runForeignHookCheck("opencode", strings.NewReader(`{"hook_event_name":"tool.execute.before"}`), &out)
+		hookcli.RunForeignHookCheck("opencode", strings.NewReader(`{"hook_event_name":"tool.execute.before"}`), &out)
 		if strings.Contains(out.String(), "hook_output") {
 			t.Fatalf("only Hermes gets a hook_output: %q", out.String())
 		}

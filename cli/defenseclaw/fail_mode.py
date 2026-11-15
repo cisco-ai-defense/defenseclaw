@@ -1309,8 +1309,8 @@ def _shared_hook_sidecar_drift(cfg: Any) -> str | None:
 def _read_windows_hook_mode(path: Path, connector: str) -> tuple[str | None, bool]:
     """Read hooks/.hookcfg exactly as the native Windows hook does.
 
-    The contract is readHookSidecar's (internal/cli/hook.go), held to by the
-    shared vectors in internal/cli/testdata/windows_hook_sidecar_vectors.json.
+    The contract is ReadHookSidecar's (internal/hookcli/hook.go), held to by the
+    shared vectors in internal/hookcli/testdata/windows_hook_sidecar_vectors.json.
     Returns the mode and whether it came from the legacy (unscoped) value;
     ``None`` names no mode, which the hook runs closed.
     """

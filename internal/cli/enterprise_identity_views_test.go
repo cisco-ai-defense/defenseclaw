@@ -14,7 +14,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // GAP-0414: the Windows administrator views must resolve the command and
@@ -36,7 +38,7 @@ func TestWindowsEnterpriseAdminUserFiltersAreRegistered(t *testing.T) {
 				t.Fatalf("--user = %q, %v", got, err)
 			}
 			parent := cmd.Parent()
-			if parent.Annotations[enterpriseIdentityViewAnnotation] == "" && parent.Annotations[secureClientAbsentAnnotation] == "" {
+			if parent.Annotations[enterpriseIdentityViewAnnotation] == "" && parent.Annotations[hookcli.SecureClientAbsentAnnotation] == "" {
 				t.Fatal("the managed administrator view lacks its Secure Client exclusion")
 			}
 		})
@@ -99,7 +101,7 @@ func TestEnterpriseAgentIdentitiesRejectsUnknownAccount(t *testing.T) {
 	cmd.SetArgs([]string{"--user", "nosuchuser99"})
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "no account named") || !strings.Contains(err.Error(), "--user takes") ||
-		commandExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
+		cliusage.ExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
 		t.Fatalf("agent identities error = %v", err)
 	}
 	cmd = newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[1])
@@ -154,7 +156,7 @@ func TestEnterpriseProfileExplainFailsForUnresolvedAccount(t *testing.T) {
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetErr(&bytes.Buffer{})
 		cmd.SetArgs(args)
-		if err := cmd.Execute(); err == nil || commandExitCode(err) != enterprisestatus.UnixExitFailure ||
+		if err := cmd.Execute(); err == nil || cliusage.ExitCode(err) != enterprisestatus.UnixExitFailure ||
 			!strings.Contains(err.Error(), "no account for this uid") {
 			t.Fatalf("json=%v: unknown uid must fail: %v", asJSON, err)
 		}
@@ -170,7 +172,7 @@ func TestEnterpriseProfileExplainFailsForUnresolvedAccount(t *testing.T) {
 		cmd.SetErr(&bytes.Buffer{})
 		cmd.SetArgs(args)
 		err := cmd.Execute()
-		if err == nil || commandExitCode(err) != enterprisestatus.UnixExitFailure || !strings.Contains(err.Error(), "no account named") {
+		if err == nil || cliusage.ExitCode(err) != enterprisestatus.UnixExitFailure || !strings.Contains(err.Error(), "no account named") {
 			t.Fatalf("json=%v: unresolved account error = %v", asJSON, err)
 		}
 		var printed map[string]any

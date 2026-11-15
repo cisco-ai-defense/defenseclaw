@@ -450,7 +450,7 @@ func recursiveDeletePrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) ||
 			!hasOperation(command, actionfacts.OperationDelete) ||
-			!recursiveForceDeleteFlags(command) {
+			!recursiveForceDeleteFlags(command) && !unrestrictedFindDelete(command) {
 			continue
 		}
 		if commandOwnsPath(
@@ -573,25 +573,17 @@ func cmdRecursiveQuietFlags(argv []string) bool {
 	return recursive && quiet
 }
 
+// deleteTargetIsCriticalScope reports a delete target that is critical scope
+// (criticalDeleteScope): the roots, the system folders, the active home and
+// the children of the system payload folders.
 func deleteTargetIsCriticalScope(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	value := canonicalSemanticPath(semanticPathValue(candidate))
-	if value == "/" || windowsDriveRoot(value) {
-		return true
-	}
-	switch strings.TrimRight(value, "/") {
-	case "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
-		"/mnt", "/opt", "/proc", "/root", "/sbin", "/srv", "/sys", "/usr", "/var",
-		"/applications", "/library", "/system", "/users",
-		"c:/program files", "c:/program files (x86)", "c:/programdata",
-		"c:/users", "c:/windows":
-		return true
-	}
-	home := strings.TrimRight(canonicalSemanticPath(facts.ActiveHome), "/")
-	return home != "" &&
-		strings.TrimRight(value, "/") == home
+	return criticalDeleteScope(
+		canonicalSemanticPath(semanticPathValue(candidate)),
+		criticalScopeHome(facts),
+	)
 }
 
 func windowsDriveRoot(value string) bool {
@@ -2331,18 +2323,7 @@ func forkBombFallbackProof(
 	return false
 }
 
-func canonicalShellForkBomb(value string) bool {
-	var compact strings.Builder
-	for _, character := range strings.TrimSpace(value) {
-		switch character {
-		case ' ', '\t', '\r', '\n':
-			continue
-		default:
-			compact.WriteRune(character)
-		}
-	}
-	return compact.String() == ":(){:|:&};:"
-}
+func canonicalShellForkBomb(value string) bool { return matchesForkBomb(value) }
 
 func exactInterpreterProgram(argv []string, expected string) bool {
 	if len(argv) != 3 || argv[1] != "-e" {

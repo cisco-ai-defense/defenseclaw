@@ -56,6 +56,9 @@ type SemanticRouteOutcome struct {
 	// policy digest, charge keys) for usage records; nil for routers that
 	// are not the routing engine.
 	Route *engine.Decision
+	// recordCaller is the caller key of the decision ring entry the router
+	// recorded (amendRoutingDecision only amends that caller's entry).
+	recordCaller string
 }
 
 // detailedModelRouter is implemented by routers that can classify why a
@@ -157,7 +160,11 @@ type ModelRouterInput struct {
 	ConversationID    string
 	// Text overrides the classifier text taken from Messages (passthrough
 	// APIs that the proxy already reduced to human text).
-	Text      string
+	Text string
+	// Body is the raw request body of the passthrough and route-only
+	// listeners, read again only when routing.context is on (the chat
+	// route reads Messages instead).
+	Body      []byte
 	HasImages bool
 	ToolTurn  bool
 	Caller    engine.Caller

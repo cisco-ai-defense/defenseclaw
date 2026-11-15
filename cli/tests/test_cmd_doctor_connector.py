@@ -695,6 +695,10 @@ class TestCheckConnectorInventory(unittest.TestCase):
         cfg.guardrail.effective_mode.return_value = "observe"
         cfg.guardrail.effective_hook_fail_mode.return_value = "closed"
         cfg.guardrail.effective_rule_pack_dir.return_value = ""
+        # A bare MagicMock judge reads as enabled with an empty hook gate,
+        # which doctor warns about (rel-1-0-10:GAP-0247); these tests are not
+        # about the judge.
+        cfg.guardrail.judge.enabled = False
         cfg.data_dir = ""
         return cfg
 
@@ -3312,6 +3316,19 @@ class TestDetectionStrategyRow(unittest.TestCase):
         self.assertIn("opt in: defenseclaw guardrail judge add codex", row["detail"])
         self.assertNotIn("hook_connectors", row["detail"])
         self.assertIn("Cisco AI Defense", row["detail"])
+
+    def test_hook_gate_empty_warns(self):
+        # rel-1-0-10:GAP-0247: an enabled judge with an empty gate covers no
+        # hook connector (hand-written or pushed config); the row warns.
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=[]), "codex")
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("reviews proxy traffic only", row["detail"])
+        self.assertIn("defenseclaw guardrail judge add all", row["detail"])
+        self.assertNotIn("hook_connectors", row["detail"])
+
+    def test_hook_gate_other_connector_passes(self):
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["hermes"]), "codex")
+        self.assertEqual(row["status"], "pass")
 
     def test_hook_connector_gated_explicit(self):
         row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["codex"]), "codex")

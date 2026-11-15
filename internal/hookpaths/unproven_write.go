@@ -11,8 +11,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/pythoninert"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
@@ -44,7 +47,95 @@ var unprovenReasonTitles = map[string]string{
 // linkCallText is link-making code this package does not evaluate:
 // interpreter, PowerShell and Windows link calls, wider than opaqueLink
 // (Perl and Ruby symlink, a .NET or COM link call).
-var linkCallText = lazyregexp.New(`(?i)symlink|hardlink|junction|\bos\.link\b|\bFile\.link\b|\blink\s*\(|mklink|new-item|createsymboliclink|createhardlink`)
+var linkCallText = lazyregexp.New(`(?i)symlink|hardlink|junction|\bos\.link\b|\bFile\.link\b|\blink\s*\(|mklink|createsymboliclink|createhardlink`)
+
+// newItemText is a New-Item spelling, read by commandNewItemMayMakeLink.
+var newItemText = lazyregexp.New(`(?i)\bnew-item\b`)
+
+// commandNewItemMayMakeLink reports a command whose New-Item calls may make
+// a link: unless the text reads as PowerShell and every New-Item
+// spelling in it is a call whose item type is fixed as a file or a folder
+// (powerShellNewItemMayMakeLink). Any New-Item counted as a possible link
+// before, so on a Windows host a benign script that writes a file and then
+// creates one with New-Item -ItemType File kept its authorized-keys block
+// in the default tier (rel-1-0-10:GAP-0801).
+func commandNewItemMayMakeLink(command string) bool {
+	spellings := len(newItemText.FindAllStringIndex(command, -1))
+	if spellings == 0 {
+		return false
+	}
+	facts := actionfacts.Analyze(actionfacts.Input{Tool: "PowerShell", Command: command, DialectHint: actionfacts.DialectPowerShell})
+	// A partial parse (a dynamic value) still names each call it read; a
+	// New-Item spelling outside a read call (a string, a script block)
+	// leaves the counts unequal.
+	if facts.Parse.Dialect != actionfacts.DialectPowerShell {
+		return true
+	}
+	read := 0
+	for _, call := range facts.Commands {
+		if len(call.Argv) == 0 || !strings.EqualFold(call.Argv[0], "new-item") {
+			continue
+		}
+		// A word is static unless it expands at run time (a variable, a
+		// splat, a subexpression or script block, an escape).
+		static := make([]bool, len(call.Argv)-1)
+		for i, word := range call.Argv[1:] {
+			static[i] = call.ArgvComplete || !strings.ContainsAny(word, "$@(){}`")
+		}
+		if powerShellNewItemMayMakeLink(call.Argv[1:], static) {
+			return true
+		}
+		read++
+	}
+	return read != spellings
+}
+
+// powerShellNewItemMayMakeLink reports a New-Item call (the words after the
+// program, and which are static) that may create a link: an item type that
+// is a link or that this reading cannot fix (a dynamic or unknown item type,
+// a splat or a dynamic parameter name). No item type (a file), or a static File or
+// Directory, makes no link.
+func powerShellNewItemMayMakeLink(args []string, static []bool) bool {
+	itemType := ""
+	for i := 0; i < len(args); i++ {
+		// A splat can carry -ItemType; a dynamic word in a parameter's place
+		// can be one. Any other dynamic word is a value (a path or content).
+		if strings.HasPrefix(args[i], "@") {
+			return true
+		}
+		if i >= len(static) || !static[i] {
+			if strings.HasPrefix(args[i], "-") {
+				return true
+			}
+			continue
+		}
+		word := strings.ToLower(args[i])
+		if !strings.HasPrefix(word, "-") {
+			continue
+		}
+		name, value, inline := strings.Cut(word, ":")
+		if name != "-type" && (len(name) < 3 || !strings.HasPrefix("-itemtype", name)) {
+			continue
+		}
+		if !inline {
+			if i+1 >= len(args) || i+1 >= len(static) || !static[i+1] {
+				return true
+			}
+			i++
+			value = strings.ToLower(args[i])
+		}
+		value = strings.Trim(value, `'"`)
+		if itemType != "" && itemType != value {
+			return true
+		}
+		itemType = value
+	}
+	switch itemType {
+	case "", "file", "directory":
+		return false
+	}
+	return true
+}
 
 // CommandMayMakeLink reports a command that may create a link itself, with a
 // target the static reading cannot place: a link program (also behind a
@@ -61,7 +152,7 @@ func CommandMayMakeLink(command string) bool {
 	if strings.Contains(command, "$(") || strings.Contains(command, "`") || strings.Contains(command, "<(") || strings.Contains(command, ">(") {
 		return true
 	}
-	if opaqueLink.MatchString(command) || linkCallText.MatchString(command) {
+	if opaqueLink.MatchString(command) || linkCallText.MatchString(command) || commandNewItemMayMakeLink(command) {
 		return true
 	}
 	if tactics.RunsProgram(command, linkPrograms...) || tactics.RunsProgram(command, multicallPrograms...) {
@@ -189,14 +280,19 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 		}
 		return ""
 	}
-	reachable := false
+	reachable, reachChecked := false, false
 	called := calledFunctions(file, home)
 	reachText := command
 	if strings.Contains(command, "()") || strings.Contains(command, "function ") {
 		reachText = reachableShellWords(file, called, home)
 	}
+	// The answer depends only on the text, the working directory and the home,
+	// so it is read once for the call, not once for each statement that asks
+	// (a "no" was read again for every command of a long script: 100 lines
+	// cost 446,000 lstat calls, 27 s on a Windows host, rel-1-0-10:GAP-0766).
 	checkReach := func() bool {
-		if !reachable {
+		if !reachChecked {
+			reachChecked = true
 			reachable = samePathName(cwd, home) || samePathName(cwd, filepath.Join(home, ".ssh")) ||
 				protectedReachFromText(reachText, cwd, home)
 		}
@@ -651,9 +747,9 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 			options = false
 			continue
 		}
-		name, value, attached := awkOptionValue(word)
+		name, value, attached := awkprog.OptionValue(word)
 		if name == "" {
-			unknownOption = unknownOption || !slicesContainsString(awkHarmlessFlags, word)
+			unknownOption = unknownOption || !slicesContainsString(awkprog.HarmlessFlags, word)
 			continue
 		}
 		valueFixed := true
@@ -700,34 +796,11 @@ func awkCallUnproven(call *syntax.CallExpr, cwd, home string) bool {
 		return true
 	}
 	for _, program := range programs {
-		if awkUnprovenOutput(program, cwd, home) || awkCommandEffect(program) {
+		if awkUnprovenOutput(program, cwd, home) || awkprog.Parse(program).RunsCommand() {
 			return true
 		}
 	}
 	return dynamicOperand && unknownOption
-}
-
-// Flags that take no value and add no file or command effect. Every other
-// option (gawk -o, -p, -d, -D, -i, -l, ...) leaves the program unknown.
-var awkHarmlessFlags = []string{"--posix", "-P", "--traditional", "--compat", "--sandbox", "-S",
-	"-b", "--characters-as-bytes", "-n", "--non-decimal-data", "-N", "--use-lc-numeric",
-	"-M", "--bignum", "-O", "--optimize", "-s", "--no-optimize", "-r", "--re-interval"}
-
-// awkOptionValue names a value option (f, e, v or F) and its attached value.
-func awkOptionValue(word string) (name, value string, attached bool) {
-	for _, option := range []struct{ short, long, name string }{
-		{"-f", "--file", "f"}, {"-e", "--source", "e"}, {"-v", "--assign", "v"}, {"-F", "--field-separator", "F"},
-	} {
-		switch {
-		case word == option.short || word == option.long:
-			return option.name, "", false
-		case strings.HasPrefix(word, option.long+"="):
-			return option.name, word[len(option.long)+1:], true
-		case strings.HasPrefix(word, option.short) && !strings.HasPrefix(word, "--"):
-			return option.name, word[len(option.short):], true
-		}
-	}
-	return "", "", false
 }
 
 // awkDynamicOptionName names the value option of a computed word whose
@@ -740,7 +813,7 @@ func awkDynamicOptionName(word *syntax.Word) string {
 	if !ok {
 		return ""
 	}
-	name, _, _ := awkOptionValue(literal.Value)
+	name, _, _ := awkprog.OptionValue(literal.Value)
 	return name
 }
 
@@ -756,7 +829,7 @@ func awkDynamicProgram(word *syntax.Word, cwd, home string) (string, bool) {
 		return "", false
 	}
 	output, unsafe, _ := awkOutputProof(text, cwd, home)
-	if output || unsafe || awkCommandEffect(text) {
+	if output || unsafe || awkprog.Parse(text).RunsCommand() {
 		return "", false
 	}
 	return text, true
@@ -799,142 +872,6 @@ func awkRenderedProgram(word *syntax.Word) (string, bool) {
 	return rendered.String(), true
 }
 
-// awkCommandEffect reports awk code that runs a command (a pipe, system(),
-// or a gawk @ directive that loads more code). Strings, regular expression
-// literals and comments are data; || is a logical operator.
-func awkCommandEffect(code string) bool {
-	previous := byte('{')
-	for i := 0; i < len(code); i++ {
-		c := code[i]
-		if awkBlank(code, &i) {
-			continue
-		}
-		if end, found, ok := awkDataEnd(code, i, previous); found {
-			if !ok {
-				return true
-			}
-			if c != '#' {
-				previous = code[end]
-			}
-			i = end
-			continue
-		}
-		switch {
-		case c == '|':
-			if i+1 < len(code) && code[i+1] == '|' {
-				i++
-			} else {
-				return true
-			}
-		case c == '@':
-			return true
-		case awkWordByte(c) && (c < '0' || c > '9'):
-			start := i
-			for i+1 < len(code) && awkWordByte(code[i+1]) {
-				i++
-			}
-			if code[start:i+1] == "system" {
-				return true
-			}
-		}
-		previous = code[i]
-	}
-	return false
-}
-
-func awkWordByte(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
-}
-
-// awkBlank steps over a blank or a backslash-newline continuation. Awk reads
-// both as a blank: neither ends a statement nor opens a literal.
-func awkBlank(code string, i *int) bool {
-	switch code[*i] {
-	case ' ', '\t', '\r':
-		return true
-	case '\\':
-		next := *i + 1
-		if next < len(code) && code[next] == '\r' {
-			next++
-		}
-		if next < len(code) && code[next] == '\n' {
-			*i = next
-			return true
-		}
-	}
-	return false
-}
-
-// awkDataEnd finds the awk data that starts at code[i]: a string, a regular
-// expression literal (a slash where awk cannot divide, after the previous
-// significant byte) or a comment. It returns the index of the data's last
-// byte; a comment ends before its newline, which still ends the statement.
-// found is false when code[i] starts no data. ok is false when the data has
-// no end awk accepts, so the program does not run as this scan reads it.
-func awkDataEnd(code string, i int, previous byte) (end int, found, ok bool) {
-	switch c := code[i]; {
-	case c == '"':
-		for j := i + 1; j < len(code); j++ {
-			switch code[j] {
-			case '\\':
-				j++
-			case '"':
-				return j, true, true
-			}
-		}
-		return len(code) - 1, true, false
-	case c == '#':
-		if newline := strings.IndexByte(code[i:], '\n'); newline >= 0 {
-			return i + newline - 1, true, true
-		}
-		return len(code) - 1, true, true
-	case c == '/' && strings.IndexByte("(,{};!~&|\n?:=}", previous) >= 0:
-		end, ok := awkRegexEnd(code, i)
-		return end, true, ok
-	}
-	return i, false, true
-}
-
-// awkRegexEnd returns the index of the slash that closes the regular
-// expression literal opening at code[start]. A slash inside a bracket
-// expression belongs to it, as gawk and mawk read it; an awk that ends the
-// literal there rejects its unclosed bracket and runs nothing. [:class:],
-// [.symbol.] and [=equivalent=] close with their own pair, not the first ].
-// ok is false for a literal that does not close on its line.
-func awkRegexEnd(code string, start int) (int, bool) {
-	bracket := false
-	for i := start + 1; i < len(code); i++ {
-		c := code[i]
-		switch {
-		case c == '\n':
-			return i, false
-		case c == '\\':
-			if i+1 < len(code) && code[i+1] == '\n' {
-				return i + 1, false
-			}
-			i++
-		case bracket && c == '[' && i+1 < len(code) && strings.IndexByte(":.=", code[i+1]) >= 0:
-			closer := string(code[i+1]) + "]"
-			if end := strings.Index(code[i+2:], closer); end >= 0 && !strings.Contains(code[i+2:i+2+end], "\n") {
-				i += 2 + end + 1
-			}
-		case bracket && c == ']':
-			bracket = false
-		case c == '[':
-			bracket = true
-			if i+1 < len(code) && code[i+1] == '^' {
-				i++
-			}
-			if i+1 < len(code) && code[i+1] == ']' {
-				i++
-			}
-		case !bracket && c == '/':
-			return i, true
-		}
-	}
-	return len(code) - 1, false
-}
-
 // provedOrdinaryInterpreterPrefix reports wrapper words that end with a
 // complete inline interpreter program which is a proved write to a fixed
 // ordinary destination; later dynamic words can only be its argv.
@@ -963,21 +900,24 @@ func awkUnprovenOutput(code, cwd, home string) bool {
 func awkOutputProof(code, cwd, home string) (output, unsafe bool, literals []string) {
 	printing := false
 	previous := byte('{')
+	var slash awkprog.Slash
 	for i := 0; i < len(code); i++ {
 		c := code[i]
-		if awkBlank(code, &i) {
+		if awkprog.Blank(code, &i) {
 			continue
 		}
-		if end, found, ok := awkDataEnd(code, i, previous); found {
+		if end, found, ok := awkprog.DataEnd(code, i, slash.RegexOK()); found {
 			if !ok {
 				return output, true, literals
 			}
 			if c != '#' {
 				previous = code[end]
+				slash.Data()
 			}
 			i = end
 			continue
 		}
+		slash.Feed(code, i)
 		before := previous
 		previous = c
 		if c == '\n' && strings.IndexByte(",&|", before) >= 0 {
@@ -988,9 +928,9 @@ func awkOutputProof(code, cwd, home string) (output, unsafe bool, literals []str
 			printing = false
 			continue
 		}
-		if awkWordByte(c) && (c < '0' || c > '9') {
+		if awkprog.WordByte(c) && (c < '0' || c > '9') {
 			start := i
-			for i+1 < len(code) && awkWordByte(code[i+1]) {
+			for i+1 < len(code) && awkprog.WordByte(code[i+1]) {
 				i++
 			}
 			previous = code[i]
@@ -1533,10 +1473,6 @@ func pythonHomePathAssignment(statement, home string) (string, bool) {
 	return "", false
 }
 
-// PythonInertTextMasked is supplied by guardrail, which imports hookpaths.
-// With no callback, every byte remains potentially executable.
-var PythonInertTextMasked func(code, cwd string) string
-
 func pythonCallSetsImportPath(call *syntax.CallExpr) bool {
 	for _, assignment := range call.Assigns {
 		if assignment.Name == nil {
@@ -1554,9 +1490,10 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 		return "interpreter-path", true
 	}
 	scan := code
-	if maskInert && PythonInertTextMasked != nil &&
-		(language == "python" || strings.HasPrefix(language, "python3")) {
-		if masked := PythonInertTextMasked(code, cwd); len(masked) == len(code) {
+	if maskInert && (language == "python" || strings.HasPrefix(language, "python3")) {
+		// The string text no string of the program can run is blanked
+		// (pythoninert); the hook binary and the gateway mask alike.
+		if masked := pythoninert.InertTextMasked(code, cwd); len(masked) == len(code) {
 			scan = masked
 		}
 	}
@@ -1886,6 +1823,13 @@ func protectedReachPathWith(path string, protected protectedFiles, ssh string, m
 	if !ok {
 		return false
 	}
+	return protectedReachResolved(resolved, protected, ssh)
+}
+
+// protectedReachResolved is protectedReachPathWith for a path already resolved
+// (resolveWriteTarget): a caller that asks about many protected sets resolves
+// each path once, not once for every set.
+func protectedReachResolved(resolved string, protected protectedFiles, ssh string) bool {
 	if protected.has(resolved) || samePathName(resolved, ssh) {
 		return true
 	}

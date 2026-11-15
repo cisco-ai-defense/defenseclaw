@@ -285,19 +285,76 @@ func TestHookJudge_ProviderErrorFailsOpen(t *testing.T) {
 // Hook tool_result content maps to the judge's "completion" direction;
 // with only the injection judge enabled (a prompt-direction judge) no
 // sub-judge applies, so the provider must not be called.
-func TestHookJudge_ToolResultMapsToCompletionDirection(t *testing.T) {
+// A tool's output gets the injection judge with the tool-result prompt
+// (rel-1-0-10 GAP-0171: it used to be judged as a completion, PII only), and
+// the verdict follows the tool-result disposition: HIGH at most, so the
+// default posture alerts and never blocks a call that has already run.
+func TestHookJudge_ToolResultRunsToolResultInjectionJudge(t *testing.T) {
 	mock := injectionHitProvider()
 	a := newHookJudgeAPIServer(t,
 		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}},
 		"judge_first", mock)
 
-	a.inspectMessageContent(t.Context(), &ToolInspectRequest{
+	v := a.inspectMessageContent(t.Context(), &ToolInspectRequest{
 		Tool: "fetch_url", Content: "tool output: hello there",
 		Direction: "tool_result", Connector: "hermes",
 	})
 
-	if len(mock.captured) != 0 {
-		t.Fatalf("injection judge called %d time(s) on completion-direction content", len(mock.captured))
+	if len(mock.captured) != 1 {
+		t.Fatalf("injection judge called %d time(s) on a tool result, want 1", len(mock.captured))
+	}
+	if sys := mock.captured[0].Messages[0].Content; sys != toolResultInjectionSystemPrompt {
+		t.Fatalf("tool result judged with another system prompt: %.80q", sys)
+	}
+	if v.Severity == "CRITICAL" || v.Action == guardrailActionBlock {
+		t.Fatalf("tool-result judge hit = %s %s; want HIGH at most and no block in the default posture", v.Severity, v.Action)
+	}
+}
+
+// A Claude Code PostToolUse hands the tool-result judge (the PII judge, which
+// reads a tool's output only for a tool the pack lists with judge_result,
+// GAP-0171) its tool and call (the hook inspects the output as "message"),
+// and the session's user request from UserPromptSubmit, outside the sample.
+func TestHookJudge_ClaudeCodeToolResultCarriesCallContext(t *testing.T) {
+	mock := injectionHitProvider()
+	a := newHookJudgeAPIServer(t,
+		config.JudgeConfig{Enabled: true, PII: true, PIICompletion: true, HookConnectors: []string{"claudecode"}},
+		"judge_first", mock)
+	a.scannerCfg.Guardrail.Connector = "claudecode"
+	home := t.TempDir()
+	ctx := ContextWithSessionID(t.Context(), "s-trctx")
+	judge := a.hookJudge.Load()
+	judge.rp = &guardrail.RulePack{SensitiveTools: &guardrail.SensitiveToolsConfig{Tools: []guardrail.SensitiveTool{
+		{Name: "mail_search", ResultInspection: true, JudgeResult: true},
+	}}}
+	judge.ObserveSessionPrompt(ctx, "update the parser fixtures")
+	a.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "PostToolUse", SessionID: "s-trctx", CWD: home, ToolName: "mail_search",
+		ToolInput:    map[string]interface{}{"query": "parser fixtures review"},
+		ToolResponse: map[string]interface{}{"content": "{\"case\": 1, \"text\": \"fixture row for the parser tests\"}"},
+	})
+	var system string
+	for _, req := range mock.captured {
+		if strings.Contains(req.Messages[0].Content, "CONTEXT FROM DEFENSECLAW") {
+			system = req.Messages[0].Content
+		}
+	}
+	if system == "" {
+		t.Fatalf("no tool-result judge call with the context block (%d calls)", len(mock.captured))
+	}
+	for _, want := range []string{"\ntool: mail_search\n", "\ncall: arguments ", "parser fixtures review"} {
+		if !strings.Contains(system, want) {
+			t.Errorf("system message lacks %q:\n%s", want, system)
+		}
+	}
+	var user string
+	for _, req := range mock.captured {
+		if strings.Contains(req.Messages[0].Content, "CONTEXT FROM DEFENSECLAW") {
+			user = req.Messages[1].Content
+		}
+	}
+	if !strings.HasPrefix(user, "USER_REQUEST") || !strings.Contains(user, "update the parser fixtures") {
+		t.Errorf("user message lacks the session's request before the sample: %.200q", user)
 	}
 }
 

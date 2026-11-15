@@ -29,6 +29,10 @@ type S7JudgeCall struct {
 	OutTokens  int64    `json:"out_tok,omitempty"`
 	Cancelled  bool     `json:"cancelled,omitempty"`
 	RespLength int      `json:"resp_len,omitempty"`
+	// Signals is the model's answer per category it labelled (category ->
+	// signal strength, "none" left out), so a benign alert can be traced to
+	// the label that raised it (review-only needs_review vs signal).
+	Signals map[string]string `json:"signals,omitempty"`
 }
 
 type s7RecordingProvider struct {
@@ -62,6 +66,15 @@ func (p *s7RecordingProvider) ChatCompletion(ctx context.Context, req *ChatReque
 			if parsed := parseJudgeJSON(raw); parsed != nil {
 				v := toolInjectionToVerdict(parsed)
 				c.Parsed, c.Action, c.Severity, c.Findings = true, v.Action, v.Severity, v.Findings
+				for cat, entry := range toolJudgeCategoryEntries(parsed) {
+					if label, _ := entry["label"].(bool); label {
+						strength, _ := entry["signal_strength"].(string)
+						if c.Signals == nil {
+							c.Signals = map[string]string{}
+						}
+						c.Signals[cat] = strength
+					}
+				}
 			}
 		}
 	}
@@ -108,4 +121,10 @@ func (e *S7Engine) TakeJudgeCalls(sessionID string) []S7JudgeCall {
 	out := e.judgeRec.calls[sessionID]
 	delete(e.judgeRec.calls, sessionID)
 	return out
+}
+
+// S7CallEffectsModeled reports whether the gateway's parser models the effects of a tool call, the property that decides
+// the tool judge's CALL_EFFECTS section and the default-pack review-only mapping (judgeReviewOnlyAudit).
+func S7CallEffectsModeled(toolName, args string) bool {
+	return toolJudgeCallEffects(context.Background(), toolName, args).modeled
 }

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -247,6 +248,17 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 			return nil
 		case "xargs":
 			return nil // A producer must prove the replacement text first.
+		case "awk", "gawk", "mawk", "nawk":
+			operands := directLiteralProgramOperands(words, stmt, cwd, home, allowFileRead)
+			if include != nil {
+				operands = append(operands, knownEntryChangeOperands(words, cwd)...)
+			}
+			// The commands the program starts are judged as the shell body
+			// they are (GAP-0499).
+			if shell, _ := awkCommandShell(words, cwd, allowFileRead); shell != nil {
+				operands = append(operands, literalProgramOperandsKnown(shell, stmt, cwd, home, depth, allowFileRead, environment, include)...)
+			}
+			return operands
 		default:
 			if allowFileRead && strings.HasSuffix(program, ".sh") {
 				if operands, read := literalLocalShellScriptOperands(words[0], cwd, home, depth); read {
@@ -331,7 +343,7 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		}
 		if allowFileRead {
 			for i := 1; i < len(words); i++ {
-				option, value, attached := awkOptionValue(words[i])
+				option, value, attached := awkprog.OptionValue(words[i])
 				if option != "f" {
 					continue
 				}
@@ -484,7 +496,7 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 // scanner. A -f file is separate code; the literal extractor examines only
 // program text present in the tool call.
 func awkInlineProgramText(words []string) []string {
-	programs, _ := awkProgramWords(words)
+	programs, _ := awkprog.ProgramWords(words)
 	return programs
 }
 
@@ -493,49 +505,8 @@ func awkInlineProgramText(words []string) []string {
 // then an input operand, an assignment or another -f program, none of which
 // changes the program text already read (GAP-2172, GAP-0498).
 func awkProgramSupplied(words []string) bool {
-	_, supplied := awkProgramWords(words)
+	_, supplied := awkprog.ProgramWords(words)
 	return supplied
-}
-
-func awkProgramWords(words []string) ([]string, bool) {
-	options, supplied := true, false
-	var programs []string
-	for i := 1; i < len(words); i++ {
-		word := words[i]
-		if options && word == "--" {
-			options = false
-			continue
-		}
-		if options && word != "-" && strings.HasPrefix(word, "-") {
-			name, value, attached := awkOptionValue(word)
-			if name == "" {
-				if slicesContainsString(awkHarmlessFlags, word) {
-					continue
-				}
-				return nil, false
-			}
-			if !attached {
-				i++
-				if i >= len(words) {
-					return nil, false
-				}
-				value = words[i]
-			}
-			if name == "f" || name == "e" {
-				supplied = true
-				if name == "e" {
-					programs = append(programs, value)
-				}
-			}
-			continue
-		}
-		if !supplied {
-			programs = append(programs, word)
-			supplied = true
-		}
-		options = false
-	}
-	return programs, supplied
 }
 
 // AWKReadsProgramFile reports a shell command with an awk call that reads its
@@ -573,7 +544,7 @@ func AWKReadsProgramFile(command string) bool {
 			if word == "--" {
 				break
 			}
-			if name, _, _ := awkOptionValue(word); name == "f" {
+			if name, _, _ := awkprog.OptionValue(word); name == "f" {
 				found = true
 				break
 			}

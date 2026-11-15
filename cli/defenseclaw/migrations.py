@@ -4069,7 +4069,7 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
     """
 
     from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply, plain_error
-    from defenseclaw.upgrade_shim import NEWER_CONFIG_KEYS, SET_ASIDE_FILE
+    from defenseclaw.upgrade_shim import IN_PROCESS_CLASSIFIERS, SET_ASIDE_FILE, config_value, newer_config_key
 
     path = os.path.join(data_dir, SET_ASIDE_FILE)
     try:
@@ -4084,17 +4084,64 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
     if not isinstance(keys, dict):
         ux.warn(f"{path} lists no keys; remove it")
         return
-    known = {key for key, _since in NEWER_CONFIG_KEYS}
+    items = record.get("items")
+    items = items if isinstance(items, dict) else {}
     current = yaml.safe_load(_read_config_text(config_path) or "") or {}
     put: dict[str, object] = {}
+    moved: dict[str, object] = {}
     for key, value in keys.items():
-        if key not in known:
+        entry = newer_config_key(key)
+        if entry is None or config_value(current, key) not in (None, ""):
             continue
-        node: object = current
-        for part in key.split("."):
-            node = node.get(part) if isinstance(node, dict) else None
-        if node in (None, ""):
+        if entry[0] != key and not _set_aside_owner_is_there(current, key, items):
+            # A key inside a list item or a map value (rel-1-0-10:GAP-0644) goes back only onto
+            # the item it came from: same place, same name. Never onto another model.
+            moved[key] = value
+            continue
+        put[key] = value
+    # rel-1-0-10:GAP-0767: decisions set aside whole go back to their place, unless one with
+    # the same name was added on the older release.
+    held_decisions = record.get("decisions") if isinstance(record.get("decisions"), list) else []
+    decisions = config_value(current, "routing.decisions")
+    decisions = list(decisions) if isinstance(decisions, list) else []
+    taken = {d.get("name") for d in decisions if isinstance(d, dict)}
+    returned: list[dict] = []
+    kept_decisions: list[dict] = []
+    for held in sorted((d for d in held_decisions if isinstance(d, dict)), key=lambda d: int(d.get("index") or 0)):
+        value = held.get("value")
+        name = value.get("name") if isinstance(value, dict) else None
+        if not isinstance(name, str):
+            continue
+        if name in taken:
+            # Kept in the record (below): the older release added a decision with this name.
+            kept_decisions.append(held)
+            ux.warn(
+                f"Did not put back the routing decision {name}: config.yaml has one with that name again. "
+                f"It is kept in {path}: {json.dumps(value, sort_keys=True)}"
+            )
+            continue
+        decisions.insert(min(int(held.get("index") or 0), len(decisions)), value)
+        taken.add(name)
+        returned.append(held)
+    # rel-1-0-10:GAP-0769: routing the downgrade switched off for the older release (it could not
+    # run the in-process classifier) is switched back on with that classifier.
+    switched = record.get("switched") if isinstance(record.get("switched"), dict) else {}
+    classifier = put.get("routing.classifier", config_value(current, "routing.classifier"))
+    for key, value in switched.items():
+        if key == "routing.enabled" and classifier in IN_PROCESS_CLASSIFIERS and config_value(current, key) in (None, False):
             put[key] = value
+            ux.ok(f"Routing is on again with the {classifier} classifier, as before the downgrade", indent="    ")
+    if moved:
+        # Kept in the record (below), named by the item they belonged to, never by an index that moved.
+        for key, value in moved.items():
+            owner = next((name for item, name in items.items() if key.startswith(item + ".")), "")
+            where = f"the routing model named {owner}" if owner else "its block"
+            setting = key.rsplit(".", 1)[-1]
+            ux.warn(
+                f"Did not put back {setting} of {where} (set aside by the downgrade as {key}): it is gone or "
+                f"moved since then. Its value is kept in {path}: {json.dumps(value, sort_keys=True)}; add it "
+                f"to {where} in config.yaml, then remove that entry from {path}"
+            )
     if put:
         try:
             apply(
@@ -4108,16 +4155,61 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
             ux.warn(f"Could not put back {', '.join(put)} ({plain_error(exc)}); set it again with: {commands}")
             return
         ux.ok(f"Put back {', '.join(put)}, set aside by the downgrade", indent="    ")
-    later = {key: value for key, value in keys.items() if key not in known}
+    if returned:
+        # Apart from the keys: a decision the older release's edits no longer fit (a model or
+        # signal it names is gone) is refused alone and kept, and never holds the rest back.
+        try:
+            apply(
+                [Change("routing.decisions", decisions)],
+                ACTOR_MIGRATION,
+                f"put back routing decisions after the downgrade to {record.get('for') or 'an older release'}",
+                path=config_path,
+            )
+            ux.ok(
+                f"Put back the routing decisions {', '.join(str(d['value'].get('name')) for d in returned)}",
+                indent="    ",
+            )
+        except Exception as exc:  # noqa: BLE001 - kept in the record, named with its value
+            kept_decisions += returned
+            for held in returned:
+                ux.warn(
+                    f"Could not put back the routing decision {held['value'].get('name')} ({plain_error(exc)}). "
+                    f"It is kept in {path}: {json.dumps(held['value'], sort_keys=True)}"
+                )
+    later = {key: value for key, value in keys.items() if newer_config_key(key) is None or key in moved}
     try:
-        if later:
+        if later or kept_decisions:
             from defenseclaw.upgrade_shim import _write_private_json
 
-            _write_private_json(path, {**record, "keys": later})
+            kept = {key: value for key, value in record.items() if key not in ("items", "decisions", "switched")}
+            kept["keys"] = later
+            later_items = {item: name for item, name in items.items() if any(k.startswith(item + ".") for k in later)}
+            if later_items:
+                kept["items"] = later_items
+            if kept_decisions:
+                kept["decisions"] = kept_decisions
+            _write_private_json(path, kept)
         else:
             os.remove(path)
     except OSError as exc:
         ux.warn(f"Could not update {path} ({exc})")
+
+
+def _set_aside_owner_is_there(current: object, key: str, items: dict) -> bool:
+    """A set-aside key inside a list item or a map value can go back: its parent is still a
+    mapping, and every list item on the way has the name it had at the downgrade."""
+
+    from defenseclaw.upgrade_shim import config_value
+
+    parent = key.rsplit(".", 1)[0]
+    if not isinstance(config_value(current, parent), dict):
+        return False
+    for item, name in items.items():
+        if key.startswith(item + "."):
+            node = config_value(current, item)
+            if not isinstance(node, dict) or node.get("name") != name:
+                return False
+    return True
 
 
 def _seal_windows_hook_credentials(data_dir: str) -> None:

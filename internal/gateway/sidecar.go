@@ -696,6 +696,7 @@ func (s *Sidecar) publishGeneration(g *Generation) {
 	}
 	publishGeneration(g)
 	s.generation.Store(g)
+	noteCascade(s.logger, g)
 	// Sandbox and security-action records need the applied policy stamp even
 	// when the install watcher is disabled or has no directories to watch.
 	audit.SetPolicyStamp(livePolicyStampV8)
@@ -1174,6 +1175,8 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 	}
 	router := newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	router.SetJudgeSource(s.sharedJudge)
+	router.SetAuditLogger(s.logger)
 	s.modelRouter = router
 	activeEngineRouter.Store(router)
 
@@ -2110,8 +2113,30 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *gen
 	fmt.Fprintf(os.Stderr, "[sidecar] LLM judge enabled (%s) (model=%s)\n", features, judgeLLM.Model)
 	if hooks := cfg.Guardrail.Judge.HookConnectors; len(hooks) > 0 {
 		fmt.Fprintf(os.Stderr, "[sidecar] LLM judge hook lane enabled for: %s\n", strings.Join(hooks, ", "))
+	} else if unjudged := hookConnectorsOutsideJudge(cfg); len(unjudged) > 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar] LLM judge hook lane off (guardrail.judge.hook_connectors is empty): the rules alone decide for %s; to judge them: defenseclaw guardrail judge add all\n", strings.Join(unjudged, ", "))
 	}
 	return judge, "", nil
+}
+
+// hookConnectorsOutsideJudge lists the active hook connectors the hook-lane
+// judge does not cover. An enabled judge with an empty
+// guardrail.judge.hook_connectors judges proxy traffic only; setup, the TUI
+// and "guardrail judge add" write the list, a hand-written or pushed config
+// may not, so the gateway says which connectors the rules decide alone.
+func hookConnectorsOutsideJudge(cfg *config.Config) []string {
+	if cfg == nil || !cfg.Guardrail.Judge.Enabled {
+		return nil
+	}
+	_, enabled, _ := cfg.GuardrailBootSet()
+	var out []string
+	for _, name := range enabled {
+		if connector.IsProxyConnector(name) || cfg.Guardrail.Judge.HookConnectorEnabled(name) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 // buildInitialSidecarJudge prepares the construction-time judge while the
@@ -2187,6 +2212,14 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if oldCfg == nil || newCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
 		!config.CurrentSchemaVersion(newCfg.ConfigVersion) {
 		return fmt.Errorf("config reload: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
+	}
+	// An invalid top-level guardrail.cascade is refused: the running
+	// generation (and its cascade) stays, instead of publishing the
+	// candidate's fallback. policy.last_reload_error and doctor name it.
+	if inv := newCfg.Guardrail.Cascade.Invalid(); inv != nil {
+		err := fmt.Errorf("config reload refused: guardrail.cascade is invalid: %s; the running configuration stays until it is fixed (defenseclaw guardrail cascade explain)", inv.Error)
+		recordGenerationBuildError(err)
+		return err
 	}
 	v8PlanChanged := false
 	if strings.TrimSpace(source.sourceName) == "" || len(source.raw) == 0 ||
@@ -2363,6 +2396,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		if err != nil {
 			return err
 		}
+		nextJudge.inheritToolJudgeContext(s.sharedJudge())
 	}
 
 	if judgeChanged {
@@ -2373,6 +2407,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// The cascade-2 judge (decision model, no LLM) follows the same inputs.
 	if judgeChanged || previousGen == nil {
 		nextGen.decisionJudge = newDecisionOnlyJudge(&next)
+		if previousGen != nil {
+			nextGen.decisionJudge.inheritToolJudgeContext(previousGen.decisionJudge)
+		}
 	} else {
 		nextGen.decisionJudge = previousGen.decisionJudge
 	}
@@ -7036,6 +7073,22 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					}
 					continue
 				}
+				if connector.AgentExecutableChangedBeforeChange(err) {
+					// The agent updated in place (npm i -g, a self-update), so its
+					// executable no longer matches the evidence setup sealed. The
+					// new bytes are not trusted until setup admits them, and
+					// neither a rollback nor a DefenseClaw upgrade can cure it:
+					// failing the start took the gateway down for every connector
+					// of the account (GAP-0249). Same scope as the custody refusal:
+					// only this connector is not started, its registration stays
+					// for the setup the refusal names.
+					fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s not started, its agent executable changed since setup (other connectors unaffected): %v\n", registration.conn.Name(), err)
+					transaction.noteNotStarted(registration.conn.Name(), err)
+					if strings.TrimSpace(previousLock.Connector) != "" {
+						transaction.keptRegistrations = append(transaction.keptRegistrations, registration.conn.Name())
+					}
+					continue
+				}
 				// A refresh is an upgrade of an existing guard. Teardown restores
 				// the pre-install, possibly hookless settings, not that guard.
 				// Restore its prior posture with the rest of this transaction and
@@ -9231,6 +9284,10 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	if router, ok := s.modelRouter.(*engineRouter); ok && router != nil {
 		ro := newRouteOnlyServer(router, s.currentConfig, s.currentConfig().DataDir)
+		ro.metrics = func() hookLifecycleMetricV8Runtime {
+			r, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+			return r
+		}
 		api.SetRouteOnly(ro)
 		api.onRouteKeyRotated = func() { s.rerenderRouteOnly(s.currentConfig()) }
 		go s.runRouteOnlyReadiness(ctx, ro)

@@ -171,6 +171,7 @@ jobs:
             -e '^internal/audit/' \
             -e '^internal/observability/redaction/' \
             -e '^internal/cli/' \
+            -e '^internal/hookcli/' \
             -e '^cli/defenseclaw/inventory/' \
             -e '^cli/defenseclaw/commands/cmd_setup\.py$' \
             -e '^cli/defenseclaw/commands/cmd_init\.py$' \

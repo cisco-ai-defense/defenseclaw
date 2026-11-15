@@ -288,15 +288,17 @@ HIGH findings are eligible for confirmation. CRITICAL still blocks. See [which a
 <Tab value="Judge">
 
 ```bash
-defenseclaw keys set DEFENSECLAW_LLM_KEY
+defenseclaw keys set DEFENSECLAW_LLM_KEY   # a Bedrock API key
 
 defenseclaw setup guardrail --non-interactive --connector claudecode --mode action \
   --detection-strategy regex_judge \
-  --judge-model anthropic/claude-sonnet-4-20250514 \
+  --judge-provider openai-compatible \
+  --judge-model google.gemma-4-31b \
+  --judge-api-base https://bedrock-mantle.us-east-1.api.aws/openai/v1 \
   --judge-api-key-env DEFENSECLAW_LLM_KEY --restart
 ```
 
-Regex runs first and the judge adjudicates what regex flags. `--detection-strategy judge_first` flips the order. To cut judge calls on tool calls, put a [decision model](/docs/guardrail/decision-model) in front of the judge. Hook connectors are judged only in action mode; `--judge-hook-connectors` chooses which. A judge verdict goes through `block_at` and `alert_at` like a rule finding.
+This is the [recommended judge](#recommended-judge-model-gemma-4-31b-on-bedrock), Gemma 4 31B on Amazon Bedrock. Any other model works the same way: pass its `--judge-provider` and `--judge-model`. Regex runs first and the judge adjudicates what regex flags. `--detection-strategy judge_first` flips the order. To cut judge calls on tool calls, put a [decision model](/docs/guardrail/decision-model) in front of the judge. Hook connectors are judged only in action mode; `--judge-hook-connectors` chooses which. A judge verdict goes through `block_at` and `alert_at` like a rule finding.
 
 </Tab>
 
@@ -337,6 +339,68 @@ Use `--judge-provider vertex_ai` with the `--judge-vertex-*` flags, or `--judge-
 
 </Tabs>
 
+## Recommended judge model: Gemma 4 31B on Bedrock
+
+The judge is opt-in: a new install runs the rules only (`detection_strategy:
+regex_only`), and nothing calls a model until you turn the judge on. When you
+do, use Gemma 4 31B (`google.gemma-4-31b`) on Amazon Bedrock. DefenseClaw
+benchmarks the judge and tunes its prompt against this model.
+
+On the S7 judge benchmark (default pack, `regex_judge`, two fresh rounds),
+rules plus Gemma 4 31B blocked no benign call on two public agent-trace
+corpora (1,200 benign calls) and alerted on 8 and 11 of the 694 benign calls
+of one of them (the rules alone: 15 and 16). On a Windows shell corpus, 7 and
+9 of 2,459 benign calls were blocked (about 0.3%). Alert recall on the other
+public corpus rose from 0.29 to 0.64. The
+[LLM judge benchmark](/docs/guardrail/llm-judge-benchmark) has more numbers.
+
+The judge's own stages are cascade lanes (`guardrail.cascade.lanes`, see
+[Configure the cascade](/docs/guardrail/configure-cascade)). They act only
+while the judge is on for the connector, and each ships `on`:
+
+| Lane | `on` (shipped) | `off` |
+|---|---|---|
+| `judge_read_skip` | With `regex_judge`, a call no rule flagged that the parser proves only reads is not sent to the judge. | Every call the rules leave open goes to the judge. |
+| `judge_unmodeled_alert` | In the default pack, a lone `needs_review` finding on a call the parser does not model (MCP and other tools) alerts. | It is recorded without an alert, like a modeled call. |
+| `judge_tool_result_context` | The judge that reads a tool's output also gets the tool, what its call did (arguments redacted) and your request for the turn. | It judges the output alone. |
+
+`shadow` acts as `off` for these lanes: they change which question the judge
+is asked and have no verdict of their own to record.
+
+Gemma 4 runs on the `bedrock-mantle` endpoint and only under the `/openai/v1`
+path. The `/v1` path refuses it with "isn't supported on this route", and
+Converse and InvokeModel do not serve it. It is In-Region only (us-east-1,
+us-east-2, us-west-2, eu-central-1). Put the path in `base_url`. The key is a
+Bedrock API key:
+
+```yaml
+# ~/.defenseclaw/config.yaml
+guardrail:
+  detection_strategy: regex_judge        # rules first; the judge reviews what they leave open
+  judge:
+    enabled: true
+    tool_injection: true
+    hook_connectors: ["*"]              # every hook connector; or name them, e.g. [claudecode, codex]
+    llm:
+      provider: openai-compatible
+      model: google.gemma-4-31b
+      base_url: https://bedrock-mantle.us-east-1.api.aws/openai/v1
+      api_key_env: DEFENSECLAW_LLM_KEY
+```
+
+Keep `hook_connectors`: without it the judge reviews no hook connector's tool
+calls, even with `enabled: true`. An empty or missing list means the judge
+reviews proxy traffic only; that is also how the CLI saves
+`defenseclaw guardrail judge remove all`, so it stays off rather than
+meaning every connector. `defenseclaw setup guardrail` and
+`defenseclaw guardrail judge add all --enable` write `["*"]` when they turn the
+judge on, and `defenseclaw init` writes the connectors you pick. For a config you write by hand or push to machines, set the list
+yourself: when it is empty, the gateway log names the hook connectors the rules
+decide alone (`LLM judge hook lane off`) and `defenseclaw doctor` warns on the
+Detection row. Run `defenseclaw config validate`, then restart the gateway. To
+turn the judge off again, set `guardrail.detection_strategy: regex_only` (or
+`guardrail.judge.enabled: false`).
+
 ## A judge on a local model
 
 ### Lemonade and Gemma 4
@@ -349,6 +413,7 @@ classification. Point `base_url` at your Lemonade server:
 guardrail:
   judge:
     enabled: true
+    hook_connectors: ["*"]              # judge every hook connector, not only proxy traffic
     llm:
       provider: openai-compatible
       model: gemma-4
@@ -367,31 +432,14 @@ Use `defenseclaw config get guardrail.judge.extra_body` to inspect it and
 `defenseclaw config validate` to check the saved configuration. It affects
 only the judge's OpenAI-compatible chat requests.
 
-Open models on Amazon Bedrock run on the `bedrock-mantle` endpoint, and the
-path depends on the model: Gemma 4 (`google.gemma-4-31b`) is served only under
-`/openai/v1`, while the gpt-oss models (for example
-`openai.gpt-oss-safeguard-20b`) and Gemma 3 are served under `/v1`. Each model
-refuses the other path with "isn't supported on this route". Put the model's
-path in `base_url`; the key is a Bedrock API key:
-
-```yaml
-guardrail:
-  judge:
-    enabled: true
-    llm:
-      provider: openai-compatible
-      model: google.gemma-4-31b
-      base_url: https://bedrock-mantle.us-east-1.api.aws/openai/v1
-      api_key_env: DEFENSECLAW_LLM_KEY
-```
-
-Gemma 4 is In-Region only (us-east-1, us-east-2, us-west-2, eu-central-1)
-and is not available through Converse or InvokeModel.
+For Gemma 4 on Amazon Bedrock instead of a local server, see
+[Recommended judge model](#recommended-judge-model-gemma-4-31b-on-bedrock).
 
 A judge on a local model (Ollama, vLLM or LM Studio on your own machine)
 answers one call at a time, so judge calls queue behind each other. With the
 judge on, a prompt can start up to three judge calls (prompt injection,
-exfiltration and PII), each tool result and reply can start a PII call, and
+exfiltration and PII), each tool result an injection call ([Tool
+results](/docs/guardrail/tool-results)), each reply a PII call, and
 the agent's next tool call waits behind them. These settings keep the
 tool-call judge and stop the other calls:
 
@@ -423,12 +471,53 @@ What you get and what you give up:
   judge's second look at them.
 - **The tool judge still knows the task.** The prompt you type is kept as the
   session's user intent for the tool judge whatever the prompt strategy is.
+  See [Which connectors give the judge your task](#which-connectors-give-the-judge-your-task).
 - **Slow answers keep the rule verdict.** A judge call that does not answer
   within `guardrail.judge.hook_timeout` (8 seconds when unset; 3.4 seconds
   for a tool call) is dropped,
   and the hook keeps the rule verdict, so a slow model never blocks by
   mistake. Raising the timeout gives prompt and tool-output judges more
   time.
+
+### Which connectors give the judge your task
+
+The tool judge and the decision model weigh each tool call against the latest
+prompt you typed in the session (the session user intent, at most 2 KB: the
+start and the end of a longer prompt). The intent is untrusted text: it is
+data for the judge, never an instruction, and it never excuses a call the
+rules block.
+
+- **Kept:** Claude Code, Claude Cowork, Codex, GitHub Copilot CLI, Cursor (IDE),
+  Amp, Kiro (IDE) and Devin.
+- **Kept, but names no destination:** Hermes. Its prompt can come from a remote
+  chat party, so no host or address in it counts as one you named, and every send
+  from a Hermes session raises the finding described below.
+- **Not kept, so the judge sees the tool calls without your task:** OpenCode,
+  Cursor Agent CLI, Kiro CLI 2.x and Antigravity, whose hooks send no prompt
+  text, and OpenClaw: its chat stream records your prompt, but the tool-call
+  check looks the task up under a different session key and finds none.
+- A new prompt starts a new turn. A prompt DefenseClaw blocks, and an empty
+  prompt, leave the turn with no task. A configuration change keeps the tasks
+  of the sessions that are open.
+- **A send to a place no prompt named.** When the judge is on, DefenseClaw
+  checks every tool call that sends data (a post or upload tool, a mail tool,
+  `curl` with a body, `scp`, `rsync`, `mail`, a cloud copy, a backup or archive
+  to another place) against the places your prompts in the session named. A send
+  to a host or mailbox that none of them named gets the finding
+  `INTENT-SCOPE-SEND`. In this release the check only records: it writes a judge
+  event of kind `tool_intent_scope_shadow` and a log line, and the verdict of the
+  call is exactly what it is without the check. Set
+  `guardrail.judge.intent_scope` to `off` to stop the check; `shadow` is the
+  default. The check reads the commands that run, from the parsed shell
+  command, never from words in quoted text, a commit message or a here-document;
+  a command that may send and cannot be read, and a call too large to read in
+  full, are recorded as outside the task. Naming a host covers that host and
+  its sub-domains, not its parent domain; the hosts of the git remotes of your
+  working folder count as named. Naming a mailbox covers that address only; a
+  person you name without an address counts when you also name the domain of
+  the mailbox. A destination you describe but do not spell out ("the management
+  team") is not named. Only text you typed counts: a prompt DefenseClaw blocks,
+  a tool result and a remote chat message name nothing.
 
 ### Let tool calls go first
 

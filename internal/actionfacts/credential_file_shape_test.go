@@ -3,7 +3,10 @@
 
 package actionfacts
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMatchCredentialFileShapeTable(t *testing.T) {
 	tests := []struct {
@@ -47,6 +50,19 @@ func TestMatchCredentialFileShapeTable(t *testing.T) {
 		{path: "~/.config/gcloud/application_default_credentials.json", class: CredentialFileCloudCLI, relative: ".config/gcloud/application_default_credentials.json"},
 		{path: `C:\Users\alice\AppData\Roaming\GitHub CLI\hosts.yml`, class: CredentialFileCloudCLI, relative: "appdata/roaming/github cli/hosts.yml"},
 		{path: "~/.azure/msal_token_cache.json", class: CredentialFileCloudCLI, relative: ".azure/msal_token_cache.json"},
+		// The credential stores of the PATH-CRED-STORE rules (GAP-0550).
+		{path: "~/.vault-token", class: CredentialFileCredentialStore, relative: ".vault-token"},
+		{path: "/home/agent/.my.cnf", class: CredentialFileCredentialStore, relative: ".my.cnf"},
+		{path: "/home/agent/.azure/accessTokens.json", class: CredentialFileCredentialStore, relative: ".azure/accesstokens.json"},
+		{path: `C:\Users\alice\.azure\accessTokens.json`, class: CredentialFileCredentialStore, relative: ".azure/accesstokens.json"},
+		{path: `C:\Users\alice\.azure\credentials`, class: CredentialFileCredentialStore, relative: ".azure/credentials"},
+		{path: "/etc/gshadow", class: CredentialFileCredentialStore, relative: "etc/gshadow"},
+		{path: "/etc/security/opasswd", class: CredentialFileCredentialStore, relative: "etc/security/opasswd"},
+		{path: "/etc/aws/credentials", class: CredentialFileCredentialStore, relative: "etc/aws/credentials"},
+		{path: "/var/lib/jenkins/credentials.xml", class: CredentialFileCredentialStore, relative: "var/lib/jenkins/credentials.xml"},
+		{path: "/var/lib/jenkins/secrets/master.key", class: CredentialFileCredentialStore, relative: "var/lib/jenkins/secrets/master.key"},
+		{path: "/etc/krb5.keytab", class: CredentialFileCredentialStore, relative: "etc/krb5.keytab"},
+		{path: "/etc/service/http.keytab", class: CredentialFileCredentialStore, relative: "http.keytab"},
 		// Private key files known only by name.
 		{path: "/work/p/certs/server.key", class: CredentialFilePrivateKey, relative: "server.key"},
 		{path: "/work/p/tls/server-key.pem", class: CredentialFilePrivateKey, relative: "server-key.pem"},
@@ -83,6 +99,10 @@ func TestMatchCredentialFileShapeExclusions(t *testing.T) {
 		"/work/p/aws/credentials", "/work/p/credentials", "/work/p/kube/config",
 		"/work/p/id_card.go", "/work/p/.ssh/known_hosts", "/work/p/.ssh/config",
 		"/work/p/hosts.yml", "/work/p/.key", "/work/p/.pem", "", "/",
+		// Near misses of the credential stores.
+		"/work/p/vault-token", "/work/p/.vault-token.example", "/work/p/.my.cnf.sample",
+		"/work/p/.azure/config", "/work/p/azure/credentials", "/work/p/.keytab",
+		"/var/lib/jenkins/secrets", "/var/lib/jenkins/jobs/x/config.xml", "/etc/hosts",
 	} {
 		if got, ok := MatchCredentialFileShape(path); ok {
 			t.Errorf("MatchCredentialFileShape(%q) = %+v, want no credentials-file shape", path, got)
@@ -106,6 +126,29 @@ func TestCredentialFileUploadClassReadsTheTable(t *testing.T) {
 	} {
 		if got := credentialFileUploadClass(path); got != want {
 			t.Errorf("credentialFileUploadClass(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// TestCredentialFileShapeProbePathsCoverEveryRow keeps the probe list the
+// table tests walk in step with the table: one probe per row, and each probe
+// is matched by the table, in every spelling (rel-1-0-10:GAP-0550).
+func TestCredentialFileShapeProbePathsCoverEveryRow(t *testing.T) {
+	probes := CredentialFileShapeProbePaths()
+	if len(probes) != len(credentialFileShapes) {
+		t.Fatalf("%d probe paths for %d table rows", len(probes), len(credentialFileShapes))
+	}
+	for _, probe := range probes {
+		for _, spelling := range []string{
+			probe,
+			"/home/agent/" + probe,
+			"/work/project/" + probe,
+			"/" + probe,
+			`C:\Users\agent\` + strings.ReplaceAll(probe, "/", `\`),
+		} {
+			if _, ok := MatchCredentialFileShape(spelling); !ok {
+				t.Errorf("probe %q: MatchCredentialFileShape(%q) = no credentials-file shape", probe, spelling)
+			}
 		}
 	}
 }

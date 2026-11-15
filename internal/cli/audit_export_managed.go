@@ -9,8 +9,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -18,7 +20,7 @@ import (
 // enterprise policy commands); the platform files set the production values.
 var (
 	auditExportManagedHost = func() bool {
-		_, ok := managedHostWindowsStandalone()
+		_, ok := hookcli.ManagedHostWindowsStandalone()
 		return ok
 	}
 	auditExportCallerIsAdministrator = platformAuditExportCallerIsAdministrator
@@ -57,7 +59,7 @@ func pinManagedAdministratorEnvironment(command string, refusal func() string) e
 		return nil
 	}
 	if !auditExportCallerIsAdministrator() {
-		return withExitCode(&managedViewRefusal{code: "elevation_required", message: refusal()}, enterprisestatus.WindowsExitAccessDenied)
+		return cliusage.WithExitCode(&managedViewRefusal{code: "elevation_required", message: refusal()}, enterprisestatus.WindowsExitAccessDenied)
 	}
 	layout, err := auditExportManagedLayout()
 	if err != nil {

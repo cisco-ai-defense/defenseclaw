@@ -143,6 +143,9 @@ func runSubreaperHelper() int {
 	child := exec.Command(spec.Path, spec.Args...)
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
 	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// The helper runs in init, on the main thread, which starts the scanner:
+	// the scanner inherits the nicer value (lowerScannerPriority, GAP-0251).
+	lowerScannerPriority()
 	if err := child.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "scanner: start contained command:", err)
 		return 1

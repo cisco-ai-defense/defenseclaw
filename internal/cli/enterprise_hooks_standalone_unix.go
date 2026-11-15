@@ -34,10 +34,12 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -216,8 +218,13 @@ func enterpriseHookUnixBindingsPath() string {
 }
 
 func loadEnterpriseHookUnixBindings() enterpriseHookUnixBindings {
+	return loadEnterpriseHookUnixBindingsFile(enterpriseHookUnixBindingsPath())
+}
+
+// loadEnterpriseHookUnixBindingsFile reads the bindings at path; a missing,
+// oversized or unreadable file is no bindings.
+func loadEnterpriseHookUnixBindingsFile(path string) enterpriseHookUnixBindings {
 	empty := enterpriseHookUnixBindings{Version: enterpriseHookUnixBindingsVersion, Bindings: map[string]enterpriseHookUnixBinding{}}
-	path := enterpriseHookUnixBindingsPath()
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > enterpriseHookUnixBindingsMaxBytes {
 		return empty
@@ -258,6 +265,78 @@ func (b enterpriseHookUnixBindings) lookup(key string, uid int, home string, ino
 	match = binding.UID == uid && filepath.Clean(binding.Home) == filepath.Clean(home) &&
 		(binding.HomeInode == 0 || inode == 0 || binding.HomeInode == inode)
 	return binding, true, match
+}
+
+// restoreDepartedEnterpriseHookMachineRoutes takes back, as each account,
+// the route-only render of a route-capable connector (Claude Code, Codex)
+// whose row left this pass (routing turned off, the connector left
+// route_only.connectors or the descriptor, the account left the
+// enrollment), rel-1-0-10 GAP-0568. It does not depend on the descriptor
+// (unreadable mid-upgrade) and is a no-op where nothing was rendered. Without it the
+// agent kept a base URL to a route the gateway no longer serves. The
+// restore touches no file when nothing was rendered; a failed one keeps
+// the binding, so the next pass tries again.
+func restoreDepartedEnterpriseHookMachineRoutes(ctx context.Context, previous, next enterpriseHookUnixBindings, resolver unixidentity.Resolver) {
+	keys := make([]string, 0, len(previous.Bindings))
+	for key := range previous.Bindings {
+		if _, kept := next.Bindings[key]; !kept {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+	jobs := map[int]*enterpriseHookWorkerJob{}
+	byIndex := map[int]string{}
+	for _, key := range keys {
+		parts := strings.SplitN(key, "\x00", 3)
+		if len(parts) != 3 || (parts[1] != "user" && parts[1] != "home") {
+			continue
+		}
+		if !slices.Contains(config.RouteOnlyCapableConnectors, parts[0]) {
+			continue
+		}
+		binding := previous.Bindings[key]
+		uid := binding.UID
+		target := enterprisehooks.ManifestTarget{Connector: parts[0], UID: &uid, UserHome: binding.Home}
+		if parts[1] == "user" {
+			target.User = parts[2]
+		}
+		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
+		if errors.Is(err, errEnterpriseHookTargetNotFound) || (err == nil && pendingReason == "" && (account.UID != binding.UID || account.UID <= 0)) {
+			// The account is gone or the name is another account now:
+			// nothing of this binding's is left to take back.
+			continue
+		}
+		if err != nil || pendingReason != "" {
+			// Not resolvable now (directory down, home pending): keep the
+			// binding, so a later pass takes the render back.
+			next.Bindings[key] = binding
+			continue
+		}
+		index := len(byIndex)
+		byIndex[index] = key
+		job, ok := jobs[account.UID]
+		if !ok {
+			job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true}}
+			jobs[account.UID] = job
+		}
+		job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
+			Index: index, Mode: enterpriseHookWorkerModeRestoreMachineRoute,
+			Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
+				ConnectorName: parts[0], UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
+			}),
+		})
+	}
+	if len(jobs) == 0 {
+		return
+	}
+	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobs)
+	for index, key := range byIndex {
+		if outcome, ok := outcomes[index]; ok && outcome.ok {
+			continue
+		}
+		next.Bindings[key] = previous.Bindings[key]
+		fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: %s: the route-only render was not taken back yet; retrying next pass\n", strings.ReplaceAll(key, "\x00", " "))
+	}
 }
 
 // resolveEnterpriseHookStandaloneAccount resolves a manifest row to the
@@ -549,6 +628,9 @@ type enterpriseHookStandaloneOutcome struct {
 	result          *enterprisehooks.InstallResult
 	// agentConfig is the worker's connector.AgentConfigStatus code.
 	agentConfig string
+	// routeDrift is why the worker could not apply the account's route-only
+	// render of a machine-policy row (GAP-0568); the row itself stands.
+	routeDrift string
 }
 
 // dispatchEnterpriseHookStandaloneJobs runs the worker pool and maps every
@@ -601,7 +683,7 @@ func dispatchEnterpriseHookStandaloneJobs(
 					continue
 				}
 				restored, changes := knownEnterpriseHookElements(result.RestoredElements, result.RestoredChanges)
-				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, restored: restored, restoredChanges: changes, result: result.Result, agentConfig: result.AgentConfig}
+				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, restored: restored, restoredChanges: changes, result: result.Result, agentConfig: result.AgentConfig, routeDrift: result.RouteDrift}
 			}
 		}
 	}
@@ -873,10 +955,14 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 						watchEnterpriseHookManagedCodexConfig(account.Home, watchDirs, sharedFiles)
 						codexFeatureRepair[account.UID] = true
 					}
+					// The account's own route render rides on the same job
+					// (nil takes an earlier render back), rel-1-0-10 GAP-0568.
 					job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: index,
-						Mode: mode,
+						Mode: mode, MachineRoute: slices.Contains(config.RouteOnlyCapableConnectors, strings.ToLower(row.Connector)),
 						Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
 							ConnectorName: row.Connector, UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
+							DataDir:   strings.TrimSpace(target.DataDir),
+							RouteOnly: enterpriseHookRouteOnly(row.Connector, account.User, strconv.Itoa(account.UID), apiAddr),
 						})})
 					machineWorkerRows = append(machineWorkerRows, index)
 				} else {
@@ -1114,6 +1200,12 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		default:
 			row.Error = outcome.err
 		}
+		if ok && outcome.routeDrift != "" {
+			// The enrollment row stands (a failed row would refuse the
+			// account's tool calls under unenrolled_users: deny); the route
+			// render is repaired on the next pass.
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: %s: route-only render not applied (route_config_drift): %s\n", enterpriseHookTargetLabel(row), outcome.routeDrift)
+		}
 		rows[index] = row
 	}
 	repairs := 0
@@ -1180,6 +1272,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		}
 	}
 
+	restoreDepartedEnterpriseHookMachineRoutes(ctx, bindings, next, resolver)
 	bindingsErr := saveEnterpriseHookUnixBindings(next)
 	writeEnterpriseHookGuardianRepairs(cfg.DataDir, repaired)
 	writeEnterpriseHookGuardianNotices(enterpriseHookWorkerLog, cfg.DataDir, notices)
@@ -1713,7 +1806,7 @@ var enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} {
 // DefenseClaw entries of connector machine policy are in place. Replaced
 // in tests.
 var enterpriseHookStandaloneMachinePolicyCovered = func(connectorName string) (bool, error) {
-	opts, ok := standaloneMachinePolicyOptions(runtime.GOOS)
+	opts, ok := hookcli.StandaloneMachinePolicyOptions(runtime.GOOS)
 	if !ok {
 		return false, errors.New("no standalone layout for this platform")
 	}

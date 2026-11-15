@@ -39,8 +39,10 @@ type routeEpochState struct {
 	// at some point under this epoch, and the pairs enrolled now.
 	seen    map[string]bool
 	present map[string]bool
-	// dirty marks an epoch the last write could not publish.
-	dirty bool
+	// dirty marks an epoch the last write could not publish; lastErr is
+	// that write's error (no secret: a path and an errno).
+	dirty   bool
+	lastErr string
 }
 
 func newRouteEpochState(dataDir func() string) *routeEpochState {
@@ -178,11 +180,34 @@ func (s *routeEpochState) publishLocked() error {
 		// The in-memory epoch stays the authority: the old credentials stay
 		// refused, and the guardian renders once a later write lands.
 		s.dirty = true
+		s.lastErr = err.Error()
 		fmt.Fprintf(os.Stderr, "[sidecar-api] route epoch not published (route-only callers are refused until it is): %v\n", err)
 		return err
 	}
-	s.dirty = false
+	s.dirty, s.lastErr = false, ""
 	return nil
+}
+
+// unpublished is why the guardian cannot derive route credentials from the
+// published epoch ("" when it can): none started yet, or the last write
+// failed. The gateway accepts route credentials of its in-memory epoch, so
+// without this /health said ready while no account could be rendered
+// (rel-1-0-10:GAP-0800).
+func (s *routeEpochState) unpublished() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.epoch == nil:
+		return "the gateway has not started its route epoch yet"
+	case s.dirty && s.lastErr != "":
+		return "the gateway could not publish its route epoch: " + truncateUTF8(s.lastErr, 200)
+	case s.dirty:
+		return "the gateway has not published its route epoch yet"
+	}
+	return ""
 }
 
 // startRouteEpoch runs when this gateway owns its API port. A managed
