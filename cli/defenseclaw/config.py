@@ -1807,6 +1807,12 @@ class DecisionModelConfig:
     block_risk_score: float = 0.0
     # A call the rules flagged never gets a confident block (it escalates); None = true.
     escalate_rule_flagged: bool | None = None
+    # Session history the model sees: last N turns, calls only (None = 25, 0 = none, at most 100).
+    history_turns: int | None = None
+    # Add each tool's result (cut to 1 KB) to that history. Off by default.
+    history_tool_results: bool = False
+    # Flow questions that turn an unauthorized or off-task confident allow into an escalation; None = true.
+    flow_guard: bool | None = None
     # Connectors whose hook-lane tool calls the model answers on its own
     # where the LLM judge does not run ("*" = all). Empty = only in front
     # of the judge. Omitted from YAML when empty.
@@ -1837,6 +1843,12 @@ class DecisionModelConfig:
     def effective_escalate_rule_flagged(self) -> bool:
         return self.escalate_rule_flagged is not False
 
+    def effective_history_turns(self) -> int:
+        return 25 if self.history_turns is None else self.history_turns
+
+    def effective_flow_guard(self) -> bool:
+        return self.flow_guard is not False
+
     def effective_on_confident_block(self) -> str:
         return (self.on_confident_block or "").strip().lower() or "escalate"
 
@@ -1860,6 +1872,14 @@ class DecisionModelConfig:
             )
         if self.escalate_rule_flagged is not None and not isinstance(self.escalate_rule_flagged, bool):
             return f"escalate_rule_flagged must be true or false, got {self.escalate_rule_flagged!r}"
+        if self.flow_guard is not None and not isinstance(self.flow_guard, bool):
+            return f"flow_guard must be true or false, got {self.flow_guard!r}"
+        if self.history_turns is not None and (
+            isinstance(self.history_turns, bool)
+            or not isinstance(self.history_turns, int)
+            or not 0 <= self.history_turns <= 100
+        ):
+            return f"history_turns must be between 0 and 100, got {self.history_turns!r}"
         if not 0 <= self.block_risk_score <= 2:
             return f"block_risk_score must be between 0 and 2, got {self.block_risk_score}"
         if not 0 <= self.timeout <= 30:
@@ -1949,6 +1969,9 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
         # Strict: a YAML bool or nothing; anything else is kept as given so
         # validation_error reports it (Go refuses it at load too).
         escalate_rule_flagged=raw.get("escalate_rule_flagged"),
+        history_turns=raw.get("history_turns"),
+        history_tool_results=raw.get("history_tool_results") is True,
+        flow_guard=raw.get("flow_guard"),
         hook_connectors=_decision_model_connector_list(raw.get("hook_connectors")),
     )
 
@@ -3124,12 +3147,17 @@ class SecretFlowConfig:
 
 @dataclass
 class CascadeLanesConfig:
-    """guardrail.cascade.lanes: one live/shadow switch per lane. Both lanes ship
-    shadow-only in 1.0.10, so the values are off | shadow ("on" is refused by the
-    Go validator). Mirrors internal/config.CascadeLanes."""
+    """guardrail.cascade.lanes: one live/shadow switch per lane, each off |
+    shadow | on, read trimmed and in any case (stored lower-cased). effects and
+    secret_flow ship shadow-only in 1.0.10 ("on" is refused by the Go
+    validator). nonshell (the MCP and app tool lane) ships on; None means the
+    key is not written, which the gateway reads as on, and a value that is no
+    lane value (an empty one included) is kept as written so the gateway refuses
+    it. Mirrors internal/config.CascadeLanes."""
 
     effects: str = "shadow"
     secret_flow: str = "shadow"
+    nonshell: str | None = None
 
 
 @dataclass
@@ -5823,6 +5851,10 @@ def _serialize_v9_guardrail_keys(guardrail: Any) -> None:
         guardrail.pop("cisco_trust_level", None)
     if not guardrail.get("internal_domains"):
         guardrail.pop("internal_domains", None)
+    cascade = guardrail.get("cascade")
+    lanes = cascade.get("lanes") if isinstance(cascade, dict) else None
+    if isinstance(lanes, dict) and lanes.get("nonshell") is None:
+        lanes.pop("nonshell", None)
     judge = guardrail.get("judge")
     if isinstance(judge, dict) and not judge.get("trace"):
         judge.pop("trace", None)
@@ -7321,12 +7353,24 @@ def _merge_cascade(raw: dict[str, Any] | None) -> CascadeConfig:
     lanes_raw = raw.get("lanes") or {}
     if not isinstance(lanes_raw, dict):
         return CascadeConfig()
+    nonshell = _cascade_lane_value(lanes_raw.get("nonshell"))
     return CascadeConfig(
         lanes=CascadeLanesConfig(
-            effects=str(lanes_raw.get("effects", "shadow") or "shadow"),
-            secret_flow=str(lanes_raw.get("secret_flow", "shadow") or "shadow"),
+            effects=_cascade_lane_value(lanes_raw.get("effects")) or "shadow",
+            secret_flow=_cascade_lane_value(lanes_raw.get("secret_flow")) or "shadow",
+            nonshell=nonshell,
         )
     )
+
+
+def _cascade_lane_value(value: Any) -> str | None:
+    """A guardrail.cascade.lanes value as the gateway reads it: trimmed and
+    lower-cased (internal/config normalizeCascadeLaneValue). None when the key
+    is absent. A value that is no lane value stays (lower-cased) so the gateway
+    refuses it with the key named."""
+    if value is None:
+        return None
+    return str(value).strip().lower()
 
 
 def _merge_secret_flow(raw: dict[str, Any] | None) -> SecretFlowConfig:

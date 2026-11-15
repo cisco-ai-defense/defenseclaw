@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -186,7 +187,11 @@ func (c *Config) validateRoutingProfiles() error {
 	r := c.Routing
 	if r.EffectiveClassifier() == RoutingClassifierSystemOne && r.SystemOne.EffectiveUseDecisionModel() &&
 		(strings.TrimSpace(c.DecisionModel.BaseURL) == "" || strings.TrimSpace(c.DecisionModel.Model) == "") {
-		return fmt.Errorf("config: routing.classifier systemone reuses decision_model, which needs base_url and model (or set routing.systemone.use_decision_model: false with its own base_url and model)")
+		// A SettingError names the key, so config set, config validate and
+		// setup say which setting to change instead of the generic refusal
+		// (GAP-0586).
+		return &SettingError{Path: "routing.classifier", cause: errors.New("systemone reuses decision_model, which needs decision_model.base_url and decision_model.model: " +
+			"set them, or set routing.systemone.use_decision_model to false with routing.systemone.base_url and routing.systemone.model")}
 	}
 	if _, err := c.RoutingFloor(); err != nil {
 		return fmt.Errorf("config: routing.admin: %w", err)

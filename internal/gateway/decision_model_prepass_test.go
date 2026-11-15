@@ -59,8 +59,10 @@ func TestDecisionPrepassUnderJudgeLoad(t *testing.T) {
 			a.hookJudgeSemOnce.Do(func() { a.hookJudgeSem = make(chan struct{}) })
 			return context.Background()
 		}},
-		{"hook judge budget spent", func(*APIServer) context.Context {
-			return withHookJudgeBudget(context.Background(), time.Now())
+		{"hook judge budget under the judge minimum", func(*APIServer) context.Context {
+			// 800 ms left: too little for the judge (1 s minimum), a quarter
+			// of it (200 ms) for the decision model.
+			return withHookJudgeBudget(context.Background(), time.Now().Add(800*time.Millisecond))
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -73,6 +75,12 @@ func TestDecisionPrepassUnderJudgeLoad(t *testing.T) {
 				t.Fatalf("decision model asked %d times, want 1", hits.Load())
 			}
 		})
+	}
+	// A fully spent hook judge budget leaves no time for either: the rule
+	// verdict, and the decision model is not asked (review round 4, P4-1).
+	spentSrv, spentHits := prepassServer(t, 0, "block", 0.02)
+	if v := spentSrv.runHookJudge(withHookJudgeBudget(context.Background(), time.Now()), "tool_call", "tool_call", "codex", prepassArgs, "Bash", nil); v != nil || spentHits.Load() != 0 {
+		t.Fatalf("spent budget: verdict %+v, %d requests; want the rule verdict and no request", v, spentHits.Load())
 	}
 	// An escalation keeps the rule verdict when the judge cannot run.
 	a, _ := prepassServer(t, 0, "allow", 0.55)

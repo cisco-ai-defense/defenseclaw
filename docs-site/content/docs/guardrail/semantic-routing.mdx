@@ -1,26 +1,60 @@
 ---
 title: Semantic model routing
-description: Run vLLM Semantic Router as a managed Docker sidecar and route supported proxy traffic between OpenAI-compatible model backends.
+description: Send each model call to the model that fits it. A built-in rules classifier (or System One, or the vLLM Semantic Router) picks the model, for proxy agents and, through route-only mode, for Claude Code and Codex.
 keywords:
   - DefenseClaw semantic routing
+  - model routing
+  - routing setup
+  - route-only
+  - rules classifier
   - vLLM Semantic Router
-  - setup routing
   - OpenClaw model routing
-  - ZeptoClaw model routing
 ---
 
-Semantic routing lets the gateway pick a model backend after it inspects a prompt and before it forwards the request. DefenseClaw runs a pinned vLLM Semantic Router container, asks it to classify each request, and forwards through the normal guardrail path. It applies to OpenClaw and ZeptoClaw requests sent as OpenAI-compatible `*/chat/completions`. Hook agents keep their own provider path.
+Semantic routing lets the gateway pick a model after it reads a request and before it forwards it. A classifier names the kind of work (for example coding or summarize), and the model you mapped to it answers. Guardrail checks, administrator rules and budgets still apply to the model that is picked, and a routing failure sends the original request unchanged.
 
-If the router is down, times out or returns an unknown model name, routing falls back to the original provider. Guardrail checks still run.
+## Choose a classifier and a way in
+
+| Classifier (`routing.classifier`) | What it is | Needs |
+| --- | --- | --- |
+| `rules` | Keyword rules in `routing.signals` and `routing.decisions`, evaluated inside the gateway. `defenseclaw routing setup` selects it. | Nothing else. Linux, macOS and Windows. |
+| `systemone` | A decision model (System One or Gemini Decision 1) picks among your categories. | A decision-model endpoint and token. |
+| `vllm_sr` | The vLLM Semantic Router container. It is what a 1.0.9 config without `routing.classifier` still uses. | Docker, or a remote router; not available on native Windows. |
+
+| Way in | Agents | How |
+| --- | --- | --- |
+| Proxy mode | OpenClaw and ZeptoClaw, and any agent already sending model calls through the guardrail proxy. | Routing applies to the calls on the guardrail path. |
+| Route-only mode | Claude Code and Codex. | `defenseclaw routing enable --connector claudecode` (or `codex`) sends only the model calls through the gateway under `/r/<connector>/`, for routing and usage. Hooks keep deciding tool calls, and no guardrail scan runs on the model call. `defenseclaw routing disable --connector NAME` restores the agent settings. |
+
+If the classifier is down, times out or names a model that is not configured, routing falls back to the original provider (`routing.on_classifier_error`).
 
 ## Prerequisites
 
-- OpenClaw or ZeptoClaw is configured in proxy mode. Native Windows is not supported: there `defenseclaw setup routing` says so and refuses `--enable`, and `--disable` still turns off a routing block copied from another machine.
-- For the managed router, Docker runs Linux containers on macOS or Linux. A remote router needs no Docker.
-- Each backend has an OpenAI-compatible Chat Completions endpoint. `base_url` is the origin, for example `https://api.openai.com`, without `/v1/chat/completions`.
+- Model backends in `routing.models`. `base_url` is the origin, for example `https://api.openai.com`, without `/v1/chat/completions`.
 - Provider keys are in the environment or `~/.defenseclaw/.env`, never in `config.yaml`.
+- Only for `vllm_sr`: Docker running Linux containers (macOS or Linux), or a remote router. On native Windows `defenseclaw setup routing` says so and refuses `--enable`; `--disable` still turns off a routing block copied from another machine.
 
-## Configure routing
+## Built-in rules classifier (1.0.10)
+
+The `rules` classifier runs inside the gateway: no Docker container, and it works on Linux, macOS and Windows. `defenseclaw routing setup` selects it; a config that does not set `routing.classifier` keeps the 1.0.9 vLLM Semantic Router. It matches the keywords of `routing.signals` as case-insensitive substrings in the newest request text and sends the request to the model of the highest-priority matching entry of `routing.decisions`. A request that matches nothing goes to `routing.default_alias`.
+
+```bash
+defenseclaw routing setup --yes \
+  --model fast=openai/gpt-4.1-mini --model deep=anthropic/claude-sonnet-5-5 \
+  --route coding=deep --route reasoning=deep --route summarize=fast
+defenseclaw-gateway restart
+defenseclaw routing test "refactor this function"
+```
+
+`--route CATEGORY=ALIAS` (categories `coding`, `reasoning` and `summarize`) writes one keyword signal and one decision per category into `config.yaml`, with starting keyword lists you can edit. Running it again re-points the model and keeps your edits to the keywords. Without `--route`, setup says that no route rules exist: every request goes to the default model. `defenseclaw doctor` shows the same warning on the **Semantic routing** row (`no route rules (routing.decisions is empty)`), and `defenseclaw routing status` and `routing models list` show what is configured.
+
+Keyword matching sees the newest user message only. It cannot tell personal data in prose from other text: use `routing.sensitive` and a profile with local-only models for regulated groups.
+
+Read what routing did with `defenseclaw routing status`, `routing explain REQUEST_ID`, `routing test PROMPT` (a dry run, no model is called) and `routing usage` (needs `observability.tokenomics`).
+
+## Configure the vLLM Semantic Router
+
+This is the 1.0.9 flow: DefenseClaw runs a pinned vLLM Semantic Router container and asks it to classify each request.
 
 1. Add a routing block to `~/.defenseclaw/config.yaml`. `name` is the alias the router returns; `decisions` pick one by keyword.
 
@@ -87,7 +121,20 @@ X-Semantic-Router: routed
 X-Semantic-Router-Reason: decision=… model=… confidence=…
 ```
 
-Each routed request also records one `defenseclaw.semantic_routing.decision` count and a `defenseclaw.semantic_routing.latency` measurement. The labels are a closed set: `result` (`applied` or `fallback`), `error.code` (`none`, `timeout`, `upstream_status`, `decode_failure`, `unknown_alias`, `credential_failure` or `configuration_failure`) and `decision` (`override` or `default`). Prompt text, credentials, endpoints and the header reason string are never labels.
+Each routed request also records one `defenseclaw.semantic_routing.decision` count and a `defenseclaw.semantic_routing.latency` measurement. The labels are a closed set: `result` (`applied`, `fallback` or `denied`), `error.code` (`none`, `timeout`, `upstream_status`, `decode_failure`, `unknown_alias`, `credential_failure` or `configuration_failure`) and `decision` (`override` or `default`). Prompt text, credentials, endpoints and the header reason string are never labels.
+
+## Sensitive requests stay local
+
+With `routing.sensitive` set (`aliases` plus `severity_at_least` and/or `signals`), a request the guardrail severity or a listed signal marks as sensitive is sent only to a `routing.sensitive.aliases` model. It is never sent to the model the agent asked for, or to another alias, on any install.
+
+- **What is checked.** The newest user turn (its first 8 KiB); tool results and earlier turns are not read. Once a turn of a conversation is sensitive, the following turns of that conversation stay local too, because they carry it in their history; each of them renews the mark, which ends 12 hours after the last such turn. Marks are kept in memory: a gateway restart clears them. A conversation is the agent session id (the DefenseClaw session header, or the Claude Code or Codex session header); a request without one is judged alone. The check is best effort: keywords and the regex guardrail miss personal data written in prose.
+- **When no local model can take it** (its key is missing, it does not speak the request API, an administrator rule does not allow it, it is unreachable on the route-only listener, or the request is a signed Bedrock body or an API DefenseClaw does not re-route, such as `count_tokens`), DefenseClaw refuses the request with `routing_sensitive_local_unavailable` and a message that names the cause, writes an audit row (target `routing.sensitive`), and `defenseclaw routing explain <id>` shows `denied`.
+- **Size bounds.** With `routing.sensitive` set, the route-only listener refuses a body over 64 MiB (HTTP 413) and answers HTTP 503 with `Retry-After` while its shared request buffer is full, instead of sending the request unchecked.
+- **Keyless local models.** A model with its own loopback `base_url` and no `api_key_env` or `credential` (Ollama, vLLM on this host) is called with no credential, also when the agent signs in with a login or a Bedrock bearer key. A sensitive request tries its local models this way at any address.
+
+## Going back to a release before 1.0.10
+
+A release before 1.0.10 has no route-only listener, so the Claude Code and Codex model settings route-only changed go back first. `defenseclaw rollback` (and `defenseclaw upgrade --version` on Windows) does it in the installer, after its prompt, with the gateway stopped. On Linux and macOS, `defenseclaw upgrade --version 1.0.9` asks first (or takes `--yes`), stops the gateway and puts them back; if they cannot be put back, or the older installer fails, the gateway of this release starts again and writes them again. Restart the agent afterwards. When you run an older release's installer yourself (`install.sh --version 1.0.9`), run `defenseclaw routing disable --connector <name>` for each route-only connector first.
 
 ## Disable routing
 
@@ -102,8 +149,9 @@ Requests use their original provider again. Connector and guardrail config stay.
 
 | Symptom | Check |
 | --- | --- |
-| No container appears | Run `docker info`, then restart the gateway. |
-| No routing headers | The agent must be OpenClaw or ZeptoClaw and the path must end in `/chat/completions`. |
+| No container appears | Only the `vllm_sr` classifier starts one: run `docker info`, then restart the gateway. |
+| No routing headers | With the vLLM router: the call must be on the guardrail path (OpenClaw or ZeptoClaw in proxy mode) and end in `/chat/completions`. Claude Code and Codex route only after `defenseclaw routing enable --connector NAME`; check `defenseclaw routing status` and `defenseclaw doctor`. |
+| Every request goes to the default model | With the rules classifier, `routing.decisions` is empty or no keyword matched: run `defenseclaw routing setup --route coding=ALIAS`, or edit `routing.signals` and `routing.decisions`. `defenseclaw routing test PROMPT` shows the category and why. |
 | `unknown model alias` in the gateway log | The router's alias must match a `routing.models[].name`. |
 | Authentication errors from a backend | Check the key with `defenseclaw keys list`. |
 | The router fails to start after you edit the YAML | Check the port, that model names are unique, that every decision's `model_refs` names a model, and the Docker logs of the labeled container. |
@@ -113,4 +161,6 @@ The classifier receives message roles and content. Keys, headers, tools and user
 ## Next steps
 
 - [Guard an ACP editor](/docs/acp-guard)
+- [Routing rules and budgets](/docs/enterprise/routing-budgets) for administrator rules, budgets and what users can read
+- [Tokenomics](/docs/observability/tokenomics) for the cost and usage of routed calls
 - [OpenClaw](/docs/connectors/openclaw) and [ZeptoClaw](/docs/connectors/zeptoclaw)
