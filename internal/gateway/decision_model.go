@@ -717,6 +717,12 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 	// What System One gives on its own for an unsure answer (cascade 2), read
 	// before a rule-flagged allow is escalated below.
 	unsure := decisionUnsureVerdict(res, dm.routingFor(ctx))
+	if unsure != nil && normalizedGuardrailAction(unsure.Action) == guardrailActionAllow {
+		// on_unsure: rules adds nothing of its own: a judge that does not
+		// answer leaves the rule verdict and judge.no_verdict to decide, as
+		// before, so a failed judge never turns into an allow-shaped answer.
+		unsure = nil
+	}
 	if res.route == decisionAllow && decisionRuleFloorFrom(ctx) {
 		// The rules flagged this call: their finding is a floor and the
 		// judge still runs (the benchmark's escalate-on-confirm).

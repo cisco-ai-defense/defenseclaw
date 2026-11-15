@@ -2109,6 +2109,13 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		// System One's abstention (the flow guard, cascade 2) is no answer.
 		if (out == nil || out.decisionAbstain) && !observeAnswer && cfg.ResolveCascade(connector).JudgeNoVerdict == config.CascadeNoVerdictUnknown {
 			out = cascadeNoVerdict(cfg, connector, a.boundedTier(ctx, connector))
+		} else if out != nil && out.decisionFloorOnly && !observeAnswer && cfg.ResolveCascade(connector).JudgeNoVerdict == config.CascadeNoVerdictUnknown {
+			// The judge gave no verdict and System One's own answer stands
+			// (GAP-0867, GAP-0868): the unknown tier still applies when it
+			// is stronger, never weaker.
+			if nv := cascadeNoVerdict(cfg, connector, a.boundedTier(ctx, connector)); nv != nil && normalizedGuardrailAction(nv.Action) != normalizedGuardrailAction(out.Action) && strongerGuardrailAction(nv.Action, out.Action) == nv.Action {
+				out = nv
+			}
 		}
 	}()
 
