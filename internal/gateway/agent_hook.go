@@ -4169,6 +4169,10 @@ func (a *APIServer) inspectAgentHookToolCall(
 		// command (see connector.CursorTrustedShellArgs).
 		if args, dir, ok := connector.CursorTrustedShellArgs(req.HookEventName, req.ToolArgs); ok {
 			actionTool, trustedArgs, toolCWD = "shell", args, dir
+		} else if args, ok := connector.CursorTrustedReadArgs(req.HookEventName, req.ToolArgs); ok {
+			// beforeReadFile names no tool either: its payload names the
+			// file read (rel-1-0-10:GAP-0781).
+			actionTool, trustedArgs = "Read", args
 		}
 	}
 	var hermesWriteViews []connector.HermesWriteView
@@ -4195,6 +4199,9 @@ func (a *APIServer) inspectAgentHookToolCall(
 		if tool, args, ok := connector.KiroTrustedWriteArgs(req.ToolName, req.ToolArgs); ok {
 			actionTool, trustedArgs = tool, args
 		}
+	}
+	if actionTool == fallbackTool {
+		actionTool, trustedArgs = agentHookNativeFileView(actionTool, trustedArgs)
 	}
 	// A sandbox shell call is also judged on its command alone when its
 	// other arguments leave the parse partial.
@@ -4232,7 +4239,21 @@ func (a *APIServer) inspectAgentHookToolCall(
 		record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 	}
 	withWindowsShellDialect(&action, dialectHint)
+	action.posixReadingTwin = dialectHint && agentHookShellToolNamesNoShell(req.ConnectorName, actionTool)
 	return a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, action, command, commandTool, hermesWriteViews)
+}
+
+// agentHookShellToolNamesNoShell reports a shell tool whose name says
+// nothing of the shell that runs its command: agy's run_command (also as
+// send_command_input). On a Windows host its command gets the Windows
+// dialect reading (GAP-0784) and also the POSIX one it had before, as the
+// proxy judges a model reply's call (rel-1-0-10:GAP-0850). A tool that names
+// its shell (Bash for Git Bash, powershell, execute_pwsh) keeps one reading:
+// a call read as the other shell gains findings the shell that runs it never
+// has (windowsReadingTwinRequests).
+func agentHookShellToolNamesNoShell(connectorName, actionTool string) bool {
+	return strings.EqualFold(strings.TrimSpace(connectorName), "antigravity") &&
+		strings.EqualFold(strings.TrimSpace(actionTool), "run_command")
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for
@@ -4338,6 +4359,17 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 	// argument) still runs its command in the directory it names; judged
 	// in the session's, the command alone could miss a rule (GAP-0694).
 	return args, connector.ShellCommandCWD(connectorName, toolName, args)
+}
+
+// agentHookNativeFileView is a native file write, edit or read tool call as
+// the Claude Code Write, Edit or Read it performs
+// (connector.NativeFileToolView), so it gets the same file facts, protected
+// paths and content scan on every route; any other call is unchanged.
+func agentHookNativeFileView(tool string, args json.RawMessage) (string, json.RawMessage) {
+	if view, projected, ok := connector.NativeFileToolView(tool, args); ok {
+		return view, projected
+	}
+	return tool, args
 }
 
 // agentHookWindowsDialectHint reports whether a structured tool call's

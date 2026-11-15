@@ -930,10 +930,11 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 	if strings.EqualFold(strings.TrimSpace(req.Connector), "opencode") {
 		actionTool = agentHookTrustedActionTool(req.Connector, req.Tool, "")
 	}
+	actionTool, actionArgs := agentHookNativeFileView(actionTool, req.Args)
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
 			Tool:       actionTool,
-			Args:       req.Args,
+			Args:       actionArgs,
 			ActiveHome: hookActiveHome(ctx),
 		},
 		LegacyText:         string(req.Args),
@@ -1196,10 +1197,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		}
 	}
 	if allowed {
-		if !isWriteToolName(strings.ToLower(req.Tool)) {
+		cgReq, isWrite := codeGuardWriteRequest(req, action)
+		if !isWrite {
 			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 		}
-		if cg := a.runCodeGuardOnArgsWithProvenance(ctx, req); len(cg.findings) > 0 {
+		if cg := a.runCodeGuardOnArgsWithProvenance(ctx, cgReq); len(cg.findings) > 0 {
 			return a.codeGuardOnlyVerdict(ctx, req, cg, true, action.EnforcementCapable)
 		}
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
@@ -1236,11 +1238,9 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// entirely while carrying the same code payload. We accept any
 	// recognised file-write alias (case-insensitive). The scan runs beside
 	// the rule dispatch (startCodeGuardOnArgs, GAP-2284).
-	tool := strings.ToLower(toolName)
-	isWriteTool := isWriteToolName(tool)
 	var waitCodeGuard func() codeGuardArgsScan
-	if isWriteTool {
-		waitCodeGuard = a.startCodeGuardOnArgs(ctx, req)
+	if cgReq, ok := codeGuardWriteRequest(req, action); ok {
+		waitCodeGuard = a.startCodeGuardOnArgs(ctx, cgReq)
 	}
 	cfg := a.decisionConfig(ctx)
 	ruleFindings := trustedToolCallFindings(ctx, action, req.MCPServerName, cfg != nil && cfg.SecureClientIntegration())
@@ -1419,6 +1419,34 @@ type codeGuardArgsScan struct {
 	complete bool
 }
 
+// codeGuardWriteRequest is the request CodeGuard scans for a file-write
+// call: the trusted action's tool and projected arguments when they are a
+// write (a connector's native write tool as the reviewed write it performs:
+// agy write_to_file, Kiro fs_write, Amp edit_file, ...), else the call's own
+// when its tool is a write. CodeGuard read only the native arguments under
+// Claude Code's keys, so the same file content raised CG-* findings on
+// Claude Code and none on Codex, Copilot, Kiro, Antigravity, Amp, OpenCode
+// and the proxy (rel-1-0-10:GAP-0776).
+func codeGuardWriteRequest(req *ToolInspectRequest, action trustedActionRequest) (*ToolInspectRequest, bool) {
+	if tool := action.Input.Tool; codeGuardWriteTool(tool) && len(action.Input.Args) != 0 {
+		view := *req
+		view.Tool, view.Args = tool, action.Input.Args
+		return &view, true
+	}
+	return req, isWriteToolName(strings.ToLower(req.Tool))
+}
+
+// codeGuardWriteTool reports a trusted action tool whose arguments carry the
+// content of a file write: the write tool names, and the Copilot CLI create
+// tool ({path, file_text}), which ActionFacts reads as a write but which is
+// not in isWriteToolName, the raw-name list other routes share (a bare
+// "create" there could name any tool). The trusted action tool is a
+// connector's projected name, so here it is the Copilot write.
+func codeGuardWriteTool(tool string) bool {
+	tool = strings.ToLower(strings.TrimSpace(tool))
+	return isWriteToolName(tool) || tool == "create"
+}
+
 func (a *APIServer) runCodeGuardOnArgsWithProvenance(ctx context.Context, req *ToolInspectRequest) codeGuardArgsScan {
 	// managed_enterprise: local content scanners (CodeGuard/ClawShield)
 	// are disabled — AID is authoritative. Defense-in-depth: short-circuit
@@ -1427,6 +1455,28 @@ func (a *APIServer) runCodeGuardOnArgsWithProvenance(ctx context.Context, req *T
 	if a.managedAIDOnly() {
 		return codeGuardArgsScan{}
 	}
+	rulesDir := ""
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
+	}
+	return codeGuardScanWriteArgs(rulesDir, req.Tool, req.Args)
+}
+
+// codeGuardPatchTools are the tools whose arguments carry an apply_patch
+// envelope rather than one path and its content.
+func codeGuardPatchTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "apply_patch", "applypatch", "patch":
+		return true
+	}
+	return false
+}
+
+// codeGuardScanWriteArgs runs CodeGuard over the content a write call puts
+// in a code file: one path and its content (path/file_path/filePath and
+// content/new_string/newString/new_str/file_text/text/body), or every file
+// an apply_patch envelope adds or updates, with the lines it adds.
+func codeGuardScanWriteArgs(rulesDir, tool string, raw json.RawMessage) codeGuardArgsScan {
 	// the managed inspect-tool hook serializes
 	// TOOL_INPUT with `jq -n --arg args "$TOOL_INPUT"`, which yields
 	// {"args": "<json-string>"} where `args` is a JSON STRING that
@@ -1435,14 +1485,18 @@ func (a *APIServer) runCodeGuardOnArgsWithProvenance(ctx context.Context, req *T
 	// any error, so the hook path silently skipped CodeGuard. We
 	// first try the object form; on failure we attempt to interpret
 	// req.Args as a JSON string and unmarshal its contents.
-	parsed, structurallyComplete := decodeCodeGuardArgsObject(req.Args)
+	parsed, structurallyComplete := decodeCodeGuardArgsObject(raw)
 	if parsed == nil {
 		return codeGuardArgsScan{}
 	}
 	bestEffort := codeGuardBestEffortObject(parsed)
+	if codeGuardPatchTool(tool) {
+		return codeGuardScanPatch(rulesDir, parsed, bestEffort, structurallyComplete)
+	}
 
 	filePath, pathComplete := exactCodeGuardStringField(parsed, bestEffort, "path", "file_path", "filePath")
-	content, contentComplete := exactCodeGuardStringField(parsed, bestEffort, "content", "new_string", "text", "body")
+	content, contentComplete := exactCodeGuardStringField(parsed, bestEffort,
+		"content", "new_string", "newString", "new_str", "newText", "file_text", "text", "body")
 	if filePath == "" || content == "" {
 		return codeGuardArgsScan{}
 	}
@@ -1451,16 +1505,113 @@ func (a *APIServer) runCodeGuardOnArgsWithProvenance(ctx context.Context, req *T
 		return codeGuardArgsScan{}
 	}
 
-	rulesDir := ""
-	if cfg := a.decisionConfig(ctx); cfg != nil {
-		rulesDir = cfg.Scanners.CodeGuard
-	}
 	cg := scanner.NewCodeGuardScanner(rulesDir)
 	scan := cg.ScanContentWithProvenance(filePath, content)
 	return codeGuardArgsScan{
 		findings: scan.Findings(),
 		complete: structurallyComplete && pathComplete && contentComplete && scan.Complete(),
 	}
+}
+
+// codeGuardScanPatch scans each code file an apply_patch envelope adds or
+// updates with the lines the envelope adds to it (Codex apply_patch,
+// OpenCode patch). An envelope that does not close, or a file directive
+// without a path, leaves the scan incomplete.
+func codeGuardScanPatch(rulesDir string, parsed map[string][]json.RawMessage, bestEffort map[string]interface{}, structurallyComplete bool) codeGuardArgsScan {
+	text, textComplete := exactCodeGuardStringField(parsed, bestEffort,
+		"command", "cmd", "patch", "patchText", "patch_text", "input")
+	if text == "" {
+		return codeGuardArgsScan{}
+	}
+	files, filesComplete := codeGuardPatchFiles(text)
+	out := codeGuardArgsScan{complete: structurallyComplete && textComplete && filesComplete}
+	var cg *scanner.CodeGuardScanner
+	for _, file := range files {
+		if file.content == "" || !scanner.IsCodeFile(filepath.Ext(file.path)) {
+			continue
+		}
+		if cg == nil {
+			cg = scanner.NewCodeGuardScanner(rulesDir)
+		}
+		scan := cg.ScanContentWithProvenance(file.path, file.content)
+		out.findings = append(out.findings, scan.Findings()...)
+		out.complete = out.complete && scan.Complete()
+	}
+	return out
+}
+
+type codeGuardPatchFile struct{ path, content string }
+
+// codeGuardPatchFiles reads the files of every apply_patch envelope in text
+// (*** Add File / *** Update File, then a *** Move to: target) and the lines
+// each adds (+). complete is false when an envelope is left open or a file
+// directive names no path.
+func codeGuardPatchFiles(text string) (files []codeGuardPatchFile, complete bool) {
+	complete = true
+	inside := false
+	var current *codeGuardPatchFile
+	var added []string
+	flush := func() {
+		if current != nil {
+			current.content = strings.Join(added, "\n")
+			files = append(files, *current)
+		}
+		current, added = nil, nil
+	}
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimRight(raw, "\r")
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasSuffix(trimmed, "*** Begin Patch"):
+			flush()
+			inside = true
+			continue
+		case !inside:
+			continue
+		case strings.HasPrefix(trimmed, "*** End Patch"):
+			flush()
+			inside = false
+			continue
+		}
+		directive := func(prefix string) (string, bool) {
+			if !strings.HasPrefix(trimmed, prefix) {
+				return "", false
+			}
+			path := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+			if path == "" {
+				complete = false
+			}
+			return path, true
+		}
+		if path, ok := directive("*** Add File:"); ok {
+			flush()
+			current = &codeGuardPatchFile{path: path}
+			continue
+		}
+		if path, ok := directive("*** Update File:"); ok {
+			flush()
+			current = &codeGuardPatchFile{path: path}
+			continue
+		}
+		if path, ok := directive("*** Move to:"); ok {
+			if current != nil && path != "" {
+				current.path = path
+			}
+			continue
+		}
+		if _, ok := directive("*** Delete File:"); ok {
+			flush()
+			continue
+		}
+		if current != nil && strings.HasPrefix(line, "+") {
+			added = append(added, line[1:])
+		}
+	}
+	if inside {
+		complete = false
+	}
+	flush()
+	return files, complete
 }
 
 // decodeCodeGuardArgsObject preserves every field occurrence so proof-relevant
