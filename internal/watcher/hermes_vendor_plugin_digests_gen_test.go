@@ -5,7 +5,6 @@ package watcher
 
 import (
 	"encoding/json"
-	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -26,7 +25,8 @@ var (
 // TestGenerateHermesVendorPluginDigests lists the shipped plugins of every
 // release checkout under -hermes-vendor-trees as the rescan does and writes
 // {release: {plugin: digest}} to -hermes-vendor-out. A plugin whose tree
-// cannot be verified (a link, a special file, an oversize tree) gets an empty
+// cannot be verified (a link, a special file, a bytecode cache file, an
+// oversize tree) gets an empty
 // digest: no copy of it can match, so the tool leaves it out. Without the
 // flags the test is skipped.
 func TestGenerateHermesVendorPluginDigests(t *testing.T) {
@@ -37,11 +37,6 @@ func TestGenerateHermesVendorPluginDigests(t *testing.T) {
 	releases, err := os.ReadDir(*hermesVendorTrees)
 	if err != nil {
 		t.Fatal(err)
-	}
-	// A release checkout has no bytecode cache, so the digest reads no
-	// manifest; a call means the tree is not a clean checkout.
-	noCache := func(map[string][]byte) ([]string, error) {
-		return nil, errors.New("a Hermes release checkout has no bytecode cache")
 	}
 	out := map[string]map[string]string{}
 	for _, release := range releases {
@@ -61,7 +56,7 @@ func TestGenerateHermesVendorPluginDigests(t *testing.T) {
 			if !ok {
 				t.Fatalf("release %s: %s is not a shipped plugin of %s", release.Name(), evt.Path, root)
 			}
-			digest, err := hermesPluginTreeDigest(evt.Path, noCache)
+			digest, err := hermesPluginTreeDigest(evt.Path)
 			if err != nil {
 				t.Logf("release %s: %s cannot be verified: %v", release.Name(), name, err)
 				digest = ""

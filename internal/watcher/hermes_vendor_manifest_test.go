@@ -157,9 +157,7 @@ func TestHermesScannerAcceptedManifestsKeepCacheOutOfScansAndBindDeclared(t *tes
 			path := f.plugin(f.bundledRoot, "web/ddgs")
 			writePluginFile(t, filepath.Join(path, "plugin.yaml"), benign)
 			writePluginFile(t, filepath.Join(path, "lib", "run.js"), "safe()\n")
-			f.pinVendor("web/ddgs", path)
-			f.w.runRescanCycle(context.Background())
-			f.unscannedVendor(path)
+			f.scannedBaseline(path)
 			admitted := len(f.admitted[path])
 			cache := filepath.Join(path, "__pycache__", "provider.cpython-312.pyc")
 			for _, body := range []string{"generated one", "generated two"} {
@@ -447,9 +445,7 @@ func TestHermesManifestFailureInWatcherFollowsThePolicyTier(t *testing.T) {
 			path := f.plugin(f.bundledRoot, "web/ddgs")
 			writePluginFile(t, filepath.Join(path, "plugin.yaml"), "name: p\nmain: lib/run.js\n")
 			writePluginFile(t, filepath.Join(path, "lib", "run.js"), "safe()\n")
-			f.pinVendor("web/ddgs", path)
-			f.w.runRescanCycle(context.Background())
-			f.unscannedVendor(path)
+			f.scannedBaseline(path)
 			admitted := len(f.admitted[path])
 			f.w.cfg.DeploymentMode = tc.mode
 			f.w.hermesManifests = func(map[string][]byte) ([]string, error) { return nil, errors.New("manifest command unavailable") }
@@ -737,17 +733,9 @@ func TestHermesLargeDeclaredEntrypointEditReachesAdmission(t *testing.T) {
 	entry := filepath.Join(path, "__pycache__", "large.pyc")
 	big := func(first string) string { return first + strings.Repeat("x", hermesScannerReadBytes) }
 	writePluginFile(t, entry, big("A"))
-	f.pinVendor("web/ddgs", path)
-	f.w.runRescanCycle(context.Background())
-	f.unscannedVendor(path)
 	findings := f.scan.findings[path]
-	f.scan.findings[path] = nil
-	writePluginFile(t, filepath.Join(path, "provider.py"), "VENDOR = False\n")
-	f.w.runRescanCycle(context.Background())
-	firstScans := f.scan.scans(path)
-	if firstScans != 1 {
-		t.Fatalf("benign admission caused %d scans, want 1", firstScans)
-	}
+	f.scannedBaseline(path)
+	firstScans := 0
 	f.scan.findings[path] = findings
 	writePluginFile(t, entry, big("B"))
 	f.w.runRescanCycle(context.Background())
@@ -780,11 +768,9 @@ func TestHermesManifestRecoveredScannerDeclarationIsScanned(t *testing.T) {
 	f := newHermesPluginFixture(t)
 	path := f.plugin(f.bundledRoot, "web/ddgs")
 	writePluginFile(t, filepath.Join(path, "plugin.yaml"), "name: p\nmain: lib/run.js\n")
-	f.pinVendor("web/ddgs", path)
 	f.w.hermesManifests = nil
 	f.cfg.Scanners.PluginScanner = script
-	f.w.runRescanCycle(context.Background())
-	f.unscannedVendor(path)
+	f.scannedBaseline(path)
 	// The outage: an ordinary cache write is neither scanned nor refused.
 	writePluginFile(t, filepath.Join(path, "__pycache__", "old.pyc"), "ordinary\n")
 	f.w.runRescanCycle(context.Background())

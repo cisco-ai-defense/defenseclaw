@@ -87,3 +87,21 @@ def test_status_note_only_when_hermes_is_not_covered(monkeypatch):
     assert "defenseclaw upgrade" in note
     monkeypatch.setattr(agent_discovery, "_read_cache", cache("Hermes Agent v0.23.1 (2026.9.24)"))
     assert cmd_status._hermes_shipped_plugins_note(SimpleNamespace(data_dir="/nonexistent")) == ""
+
+
+def test_vendor_skill_with_planted_bytecode_is_not_bundled(tmp_path, monkeypatch):
+    """rel-1-0-10:GAP-0798: the Python twin of the bundled-skill digest covers a bytecode cache too."""
+    from pathlib import Path
+
+    from defenseclaw import hermes_skills
+
+    fixture = Path(__file__).resolve().parents[2] / "internal" / "hermesskills" / "testdata" / "vendor"
+    skill = tmp_path / "skills" / "media" / "songsee"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_bytes((fixture / "media" / "songsee" / "SKILL.md").read_bytes())
+    clean = hermes_skills._tree_sha256(str(skill))
+    assert clean == hermes_skills.VENDOR_DIGESTS["media/songsee"]
+    cache = skill / "scripts" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "tool.cpython-312.pyc").write_bytes(b"planted bytecode")
+    assert hermes_skills._tree_sha256(str(skill)) not in (None, clean)
