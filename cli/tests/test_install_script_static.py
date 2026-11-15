@@ -2107,18 +2107,17 @@ def test_a_process_gone_since_ps_listed_it_is_skipped_without_lsof(tmp_path: Pat
     result = _agent_scan(home, [stubs])
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "scan-passed" in result.stdout
-    if installed:
-        assert f"audit: live-agent identity unproven for PID {gone.pid}: process vanished during lookup" in result.stderr
-    else:
-        assert "audit:" not in result.stderr
+    # GAP-0916: a process that exited after the listing is not an unproven identity.
+    assert "audit:" not in result.stderr and "vanished" not in result.stderr
     assert not marker.exists()
     assert time.monotonic() - started < 10
 
 
 @pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
-def test_the_audit_line_goes_to_the_install_log_not_the_console(tmp_path: Path) -> None:
-    # GAP-0103: install.sh printed "audit: live-agent identity unproven ... process vanished during
-    # lookup" in the console. With the install log open (LOG) the line is written there only.
+def test_a_vanished_process_leaves_no_audit_line_and_an_unproven_one_goes_to_the_log(tmp_path: Path) -> None:
+    # GAP-0103 moved the line from the console to the install log; GAP-0916: a
+    # process that is gone is not audited at all. A real unproven identity (a
+    # process list that cannot be read) still goes to the log, not the console.
     gone = subprocess.Popen(["true"])
     gone.wait()
     stubs, log = tmp_path / "stubs", tmp_path / "install.log"
@@ -2132,7 +2131,13 @@ def test_the_audit_line_goes_to_the_install_log_not_the_console(tmp_path: Path) 
     result = _agent_scan(home, [stubs], LOG=str(log))
     assert result.returncode == 0 and "scan-passed" in result.stdout, (result.stdout, result.stderr)
     assert "audit:" not in result.stderr and "audit:" not in result.stdout
-    assert f"audit: live-agent identity unproven for PID {gone.pid}: process vanished during lookup" in log.read_text()
+    assert not log.exists() or "vanished" not in log.read_text()
+
+    (stubs / "ps").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    result = _agent_scan(home, [stubs], LOG=str(log))
+    assert result.returncode == 0 and "scan-passed" in result.stdout, (result.stdout, result.stderr)
+    assert "audit:" not in result.stderr and "audit:" not in result.stdout
+    assert "audit: live-agent identity unproven for PID 0: process list unreadable" in log.read_text()
 
 
 @pytest.mark.parametrize("installed", [False, True])

@@ -937,3 +937,52 @@ func TestRestartFeedsNoUnchangedPhase(t *testing.T) {
 		t.Fatalf("lifecycle not republished: %+v", e.tel.lifecycle)
 	}
 }
+
+// GAP-0917: "no sandbox state" is certain or it is false.
+func TestNoSandboxState(t *testing.T) {
+	put := func(t *testing.T, dir, name, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, tc := range map[string]struct {
+		setup func(t *testing.T, dir string)
+		want  bool
+	}{
+		"nothing":         {func(*testing.T, string) {}, true},
+		"empty folders":   {func(t *testing.T, d string) { _ = os.MkdirAll(filepath.Join(d, "sandboxes", "manager"), 0o755) }, true},
+		"a valid record":  {func(t *testing.T, d string) { put(t, d, "sandboxes/manager/dc-a.json", `{"name":"dc-a"}`) }, false},
+		"a malformed one": {func(t *testing.T, d string) { put(t, d, "sandboxes/manager/dc-a.json", "{") }, false},
+		"a record folder": {func(t *testing.T, d string) {
+			_ = os.MkdirAll(filepath.Join(d, "sandboxes", "manager", "dc-a.json"), 0o755)
+		}, false},
+		"an orphan folder": {func(t *testing.T, d string) { put(t, d, "sandboxes/dc-a/run-config/s.json", "{}") }, false},
+		"a snapshot":       {func(t *testing.T, d string) { _ = os.MkdirAll(filepath.Join(d, "snapshots", "dc-a"), 0o755) }, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, dir)
+			if got := NoSandboxState(dir); got != tc.want {
+				t.Fatalf("NoSandboxState = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if os.Geteuid() != 0 {
+		dir := t.TempDir()
+		records := filepath.Join(dir, "sandboxes", "manager")
+		if err := os.MkdirAll(records, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(records, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(records, 0o755) })
+		if NoSandboxState(dir) {
+			t.Fatal("an unreadable records folder is not none")
+		}
+	}
+}
