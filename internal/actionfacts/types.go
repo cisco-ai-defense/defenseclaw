@@ -1075,14 +1075,18 @@ type CommandFact struct {
 	// `cd X && a && b` (b runs only after the cd succeeded) from
 	// `cd X && a; b` (b also runs after a failed cd).
 	ShortCircuitListID int64 `json:"-"`
-	Kind               CommandKind
-	Dialect            Dialect
-	Effect             CommandEffect
-	Executable         string
-	Program            string
-	Argv               []string
-	Arguments          []ArgumentFact
-	ArgvComplete       bool
+	// workFolder is the chain of cd targets the shell had run before this
+	// command (working_folder.go); the path facts of the command are
+	// resolved against the folder it moves the call to.
+	workFolder   workFolder
+	Kind         CommandKind
+	Dialect      Dialect
+	Effect       CommandEffect
+	Executable   string
+	Program      string
+	Argv         []string
+	Arguments    []ArgumentFact
+	ArgvComplete bool
 	// LiteralStdin is retained only for one bounded POSIX heredoc (any
 	// delimiter quoting, <<-) whose bytes cannot undergo shell expansion.
 	// It is private in-process evidence and is intentionally not part of

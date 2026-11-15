@@ -72,6 +72,7 @@ func normalizePathFactsForCommandsInShell(
 	for i := range commands {
 		commandByID[commands[i].ID] = &commands[i]
 	}
+	windowsFolders := windowsWorkFolders(commands)
 	// One index per command: a command of thousands of operands has a path
 	// fact for each, and each fact asked the whole argument list (GAP-0483).
 	indexByID := make(map[int64]*commandPathIndex, len(commands))
@@ -84,16 +85,35 @@ func normalizePathFactsForCommandsInShell(
 				indexByID[command.ID] = index
 			}
 		}
+		// A command that runs after a cd works in the folder the cd moved the
+		// call to (working_folder.go); an unreadable move keeps the hook's.
+		factCWD := cwd
+		if command != nil {
+			switch command.Dialect {
+			case DialectPOSIX:
+				if command.workFolder.moved() {
+					if folder, ok := resolveWorkFolder(cwd, activeHome, command.workFolder); ok {
+						factCWD = folder
+					}
+				}
+			case DialectPowerShell, DialectCMD:
+				if moved := windowsFolders[command.ID]; moved.moved() {
+					if folder, ok := resolveWindowsWorkFolder(cwd, activeHome, moved); ok {
+						factCWD = folder
+					}
+				}
+			}
+		}
 		context := pathContextForCommand(
 			facts[i],
-			cwd,
+			factCWD,
 			command,
 			index,
 		)
 		context.windowsShellCWD = windowsShellCWD
 		normalized, absolute, resolved := derivePathWithContext(
 			facts[i],
-			cwd,
+			factCWD,
 			activeHome,
 			context,
 		)
@@ -102,7 +122,7 @@ func normalizePathFactsForCommandsInShell(
 		facts[i].Resolved = resolved
 		facts[i].Flavor = normalizedPathFlavorWithContext(
 			facts[i],
-			cwd,
+			factCWD,
 			normalized,
 			resolved,
 			context,

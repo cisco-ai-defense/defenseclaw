@@ -73,6 +73,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	pipelines := posixPipelineRelations(file)
 	representedFallbacks := exactStandalonePOSIXAbsoluteCDFallbacks(file)
 	statementIDs := make(map[*syntax.Stmt]int64)
+	workFolders := posixWorkFolders(file)
 	var stack []syntax.Node
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if node == nil {
@@ -113,6 +114,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 			command, ok := projectPOSIXStatement(typed, pipelines[typed], stack, statementIDs, &out)
 			if ok {
 				statementIDs[typed] = command.ID
+				command.workFolder = workFolders[typed]
 				out.appendCommand(command)
 			}
 		}
