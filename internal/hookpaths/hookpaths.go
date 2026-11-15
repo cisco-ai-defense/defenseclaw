@@ -7633,14 +7633,14 @@ func (l *shellLinks) add(program string, args []string, cwd string) bool {
 			continue
 		}
 		for j := 1; j < len(arg); j++ {
-			switch c := arg[j]; {
-			case c == 's':
+			switch c := arg[j]; c {
+			case 's':
 				symbolic = true
-			case c == 'r':
+			case 'r':
 				relative = true
-			case c == 'T':
+			case 'T':
 				noTargetDir = true
-			case c == 't' || c == 'S':
+			case 't', 'S':
 				value := arg[j+1:]
 				if value == "" {
 					if i++; i >= len(args) {
