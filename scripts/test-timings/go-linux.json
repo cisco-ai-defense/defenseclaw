@@ -2440,6 +2440,7 @@
    "TestStreamTailLLMRoute": 2.7,
    "TestStreamTailMatchesWholeTextCheck": 129.6,
    "TestStreamTailMatchesWholeTextCheckAcrossLanes": 2.6,
+   "TestStreamTailOversizeEventKeepsTheRestInspected": 14.7,
    "TestStreamTailPartialLineBound": 2.9,
    "TestStreamTailSlowLongLineIsNotTruncated": 8.8,
    "TestStreamTailSplitAcrossLastScan": 3.7,
