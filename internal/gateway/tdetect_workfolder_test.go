@@ -102,6 +102,15 @@ func TestCDFirstFormsGetTheVerdictOfTheOneStepForm(t *testing.T) {
 				}
 			}
 		}
+		// A link to /dev/null masks a unit (turns it off); it is no persistence.
+		for _, command := range []string{
+			"ln -sf /dev/null /etc/systemd/system/enforce-ci-config.timer", "cd /etc/systemd/system && ln -sf /dev/null static.path",
+			"ln -sf /dev/null ~/.config/systemd/user/x.service",
+		} {
+			if got := verdict(command); got != "A" {
+				t.Errorf("%s: masking link %q is %s, want allow", p.name, command, got)
+			}
+		}
 		// Controls: a cd that leaves the protected folder, and a folder that is not the target's.
 		for _, command := range []string{
 			"cd src && echo ok > out.txt", "cd .git/hooks && cd /tmp && echo x > pre-push", "cd /tmp && echo x > .bashrc",

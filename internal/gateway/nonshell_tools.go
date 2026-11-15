@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path"
 	"slices"
 	"strings"
@@ -361,8 +362,29 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	for _, p := range facts.Paths {
 		path := firstNonEmpty(p.Resolved, p.Normalized, p.Value)
 		for _, id := range toolshape.PathRules(string(p.Access), path, text) {
+			// A link to /dev/null in a unit folder masks the unit: it stops
+			// what runs at boot or login, it does not start anything.
+			if id == "CMD-PERSIST-SYSTEM-SCHEDULE" && linksToDevNull(facts, p.CommandID) {
+				continue
+			}
 			add(id, "")
 		}
 	}
 	return out
+}
+
+// linksToDevNull reports an ln whose source is /dev/null: the link it makes
+// masks its name (systemctl mask), a way to turn a unit off.
+func linksToDevNull(facts actionfacts.Facts, commandID int64) bool {
+	for _, command := range facts.Commands {
+		if command.ID != commandID || path.Base(command.Program) != "ln" {
+			continue
+		}
+		for _, word := range argvOperands(command.Argv) {
+			if word == os.DevNull {
+				return true
+			}
+		}
+	}
+	return false
 }
