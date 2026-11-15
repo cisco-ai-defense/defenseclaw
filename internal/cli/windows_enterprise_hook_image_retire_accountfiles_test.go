@@ -222,3 +222,44 @@ func TestManagedAccountHookCompanionPathsMatchTheRenderedFiles(t *testing.T) {
 		t.Errorf("codex companions = %v", got)
 	}
 }
+
+// The matcher every account file goes through (rel-1-0-10 GAP-0880, WU2's
+// slot-3 files): a Copilot hook file that names the launch folder only inside
+// PowerShell -EncodedCommand blobs, a Hermes file that spells it with forward
+// slashes, and a plain file with no launch folder (the transition image,
+// another install's folder, prose about a folder) that names none.
+func TestHookImageFoldersNamedInEncodedForwardSlashAndPlainFiles(t *testing.T) {
+	const folder = "2f2cecec41b0ee4b"
+	launch := hookImageTestBin + `\hooks\` + folder + `\` + winpath.EnterpriseHookImageName
+	files := gap0880AccountFiles(t, launch)
+	copilot := files[gap0880Home+`\.copilot\hooks\`+enterprisepolicy.CopilotVSCodeLocalHookFileName]
+	if strings.Contains(strings.ToLower(string(copilot)), folder) {
+		t.Fatal("the Copilot render names the folder in clear text; the test needs it only inside -EncodedCommand")
+	}
+	if !strings.Contains(string(copilot), "-EncodedCommand") && !strings.Contains(string(copilot), "-encodedcommand") {
+		t.Fatalf("the Copilot render has no -EncodedCommand: %s", copilot)
+	}
+	hermes := files[gap0880Home+`\AppData\Local\hermes\`+connector.HermesAllowlistFileName]
+	if !strings.Contains(string(hermes), "C:/Program Files/") {
+		t.Fatalf("the Hermes allowlist does not use forward slashes: %s", hermes)
+	}
+	for name, body := range map[string][]byte{"copilot -EncodedCommand": copilot, "hermes forward slashes": hermes,
+		"hermes config.yaml": files[gap0880Home+`\AppData\Local\hermes\config.yaml`]} {
+		if got := windowsHookImageFoldersNamedIn(body, hookImageTestBin); len(got) != 1 || got[0] != folder {
+			t.Errorf("%s: folders named = %v, want [%s]", name, got, folder)
+		}
+	}
+	transition := gap0880AccountFiles(t, hookImageTestBin+`\`+winpath.EnterpriseHookImageName)
+	plain := map[string][]byte{
+		"copilot transition render": transition[gap0880Home+`\.copilot\hooks\`+enterprisepolicy.CopilotVSCodeLocalHookFileName],
+		"hermes transition render":  transition[gap0880Home+`\AppData\Local\hermes\`+connector.HermesAllowlistFileName],
+		"another install":           []byte(`{"command":"\"D:/Other/bin/hooks/` + folder + `/defenseclaw-hook.exe\" hook --connector hermes"}`),
+		"prose":                     []byte("# the launch folder bin\\hooks\\" + folder + " was retired\nmodel: sonnet\n"),
+		"empty":                     nil,
+	}
+	for name, body := range plain {
+		if got := windowsHookImageFoldersNamedIn(body, hookImageTestBin); len(got) != 0 {
+			t.Errorf("%s: folders named = %v, want none", name, got)
+		}
+	}
+}
