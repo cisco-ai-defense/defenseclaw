@@ -19987,6 +19987,7 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
     if acp is None:
         return
     try:
+        from defenseclaw.acp_catalog import own_tools_notice
         from defenseclaw.commands import cmd_acp
 
         data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
@@ -20017,7 +20018,8 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
         except Exception as exc:
             problems, profile, mode = [f"could not be checked: {exc}"], "?", "?"
         if not problems:
-            _emit("pass", label, f"healthy; profile {profile} ({mode})", r=r)
+            notice = own_tools_notice(agent)
+            _emit("pass", label, f"healthy; profile {profile} ({mode})" + (f"; {notice}" if notice else ""), r=r)
             continue
         if all("acp refresh" in problem for problem in problems):
             # The upgraded guard, or an agent the user updated (acp refresh
