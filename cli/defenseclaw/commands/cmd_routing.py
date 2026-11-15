@@ -22,7 +22,7 @@ from typing import Any
 
 import click
 
-from defenseclaw import config_writer, ux
+from defenseclaw import config_writer, routing_tokenomics, ux
 from defenseclaw.context import AppContext, pass_ctx
 
 ADMIN_RULES_KEY = "routing.admin.rules"
@@ -203,6 +203,14 @@ def _write(app: AppContext, changes: dict[str, Any], *, unset: list[str] | None 
             parse_path(key)
         written = _write_config_change(app, [Change(k, unset=True) for k in unset], expect, "unset") or written
     return written
+
+
+def _tokenomics_hint(doc: dict[str, Any], *, routing_on: bool = False, budgets_set: bool = False) -> None:
+    """Say that tokenomics is off when routing or a budget was just turned on
+    (the dashboard panels and budgets need it; it stays off by default, GAP-0932)."""
+    note = routing_tokenomics.note_from_doc(doc, routing_on=routing_on, budgets_set=budgets_set)
+    if note:
+        ux.warn(note)
 
 
 def _check_provider(provider: str, *, option: str = "--provider") -> str:
@@ -632,6 +640,7 @@ def routing_enable(app: AppContext, connector: str) -> None:
     _refuse_on_managed(["routing.route_only" if connector else "routing.enabled"])
     if connector:
         _route_only_change(app, connector, enable=True)
+        _tokenomics_hint(_document(), routing_on=True)
         return
     doc = _document()
     if not _aliases(doc):
@@ -646,6 +655,7 @@ def routing_enable(app: AppContext, connector: str) -> None:
     needs_docker = (classifier or DEFAULT_CLASSIFIER) == "vllm_sr" and not remote_endpoint
     docker_problem = _docker_problem() if needs_docker else ""
     _write(app, {"routing.enabled": True})
+    _tokenomics_hint(doc, routing_on=True)
     if classifier:
         click.echo(f"Classifier: {classifier}")
     else:
@@ -909,7 +919,10 @@ def _lint(doc: dict[str, Any]) -> list[str]:
     obs = doc.get("observability") or {}
     tokenomics = obs.get("tokenomics") or {}
     if budgets and not (tokenomics.get("enabled") and (tokenomics.get("local_store") or {}).get("enabled")):
-        notes.append("budgets need observability.tokenomics.enabled and observability.tokenomics.local_store.enabled")
+        notes.append(
+            "budgets need observability.tokenomics.enabled and observability.tokenomics.local_store.enabled: "
+            + routing_tokenomics.ENABLE_COMMAND
+        )
     priced = {
         (str(p.get("provider")), str(p.get("model")))
         for p in _list((obs.get("pricing") or {}).get("models"))
@@ -1146,6 +1159,7 @@ def routing_budgets_add(
     )
     if _write(app, {ADMIN_BUDGETS_KEY: budgets}) and on_exceed == "deny" and not _managed():
         ux.warn("deny budgets are reported, not enforced, on an unmanaged device")
+    _tokenomics_hint(doc, budgets_set=True)
 
 
 @routing_budgets.command("remove")
@@ -1576,6 +1590,7 @@ def routing_setup(
         click.echo(f'Test skipped: {error}. Run later: defenseclaw routing test "<prompt>"')
     elif isinstance(answer, dict):
         click.echo(f"Test: a coding prompt goes to {answer.get('selected_alias') or answer.get('outcome')}.")
+    _tokenomics_hint(doc, routing_on=True)
 
 
 # ---------------- doctor

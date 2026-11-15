@@ -669,6 +669,12 @@ def _print_stack_summary(
     click.echo()
     print_redaction_status_hint(cfg)
     click.echo()
+    from defenseclaw.routing_tokenomics import note_from_cfg
+
+    tokenomics_note = note_from_cfg(cfg)
+    if tokenomics_note:
+        ux.warn(tokenomics_note)
+        click.echo()
     ux.section("Next steps")
     click.echo("    # DefenseClaw applies the destination itself (it restarts the gateway when needed).")
     click.echo("    defenseclaw setup local-observability status")

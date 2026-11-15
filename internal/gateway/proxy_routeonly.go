@@ -314,6 +314,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	original.usage = routeOnlyUsageFacts(connector, native, family, body)
 	// The verified caller (OSS gateway owner or managed kernel peer).
 	original.usage.Subject = subject
+	original.usage.SubjectName = sanitizeLLMEventUser(userScopedIdentityName(subject))
 	routeCaller, routeProfiles := routeOnlyCaller(r.Context(), subject)
 	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body, routeCaller, routeProfiles)
 	original.usage.Route = usageDecision(usageRouteFacts(routedOutcome, true), false)

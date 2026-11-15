@@ -171,13 +171,17 @@ type DenyReason struct {
 
 // Decision is the routing outcome for one request.
 type Decision struct {
-	Outcome      string
-	Backend      *Backend // nil unless Outcome is applied
-	Source       string
-	Category     string
-	RuleID       string
-	Candidate    string
-	FilteredBy   string
+	Outcome    string
+	Backend    *Backend // nil unless Outcome is applied
+	Source     string
+	Category   string
+	RuleID     string
+	Candidate  string
+	FilteredBy string
+	// NoCredential lists the aliases the policy allows that the request
+	// could not use for lack of a gateway credential (Gate then says so
+	// instead of blaming the administrator, rel-1-0-10 GAP-0921).
+	NoCredential []string
 	FailureCode  string
 	Confidence   float64
 	Deny         *DenyReason

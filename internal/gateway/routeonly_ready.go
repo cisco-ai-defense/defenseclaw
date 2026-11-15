@@ -115,6 +115,15 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 		default:
 			r.Credential, r.Ready = routeCredentialAgent, true
 		}
+		if managedHost && r.Problem == "" {
+			if dead := routeOnlyDeadAllowRules(cfg, name, r.Provider); len(dead) > 0 {
+				// An allowed alias without a gateway key refuses every call
+				// of its rule as "not allowed" (rel-1-0-10 GAP-0921).
+				r.Ready = false
+				r.Problem = "routing.admin rule " + dead[0].ID + " allows only " + strings.Join(dead[0].Aliases, ", ") + ", which has no gateway credential on this host: every " + name + " call it matches is refused"
+				r.Fix = "name a protected credential in routing.models[].credential for " + strings.Join(dead[0].Aliases, ", ") + " in the policy bundle and store its key: defenseclaw-gateway enterprise secret set --name <name> --from-stdin"
+			}
+		}
 		if managedHost && enrolled != nil {
 			if n, ok := enrolled(name); ok {
 				r.EnrolledUsers = &n

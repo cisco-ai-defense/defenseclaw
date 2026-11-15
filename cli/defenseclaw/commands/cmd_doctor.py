@@ -13493,6 +13493,22 @@ def _check_routing_sensitive(cfg, r: _DoctorResult) -> None:
         _emit(status, "Routing sensitive data", detail, remediation=remediation, r=r)
 
 
+def _check_routing_tokenomics(cfg, r: _DoctorResult) -> None:
+    """Routing or a budget is on while tokenomics is off (GAP-0932): the dashboard
+    panels and budgets stay empty. It stays off by default; say how to turn it on."""
+    from defenseclaw.routing_tokenomics import ENABLE_COMMAND, note_from_cfg
+
+    note = note_from_cfg(cfg)
+    if note:
+        _emit(
+            "warn" if "budgets" in note else "info",
+            "Routing tokenomics",
+            note.split(" Turn it on:")[0],
+            remediation=ENABLE_COMMAND,
+            r=r,
+        )
+
+
 def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
     """Warn about routed models a managed host keys by api_key_env.
 
@@ -16892,6 +16908,7 @@ def doctor(
     _check_semantic_routing(cfg, r, live_health=sidecar_health)
     _check_routing_policy(r)
     _check_routing_sensitive(cfg, r)
+    _check_routing_tokenomics(cfg, r)
     _check_route_only(cfg, r, live_health=sidecar_health)
     _check_routing_managed_key_env(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
