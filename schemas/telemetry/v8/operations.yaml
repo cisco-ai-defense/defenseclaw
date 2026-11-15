@@ -11747,6 +11747,40 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
+- id: metric.defenseclaw.hook.deadline_outcomes
+  type: metric
+  brief: Hook calls that ended at their answer budget, by outcome (the hook path overload signal)
+  stability: stable
+  introduced_in: telemetry-registry-v4
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.reason
+    requirement_level: required
+    constraints:
+      enum:
+      - deadline_deny
+      - late_allow
+      - shed
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.hook.deadline_outcomes
+    instrument_type: counter
+    value_type: int64
+    unit: "{call}"
+    description: "Hook calls that ran out of their answer budget: deadline_deny (the hook blocked the call), late_allow (the call ran unchecked after the budget), shed (refused by the admission limits)"
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.reason
+        label: outcome
+  x-defenseclaw:
+    bucket: platform.health
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings: []
 - id: metric.defenseclaw.otel.ingest.bytes
   type: metric
   brief: Total OTLP body bytes received by the connector ingest receiver, by signal/source

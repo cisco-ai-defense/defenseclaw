@@ -154,6 +154,18 @@ defenseclaw setup observability add local-otlp --endpoint <stack-host>:4317 --no
 
 Agent360 shows one agent, or an agent and all its descendants, from one stable identity. New root agents and subagents appear as hook events arrive; DefenseClaw creates no dashboard file per agent. Open it from **Agent identity → Runtime Agent Directory** by clicking an **Agent ID**.
 
+## Hook capacity monitoring
+
+Every hook call that runs out of its answer budget increments `defenseclaw.hook.deadline_outcomes` (delta, unit `{call}`). In the local stack it is the Prometheus counter `defenseclaw_hook_deadline_outcomes_total` with an `outcome` label, and the `DefenseClawHookOverCapacity` alert fires when one outcome (`deadline_deny`, `late_allow` or `shed`) grows by more than 5 calls in every 5-minute window for 5 minutes in a row (`increase(...[5m]) > 5` with `for: 5m`), so one late call does not page.
+
+| `outcome` | Meaning |
+|---|---|
+| `deadline_deny` | The hook blocked the call because DefenseClaw did not decide it in time (managed hosts, strict and closed fail modes). |
+| `late_allow` | The call ran unchecked after its answer budget (per-user default fail mode). |
+| `shed` | The gateway admission limits refused the call (an account over its own budget, or a full gateway). Its hook sends it again and blocks it when its answer budget ends unless a resend is admitted. Counted once per call. |
+
+A per-user gateway counts the late calls its hooks log. A managed gateway counts a call only from evidence that it ran out of its budget: a late or open delivery receipt from the hook, a client that left before the answer or before admission (by the no-answer fail mode: `closed` is a `deadline_deny`, `open` a `late_allow`), a sandbox receipt that never came, or a refusal by the admission limits. A call that never reached a managed gateway, or one whose hook sent no receipt for another reason, is not counted (the per-call record in the system log has it), and a disk or audit failure is not counted as load. The same counts for the last hour are in `defenseclaw status` and `defenseclaw doctor` (on every OS), in `enterprise <os> status` and `verify` (warning `hook_over_capacity`), and in the gateway `/status` document as `hook_capacity`. A per-user gateway keeps them out of its `/health`, which needs no credential; a managed gateway adds them to `/health` only for an administrator. The measured rate per host is in [Hook sizing](/docs/support-matrix#hook-sizing).
+
 ## Managed AI Defense fail-open monitoring
 
 In managed enterprise mode, a request is allowed when the AI Defense inspection returns no verdict. Each such decision increments `defenseclaw.managed_aid.fail_open.decisions` (delta, unit `{decision}`). In the local stack it is the Prometheus counter `defenseclaw_managed_aid_fail_open_decisions_total` with a `reason` label.

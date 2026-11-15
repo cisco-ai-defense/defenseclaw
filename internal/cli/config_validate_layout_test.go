@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -160,9 +161,9 @@ func TestConfigValidateDefaultsToTheManagedConfigOnAWindowsStandaloneComputer(t 
 	if err := os.WriteFile(layout.ConfigPath, []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previous := managedHostWindowsStandalone
-	t.Cleanup(func() { managedHostWindowsStandalone = previous })
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	previous := hookcli.ManagedHostWindowsStandalone
+	t.Cleanup(func() { hookcli.ManagedHostWindowsStandalone = previous })
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	t.Setenv(managed.ConfigPathEnv, "")
 	t.Setenv("DEFENSECLAW_HOME", filepath.Join(dir, "per-user"))
 	out := &strings.Builder{}

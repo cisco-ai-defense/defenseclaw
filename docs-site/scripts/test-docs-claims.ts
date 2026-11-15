@@ -29,6 +29,22 @@ function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
 
+describe('Tool judge task scope', () => {
+  const text = () => page('guardrail/index.mdx').split('### Which connectors give the judge your task')[1].split('### Let tool calls go first')[0];
+  it('lists the connectors that keep the task and documents the scope finding', () => {
+    const section = text();
+    assert.match(section, /\*\*Kept:\*\*[^*]*Claude Code[^*]*Devin\./);
+    assert.match(section, /\*\*Kept, but names no destination:\*\* Hermes/);
+    assert.match(section, /\*\*Not kept[^*]*\*\*[^*]*OpenCode[^*]*OpenClaw/);
+    assert.match(section, /`INTENT-SCOPE-SEND`/);
+    assert.match(section, /Naming a mailbox covers that address only; a person you name without an address counts when you also name the domain of the mailbox/);
+    assert.match(section, /In this release the check only records: it writes a judge event of kind `tool_intent_scope_shadow`/);
+    assert.match(section, /`guardrail\.judge\.intent_scope` to `off` to stop the check; `shadow` is the default/);
+    assert.match(section, /never from words in quoted text, a commit message or a here-document/);
+    assert.match(section, /hosts of the git remotes of your working folder count as named/);
+  });
+});
+
 describe('Rollback gateway state', () => {
   it('qualifies automatic startup and names the command for a stopped gateway', () => {
     const text = page('get-started/upgrade.mdx').split('## Rollback')[1].split('## Update notices')[0];

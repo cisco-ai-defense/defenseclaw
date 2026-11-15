@@ -6719,6 +6719,51 @@ guardrail.add_command(_judge_group)
 
 
 # ---------------------------------------------------------------------------
+# guardrail cascade
+# ---------------------------------------------------------------------------
+
+
+@guardrail.group("cascade")
+def cascade_group() -> None:
+    """Show how the guardrail cascade decides (rules, System One, judge, Rego policy)."""
+
+
+@cascade_group.command("explain")
+@click.option("--connector", default="", help="Agent connector (claudecode, codex, ...); empty for the global scope.")
+@click.option("--profile", default="", help="Resolve for the subjects of this guardrail profile.")
+@click.option(
+    "--input",
+    "input_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Replay one decision: a cascade policy input (JSON) through the Rego policy and the limits.",
+)
+@click.option(
+    "--last",
+    default=0,
+    type=click.IntRange(min=0),
+    help="Replay the Nth most recent decision the gateway recorded (1 = the latest): "
+    "the decisions the Rego policy set or failed on, or that a floor raised after it.",
+)
+@click.option("--json", "json_out", is_flag=True, help="Print JSON.")
+def cascade_explain_cmd(connector: str, profile: str, input_path: str | None, last: int, json_out: bool) -> None:
+    """Show the effective cascade for a connector: what runs, what each outcome does,
+    the unknown tier, lanes, the Rego policy and locks, and the key that set each value.
+    With --input, also which layer or policy rule set the final action of that decision."""
+    from defenseclaw import cascade
+
+    if input_path and last:
+        raise click.UsageError("use --input or --last, not both")
+    payload, error = cascade.gateway_explain(connector, profile, input_path or "", as_json=json_out, last=last)
+    if error:
+        raise click.ClickException(error)
+    if json_out:
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        click.echo(str(payload).rstrip("\n"))
+
+
+# ---------------------------------------------------------------------------
 # Secret flow tracking (guardrail.secret_flow) — S7, 1.0.10
 # ---------------------------------------------------------------------------
 
@@ -6734,9 +6779,12 @@ _SECRET_FLOW_SET_KEYS = {
 
 
 def _cascade_lane(gc, name: str) -> str:
-    """The value of guardrail.cascade.lanes.<name> (shadow when unset)."""
-    lanes = getattr(getattr(gc, "cascade", None), "lanes", None)
-    return (getattr(lanes, name, "shadow") or "shadow") if lanes is not None else "shadow"
+    """The value of guardrail.cascade.lanes.<name> (shadow when unset). The
+    cascade is kept as written (a mapping, ``GuardrailConfig.cascade``)."""
+    cascade = getattr(gc, "cascade", None)
+    lanes = cascade.get("lanes") if isinstance(cascade, dict) else None
+    value = lanes.get(name) if isinstance(lanes, dict) else None
+    return str(value) if value else "shadow"
 
 
 def _secret_flow_lane_mode(gc) -> str:

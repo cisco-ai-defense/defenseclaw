@@ -101,6 +101,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall, toolresult, nonshell,
             # psfloor, sender and response-fields packs.
             "bcea83c78cdebc78f4cd5ac07321a9ce8cc91f9d7d6f0d9b49dbb6d7f6829870",
+            # 1.0.10 (rel/1.0.10 INT batch 11 delta 3): + g596 self-protection rules.
+            "b8be2e07c3cdfcd48ea89580512d0c79629bfa61bb84a9571313a82997fd5267",
             # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and
             # command rule ids.
             "b10430a9f09cf9341d1810047bdc4db50be2987e2f27584af20e579e13e20b09",
@@ -170,6 +172,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall, toolresult, nonshell,
             # psfloor, sender and response-fields packs.
             "b27db48e2e35664d39cdcf1bdd022de5b8a6514ed42088faf8de6e34fdeb9b1a",
+            # 1.0.10 (rel/1.0.10 INT batch 11 delta 3): + g596 self-protection rules.
+            "098589e5aad658e8e575589b3f3c0fbceeb50433f6d4935a05c77d3ffe7102bd",
             # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and
             # command rule ids.
             "2fc01f00e12d004a400b70939788dda568c097ba4ef895f5392735f698238142",
@@ -238,6 +242,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall, toolresult, nonshell,
             # psfloor, sender and response-fields packs.
             "6f5ab18b2bbbbfe1c6852b58ac5c2b6949632f28620518d7f5c9ad157531876d",
+            # 1.0.10 (rel/1.0.10 INT batch 11 delta 3): + g596 self-protection rules.
+            "235f5925f206724402760fbd8aa969def4c3518e3b3c3d4d82e55d7d3426301b",
             # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and
             # command rule ids.
             "80a72f2d44b59278db1dec7d86ec2c26709638f4f56de6948de7f4040b5802d6",

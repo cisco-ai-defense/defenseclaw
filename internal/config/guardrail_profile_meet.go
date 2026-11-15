@@ -204,7 +204,7 @@ func (c *Config) DeriveGuardrailProfileMeet(members []string, profile GuardrailP
 		return DerivedGuardrailProfile{}, fmt.Errorf("guardrail profile meet %s: %w", name, err)
 	}
 	profile.Sandbox = nil
-	derived := deriveProfileFrom(base, profile)
+	derived := deriveProfileFrom(base, name, c.withMeetCascade(members, profile))
 	for name, mode := range hookModes {
 		// A profile's explicit guardrail mode clears inherited hook modes.
 		// Restore only overrides that differ from the meet's inspect mode,

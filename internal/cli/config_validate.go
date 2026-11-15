@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
@@ -174,7 +175,7 @@ func configValidateManagedHostLayout() (managed.StandaloneLayout, bool) {
 	// marker, as every other managed-host check there reads it; without it
 	// validate with no file read the per-user config the administrator has
 	// none of (GAP-1625, the Windows half of GAP-0602).
-	if _, present := managedHostWindowsStandalone(); present {
+	if _, present := hookcli.ManagedHostWindowsStandalone(); present {
 		return layout, true
 	}
 	if layout.DescriptorPath == "" {

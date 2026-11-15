@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -47,20 +48,20 @@ import (
 // of a managed computer, and a test that did not pin the identity gave
 // another answer as LocalSystem or as a standard user.
 func isolateTestHost() func() {
-	sandboxSeam("managedHostWindowsStandalone", &managedHostWindowsStandalone, func() (string, bool) { return "", false })
+	sandboxSeam("managedHostWindowsStandalone", &hookcli.ManagedHostWindowsStandalone, func() (string, bool) { return "", false })
 	// GAP-2572: on a managed lane host the HKLM marker key exists, so the
 	// "marker present but unverified" check read it and closed every
 	// per-user outage case; Secure Client and the runtime descriptor are the
 	// other two machine signals the outage mode reads.
-	sandboxSeam("managedHostWindowsMarkerUncertain", &managedHostWindowsMarkerUncertain, func() bool { return false })
-	sandboxSeam("secureClientHost", &secureClientHost, func() bool { return false })
+	sandboxSeam("managedHostWindowsMarkerUncertain", &hookcli.ManagedHostWindowsMarkerUncertain, func() bool { return false })
+	sandboxSeam("secureClientHost", &hookcli.SecureClientHost, func() bool { return false })
 	pinTestProcessIdentity()
 	normalizeTestTokenDefaultOwner()
 	restoreTemp := isolateTestRunTemp()
 	dir, err := os.MkdirTemp("", "defenseclaw-cli-test-")
 	if err != nil {
 		sandboxSeam("windowsScannerRuntimeDir", &windowsScannerRuntimeDir, func() (string, error) { return "", err })
-		sandboxSeam("managedHostDescriptorPath", &managedHostDescriptorPath, func() string { return "" })
+		sandboxSeam("managedHostDescriptorPath", &hookcli.ManagedHostDescriptorPath, func() string { return "" })
 		isolateTestDeploymentReaders(os.TempDir())
 		isolateTestRunFolders("")
 		isolateTestGatewayPortClaims(filepath.Join(os.TempDir(), "defenseclaw-cli-test-no-port-claims"))
@@ -76,7 +77,7 @@ func isolateTestHost() func() {
 	isolateTestRunFolders(dir)
 	isolateTestGatewayPortClaims(filepath.Join(dir, "port-claims"))
 	missingDescriptor := filepath.Join(dir, "no-runtime-descriptor")
-	sandboxSeam("managedHostDescriptorPath", &managedHostDescriptorPath, func() string { return missingDescriptor })
+	sandboxSeam("managedHostDescriptorPath", &hookcli.ManagedHostDescriptorPath, func() string { return missingDescriptor })
 	// Absent like on a computer without a deployment.
 	runtimeDir := filepath.Join(dir, "scanners")
 	sandboxSeam("windowsScannerRuntimeDir", &windowsScannerRuntimeDir, func() (string, error) { return runtimeDir, nil })
@@ -807,8 +808,8 @@ func isolateTestDeploymentReaders(dir string) {
 	// they are.
 	missingRoots, missingRootsErr := winpath.EnterpriseRootsFor(managed.ProfileStandalone,
 		filepath.Join(dir, "no-program-files"), filepath.Join(dir, "no-program-data"))
-	sandboxSeam("windowsManagedLayout.standalone", &windowsManagedLayout.standalone, func() (managed.StandaloneLayout, error) { return missing, nil })
-	sandboxSeam("windowsManagedLayout.roots", &windowsManagedLayout.roots, func(profile string) (winpath.EnterpriseRoots, error) {
+	sandboxSeam("windowsManagedLayout.standalone", &hookcli.WindowsManagedLayout.Standalone, func() (managed.StandaloneLayout, error) { return missing, nil })
+	sandboxSeam("windowsManagedLayout.roots", &hookcli.WindowsManagedLayout.Roots, func(profile string) (winpath.EnterpriseRoots, error) {
 		if profile != managed.ProfileStandalone {
 			return winpath.TrustedEnterpriseRoots(profile)
 		}
@@ -816,7 +817,7 @@ func isolateTestDeploymentReaders(dir string) {
 	})
 	// cowork-1-0-8 GAP-0093 (round 3, review 2 S2): the guardian's self-heal
 	// derives its install and state layout from these registrations.
-	sandboxSeam("windowsManagedLayout.programRoots", &windowsManagedLayout.programRoots, func() (string, string) {
+	sandboxSeam("windowsManagedLayout.programRoots", &hookcli.WindowsManagedLayout.ProgramRoots, func() (string, string) {
 		return filepath.Join(dir, "no-program-files"), filepath.Join(dir, "no-program-data")
 	})
 	sandboxSeam("windowsEnterpriseInstalledConfigPath", &windowsEnterpriseInstalledConfigPath, func() (string, error) { return missing.ConfigPath, nil })
@@ -864,7 +865,7 @@ func isolateTestDeploymentReaders(dir string) {
 		func(managed.StandaloneLayout) *windowsGuardianStateHold { return nil })
 	sandboxSeam("enterpriseHookWindowsConnectorUserRuntimeLeftovers", &enterpriseHookWindowsConnectorUserRuntimeLeftovers,
 		func(string, string, string, []string) []string { return nil })
-	sandboxSeam("windowsConnectorOffRosterRead", &windowsConnectorOffRosterRead, func(string) (bool, error) { return false, nil })
+	sandboxSeam("windowsConnectorOffRosterRead", &hookcli.WindowsConnectorOffRosterRead, func(string) (bool, error) { return false, nil })
 	sandboxSeam("windowsEnterpriseRemovedConnectorsForStatus", &windowsEnterpriseRemovedConnectorsForStatus, func() ([]managed.RemovedConnector, error) { return nil, nil })
 	sandboxSeam("windowsEnterpriseAgentSettingsNotices", &windowsEnterpriseAgentSettingsNotices, func() []string { return nil })
 	sandboxSeam("windowsEnterpriseNativeOTLPNotices", &windowsEnterpriseNativeOTLPNotices, func() []string { return nil })
@@ -1081,13 +1082,13 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 			t.Fatalf("the shared temp folder %s is a run marker", marker)
 		}
 	}
-	if where, managed := managedHostWindowsStandalone(); managed {
+	if where, managed := hookcli.ManagedHostWindowsStandalone(); managed {
 		t.Fatalf("the managed-host guard reads the real deployment (%s)", where)
 	}
-	if managedHostWindowsMarkerUncertain() || secureClientHost() {
+	if hookcli.ManagedHostWindowsMarkerUncertain() || hookcli.SecureClientHost() {
 		t.Fatal("the outage mode reads the computer's own HKLM marker or Secure Client install")
 	}
-	if descriptor := managedHostDescriptorPath(); descriptor != "" {
+	if descriptor := hookcli.ManagedHostDescriptorPath(); descriptor != "" {
 		if rel, err := filepath.Rel(os.TempDir(), descriptor); err != nil || strings.HasPrefix(rel, "..") {
 			t.Fatalf("the managed runtime descriptor %s is outside the temp folder %s", descriptor, os.TempDir())
 		}
@@ -1216,7 +1217,7 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 	}
 	// cowork-1-0-8 GAP-0093 (round 2): the one layout source answers the
 	// run's missing deployment; the Secure Client roots are the computer's.
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1224,7 +1225,7 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 		layout.GuardianAuthDir, layout.ManifestPath, layout.LogDir} {
 		inTemp("the standalone layout", path)
 	}
-	standaloneRoots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	standaloneRoots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1234,7 +1235,7 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 	// GAP-0093 (round 3, review 2 S2): the guardian's self-heal reads the
 	// run's missing Program Files and ProgramData, and its three repairs are
 	// the sandbox's no-ops, not the machine writers.
-	selfHealFiles, selfHealData := windowsManagedLayout.programRoots()
+	selfHealFiles, selfHealData := hookcli.WindowsManagedLayout.ProgramRoots()
 	inTemp("the self-heal Program Files", selfHealFiles)
 	inTemp("the self-heal ProgramData", selfHealData)
 	for name, seam := range map[string][2]any{
@@ -1247,7 +1248,7 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 		}
 	}
 	if want, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient); err == nil {
-		if got, err := windowsManagedLayout.roots(winpath.EnterpriseProfileSecureClient); err != nil || got != want {
+		if got, err := hookcli.WindowsManagedLayout.Roots(winpath.EnterpriseProfileSecureClient); err != nil || got != want {
 			t.Fatalf("the Secure Client roots changed in the sandbox: %+v, %v; want %+v", got, err, want)
 		}
 	}
@@ -1379,8 +1380,8 @@ func TestStandaloneRegistrationWritesOnlyTheTestSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, values := range map[string]map[string]string{
-		WindowsEnterpriseMarkerKey: {"Profile": managed.ProfileStandalone, "ProductVersion": "1.0.9-sandbox"},
-		windowsEnterpriseARPKey:    {"DisplayVersion": "1.0.9-sandbox", "DisplayName": "Cisco DefenseClaw Enterprise"},
+		hookcli.WindowsEnterpriseMarkerKey: {"Profile": managed.ProfileStandalone, "ProductVersion": "1.0.9-sandbox"},
+		windowsEnterpriseARPKey:            {"DisplayVersion": "1.0.9-sandbox", "DisplayName": "Cisco DefenseClaw Enterprise"},
 	} {
 		key, err := registry.OpenKey(windowsEnterpriseMachineRegistry, path, registry.QUERY_VALUE|registry.WOW64_64KEY)
 		if err != nil {
@@ -1398,7 +1399,7 @@ func TestStandaloneRegistrationWritesOnlyTheTestSandbox(t *testing.T) {
 	if err := updateWindowsEnterpriseRegistration(uninstall, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey} {
+	for _, path := range []string{hookcli.WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey} {
 		if key, err := registry.OpenKey(windowsEnterpriseMachineRegistry, path, registry.QUERY_VALUE|registry.WOW64_64KEY); err == nil {
 			_ = key.Close()
 			t.Errorf("the uninstall left %s in the sandbox", path)

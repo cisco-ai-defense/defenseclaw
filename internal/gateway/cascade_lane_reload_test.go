@@ -26,9 +26,9 @@ func TestCascadeLaneHotReloadEveryLane(t *testing.T) {
 		bad              []string
 		good, goodMode   string
 	}{
-		"effects":     {"Off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null"}, "\" Shadow \"", "shadow"},
-		"secret_flow": {"Off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null"}, "Shadow", "shadow"},
-		"nonshell":    {"Shadow", "shadow", []string{"\"\"", "garbage", "1", "true", "null", "yes"}, "ON", "on"},
+		"effects":     {"off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null", "Off", "\" Shadow \""}, "shadow", "shadow"},
+		"secret_flow": {"off", "off", []string{"on", "ON", "\"\"", "garbage", "1", "true", "null", "Off", "Shadow"}, "shadow", "shadow"},
+		"nonshell":    {"shadow", "shadow", []string{"\"\"", "garbage", "1", "true", "null", "yes", "Shadow", "ON"}, "on", "on"},
 	}
 	for _, lane := range config.CascadeLaneNames() {
 		c, ok := cases[lane]

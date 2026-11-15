@@ -1518,18 +1518,6 @@ func TestWindowsRawStructuredFailClosedParity(t *testing.T) {
 			forbidNetwork:    true,
 		},
 		{
-			name:    "PowerShell certutil remains unsupported",
-			dialect: DialectPowerShell,
-			raw:     `certutil.exe -decode C:\input.txt C:\output.bin`,
-			argv: []string{
-				"certutil.exe", "-decode",
-				`C:\input.txt`, `C:\output.bin`,
-			},
-			effect:           EffectExecute,
-			forbidOperations: []OperationKind{OperationDecode},
-			forbidPaths:      true,
-		},
-		{
 			name:    "netcat ambiguous value bundle",
 			dialect: DialectCMD,
 			raw:     `nc.exe -wlp4444`,

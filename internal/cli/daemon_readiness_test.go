@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -1652,7 +1653,7 @@ func TestHookContractAdmissionStartErrorUsesTheInstallerExitCode(t *testing.T) {
 		[]string{"codex", "claudecode"},
 		"hook contract admission failed: connector codex hook contract drift detected",
 	)
-	if code := commandExitCode(err); code != 3 {
+	if code := cliusage.ExitCode(err); code != 3 {
 		t.Fatalf("exit code = %d, want 3", code)
 	}
 	for _, want := range []string{

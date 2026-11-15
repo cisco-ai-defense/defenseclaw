@@ -2889,10 +2889,12 @@ func senderReaderEgress(facts actionfacts.Facts) bool {
 	return false
 }
 
-// senderReaderUnknownDestination reports a sender whose destination the
-// shared sender reader cannot read in full (never "no sender").
+// senderReaderUnknownDestination reports a call the shared sender reader
+// cannot prove sends nothing: a sender whose destination it cannot read in
+// full, a part it cannot read (a program word the shell builds, a source the
+// parser gave up on) or a reading cap (never "no sender").
 func senderReaderUnknownDestination(facts actionfacts.Facts) bool {
-	return actionfacts.ReadSenders(facts).UnknownDestination()
+	return actionfacts.ReadSenders(facts).UnknownTier()
 }
 
 func externalDataBearingUpload(facts actionfacts.Facts) bool {

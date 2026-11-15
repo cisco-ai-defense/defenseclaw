@@ -34,6 +34,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -140,7 +141,7 @@ func windowsHookImageBin() (string, error) {
 	if !strings.EqualFold(filepath.Base(executable), "defenseclaw-gateway.exe") || !strings.EqualFold(filepath.Base(bin), "bin") {
 		return "", fmt.Errorf("hook-image must run from the installed gateway <InstallRoot>\\bin\\defenseclaw-gateway.exe, not %s", executable)
 	}
-	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return "", fmt.Errorf("resolve the standalone install roots: %w", err)
 	}
@@ -197,7 +198,7 @@ func runWindowsHookImagePrune(keep []string) windowsHookImagePruneReport {
 	if err != nil {
 		return failed(err)
 	}
-	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return failed(fmt.Errorf("resolve the standalone roots: %w", err))
 	}
@@ -465,7 +466,7 @@ func windowsHookImageStandaloneBin() (string, bool) {
 	if !strings.EqualFold(filepath.Base(bin), "bin") {
 		return "", false
 	}
-	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(winpath.EnterpriseProfileStandalone)
 	if err != nil || winpath.ValidateEnterpriseInstallRoot(roots, filepath.Dir(bin)) != nil {
 		return "", false
 	}

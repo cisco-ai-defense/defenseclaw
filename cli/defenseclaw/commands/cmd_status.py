@@ -462,9 +462,12 @@ def status(app: AppContext, as_json: bool) -> None:
             for label, val in (
                 ("Total scans", counts.total_scans),
                 ("Active alerts", counts.alerts),
+                ("Unread calls", counts.unread_calls),
             ):
                 if val is None:
                     val = ux.dim("not counted (too many audit events to count quickly; list them: defenseclaw alerts)")
+                elif label == "Unread calls" and val:
+                    val = f"{val} " + ux.dim("(ACTION-PARSE-FAILURE: tool calls read only in part)")
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
@@ -519,6 +522,7 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux._style("running", fg="green") + ux.dim(_sidecar_running_detail(health, bind, cfg.gateway.api_port)),
             )
         _print_policy(health)
+        _print_hook_capacity(health)
         _print_watch_root_coverage(health)
         _print_audit_log_health(cfg, health)
         _print_retention_cap_warning(health)
@@ -1280,6 +1284,11 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     if isinstance(policy, dict):
         # The effective policy the gateway applied, for the Policy row.
         health = {**health, "policy": policy}
+    capacity = document.get("hook_capacity")
+    if isinstance(capacity, dict):
+        # The hook load of the last hour (S8 DESIGN 18): only the
+        # authenticated /status of a per-user gateway carries it.
+        health = {**health, "hook_capacity": capacity}
     # The verified runtime PID, for the Sidecar row (GAP-1789).
     return {**health, "pid": trust.pid} if "pid" not in health else health
 
@@ -1363,6 +1372,62 @@ def _policy_status(health: dict | None) -> dict | None:
         "last_reload_error": policy_reload_rejection(policy),
         "opa_unavailable": policy.get("opa_unavailable") or "",
     }
+
+
+def _hook_capacity_status(health: dict | None) -> dict | None:
+    """The hook capacity window of the gateway (S8 DESIGN 18), or None.
+
+    Counts of the last hour: tool calls answered in time, and the ones that
+    ran out of their answer budget (deadline denies, late allows) or were
+    refused by the admission limits (shed). It comes from the authenticated
+    /status, or the /health a managed gateway gives an administrator. Absent
+    on older gateways, on Secure Client and for an ordinary account of a
+    managed host.
+    """
+    capacity = (health or {}).get("hook_capacity")
+    if not isinstance(capacity, dict):
+        return None
+    window = capacity.get("window") if isinstance(capacity.get("window"), dict) else {}
+
+    def count(key: str) -> int:
+        value = window.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    minutes = capacity.get("window_minutes")
+    return {
+        "window_minutes": minutes if isinstance(minutes, int) and not isinstance(minutes, bool) else 60,
+        "answered": count("answered"),
+        "deadline_denies": count("deadline_denies"),
+        "late_allows": count("late_allows"),
+        "shed": count("shed"),
+        "sizing_doc": str(capacity.get("sizing_doc") or "")[:200],
+    }
+
+
+def _hook_capacity_clauses(denies: int, late: int, shed: int) -> list[str]:
+    """What the window holds, one clause per kind (shared with doctor)."""
+    clauses = []
+    if denies + late:
+        clauses.append(f"{denies} denied and {late} unchecked tool call(s) ran out of their answer budget")
+    if shed:
+        clauses.append(f"{shed} call(s) refused by the admission limits; their hooks block them when the budget ends")
+    return clauses
+
+
+def _print_hook_capacity(health: dict | None) -> None:
+    """One row only when a call ran out of its answer budget or was refused in the window."""
+    capacity = _hook_capacity_status(health)
+    if capacity is None:
+        return
+    clauses = _hook_capacity_clauses(capacity["deadline_denies"], capacity["late_allows"], capacity["shed"])
+    if not clauses:
+        return
+    minutes, answered = capacity["window_minutes"], capacity["answered"]
+    value = (
+        f"over capacity in the last {minutes} min: " + "; and ".join(clauses) + f" ({answered} answered in time); "
+        "not a policy result, see defenseclaw doctor"
+    )
+    _status_row("Hook capacity", ux._style(value, fg="yellow"))
 
 
 def _print_policy(health: dict | None) -> None:
@@ -2568,6 +2633,7 @@ def _status_payload(app) -> dict:
             payload["activity"] = {
                 "total_scans": counts.total_scans,
                 "active_alerts": counts.alerts,
+                "unread_calls": counts.unread_calls,
             }
     else:
         payload["enforcement"] = None
@@ -2654,6 +2720,8 @@ def _status_payload(app) -> dict:
             payload["audit_store_cap_warning"] = warning
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
+    if (capacity := _hook_capacity_status(health)) is not None:
+        payload["hook_capacity"] = capacity
     payload["connectors"] = _connector_roster(cfg, health=health)
     if any(row.get("name") == "openclaw" and row.get("enabled") for row in payload["connectors"]):
         from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue

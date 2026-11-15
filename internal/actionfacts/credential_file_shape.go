@@ -21,6 +21,11 @@ const (
 	CredentialFileDeveloperToken  CredentialFileClass = "developer_token"
 	CredentialFileCloudCLI        CredentialFileClass = "cloud_cli_token"
 	CredentialFilePrivateKey      CredentialFileClass = "private_key_file"
+	// CredentialFileCredentialStore is a store of secrets the PATH-CRED-STORE
+	// rules name that no other class holds: a Vault token, a MySQL client
+	// option file, the Azure CLI credential files, a keytab, the system
+	// shadow and service credential files (rel-1-0-10:GAP-0550).
+	CredentialFileCredentialStore CredentialFileClass = "credential_store"
 )
 
 // CredentialFileShape is the one entry of credentialFileShapes that a path
@@ -51,6 +56,9 @@ type credentialFileShape struct {
 	// names the cache and per-account folders whose file names are not
 	// fixed.
 	folder string
+	// under: a folder (path components, matched at a component boundary);
+	// every file below it is the entry (var/lib/jenkins/secrets).
+	under string
 	// base: an exact file name, anywhere.
 	base string
 	// basePrefix: a file name prefix; with dir, only directly inside a
@@ -129,6 +137,25 @@ var credentialFileShapes = [...]credentialFileShape{
 	{class: CredentialFileCloudCLI, relative: ".azure/azureprofile.json"},
 	{class: CredentialFileCloudCLI, relative: ".azure/tokencache.dat"},
 	{class: CredentialFileCloudCLI, dir: ".azure", basePrefix: "msal_token_cache", suffixes: []string{".json", ".bin"}},
+
+	// The credential stores of the PATH-CRED-STORE and PATH-CRED-STORE-USER
+	// rules that the rows above do not hold (gh hosts.yml, .pgpass and the
+	// Azure token caches are rows above). A read of any of them starts the
+	// secret-read chain like every other row (rel-1-0-10:GAP-0550).
+	{class: CredentialFileCredentialStore, base: ".vault-token"},
+	{class: CredentialFileCredentialStore, base: ".my.cnf"},
+	{class: CredentialFileCredentialStore, relative: ".azure/accesstokens.json"},
+	{class: CredentialFileCredentialStore, relative: ".azure/credentials"},
+	{class: CredentialFileCredentialStore, relative: "etc/master.passwd"},
+	{class: CredentialFileCredentialStore, relative: "etc/gshadow"},
+	{class: CredentialFileCredentialStore, relative: "etc/security/opasswd"},
+	{class: CredentialFileCredentialStore, relative: "etc/krb5.keytab"},
+	{class: CredentialFileCredentialStore, relative: "etc/aws/credentials"},
+	{class: CredentialFileCredentialStore, relative: "etc/azure/credentials"},
+	{class: CredentialFileCredentialStore, relative: "etc/gcloud/credentials"},
+	{class: CredentialFileCredentialStore, relative: "var/lib/jenkins/credentials.xml"},
+	{class: CredentialFileCredentialStore, under: "var/lib/jenkins/secrets"},
+	{class: CredentialFileCredentialStore, suffixes: []string{".keytab"}},
 
 	// Login and token files of developer CLIs and agents (S7 secret-read
 	// table). Each row names the path the tool's public documentation gives.
@@ -263,6 +290,12 @@ func MatchCredentialFileShape(value string) (CredentialFileShape, bool) {
 				continue
 			}
 			relative = row.relative
+		case row.under != "":
+			under, ok := belowFolder(value, row.under)
+			if !ok {
+				continue
+			}
+			relative = under
 		case row.base != "":
 			if base != row.base {
 				continue
@@ -315,6 +348,63 @@ func folderIndex(value, folder string) int {
 		return index + 1
 	}
 	return -1
+}
+
+// CredentialFileShapeProbePaths returns, for every row of the credentials-file
+// table, one concrete path the row names, spelled relative to a root (a home,
+// a project, "/"): a test that walks it covers every row, so a path added to
+// the table is covered by the tests that read this list with no edit.
+func CredentialFileShapeProbePaths() []string {
+	probes := make([]string, 0, len(credentialFileShapes))
+	for _, row := range credentialFileShapes {
+		var probe string
+		switch {
+		case row.relative != "":
+			probe = row.relative
+		case row.under != "":
+			probe = row.under + "/probe"
+		case row.base != "":
+			probe = row.base
+		case row.basePrefix != "":
+			probe = row.basePrefix + "probe"
+			if len(row.suffixes) != 0 {
+				probe += row.suffixes[0]
+			}
+			if row.dir != "" {
+				probe = row.dir + "/" + probe
+			}
+		case len(row.suffixes) != 0:
+			stem := "probe"
+			if len(row.stemAny) != 0 {
+				stem += "-" + row.stemAny[0]
+			}
+			probe = stem + row.suffixes[0]
+		default:
+			continue
+		}
+		probes = append(probes, probe)
+	}
+	return probes
+}
+
+// belowFolder reports a path below folder (components, matched at a component
+// boundary) and returns the folder-relative spelling of the file.
+func belowFolder(value, folder string) (string, bool) {
+	rest := ""
+	switch {
+	case strings.HasPrefix(value, folder+"/"):
+		rest = value[len(folder)+1:]
+	default:
+		index := strings.Index(value, "/"+folder+"/")
+		if index < 0 {
+			return "", false
+		}
+		rest = value[index+len(folder)+2:]
+	}
+	if rest == "" {
+		return "", false
+	}
+	return folder + "/" + rest, true
 }
 
 func hasAnySuffix(value string, suffixes []string) bool {

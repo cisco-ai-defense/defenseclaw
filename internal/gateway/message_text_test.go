@@ -495,7 +495,16 @@ func TestExtractMessageArgsRoutingCost(t *testing.T) {
 // call (GAP-0328, GAP-0338): inside it the content decides, past it the unread
 // part is truncated, never skipped, and a 4 MB or 16 MB attachment costs no
 // more than one at the budget.
+//
+// The cost is counted in work units, the base64 characters the attachment
+// readers consume, not in wall-clock time: a wall-clock bound failed on a
+// loaded hosted runner under -race (16 MB in 4.21 s, rel 2dfe1b576e) while the
+// reading stayed inside the budget. Past the budget the work is exactly that
+// of a call at the budget. What still grows with the input is the JSON decode
+// of the args and the one byte scan that tells an attachment from text, both
+// linear and both bounded by the 1 MiB request body limit of a real call.
 func TestExtractMessageArgsAttachmentBudget(t *testing.T) {
+	work := map[string]int{}
 	for _, tc := range []struct {
 		name      string
 		chars     int
@@ -510,19 +519,24 @@ func TestExtractMessageArgsAttachmentBudget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		start := time.Now()
 		got := extractMessageArgs(raw)
-		// The bound only catches a read that scales with the attachment (the
-		// 200 ms path is 8 MiB of decode and rune scan away from a 504): the
-		// request body limit keeps a real call under 1 MiB, and -race on a
-		// loaded box is ten times slower than production.
-		took := time.Since(start)
-		t.Logf("%s: extractMessageArgs took %v", tc.name, took)
-		if took > 4*time.Second {
-			t.Errorf("%s: reading the call took %v", tc.name, took)
+		work[tc.name] = got.decoded
+		t.Logf("%s: the attachment readers consumed %d base64 characters", tc.name, got.decoded)
+		// Each reading (the 8-bit runs, the UTF-16 probe, the UTF-16 runs)
+		// reads at most what the budget lets in, the whole of it at most twice.
+		if read := min(tc.chars, messagePayloadMaxChars); got.decoded < read || got.decoded > 2*read+messageUTF16ProbeBytes*4/3+4 {
+			t.Errorf("%s: the readers consumed %d characters, want %d to %d", tc.name, got.decoded, read, 2*read+messageUTF16ProbeBytes*4/3+4)
 		}
 		if got.Text != "hi" || got.Truncated.Has(bounded.Bytes) != tc.truncated {
 			t.Errorf("%s: text %q, truncated bytes = %v, want hi and %v", tc.name, got.Text, got.Truncated.Has(bounded.Bytes), tc.truncated)
+		}
+	}
+	if work["1 MiB"] >= work["at the budget"] {
+		t.Errorf("1 MiB consumed %d characters, at the budget %d: the work does not follow the attachment inside the budget", work["1 MiB"], work["at the budget"])
+	}
+	for _, name := range []string{"4 MB", "16 MB"} {
+		if work[name] != work["at the budget"] {
+			t.Errorf("%s consumed %d characters, at the budget %d: past the budget the work must be the budget's", name, work[name], work["at the budget"])
 		}
 	}
 	// Text after the budget is unread and the call says so; text inside it is read.

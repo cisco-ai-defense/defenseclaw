@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"os"
@@ -114,6 +115,11 @@ type agentHookConfigGuard struct {
 	// placeCache holds the places of each spelling already resolved in this
 	// call: the owner checks walk the whole registration set per path.
 	placeCache map[string][]string
+	// gitIndexRedirected is set when the call names GIT_INDEX_FILE or GIT_DIR
+	// anywhere (a prefix, env, export, declare): the index git reads is then
+	// not <worktree>/.git/index, so a file the tree lacks is not known to be
+	// absent from the index (rel-1-0-10:GAP-0789).
+	gitIndexRedirected bool
 }
 
 // shellMentionsRegistryPath is a cheap prefilter. Every component comes from
@@ -1117,6 +1123,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	}
 	text := strings.ToLower(request.LegacyText + "\n" + request.Input.Command + "\n" + string(request.Input.Args) + "\n" + strings.Join(request.Input.Argv, "\n"))
 	rawCommand := agentHookConfigRawShellCommand(request.Input)
+	guard.gitIndexRedirected = agentHookConfigRedirectsGitIndex(rawCommand)
 	// A command that spells a link only through a variable (dest=LINK; then
 	// the variable as an operand) never names the registered file in its
 	// text; the shared reader resolves the values the command binds, as the
@@ -1138,6 +1145,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		partGuard := guard
 		if part.Dir != guard.cwd {
 			partGuard = newAgentHookConfigGuard(part.Dir, guard.home)
+			partGuard.gitIndexRedirected = guard.gitIndexRedirected
 		}
 		if hookpaths.RegistrationWriteCandidate(part.Command) {
 			registered := agentHookConfigRegistrationPaths(partGuard)
@@ -1569,6 +1577,151 @@ func agentHookConfigGitNewBranchOnly(sub string, args []string) bool {
 	return false
 }
 
+// agentHookConfigPathspecFolderHolds reports a registration file that a
+// pathspec naming its folder (git checkout -- ., git restore src) can
+// rewrite. guard.files lists every name a registration file could have from
+// the cwd up to the home, so a folder pathspec reaches one only where the
+// file is there. The reading holds only where the content comes from the
+// index (fromIndex: no tree-ish, no --source, no --staged): that rewrites
+// the files the index tracks, and recreates a tracked file that was deleted
+// from the tree, but no file that is absent from both (rel-1-0-10:GAP-0572).
+// A named ref or tree (git checkout other -- ., git restore --source=other .)
+// brings in whatever files the ref holds, a settings file the tree lacks
+// included, so every registration name under the folder counts
+// (rel-1-0-10:GAP-0716). A pathspec that names the file itself is read as
+// before. Where the folder cannot be read (a gateway behind ProtectHome, a
+// closed folder) or the index is not understood, the file is not known absent
+// and is counted.
+func agentHookConfigPathspecFolderHolds(folder, path, worktree string, fromIndex bool) bool {
+	if !fromIndex {
+		return true
+	}
+	if info, err := os.Stat(folder); err != nil || !info.IsDir() {
+		return true
+	}
+	if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
+		return true
+	}
+	return agentHookConfigGitIndexMayTrack(worktree, path)
+}
+
+// agentHookConfigRedirectsGitIndex reports a call that names GIT_INDEX_FILE
+// or GIT_DIR, the two variables that move the index git reads away from
+// <worktree>/.git/index (rel-1-0-10:GAP-0789). Their value is not read: the
+// index it names is not the one agentHookConfigGitIndexMayTrack opens.
+func agentHookConfigRedirectsGitIndex(command string) bool {
+	return strings.Contains(command, "GIT_INDEX_FILE") || strings.Contains(command, "GIT_DIR")
+}
+
+// agentHookConfigGitFromIndex reports a git checkout or restore whose
+// files come from the index: a checkout with no word before -- (a branch or
+// tree-ish, or the value of -b, -B, --orphan) and a restore with neither
+// --source nor --staged. Anything else is read as a named source.
+func agentHookConfigGitFromIndex(sub string, args []string) bool {
+	switch sub {
+	case "checkout":
+		for _, arg := range args {
+			if arg == "--" {
+				return true
+			}
+			if !strings.HasPrefix(arg, "-") {
+				return false
+			}
+		}
+		return false
+	case "restore":
+		for _, arg := range args {
+			if arg == "--" {
+				return true
+			}
+			if arg == "--source" || arg == "--staged" || strings.HasPrefix(arg, "--source=") {
+				return false
+			}
+			if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.ContainsAny(arg[1:], "sS") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// maxAgentHookConfigIndexBytes bounds the index file read.
+const maxAgentHookConfigIndexBytes = 32 << 20
+
+// agentHookConfigGitIndexMayTrack reports that the index of the repository at
+// worktree may list path: it lists it, or is not in a form this reads (a
+// version other than 2 or 3, a split or sparse index, a .git that is a file
+// or a name this process cannot read, one over the bound). A repository with
+// no index file tracks nothing.
+func agentHookConfigGitIndexMayTrack(worktree, path string) bool {
+	relative, err := filepath.Rel(worktree, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return true
+	}
+	relative = filepath.ToSlash(relative)
+	gitDir := filepath.Join(worktree, ".git")
+	if info, err := os.Lstat(gitDir); err != nil || !info.IsDir() {
+		return true
+	}
+	file, err := os.Open(filepath.Join(gitDir, "index"))
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxAgentHookConfigIndexBytes+1))
+	if err != nil || len(data) > maxAgentHookConfigIndexBytes || len(data) < 32 || string(data[:4]) != "DIRC" {
+		return true
+	}
+	version, count := binary.BigEndian.Uint32(data[4:8]), binary.BigEndian.Uint32(data[8:12])
+	if version != 2 && version != 3 {
+		return true
+	}
+	end := len(data) - 20
+	offset := 12
+	for entry := uint32(0); entry < count; entry++ {
+		if offset+62 > end {
+			return true
+		}
+		flags := binary.BigEndian.Uint16(data[offset+60:])
+		header := 62
+		if version >= 3 && flags&0x4000 != 0 {
+			header = 64
+		}
+		length := int(flags & 0xfff)
+		if offset+header+length > end {
+			return true
+		}
+		if length == 0xfff {
+			cut := bytes.IndexByte(data[offset+header:end], 0)
+			if cut < 0 {
+				return true
+			}
+			length = cut
+		}
+		name := string(data[offset+header : offset+header+length])
+		if name == relative || strings.HasSuffix(name, "/") && strings.HasPrefix(relative, name) {
+			return true
+		}
+		offset += (header + length + 8) &^ 7
+	}
+	for offset+8 <= end {
+		size := int64(binary.BigEndian.Uint32(data[offset+4:]))
+		switch string(data[offset : offset+4]) {
+		case "link", "sdir":
+			return true
+		}
+		offset += 8 + int(size)
+		if size > int64(end) {
+			return true
+		}
+	}
+	return false
+}
+
 func agentHookConfigGitGlobReach(spec, worktree string, guard *agentHookConfigGuard) bool {
 	pattern := spec
 	top := false
@@ -1625,6 +1778,10 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 	// env -u drop what was assigned before them, as env does. Every pass
 	// consumes at least one word, so the peel ends with the argv.
 	rest, workTreeVar, gitDirVar := argv, "", ""
+	// GIT_INDEX_FILE or GIT_DIR before the command, or in an env wrapper,
+	// moves the index git reads (GAP-0789); so does one named elsewhere in
+	// the call (guard.gitIndexRedirected).
+	indexRedirected := guard.gitIndexRedirected
 	for len(rest) > 0 {
 		for len(rest) > 0 && agentHookConfigAssignment(rest[0]) {
 			name, value, _ := strings.Cut(rest[0], "=")
@@ -1633,6 +1790,9 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 				workTreeVar = value
 			case "GIT_DIR":
 				gitDirVar = value
+			}
+			if name == "GIT_INDEX_FILE" || name == "GIT_DIR" {
+				indexRedirected = true
 			}
 			rest = rest[1:]
 		}
@@ -1652,7 +1812,9 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 				if !filepath.IsAbs(directory) {
 					directory = filepath.Join(guard.cwd, directory)
 				}
+				redirected := guard.gitIndexRedirected
 				guard = newAgentHookConfigGuard(directory, guard.home)
+				guard.gitIndexRedirected = redirected
 			}
 			rest = child
 		} else if child, wrapper := agentHookConfigWrapperChild(rest); wrapper {
@@ -1769,6 +1931,7 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 		}
 	}
 	// An explicit pathspec may name a file currently absent from this tree.
+	fromIndex := agentHookConfigGitFromIndex(sub, args)
 	if sub == "restore" || (sub == "checkout" || sub == "reset") && slices.Contains(args, "--") {
 		start := sub == "restore"
 		saw := false
@@ -1802,7 +1965,8 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 				return arg
 			}
 			for _, file := range guard.files {
-				if file.Path == candidate || strings.HasPrefix(file.Path, candidate+string(filepath.Separator)) {
+				if file.Path == candidate || strings.HasPrefix(file.Path, candidate+string(filepath.Separator)) &&
+					agentHookConfigPathspecFolderHolds(candidate, file.Path, worktree, fromIndex && !indexRedirected) {
 					return arg
 				}
 			}

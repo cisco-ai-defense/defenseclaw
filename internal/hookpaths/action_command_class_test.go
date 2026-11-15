@@ -473,13 +473,15 @@ func TestR104ActionWindowsProtectedWriterSweep(t *testing.T) {
 		`Get-Content ` + target,
 		`Resolve-Path ` + target,
 		`Test-Path ` + target,
+		// Get-Item shows properties of the file (rel-1-0-10:GAP-0157).
+		`Get-Item ` + target,
+		`Get-Item ` + target + ` | Select-Object Length,LastWriteTime`,
 	} {
 		if got := ActionCommandDecision(command, cwd, home); got != "" {
 			t.Errorf("read-only Windows command blocked: %q: %q", command, got)
 		}
 	}
 	for _, command := range []string{
-		`Get-Item ` + target,
 		`Get-Acl ` + target,
 		`git status --short ` + target,
 		`[System.IO.File]::ReadAllText('C:/Users/Alice/.ssh/authorized_keys')`,

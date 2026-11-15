@@ -34,6 +34,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -67,7 +68,7 @@ var sandboxOpenShellExecCmd = &cobra.Command{
 		if err != nil {
 			// A missing or untrusted prerequisite (an account that has not
 			// installed OpenShell yet, say) is no failure to restart for.
-			return withExitCode(err, sandboxPrerequisiteExit)
+			return cliusage.WithExitCode(err, sandboxPrerequisiteExit)
 		}
 		// The account's local PKI is written owner-only (the upstream
 		// unit generates it under UMask=0077); the gateway itself runs

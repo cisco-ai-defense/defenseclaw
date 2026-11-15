@@ -132,7 +132,13 @@ func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
 			}}
 		}
 	}
-	err = config.CheckCandidateAssets(loaded.runtime)
+	// The same guardrail.cascade check as config.ValidateCandidate: the
+	// loader ignores a locked or invalid narrower-scope value and falls back
+	// for an invalid top-level cascade, and every writer refuses both.
+	err = config.CascadeCandidateError(loaded.runtime)
+	if err == nil {
+		err = config.CheckCandidateAssets(loaded.runtime)
+	}
 	if err == nil {
 		err = checkJSONLDestinationPaths(loaded.compiled, "")
 	}

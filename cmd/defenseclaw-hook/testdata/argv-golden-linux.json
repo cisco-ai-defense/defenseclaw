@@ -1,0 +1,260 @@
+[
+  {
+    "name": "version",
+    "exit": 0,
+    "stdout": "defenseclaw-hook version dev (commit=unknown, built=unknown)\n",
+    "stderr": ""
+  },
+  {
+    "name": "version-json",
+    "exit": 0,
+    "stdout": "{\"schema_version\":1,\"name\":\"defenseclaw-hook\",\"version\":\"dev\",\"commit\":\"unknown\",\"built\":\"unknown\"}\n",
+    "stderr": ""
+  },
+  {
+    "name": "version-json-extra",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw-hook: expected hook, hook-post or notify subcommand\n"
+  },
+  {
+    "name": "no-args-no-stdin",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw-hook: expected hook, hook-post or notify subcommand\n"
+  },
+  {
+    "name": "no-args-cursor-event",
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "no-args-claude-event",
+    "exit": 0,
+    "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"DefenseClaw blocked this tool call: DefenseClaw is not set up correctly on this computer. Contact your administrator. (enterprise_managed_runtime_descriptor_missing)\"}}\n",
+    "stderr": "defenseclaw: event_id=\u003cID\u003e: this refusal is recorded in \u003cHOME\u003e/.defenseclaw/logs/hook-failures.jsonl\n"
+  },
+  {
+    "name": "no-args-other-json",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw-hook: expected hook, hook-post or notify subcommand\n"
+  },
+  {
+    "name": "daemon-command",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw-hook: expected hook, hook-post or notify subcommand\n"
+  },
+  {
+    "name": "root-flag",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw-hook: expected hook, hook-post or notify subcommand\n"
+  },
+  {
+    "name": "hook-no-connector",
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Error: required flag(s) \"connector\" not set\n"
+  },
+  {
+    "name": "hook-unknown-flag",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw: claude-code hook error: hook invocation error: unknown flag: --bogus\nError: unknown flag: --bogus\n"
+  },
+  {
+    "name": "hook-stray-arg",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw: claude-code hook error: hook invocation error: unknown command \"stray\" for \"defenseclaw-gateway hook\"\nError: unknown command \"stray\" for \"defenseclaw-gateway hook\"\n"
+  },
+  {
+    "name": "hook-bad-surface",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw: claude-code hook error: hook invocation error: --hook-surface \"v3\" is not valid for connector \"claudecode\"\nError: --hook-surface \"v3\" is not valid for connector \"claudecode\"\n"
+  },
+  {
+    "name": "hook-unknown-connector",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw: unknown hook connector \"nosuchagent\"\n"
+  },
+  {
+    "name": "hook-claude-no-gateway",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw: DefenseClaw home is unavailable, blocking claude-code tool (fail mode closed)\n"
+  },
+  {
+    "name": "hook-claude-gateway-down",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw: missing gateway token: \u003cTMP\u003e/home/.defenseclaw/hooks/.hook-claudecode.token not found, blocking claude-code tool (fail mode closed)\n"
+  },
+  {
+    "name": "hook-codex-gateway-down",
+    "exit": 0,
+    "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"DefenseClaw hook failed closed\"}}\n",
+    "stderr": "defenseclaw: codex hook error: Codex hook command is missing its installer-bound contract\n"
+  },
+  {
+    "name": "hook-claude-fail-open",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw: DefenseClaw home is unavailable, blocking claude-code tool (fail mode closed)\n"
+  },
+  {
+    "name": "hook-claude-contract",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw: DefenseClaw home is unavailable, blocking claude-code tool (fail mode closed)\n"
+  },
+  {
+    "name": "hook-codex-no-gateway",
+    "exit": 0,
+    "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"DefenseClaw hook failed closed\"}}\n",
+    "stderr": "defenseclaw: DefenseClaw home is unavailable, blocking codex tool (fail mode closed)\n"
+  },
+  {
+    "name": "hook-managed-no-runtime",
+    "exit": 0,
+    "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"DefenseClaw blocked this tool call: DefenseClaw is not set up correctly on this computer. Contact your administrator. (enterprise_managed_runtime_descriptor_missing)\"}}\n",
+    "stderr": "defenseclaw: event_id=\u003cID\u003e: this refusal is recorded in \u003cHOME\u003e/.defenseclaw/logs/hook-failures.jsonl\n"
+  },
+  {
+    "name": "hook-managed-codex-no-runtime",
+    "exit": 0,
+    "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"DefenseClaw blocked this tool call: DefenseClaw is not set up correctly on this computer. Contact your administrator. (enterprise_managed_runtime_descriptor_missing)\"}}\n",
+    "stderr": "defenseclaw: event_id=\u003cID\u003e: this refusal is recorded in \u003cHOME\u003e/.defenseclaw/logs/hook-failures.jsonl\nDefenseClaw blocked this tool call: DefenseClaw is not set up correctly on this computer. Contact your administrator. (enterprise_managed_runtime_descriptor_missing)\n"
+  },
+  {
+    "name": "hook-hermes-probe",
+    "exit": 0,
+    "stdout": "defenseclaw-execution-probe-ok\n",
+    "stderr": ""
+  },
+  {
+    "name": "hook-hermes-probe-extra",
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Error: hermes execution probe requires the exact registered command\n"
+  },
+  {
+    "name": "hook-foreign-check",
+    "exit": 0,
+    "stdout": "{\"deny\":false}\n",
+    "stderr": ""
+  },
+  {
+    "name": "hook-input-file",
+    "exit": 2,
+    "stdout": "{\"continue\":false,\"permission\":\"deny\",\"user_message\":\"DefenseClaw hook failed closed\",\"agent_message\":\"DefenseClaw hook failed closed\"}\n",
+    "stderr": "defenseclaw: cursor hook error: hook invocation error: --input-file is only supported for the Cursor Windows hook adapter\nError: --input-file is only supported for the Cursor Windows hook adapter\n"
+  },
+  {
+    "name": "hook-resolve-writes",
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "hook-session-facts",
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "hook-post-no-addr",
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Error: required flag(s) \"api-addr\" not set\n"
+  },
+  {
+    "name": "hook-post-bad-time",
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Error: per-user hook timeout must be 1 to 30 seconds\n"
+  },
+  {
+    "name": "hook-post-unknown-flag",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "Error: unknown flag: --bogus\nUsage: defenseclaw-gateway hook-post [flags]\nTry 'defenseclaw-gateway hook-post --help' for help.\n"
+  },
+  {
+    "name": "hook-post-bad-int",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "Error: --max-time takes a whole number, not \"soon\"\nUsage: defenseclaw-gateway hook-post [flags]\nTry 'defenseclaw-gateway hook-post --help' for help.\n"
+  },
+  {
+    "name": "hook-post-stray-arg",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "Error: unexpected argument \"stray\" for \"defenseclaw-gateway hook-post\"\nUsage: defenseclaw-gateway hook-post [flags]\nTry 'defenseclaw-gateway hook-post --help' for help.\n"
+  },
+  {
+    "name": "hook-post-no-gateway",
+    "exit": 7,
+    "stdout": "",
+    "stderr": "defenseclaw-gateway hook-post: Post \"http://127.0.0.1:1/api/v1/claude-code/hook\": dial tcp 127.0.0.1:1: connect: connection refused\n"
+  },
+  {
+    "name": "hook-post-no-gateway-json",
+    "exit": 7,
+    "stdout": "",
+    "stderr": "defenseclaw-gateway hook-post: Post \"http://127.0.0.1:1/api/v1/claude-code/hook\": dial tcp 127.0.0.1:1: connect: connection refused\n"
+  },
+  {
+    "name": "hook-post-bad-path",
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Error: unsupported per-user plugin hook path\n"
+  },
+  {
+    "name": "notify-no-payload",
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Error: accepts 1 arg(s), received 0\n"
+  },
+  {
+    "name": "notify-unknown-flag",
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Error: unknown flag: --bogus\n"
+  },
+  {
+    "name": "guard-missing-launcher",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "DefenseClaw blocked this: its Claude Code hook launcher is missing. Run the DefenseClaw installer again to repair it.\n"
+  },
+  {
+    "name": "guard-wrapped-missing-launcher",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "DefenseClaw blocked this: its Claude Code hook launcher is missing. Run the DefenseClaw installer again to repair it.\n"
+  },
+  {
+    "name": "guard-open-missing-launcher",
+    "exit": 1,
+    "stdout": "",
+    "stderr": "DefenseClaw could not check this Claude Code event; run the DefenseClaw installer again to repair its hook launcher.\n"
+  },
+  {
+    "name": "guard-other-connector",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw-hook: expected hook, hook-post or notify subcommand\n"
+  },
+  {
+    "name": "cowork-missing-launcher",
+    "exit": 2,
+    "stdout": "",
+    "stderr": "defenseclaw-hook: expected hook, hook-post or notify subcommand\n"
+  }
+]
