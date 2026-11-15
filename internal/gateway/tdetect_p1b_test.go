@@ -3,7 +3,10 @@
 
 package gateway
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // TestAccountPowerAndHistoryRulesFiveTiers: the Phase-1 tune side classes
 // "account change", "shutdown" and "history clearing" of rel-1-0-10 T-DETECT.
@@ -118,6 +121,9 @@ func TestDataToolFileReadsGetTheVerdictOfCat(t *testing.T) {
 // managed and permissive; block in strict and managed-strict. The system-wide
 // unit folders are not in this row (GAP-0817 on the 0327 branch).
 func TestUserLevelPersistenceFoldersFiveTiers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("systemd user units, XDG autostart and ~/Library/LaunchAgents are POSIX-host folders; rel judged none of them on Windows either")
+	}
 	tdetectRunRows(t, []tdetectRow{
 		{"td-ul-systemd-user", `printf '[Service]\nExecStart=/tmp/x\n' > ~/.config/systemd/user/evil.service`, "LBLLB"},
 		{"td-ul-systemd-user-tee", `printf x | tee ~/.config/systemd/user/evil.timer`, "LBLLB"},
