@@ -361,6 +361,13 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			if credentialFileSweep(c, request.Input.ActiveHome) {
 				add(credentialSweepRuleID, "")
 			}
+			// rm -rf ~/*: the glob keeps the call out of the semantic owner
+			// (a partial parse), but the match-all name in a critical folder
+			// empties it as the folder delete does.
+			if hasOperation(c, actionfacts.OperationDelete) &&
+				recursiveForceDeleteFlags(facts, c) && deleteGlobEmptiesCriticalFolder(facts, c) {
+				add("CMD-RM-RF-GLOB", "")
+			}
 		}
 	}
 	for _, p := range facts.Paths {

@@ -14,6 +14,11 @@ import "testing"
 // home and the same wrappers around a project path stay allowed.
 // Letters: default, strict, permissive, managed, managed-strict.
 func TestHomeDeleteSpellingsFiveTiers(t *testing.T) {
+	// A glob of the home is read by the facts, not expanded: an empty home keeps the
+	// scan off the real folder. The glob spellings are an alert in default and
+	// permissive, and a block in strict and on a managed install (the call stays a partial parse, so the
+	// semantic owner does not own it; the shell lane of the tool-shape table does).
+	t.Setenv("HOME", t.TempDir())
 	tdetectRunRows(t, []tdetectRow{
 		{"td-del-plain", `rm -rf ~/`, "BBBBB"},
 		{"td-del-nice", `nice rm -rf ~/`, "BBBBB"},
@@ -30,6 +35,15 @@ func TestHomeDeleteSpellingsFiveTiers(t *testing.T) {
 		{"td-del-interactive-never", `rm -r --interactive=never ~`, "BBBBB"},
 		{"td-del-force-last", `rm -ir ~ -f`, "BBBBB"},
 		{"td-del-yes-fed", `yes | rm -ri ~`, "BBBBB"},
+		{"td-del-home-glob", `rm -rf ~/*`, "LBLBB"},
+		{"td-del-home-glob-var", `rm -rf $HOME/*`, "LBLBB"},
+		{"td-del-home-glob-hidden", `rm -rf ~/.[!.]* ~/*`, "LBLBB"},
+		{"td-del-root-glob", `rm -rf /*`, "LBLBB"},
+		{"td-del-home-dir-glob", `rm -rf /home/*`, "LBLBB"},
+		{"td-del-glob-project", `rm -rf ~/proj/*`, "AAAAA"},
+		{"td-del-glob-build", `rm -rf ./build/*`, "AAAAA"},
+		{"td-del-glob-ext", `rm -rf ~/*.log`, "AAAAA"},
+		{"td-del-glob-prompting", `rm -ri ~/*`, "AAAAA"},
 		{"td-del-prompting", `rm -ri ~`, "AAAAA"},
 		{"td-del-interactive-always", `rm -r --interactive=always ~`, "AAAAA"},
 		{"td-del-prompt-last", `rm -fr -i ~`, "AAAAA"},

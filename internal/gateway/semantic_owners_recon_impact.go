@@ -463,6 +463,7 @@ func recursiveDeletePrerequisite(facts actionfacts.Facts) bool {
 		) {
 			return true
 		}
+
 	}
 	return false
 }
@@ -620,7 +621,10 @@ func deleteTargetIsCriticalScope(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	value := canonicalSemanticPath(semanticPathValue(candidate))
+	return deleteScopeIsCritical(facts, canonicalSemanticPath(semanticPathValue(candidate)))
+}
+
+func deleteScopeIsCritical(facts actionfacts.Facts, value string) bool {
 	if value == "/" || windowsDriveRoot(value) {
 		return true
 	}
@@ -635,6 +639,53 @@ func deleteTargetIsCriticalScope(
 	home := strings.TrimRight(canonicalSemanticPath(facts.ActiveHome), "/")
 	return home != "" &&
 		strings.TrimRight(value, "/") == home
+}
+
+// deleteMatchAllName reports a final path word that matches every entry of a
+// folder (or every hidden one): *, .*, and the portable spellings of the
+// hidden entries (.[!.]*, .[^.]*, .??*, ..?*).
+func deleteMatchAllName(name string) bool {
+	switch name {
+	case "*", ".*", ".[!.]*", ".[^.]*", ".??*", "..?*":
+		return true
+	}
+	return false
+}
+
+// deleteGlobEmptiesCriticalFolder reports an rm operand that is a match-all
+// name in a critical folder (rm -rf ~/*, $HOME/.[!.]*, /home/*, /*): it removes
+// what the folder holds as the folder does. The facts keep such a word as a
+// static glob (or a $HOME spelling) with no path fact, the call partial, so the
+// folder is read from the word (rel-1-0-10:GAP-0743, the glob spellings of the
+// home delete).
+func deleteGlobEmptiesCriticalFolder(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	for _, argument := range command.Arguments {
+		spelling := argument.StaticGlob
+		if spelling == "" {
+			spelling = argument.HomeSpelling()
+		}
+		index := strings.LastIndex(spelling, "/")
+		if index < 0 || !deleteMatchAllName(spelling[index+1:]) {
+			continue
+		}
+		folder := spelling[:index+1]
+		switch {
+		case folder == "~/" || folder == "~":
+			folder = facts.ActiveHome
+		case strings.HasPrefix(folder, "~/"):
+			folder = strings.TrimRight(facts.ActiveHome, "/") + "/" + folder[2:]
+		case !strings.HasPrefix(folder, "/"):
+			continue
+		}
+		folder = canonicalSemanticPath(folder)
+		if folder != "/" {
+			folder = strings.TrimRight(folder, "/")
+		}
+		if deleteScopeIsCritical(facts, folder) {
+			return true
+		}
+	}
+	return false
 }
 
 func windowsDriveRoot(value string) bool {
