@@ -313,6 +313,9 @@ type trustedActionRequest struct {
 	windowsPowerShellReading *windowsHintedReading
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
+	// launcherDepth is the number of shell launchers whose body this request
+	// reads (launcherBodyTwinRequest), bounded by maxLauncherBodyDepth.
+	launcherDepth int
 	// generation is the rule generation the call is judged with; nil: the
 	// request profile's (snapshotRulePackGenerationFor). A caller that
 	// combines several dispatches of one request judges each with each
@@ -646,7 +649,19 @@ func dispatchTrustedAction(
 			// (GAP-0693).
 			defer func() { findings = withPowerShellCapPieces(parent, request, findings) }()
 		}
-		if cut := trustedReadingCut(request.Input, facts); cut.Any() {
+		launcherTwin, launcherRead := launcherBodyTwinRequest(request, facts)
+		if launcherRead {
+			// The script of an argv shell launcher (powershell.exe -Command,
+			// cmd /c) is judged as the string command the same script is
+			// (rel-1-0-10:GAP-0711, GAP-0712): its findings count, the
+			// TRUNCATED floor of its own cap among them.
+			defer func() {
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcherTwin))
+			}()
+		}
+		// A script past the input bound is not read in full, so the bound of the argv
+		// call still cuts it (rel-1-0-10:GAP-0712).
+		if cut := trustedReadingCut(request.Input, facts, launcherRead && len(launcherTwin.Input.Command) <= actionfacts.MaxCommandBytes); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
 			// statement budget: the call is TRUNCATED (the one bound rule),
 			// never judged below the unknown tier of its pack, and what was
@@ -9845,17 +9860,28 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 //     found but allowed in every pack (rel-1-0-10:GAP-0589). The statements
 //     of a capped PowerShell reading are read again in runs under the cap
 //     (actionfacts.PowerShellCappedRuns).
+//   - An argv command that no launcher script covers (trustedArgvReadingCut):
+//     a word over 4 KiB, over 64 KiB in all, or more than 256 words
+//     (rel-1-0-10:GAP-0712). bodyRead is set when the script of the launcher
+//     is read on its own (launcherBodyTwinRequest): a word over the argv
+//     bounds is then not a cut of the reading, and the script's own cuts are
+//     the ones that count.
 //
 // A POSIX reading is not truncated by its command cap: its per-statement
 // split (SimpleCommands) reads every statement up to the statement budget
 // (ShellStatementsOverBudget), and each is judged.
-func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
+func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts, bodyRead bool) bounded.CapSet {
 	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 		return bounded.CapSet{}
 	}
 	if command, known := trustedBashCommandInput(input); known && len(command) > actionfacts.MaxCommandBytes &&
 		trustedShellCommandTool(input.Tool) {
 		return bounded.Of(bounded.Bytes)
+	}
+	if !bodyRead {
+		if cut := trustedArgvReadingCut(input, facts); cut.Any() {
+			return cut
+		}
 	}
 	if facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell {
 		return bounded.Of(bounded.Items)
