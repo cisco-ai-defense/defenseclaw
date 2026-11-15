@@ -38,10 +38,12 @@ var actionGitBashWindowsRoots = regexp.MustCompile("\\\\[^\"'$`\\\\nt\n]|" +
 // a cmdlet (Verb-Noun), a $variable assignment, a .NET type member and a
 // here-string opener (@' or @" at the end of a line). A call that carries it may be PowerShell text whatever the
 // hint says, so it keeps every reading. A Verb-Noun after a slash is a path
-// component (/opt/tools/add-key), a file both shells run as a program, not
-// a cmdlet: it keeps the POSIX reading of the call, as the same program
-// named without its folder does (rel-1-0-10:GAP-0967). A module-qualified
-// cmdlet is spelled with a backslash, which actionGitBashWindowsRoots keeps.
+// component (/opt/tools/add-key): PowerShell never reads a forward slash as
+// a module qualifier, so the word names a program file, not a cmdlet, and
+// the call keeps its POSIX reading (rel-1-0-10:GAP-0967). A bare Verb-Noun
+// (add-key) may still be a PowerShell function or cmdlet and keeps every
+// reading (rel-1-0-10:GAP-0983). A module-qualified cmdlet is spelled with a
+// backslash, which actionGitBashWindowsRoots keeps.
 var actionGitBashPowerShellSyntax = regexp.MustCompile(`(?i)(^|[^\w/-])(get|set|add|out|write|remove|new|copy|move|rename|invoke|start|stop|select|foreach|where|test|import|export|read|clear|format|join|split|resolve|push|pop|convertto|convertfrom)-[a-z]+|` +
 	`\$[A-Za-z_][A-Za-z0-9_:]*\s*[+-]?=|\]::|@['"]\r?\n`)
 
