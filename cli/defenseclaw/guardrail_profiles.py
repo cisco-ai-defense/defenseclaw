@@ -109,6 +109,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "bae849da47c25cb44132971419ea52e8c7a87b0bd994fece05d1f98bccda2392",
             # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
             "a86801cc5e8efd1c6c8c4b88164c9bcd608fad5200371e7cc0632e297309bd7a",
+            # 1.0.10 (s7/g596 merged with rel/1.0.10 2dfe1b576e): the DefenseClaw self-protection rules
+            # (tamper.defenseclaw_control_disable and _unproven).
+            "29601a642245542d5166e1c1b691af8c10bf4008f32e486d8ec816c70a3de24b",
         }
     ),
     "permissive": frozenset(
@@ -174,6 +177,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "e37c3a00b671321ae3e047606610d2fe08083a6282e8ed8778f2b1aac82959a4",
             # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
             "6632604f57eb9a3d0618857cadeaa1ffa53b031115492e82799e917b7d21cc50",
+            # 1.0.10 (s7/g596 merged with rel/1.0.10 2dfe1b576e): the DefenseClaw self-protection rules
+            # (tamper.defenseclaw_control_disable and _unproven).
+            "476ab409c5035a4e4fea8c02f92631a524a5337e4cf192484f2dc10dd117c1af",
         }
     ),
     "strict": frozenset(
@@ -238,6 +244,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "d7e4600212678a341448694e23e271de3dce897e0897dde4d7eaf9f4a12f8e23",
             # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
             "b70be45b7d2384a6b05eeb85893ad80926d19207e7a6896390e16aadb06a551b",
+            # 1.0.10 (s7/g596 merged with rel/1.0.10 2dfe1b576e): the DefenseClaw self-protection rules
+            # (tamper.defenseclaw_control_disable and _unproven).
+            "5d8ad2ee32f71f469d330c20b8b923841464eda375030927c85d95f0317feef2",
         }
     ),
 }
