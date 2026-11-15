@@ -10168,6 +10168,10 @@ func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bo
 	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
 }
 
+// credentialFileExternalUploadRuleID is the exact credential-file upload rule
+// (semantic owner exfil.credential_file_external_upload).
+const credentialFileExternalUploadRuleID = "exfil.credential_file_external_upload"
+
 // withCredentialSenderFinding adds the unknown-tier verdict of a call that
 // hands credential material to a sender whose destination is not read in
 // full. It is the evaluation-limit finding the profile decides, with the
@@ -10179,6 +10183,16 @@ func withCredentialSenderFinding(
 ) []RuleFinding {
 	for _, finding := range findings {
 		if finding.RuleID == "ACTION-COMPOUND-LIMIT" {
+			return findings
+		}
+		if reason == actionfacts.CredentialSenderFile && finding.RuleID == credentialFileExternalUploadRuleID {
+			// The exact credential-file upload rule already proved this
+			// upload from the same file (curl -T, scp, rsync, wget, any
+			// upload option, GAP-0768) and decides it in every tier, an
+			// alert in default and permissive and a block in strict
+			// (GAP-0595): a part of the call the exact rule does not need
+			// (a stdout redirect to ~/out.txt or out-*.txt) does not make
+			// the same file an unread destination.
 			return findings
 		}
 	}
