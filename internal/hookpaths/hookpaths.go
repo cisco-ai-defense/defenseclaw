@@ -4683,9 +4683,12 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				placedLinkCalls[call] = true
 			}
 		case slices.Contains(copyPrograms, program):
-			words, static := copyGlobOperandsAsNames(args, words, static)
 			_, topLevelPlaced := linkDirs[call]
 			_, nestedPlaced := nestedCopyDirs[call]
+			// After a cd the walk cannot resolve (cd "$UNSET" && cp .aws/*
+			// /tmp/x) a relative glob may reach any file, so it keeps the
+			// reading of rel (rel-1-0-10:GAP-0960).
+			words, static := copyGlobOperandsAsNames(args, words, static, home, topLevelPlaced || nestedPlaced)
 			var globDestinations []string
 			globSafe := len(file.Stmts) == 1 && file.Stmts[0].Cmd == call &&
 				len(file.Stmts[0].Redirs) == 0 && len(callDirs) > 0
