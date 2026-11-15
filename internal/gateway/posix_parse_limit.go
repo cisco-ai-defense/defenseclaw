@@ -139,6 +139,9 @@ func posixDataWordTwinRequest(request trustedActionRequest, facts actionfacts.Fa
 		return trustedActionRequest{}, false
 	}
 	split, ok := actionfacts.SplitOverLimitWords(command)
+	if _, text := trustedBashCommandInput(request.Input); !text {
+		split, ok = actionfacts.SplitOverLimitWordsOfArgv(command)
+	}
 	if !ok || split.Code > 0 || split.Data == 0 ||
 		actionfacts.ShellInputPastByteBound(split.Twin, len(request.Input.Args)) {
 		return trustedActionRequest{}, false

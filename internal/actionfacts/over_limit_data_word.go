@@ -65,6 +65,21 @@ type OverLimitWordSplit struct {
 // shorten, or the twin is itself over a bound): the caller then keeps the
 // call truncated.
 func SplitOverLimitWords(command string) (OverLimitWordSplit, bool) {
+	return splitOverLimitWords(command, false)
+}
+
+// SplitOverLimitWordsOfArgv is SplitOverLimitWords for the text of a call
+// whose command is an array of words (the Codex shell tool): the script
+// word of a shell -c is shell text to the reading of that array, so the
+// over-limit words inside it that are plain data (ssh host '...') leave the
+// call as its twin, as the same words typed as an argv are not code. A call
+// written as text keeps the stricter reading (a script handed to the local
+// shell is code, rel-1-0-10:GAP-0382, GAP-0689).
+func SplitOverLimitWordsOfArgv(command string) (OverLimitWordSplit, bool) {
+	return splitOverLimitWords(command, true)
+}
+
+func splitOverLimitWords(command string, nestedBodies bool) (OverLimitWordSplit, bool) {
 	if len(command) > maxCommandBytes {
 		return OverLimitWordSplit{Why: "text over the bound"}, false
 	}
@@ -103,7 +118,7 @@ func SplitOverLimitWords(command string) (OverLimitWordSplit, bool) {
 			// over-limit word is data (ssh host '<script>' inside bash -lc)
 			// is read as its twin, the rest of the body kept
 			// (rel-1-0-10:GAP-0689, the argv form of the Codex shell tool).
-			if bodyWords[word] {
+			if nestedBodies && bodyWords[word] {
 				if text, nested, ok := nestedBodyTwin(word); ok {
 					start, end := int(word.Pos().Offset()), int(word.End().Offset())
 					if start >= 0 && end <= len(command) && start < end {
@@ -247,7 +262,7 @@ func nestedBodyTwin(word *syntax.Word) (string, OverLimitWordSplit, bool) {
 	if value.Expands || len(value.Value) <= maxScalarBytes {
 		return "", OverLimitWordSplit{}, false
 	}
-	nested, ok := SplitOverLimitWords(value.Value)
+	nested, ok := SplitOverLimitWordsOfArgv(value.Value)
 	if !ok || nested.Code > 0 || nested.Data == 0 || len(nested.Twin) >= len(value.Value) {
 		return "", OverLimitWordSplit{}, false
 	}
