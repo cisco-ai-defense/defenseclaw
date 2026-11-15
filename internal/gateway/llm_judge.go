@@ -2396,7 +2396,8 @@ func judgeSessionKeyFor(ctx context.Context, sessionID string) string {
 // ResetToolJudgeSession drops the session's bounded context when a connector
 // announces a new or ended session. The process-local store persists no tool
 // arguments.
-// sessionID is the state key (sandboxSessionStateKey), not the raw ID; ctx
+// sessionID is the judge's session key (judgeSessionKeyFor: the state key,
+// prefixed with the verified caller on a shared gateway), not the raw ID; ctx
 // is the hook call's (a shared store finds the caller in it).
 func (j *LLMJudge) ResetToolJudgeSession(ctx context.Context, sessionID string) {
 	if j == nil || strings.TrimSpace(sessionID) == "" {

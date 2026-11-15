@@ -860,12 +860,12 @@ func TestStreamTailBigLine(t *testing.T) {
 	}
 }
 
-// An SSE line that never ends within streamHoldMaxLine raw bytes is
+// An SSE line that never ends within sseEventMax raw bytes is
 // TRUNCATED (bound rule, cap bytes): the default pack alerts and sends it,
 // the strict pack blocks it.
 func TestStreamTailPartialLineBound(t *testing.T) {
 	f := streamTailFormats[0] // an SSE passthrough format; an eventstream frame over the bound breaks framing first
-	long := "data: " + strings.Repeat("x", streamHoldMaxLine+(64<<10))
+	long := "data: " + strings.Repeat("x", sseEventMax+(64<<10))
 	for _, strict := range []bool{false, true} {
 		t.Run(fmt.Sprintf("strict=%v", strict), func(t *testing.T) {
 			body := f.head + f.delta(streamTailProse(1440)) + long + "\n\n" + f.terminal
@@ -878,7 +878,7 @@ func TestStreamTailPartialLineBound(t *testing.T) {
 			}
 			out, log := streamTailServeReq(t, proxy, req)
 			if strict {
-				if strings.Contains(out, long[:streamHoldMaxLine]) || streamTailSentTerminal(f, out) {
+				if strings.Contains(out, long[:sseEventMax]) || streamTailSentTerminal(f, out) {
 					t.Fatalf("strict pack sent a truncated line: %d bytes", len(out))
 				}
 				if !strings.Contains(log, "PASSTHROUGH-STREAM-BLOCK") {

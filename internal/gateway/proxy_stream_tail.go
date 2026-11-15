@@ -33,7 +33,7 @@ import (
 // read so far is still checked, then the unknown tier of the pack decides
 // (alert and send in the default and permissive packs, block in the strict
 // pack), never a silent release. In size an unfinished event is bounded by
-// its framer: an SSE event at streamHoldMaxLine (the framer's sseEventMax)
+// its framer: an SSE event over sseEventMax (the framer's bound)
 // is TRUNCATED the same way and also takes the fail mode, since it can
 // never be read whole (a managed or strict install refuses; whichever rule
 // refuses wins). Otherwise that event alone is passed on unread, and the
@@ -53,7 +53,6 @@ import (
 const (
 	streamHoldMaxAge        = 100 * time.Millisecond
 	streamHoldMaxBytes      = 64 << 10
-	streamHoldMaxLine       = sseEventMax
 	streamLineMaxText       = 1 << 20
 	streamHoldMaxPartialAge = 5 * time.Second
 )

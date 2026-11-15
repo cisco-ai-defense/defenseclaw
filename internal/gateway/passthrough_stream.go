@@ -394,7 +394,7 @@ func (s *passthroughStream) run() {
 	// held and checked as before, and the final check is still enforced
 	// (GAP-0313).
 	sseOversize := func() bool {
-		if tailHold && (!scanText() || !boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame unfinished at %d bytes", streamHoldMaxLine))) {
+		if tailHold && (!scanText() || !boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame unfinished at %d bytes", sseEventMax))) {
 			return false
 		}
 		if p.uninspectableReply(ctx, label, mode, "the event stream could not be framed") {
