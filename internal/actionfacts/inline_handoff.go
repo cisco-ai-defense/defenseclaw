@@ -160,21 +160,30 @@ func InlineChild(argv []string) (child []string, fed bool, caps bounded.CapSet) 
 // and one runner each. A chain with something left to read after
 // InlineChainRounds rounds reports the depth cap.
 func inlineChildAt(argv []string) (offset int, fed bool, caps bounded.CapSet) {
+	wrappers := 0
 	for round := 0; ; round++ {
-		next, runner, progressed := inlineStep(argv, offset)
+		next, runner, read, progressed := inlineStep(argv, offset)
 		if !progressed {
 			return offset, fed, caps
 		}
-		if round >= InlineChainRounds {
+		wrappers += read
+		if round >= InlineChainRounds || wrappers > InlineChainWrappers {
 			return offset, fed, bounded.Of(bounded.Depth)
 		}
 		offset, fed = next, fed || runner
 	}
 }
 
+// InlineChainWrappers is the most prefix wrappers InlineCodeHandoff reads in
+// all its rounds. It is counted in wrappers, not in reader calls: one
+// StaticPrefixWrapperChild call reads up to MaxPrefixWrapperChain wrappers
+// (rel-1-0-10:GAP-0689), so a bound of rounds alone let a chain of 65
+// wrappers end in three rounds with no cap (TestInlineChainCaps).
+const InlineChainWrappers = InlineChainRounds * 8
+
 // inlineStep reads one round of the chain at offset: the run of prefix
-// wrappers there, then one runner.
-func inlineStep(argv []string, offset int) (next int, runner, progressed bool) {
+// wrappers there (wrappers of them), then one runner.
+func inlineStep(argv []string, offset int) (next int, runner bool, wrappers int, progressed bool) {
 	next = offset
 	static := make([]bool, len(argv)-next)
 	for i := range static {
@@ -182,13 +191,14 @@ func inlineStep(argv []string, offset int) (next int, runner, progressed bool) {
 	}
 	if run, ok := StaticPrefixWrapperChild(argv[next:], static); ok {
 		next += run.Index
+		wrappers = run.Length
 		progressed = true
 	}
 	if child := inlineRunnerChild(argv[next:]); child >= 0 {
 		next += child
 		runner, progressed = true, true
 	}
-	return next, runner, progressed
+	return next, runner, wrappers, progressed
 }
 
 // inlineRunnerChild returns the index of the child an xargs or parallel call
