@@ -13902,6 +13902,58 @@ def _check_decision_model(cfg, r: _DoctorResult) -> None:
     _emit("pass", "Decision model", detail, r=r)
 
 
+
+def _check_guardrail_cascade(cfg, r: _DoctorResult) -> None:
+    """``Guardrail cascade`` row, only when guardrail.cascade is set at some
+    scope. FAIL when the gateway found it invalid (the guardrail then decides
+    with the last-known-good cascade or the pack defaults, which the row
+    names, and says when that is weaker); WARN on settings that let the
+    guardrail do less than its pack."""
+    from defenseclaw import cascade
+
+    if not cascade.configured(cfg):
+        return
+    payload, error = cascade.gateway_explain()
+    if error:
+        _emit("warn", "Guardrail cascade", f"could not resolve: {error}", r=r,
+              remediation="defenseclaw guardrail cascade explain")
+        return
+    view = (payload or {}).get("cascade") or {}
+    invalid = view.get("invalid")
+    if invalid:
+        fallback = (
+            "the last-known-good cascade" if invalid.get("fallback") == "last_known_good" else "the rule pack defaults"
+        )
+        detail = (
+            f"invalid: {invalid.get('error')}; a running gateway refuses the reload and keeps its current "
+            f"configuration; a gateway started now decides with {fallback}"
+        )
+        if invalid.get("weaker"):
+            detail += "; WEAKER than your configuration: " + "; ".join(invalid["weaker"])
+        _emit("fail", "Guardrail cascade", detail, r=r,
+              remediation="fix the named guardrail.cascade key, then: defenseclaw guardrail cascade explain")
+        return
+    notes = cascade.loosening_notes(view)
+    ignored = view.get("ignored") or []
+    if ignored:
+        # A locked key or an invalid connector/profile cascade: the
+        # administrator's top-level values apply, the narrower one does not.
+        shown = "; ".join(f"{i.get('path')}: {i.get('reason')}" for i in ignored[:5])
+        if len(ignored) > 5:
+            shown += f"; and {len(ignored) - 5} more"
+        notes = [f"{len(ignored)} narrower-scope setting(s) not applied: {shown}", *notes]
+    summary = (
+        f"unknown {(view.get('unknown') or {}).get('action')}, judge {(view.get('judge') or {}).get('runs')}, "
+        f"System One {(view.get('system_one') or {}).get('runs')}, Rego policy "
+        f"{'on' if (view.get('policy') or {}).get('active') else 'off'}, CRITICAL floor {view.get('critical_floor')}"
+    )
+    if notes:
+        _emit("warn", "Guardrail cascade", summary + "; " + "; ".join(notes), r=r,
+              remediation="defenseclaw guardrail cascade explain")
+        return
+    _emit("pass", "Guardrail cascade", summary, r=r)
+
+
 def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     """One-shot ``llm.ping`` against the guardrail's resolved LLM.
 
@@ -16691,6 +16743,7 @@ def doctor(
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
     _check_decision_model(cfg, r)
+    _check_guardrail_cascade(cfg, r)
     _check_private_upstream_refusals(cfg, r)
     if not _check_judge_running(sidecar_health, r):
         _check_judge_calls(cfg, r)
@@ -19934,6 +19987,7 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
     if acp is None:
         return
     try:
+        from defenseclaw.acp_catalog import own_tools_notice
         from defenseclaw.commands import cmd_acp
 
         data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
@@ -19964,7 +20018,8 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
         except Exception as exc:
             problems, profile, mode = [f"could not be checked: {exc}"], "?", "?"
         if not problems:
-            _emit("pass", label, f"healthy; profile {profile} ({mode})", r=r)
+            notice = own_tools_notice(agent)
+            _emit("pass", label, f"healthy; profile {profile} ({mode})" + (f"; {notice}" if notice else ""), r=r)
             continue
         if all("acp refresh" in problem for problem in problems):
             # The upgraded guard, or an agent the user updated (acp refresh

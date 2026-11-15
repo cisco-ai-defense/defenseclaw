@@ -6,6 +6,7 @@ package gateway
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,7 +23,8 @@ import (
 // launcher makes the tokenizer read the call as invalid syntax, which the
 // syntax-error reading judges (s7/syntax-tail), not this screen. The
 // launcher word in the data of another command (an ssh remote command) is not
-// one. The fixture is the toolcall corpus attack by id.
+// one: it is allowed with no alert, with at most the detection-only data-word
+// record (the lead ruling on GAP-0382 and GAP-0760). The fixture is the toolcall corpus attack by id.
 func TestWindowsLauncherSpellingsPastTheBoundAreNeverACleanAllow(t *testing.T) {
 	type tier struct {
 		name, pack      string
@@ -99,7 +101,14 @@ func TestWindowsLauncherSpellingsPastTheBoundAreNeverACleanAllow(t *testing.T) {
 			for _, sp := range spellings {
 				findings := run(tr, sp.input(launcher))
 				if sp.clean {
-					if windowsBoundsHasLimit(findings) {
+					// Lead ruling (GAP-0382, GAP-0760): a launcher name inside the
+					// quoted remote command of ssh is DATA. The call keeps the
+					// winrecall verdict, an allow with no alert, and carries at most
+					// the detection-only data-word record, which is no cap.
+					capped := slices.ContainsFunc(findings, func(f RuleFinding) bool {
+						return !f.dataWordRecord && canonicalTrustedRuleID(f.RuleID) == evaluationLimitRuleID
+					})
+					if capped || !windowsBoundsAllowed(findings) {
 						t.Errorf("%s pad%d %s: the launcher word in another command's data is truncated: %v", tr.name, pad, sp.id, FindingStrings(findings))
 					}
 					continue
