@@ -740,8 +740,14 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 			}
 		})
 		t.Run(connector+" benign only", func(t *testing.T) {
-			if got := post(t, connector, "action", chain(31, ""), ""); !strings.HasPrefix(got, allow) {
+			if got := post(t, connector, "action", chain(16, ""), ""); !strings.HasPrefix(got, allow) {
 				t.Fatalf("benign targets = %.400s", got)
+			}
+			// 31 terms of a && list are past the analysis depth bound, which is
+			// the unknown tier whatever the call names (GAP-0688); the strict
+			// profile this test runs in blocks it.
+			if got := post(t, connector, "action", chain(31, ""), ""); !strings.HasPrefix(got, block) {
+				t.Fatalf("benign targets past the analysis depth bound = %.400s", got)
 			}
 		})
 		t.Run(connector+" unresolved target", func(t *testing.T) {

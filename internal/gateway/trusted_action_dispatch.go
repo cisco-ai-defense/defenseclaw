@@ -187,6 +187,13 @@ type trustedActionRequest struct {
 	// check (conflictingToolArgumentKeys); nil when Input.Args is the object
 	// the call carried.
 	conflictSource *conflictingToolArgumentSource
+	// capFloor is the cap floor of the hook call (withCapFloor), shared by
+	// the call and its piece twins; capFloorSeen marks a request whose
+	// floor is already registered (every other twin of it inherits that),
+	// and capFloorDepth counts the piece twins above it.
+	capFloor      *capFloorState
+	capFloorSeen  bool
+	capFloorDepth int
 	// DowngradeReadOnlyDataArgs is advisory-only. Bare executable names and
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
@@ -490,7 +497,26 @@ func dispatchTrustedAction(
 	// binding; the other tiers follow the top-level statements before it.
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
+	// analyzedCaps: the caps the action analysis below stopped at.
+	var analyzedCaps bounded.CapSet
+	// nestedBodies: the call is past the nested-body bound, which the owner
+	// ruled is decided at once (GAP-0677): the cap floor judges only its
+	// statements of at most capFloorPieceBytes, never its bodies.
+	var nestedBodies bool
+	if !request.capFloorSeen {
+		// After every path below, the budget and limit paths included: a
+		// block proven on a statement the cap did not take still decides
+		// (withCapFloor, rel-1-0-10:GAP-0312, GAP-0360, GAP-0435, GAP-0381,
+		// GAP-0532).
+		request.capFloorSeen = true
+		if request.capFloor == nil {
+			request.capFloor = &capFloorState{}
+		}
+		floorRequest := request
+		defer func() { findings = withCapFloor(parent, floorRequest, findings, analyzedCaps, nestedBodies) }()
+	}
 	bound := trustedActionCommandBound(request.Input)
+	nestedBodies = bound == shellReadingNestedBodies
 	if bound == shellReadingBudget {
 		// Past the reading budget (shellparse.BudgetExceeded): no reader
 		// below parses it, and the call is opaque to them. It takes the
@@ -561,6 +587,7 @@ func dispatchTrustedAction(
 	if !request.simpleCommandPass {
 		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
+		analyzedCaps = capFloorAnalysisCaps(facts)
 		if trustedCallOverStatementBudgetWith(request.Input, facts, request.simpleMemo.commands(request.Input, facts)) {
 			// Over the statement budget the call blocks with
 			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is
@@ -692,6 +719,7 @@ func dispatchTrustedAction(
 	defer func() {
 		findings = withCradleUnknownTier(findings, request)
 	}()
+	analyzedCaps = capFloorAnalysisCaps(facts)
 	// Credential material that reaches a sender whose destination is not read
 	// in full (interpreter code that names a credentials file and a network
 	// capability, a credential-named environment variable piped into an
