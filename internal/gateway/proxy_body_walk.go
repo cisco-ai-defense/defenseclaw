@@ -577,6 +577,32 @@ func (w *textWalker) walk(n *jnode, key string, depth int) {
 // error, a result) is reply text.
 var callObjectOwn = keySet("name", "tool_name", "function", "arguments", "input", "args", "parameters", "action", "code", "id", "call_id", "type", "index")
 
+// serverCallResultKeys are the fields a call the provider runs itself
+// (serverCallType) returns: its result, not what it was called with.
+var serverCallResultKeys = keySet("result", "results", "output", "outputs")
+
+// callArgsObject is what a call object without an argument field is judged
+// with: the object itself, less what a provider-run call returned. The
+// finished image_generation_call carries its image (about 1.6 MB of base64)
+// in result; read as the call's arguments, the managed strict tier on a
+// Windows host blocked a benign image reply (push 19: feat GAP-0189/GAP-0249
+// a99aaf1b13/d960a3860e read the finished call, d4 GAP-0782/GAP-0784 judge it
+// as the hook routes do). The result is still read as reply text by the walk
+// above (mediaValue), as every text a server call returns is (GAP-0249).
+func callArgsObject(n *jnode, typ string) string {
+	if n.kind != 'o' || !serverCallType(typ) {
+		return n.json()
+	}
+	in := jnode{kind: 'o'}
+	for i, k := range n.keys {
+		if !serverCallResultKeys[normKey(k)] {
+			in.keys = append(in.keys, k)
+			in.kids = append(in.kids, n.kids[i])
+		}
+	}
+	return in.json()
+}
+
 // callObject records the tool call n (unless the stream state machine does)
 // and reads the rest of its strings as text.
 func (w *textWalker) callObject(n *jnode, key string) {
@@ -614,7 +640,7 @@ func (w *textWalker) callObject(n *jnode, key string) {
 	a := ""
 	switch {
 	case args == nil:
-		a = n.json()
+		a = callArgsObject(n, typ)
 	case args.kind == 's':
 		a = args.s
 	default:
