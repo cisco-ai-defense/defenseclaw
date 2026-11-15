@@ -217,16 +217,18 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// restarts there); the gateway uses its own credential for the target.
 	custody := s.custody(cfg)
 	subject := caller.Subject
-	if cfg.StandaloneEnterprise() {
-		// Managed: the proved account is the subject downstream (profile
-		// matching, audit). OSS: the gateway owner, as before.
-		r = r.WithContext(attachVerifiedSubject(r.Context(), nil, subject, sanitizeLLMEventUser(userScopedIdentityName(subject)), subjectSourceKernelPeer))
-	}
 	if !s.acquire(subject) {
 		routeOnlyError(w, http.StatusTooManyRequests, "rate_limit_error", "too many concurrent model calls through DefenseClaw")
 		return
 	}
 	defer s.release(subject)
+	if cfg.StandaloneEnterprise() {
+		// Managed: the proved account is the subject downstream (profile
+		// matching, audit), attached after the per-account bound because
+		// the profile resolution can wait on a directory lookup. OSS: the
+		// gateway owner, as before.
+		r = r.WithContext(routeOnlyManagedContext(r.Context(), subject, connector))
+	}
 
 	original := routeOnlyAttempt{base: upstream.BaseURL, native: native, keepInbound: true, signer: signer}
 	// A gateway-signed call carries the gateway identity (the inbound AWS
@@ -308,7 +310,8 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	original.usage = routeOnlyUsageFacts(connector, native, family, body)
 	// The verified caller (OSS gateway owner or managed kernel peer).
 	original.usage.Subject = subject
-	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body, engine.Caller{Verified: true, Key: subject, Source: subjectSourceKernelPeer})
+	routeCaller, routeProfiles := routeOnlyCaller(r.Context(), subject)
+	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body, routeCaller, routeProfiles)
 	original.usage.Route = usageDecision(usageRouteFacts(routedOutcome, true), false)
 	if routedOutcome.Result == "" {
 		original.usage.Route.Decision = modelusage.DecisionPassthrough
@@ -533,7 +536,31 @@ func routeOnlyConversationID(h http.Header) string {
 // decide asks the router and returns the routed attempt (nil: send the
 // original), the outcome, and whether the admin gate allows the original
 // request as a fallback target.
-func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, signer *bedrockSigner, body []byte, caller engine.Caller) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
+// routeOnlyManagedContext attaches the proved account of a managed
+// route-only request and the guardrail profile it resolves to, so the
+// routing.admin rules (users, groups) and the profile routing overlay match
+// this account, as on the hook and proxy paths (rel-1-0-10:GAP-0764).
+func routeOnlyManagedContext(ctx context.Context, subject, connector string) context.Context {
+	ctx = attachVerifiedSubject(ctx, nil, subject, sanitizeLLMEventUser(userScopedIdentityName(subject)), subjectSourceKernelPeer)
+	return withGuardrailProfile(ctx, pinnedProfileSet(ctx), connector)
+}
+
+// routeOnlyCaller is the routing caller of a verified route-only request.
+// Managed: the proved account with its directory matcher and resolved
+// profiles (routeCallerFromContext, the hook and proxy paths' caller), so
+// routing.admin user and group rules and guardrail.profiles.*.routing tell
+// accounts apart; before, the caller had no matcher and no profiles, so
+// every user rule matched every caller and a group rule left every caller
+// unconfirmed (rel-1-0-10:GAP-0764). OSS: the gateway owner (identity
+// selectors do not apply on a per-user gateway).
+func routeOnlyCaller(ctx context.Context, subject string) (engine.Caller, []string) {
+	if fromContext, profiles := routeCallerFromContext(ctx); fromContext.Verified && fromContext.Key == subject {
+		return fromContext, profiles
+	}
+	return engine.Caller{Verified: true, Key: subject, Source: subjectSourceKernelPeer}, nil
+}
+
+func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, signer *bedrockSigner, body []byte, caller engine.Caller, profiles []string) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
 	if s.router == nil {
 		return nil, SemanticRouteOutcome{}, true
 	}
@@ -562,7 +589,7 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 		Model: model, RequestModel: model, APIFamily: family, Connector: connector,
 		Listener: engine.ListenerRouteOnly, RequestedProvider: inProvider, CredentialClass: inClass,
 		ConversationID: routeOnlyConversationID(r.Header), Text: text, HasImages: images, ToolTurn: toolTurn,
-		Caller: caller,
+		Caller: caller, Profiles: profiles,
 	}
 	if hasTools {
 		in.Tools = []interface{}{true}
