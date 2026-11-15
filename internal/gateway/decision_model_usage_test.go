@@ -32,7 +32,7 @@ func TestDecisionModelCallIsRecordedWithoutTokensOrCost(t *testing.T) {
 	if dm == nil {
 		t.Fatal("no decision model")
 	}
-	_, _, _, _ = dm.call(context.Background(), decisionModelState{})
+	_, _, _, _, _ = dm.call(context.Background(), decisionModelState{})
 	select {
 	case rec := <-sink.ch:
 		if rec.Facts.CallRole != modelusage.RoleDecisionModel || rec.Facts.SelectedModel != "dm-1" || rec.Status != 200 {

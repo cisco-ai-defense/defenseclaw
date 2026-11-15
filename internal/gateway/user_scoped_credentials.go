@@ -314,6 +314,28 @@ func routeEnrollments(ledger managedHookLedger) map[string]bool {
 	return out
 }
 
+// routeEnrolledCount counts the protected ledger rows of connector whose
+// route credential the gateway accepts; ok is false when the index could
+// not be built (no key or an unreadable ledger).
+func (s *userScopedCredentialStore) routeEnrolledCount(connector string) (int, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshLocked()
+	if !s.built {
+		return 0, false
+	}
+	n := 0
+	for key := range s.enrolled {
+		if strings.HasSuffix(key, "\x00"+connector) {
+			n++
+		}
+	}
+	return n, true
+}
+
 // keyFingerprints names the keys whose credentials authenticate right now:
 // the committed key, then a staged or retiring one. The standalone lifecycle reads them
 // from /health to prove a rotation's key is live before any user is moved

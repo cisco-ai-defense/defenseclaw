@@ -282,6 +282,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Connector:    "codex",
 			contentScope: ruleContentScopeUntrusted,
 		})
+		a.forgetBlockedPrompt(ctx, req.Prompt, verdict)
 		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{
 				targetType: "skill",
@@ -323,8 +324,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 		windowsReadings := windowsHookHost() && !isSandboxHookRequest(ctx) &&
 			(cfg == nil || !cfg.SecureClientIntegration())
+		var windowsPowerShellReading *windowsHintedReading
 		if windowsReadings {
-			actionInput.DialectHint = selectWindowsShellDialect(
+			actionInput.DialectHint, windowsPowerShellReading = selectWindowsShellDialectReading(
 				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
 			)
 		}
@@ -339,6 +341,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			DowngradeReadOnlyDataArgs:     mode != "action",
 			SandboxGuestCWD:               req.guestCWD,
 			windowsDialectReadings:        windowsReadings,
+			windowsPowerShellReading:      windowsPowerShellReading,
 			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
@@ -1012,6 +1015,9 @@ func (a *APIServer) inspectCodexToolResult(
 ) *ToolInspectVerdict {
 	req = req.withTrustedActiveHome(ctx)
 	content := codexToolResponseString(req.ToolResponse)
+	for _, j := range a.hookSessionJudges(ctx) {
+		j.ObserveToolResult(ctx, content) // decision_model.history_tool_results only
+	}
 	if sandboxToolResultUntrusted(ctx) {
 		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, ruleContentScopeUntrusted))
 	}
