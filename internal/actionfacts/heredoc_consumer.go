@@ -137,7 +137,7 @@ func hereDocProgramConsumer(program string, words []string, static []bool, depth
 		at := len(words) - len(inner)
 		return hereDocArgvConsumer(words[at:], static[at:], depth+1)
 	}
-	if _, interpreter := inlineInterpreterRow(program); interpreter {
+	if _, _, interpreter := inlineInterpreterRow(program); interpreter {
 		// An interpreter (python3 -, perl) runs its standard input as its own
 		// language, not as shell: the body is its data, which the strict and
 		// managed raw scan still reads (GAP-0876 ruling).
