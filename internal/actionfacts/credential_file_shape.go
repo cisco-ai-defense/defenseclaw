@@ -190,9 +190,6 @@ var credentialFileShapes = [...]credentialFileShape{
 	// (default $HOME/.config/git/credentials):
 	// https://git-scm.com/docs/git-credential-store#FILES
 	{class: CredentialFileDeveloperToken, relative: ".config/git/credentials", strongUpload: true},
-	// HashiCorp Vault's token helper file ~/.vault-token:
-	// https://developer.hashicorp.com/vault/docs/commands/token-helper
-	{class: CredentialFileDeveloperToken, base: ".vault-token"},
 	// Terraform CLI credentials: ~/.terraform.d/credentials.tfrc.json, on
 	// Windows %APPDATA%\terraform.d\credentials.tfrc.json:
 	// https://developer.hashicorp.com/terraform/cli/config/config-file#credentials

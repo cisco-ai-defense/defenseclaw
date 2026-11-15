@@ -37,7 +37,7 @@ func TestMatchCredentialFileShapeDeveloperToolLogins(t *testing.T) {
 			[]string{`C:\Users\alice\AppData\Local\github-copilot\versions.json`}},
 		{"git XDG store", "/home/alice/.config/git/credentials", CredentialFileDeveloperToken, ".config/git/credentials",
 			[]string{"/home/alice/.config/git/config", "/home/alice/.config/git/ignore", "/home/alice/.config/gitx/credentials"}},
-		{"Vault token", "/home/alice/.vault-token", CredentialFileDeveloperToken, ".vault-token",
+		{"Vault token", "/home/alice/.vault-token", CredentialFileCredentialStore, ".vault-token",
 			[]string{"/home/alice/.vault-token.example", "/home/alice/vault-token", "/home/alice/.vault.hcl"}},
 		{"Terraform", "/home/alice/.terraform.d/credentials.tfrc.json", CredentialFileDeveloperToken, ".terraform.d/credentials.tfrc.json",
 			[]string{"/home/alice/.terraform.d/checkpoint_cache", "/work/p/credentials.tfrc.json", "/home/alice/.terraform.d/plugins/x.json"}},
