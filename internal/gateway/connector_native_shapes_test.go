@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"net/http"
+	"runtime"
 	"testing"
 )
 
@@ -34,10 +35,19 @@ func TestConnectorNativeShapesNeverWeakerThanClaudeCode(t *testing.T) {
 			base := shapeParityHook(t, handlers["claudecode"], shapeParityCall{name: "claudecode", conn: "claudecode",
 				event: "PreToolUse", body: shapeParityEnvelope("PreToolUse", cwd, c.tool, c.args)}, p.managed)
 			for _, call := range shapeParityNative(c.tool, c.args, cwd) {
+				want, wantTool := base, c.tool
+				if c.tool == "Bash" && runtime.GOOS == "windows" {
+					// On a Windows gateway agy runs run_command in
+					// PowerShell: its baseline is the Claude Code PowerShell
+					// tool, not the Bash tool (Git Bash there).
+					wantTool = "PowerShell"
+					want = shapeParityHook(t, handlers["claudecode"], shapeParityCall{name: "claudecode", conn: "claudecode",
+						event: "PreToolUse", body: shapeParityEnvelope("PreToolUse", cwd, wantTool, c.args)}, p.managed)
+				}
 				got := shapeParityHook(t, handlers[call.conn], call, p.managed)
 				checked++
-				if shapeParityRank[got] < shapeParityRank[base] {
-					t.Errorf("%s %s: %s answered %s, Claude Code %s %s", p.name, c.id, call.name, got, c.tool, base)
+				if shapeParityRank[got] < shapeParityRank[want] {
+					t.Errorf("%s %s: %s answered %s, Claude Code %s %s", p.name, c.id, call.name, got, wantTool, want)
 				}
 			}
 		}
