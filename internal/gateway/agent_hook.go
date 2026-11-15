@@ -4226,7 +4226,21 @@ func (a *APIServer) inspectAgentHookToolCall(
 		record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 	}
 	withWindowsShellDialect(&action, dialectHint)
+	action.posixReadingTwin = dialectHint && agentHookShellToolNamesNoShell(req.ConnectorName, actionTool)
 	return a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, action, command, commandTool, hermesWriteViews)
+}
+
+// agentHookShellToolNamesNoShell reports a shell tool whose name says
+// nothing of the shell that runs its command: agy's run_command (also as
+// send_command_input). On a Windows host its command gets the Windows
+// dialect reading (GAP-0784) and also the POSIX one it had before, as the
+// proxy judges a model reply's call (rel-1-0-10:GAP-0850). A tool that names
+// its shell (Bash for Git Bash, powershell, execute_pwsh) keeps one reading:
+// a call read as the other shell gains findings the shell that runs it never
+// has (windowsReadingTwinRequests).
+func agentHookShellToolNamesNoShell(connectorName, actionTool string) bool {
+	return strings.EqualFold(strings.TrimSpace(connectorName), "antigravity") &&
+		strings.EqualFold(strings.TrimSpace(actionTool), "run_command")
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for
