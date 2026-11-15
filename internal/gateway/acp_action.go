@@ -125,6 +125,15 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 		}
 		calls, prose, read := acpToolCallUpdateCalls(update2, goos, false, merged)
 		if len(calls) == 0 {
+			// An agent that shows its command only as text (Hermes) names its
+			// action in no input: the report is still the shell call it shows,
+			// judged as one and, as every report, never refused
+			// (rel-1-0-10:GAP-0619).
+			if agent, err := acp.LookupAgent(req.AgentID); err == nil {
+				if call, shown := acpDisplayedShellCall(agent.ConnectorID, params.Update); shown {
+					return acpFrameAction{calls: []acpToolCall{call}, prose: prose, trunc: merged.Union(read)}, true
+				}
+			}
 			// A status or output report names no action: its text is agent
 			// output, judged as before.
 			return acpFrameAction{}, false

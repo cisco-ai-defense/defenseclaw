@@ -6,33 +6,21 @@ package gateway
 
 import "context"
 
-// The ONE test helper that reads the judge's private per-session state
-// (toolContext). Tests seed and read session state through it only, so a
-// move of that state (feat/substrate's intentstore) has one place to port.
-
-// carrySessionForTest copies sessionID's context from one judge to another by
-// value, as a rebuilt judge does when it keeps a live session (s7/intent's
-// inheritToolJudgeContext copies the entry and its event slice).
-func carrySessionForTest(ctx context.Context, from, to *LLMJudge) {
-	key := judgeSessionKey(ctx)
-	from.toolContextMu.Lock()
-	entry := from.toolContext[key]
-	entry.events = append([]toolJudgeContextEvent(nil), entry.events...)
-	from.toolContextMu.Unlock()
-	to.toolContextMu.Lock()
-	if to.toolContext == nil {
-		to.toolContext = make(map[string]toolJudgeSessionContext)
-	}
-	to.toolContext[key] = entry
-	to.toolContextMu.Unlock()
-}
+// The ONE test helper that reads the judge's private per-session target
+// history (judgeTargets, judge_packet.go). Tests read it through this file
+// only, so a move of that state has one place to port. Session intent and
+// recent calls are in the intent store (intentstore.Process.Peek).
 
 // sessionTargetsForTest lists the paths a judge's session history holds.
 func sessionTargetsForTest(ctx context.Context, j *LLMJudge) map[string]bool {
-	j.toolContextMu.Lock()
-	defer j.toolContextMu.Unlock()
+	entry := func() judgeTargetSession {
+		t := j.judgeTargets()
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return t.sessions[judgeSessionKey(ctx)]
+	}()
 	out := map[string]bool{}
-	for path := range j.toolContext[judgeSessionKey(ctx)].targets {
+	for path := range entry.targets {
 		out[path] = true
 	}
 	return out

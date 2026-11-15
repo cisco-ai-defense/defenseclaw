@@ -38,6 +38,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -165,6 +166,17 @@ type trustedActionRequest struct {
 	// because a managed device fails closed.
 	ManagedInstall             bool
 	UnknownKeyPossibleOverflow bool
+	// hostTwinDepth is the number of wrapper layers the call's parents used
+	// reading it as a script (actionfacts.HostScriptReadings): one budget for a
+	// call however its twins nest.
+	hostTwinDepth int
+	// hostTwinListed: the call is a statement, or a run of statements, of a
+	// list already read one by one.
+	hostTwinListed bool
+	// hostScriptTwinOff turns the script reading off, so a test can compare a
+	// call's findings with and without it (TestHostScriptTwinOnlyAddsFindings).
+	// Production requests never set it.
+	hostScriptTwinOff bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
@@ -175,6 +187,13 @@ type trustedActionRequest struct {
 	// check (conflictingToolArgumentKeys); nil when Input.Args is the object
 	// the call carried.
 	conflictSource *conflictingToolArgumentSource
+	// capFloor is the cap floor of the hook call (withCapFloor), shared by
+	// the call and its piece twins; capFloorSeen marks a request whose
+	// floor is already registered (every other twin of it inherits that),
+	// and capFloorDepth counts the piece twins above it.
+	capFloor      *capFloorState
+	capFloorSeen  bool
+	capFloorDepth int
 	// DowngradeReadOnlyDataArgs is advisory-only. Bare executable names and
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
@@ -238,6 +257,10 @@ type trustedActionRequest struct {
 	// DefenseClaw state: a LoginGuess reading of a simple command keeps only
 	// that proof (loginGuessProvedFinding), so no other rule needs to run.
 	stateProofOnly bool
+	// sendDestination marks the routing values of a message call, where its
+	// text is sent (ToolInspectRequest.sendDestination): the call is a send
+	// whatever the tool is named (trustedActionSendsMessage).
+	sendDestination bool
 	// overBudgetOmission, when set, is told that the authorized-keys proof
 	// found only an operand that the client's bounded map left out because
 	// it was full (hookpaths.BudgetKey, GAP-0146).
@@ -281,6 +304,10 @@ type trustedActionRequest struct {
 	// as its readable statements (windowsReadingTwinRequests), never as another
 	// shell.
 	windowsDialectReadings bool
+	// windowsPowerShellReading is the PowerShell reading the hook's dialect
+	// selection made of a call it placed in no dialect; the readings above
+	// reuse it instead of parsing the call again. nil: none.
+	windowsPowerShellReading *windowsHintedReading
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
 	// generation is the rule generation the call is judged with; nil: the
@@ -383,6 +410,22 @@ func dispatchTrustedAction(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	// A call judged as the twin of its data word leaves a detection-only
+	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
+	// other defer, so a limit finding any of them raises is kept as it is and
+	// the record never stands in for it.
+	var unreadDataWord bool
+	defer func() {
+		if unreadDataWord {
+			findings = withPosixDataWordRecord(findings)
+		}
+	}()
+	// One dispatch is one hook call whichever surface carries the action (the
+	// hook request, an ACP frame, a direct evaluation): the file system reads
+	// of its reach scans are remembered for the decision (hookpaths.HookCall;
+	// nested in the handler's own call, or in a twin of this dispatch, it
+	// begins nothing more, rel-1-0-10:GAP-0766).
+	defer hookpaths.HookCall()()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	defer recoverTrustedActionFault(request, &findings)
 	if trustedActionFaultHook != nil {
@@ -450,6 +493,10 @@ func dispatchTrustedAction(
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
+	// A backup file of sed -i or perl -i the readers cannot resolve is a
+	// path target past what they judge: at least the unknown tier
+	// (rel-1-0-10:GAP-0540).
+	defer func() { findings = sedBackupUnresolvedFindings(request, findings) }()
 	if request.simpleMemo == nil {
 		request.simpleMemo = &trustedSimpleMemo{}
 	}
@@ -466,7 +513,26 @@ func dispatchTrustedAction(
 	// binding; the other tiers follow the top-level statements before it.
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
+	// analyzedCaps: the caps the action analysis below stopped at.
+	var analyzedCaps bounded.CapSet
+	// nestedBodies: the call is past the nested-body bound, which the owner
+	// ruled is decided at once (GAP-0677): the cap floor judges only its
+	// statements of at most capFloorPieceBytes, never its bodies.
+	var nestedBodies bool
+	if !request.capFloorSeen {
+		// After every path below, the budget and limit paths included: a
+		// block proven on a statement the cap did not take still decides
+		// (withCapFloor, rel-1-0-10:GAP-0312, GAP-0360, GAP-0435, GAP-0381,
+		// GAP-0532).
+		request.capFloorSeen = true
+		if request.capFloor == nil {
+			request.capFloor = &capFloorState{}
+		}
+		floorRequest := request
+		defer func() { findings = withCapFloor(parent, floorRequest, findings, analyzedCaps, nestedBodies) }()
+	}
 	bound := trustedActionCommandBound(request.Input)
+	nestedBodies = bound == shellReadingNestedBodies
 	if bound == shellReadingBudget {
 		// Past the reading budget (shellparse.BudgetExceeded): no reader
 		// below parses it, and the call is opaque to them. It takes the
@@ -476,7 +542,8 @@ func dispatchTrustedAction(
 		// is a possible write to it, which blocks in every mode and
 		// profile, as the readers' proof of a state write did before the
 		// budget refused to read the call (GAP-0254, GAP-0255, GAP-0281).
-		return withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable))
+		return withPowerShellCapPieces(parent, request,
+			withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable)))
 	}
 	if bound == shellReadingTooDeep || bound == shellReadingNestedBodies {
 		// Past the reading bounds: no reader below parses it, and the call
@@ -484,10 +551,17 @@ func dispatchTrustedAction(
 		// GAP-0677). It is decided before the recovered-parse reading
 		// below, which would read the same bodies again for the same
 		// finding.
-		return trustedActionLimitFindings(request.EnforcementCapable)
+		return withPowerShellCapPieces(parent, request, trustedActionLimitFindings(request.EnforcementCapable))
 	}
 	if request.EnforcementCapable && shellReason == "shell-parse-bound" {
-		return trustedActionLimitFindings(true)
+		if !trustedCallReadsSyntaxTail(request) {
+			return withPowerShellCapPieces(parent, request, trustedActionLimitFindings(true))
+		}
+		// A plain syntax error stops the recovering parse at its proof
+		// bound too, but the statements that parse are read: they are
+		// judged in full below, and the bound still decides the call at
+		// least as the evaluation limit does (rel-1-0-10:GAP-0526).
+		defer func() { findings = withTrustedActionLimitFinding(findings, true) }()
 	}
 	if bound == shellReadingNestedProof {
 		// The readers below read it, but past this weight they do not prove
@@ -530,6 +604,7 @@ func dispatchTrustedAction(
 	if !request.simpleCommandPass {
 		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
+		analyzedCaps = capFloorAnalysisCaps(facts)
 		if trustedCallOverStatementBudgetWith(request.Input, facts, request.simpleMemo.commands(request.Input, facts)) {
 			// Over the statement budget the call blocks with
 			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is
@@ -541,11 +616,53 @@ func dispatchTrustedAction(
 			// observe mode allows the budget finding but hard-blocks a
 			// proven write to the active state, and that proof is formed
 			// only there (withOverBudgetStateMutation).
-			return withOverBudgetStateMutation(parent, request, facts, trustedActionLimitFindings(request.EnforcementCapable))
+			// A call whose analysis also stopped at a byte bound names that cap
+			// (GAP-0382); the finding is the same one. The statements at the start
+			// and the end of a PowerShell call are also judged alone: a protected
+			// write beside the padding that put the call past the budget keeps its
+			// block (GAP-0693).
+			return withPowerShellCapPieces(parent, request,
+				withOverBudgetStateMutation(parent, request, facts,
+					withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
+						posixParseTruncation(request, facts), request)))
+		}
+		if awkCommandDynamic(facts) {
+			// An awk command built at run time has no text to judge
+			// (GAP-0499): the call is unknown, never an allow.
+			defer func() {
+				findings = withAwkDynamicCommand(findings, request.EnforcementCapable)
+			}()
 		}
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
+		if facts.Parse.Status == actionfacts.StatusLimitExceeded {
+			// A PowerShell call the reading stopped at a cap of its own (a
+			// nesting, word, statement or command cap, or the input bound)
+			// keeps the blocks its first and last statements prove alone
+			// (GAP-0693).
+			defer func() { findings = withPowerShellCapPieces(parent, request, findings) }()
+		}
+		if cut := trustedReadingCut(request.Input, facts); cut.Any() {
+			// The reading of the call stopped at a cap of its own under the
+			// statement budget: the call is TRUNCATED (the one bound rule),
+			// never judged below the unknown tier of its pack, and what was
+			// read still decides (trustedReadingCut).
+			defer func() { findings = withBoundedTruncation(findings, cut, request) }()
+			if facts.Parse.Dialect == actionfacts.DialectPowerShell && !request.readingTwin {
+				// The statements of the call are also read in runs that fit
+				// under the cap, so a block proven on a run keeps its own
+				// verdict (actionfacts.PowerShellCappedRuns).
+				for _, run := range actionfacts.PowerShellCappedRuns(request.Input, facts) {
+					twin := windowsReadingTwin(request)
+					twin.Input = run
+					twin.LegacyText = run.Command
+					defer func() {
+						findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+					}()
+				}
+			}
+		}
 	}
 	// A ~<active user> tilde-prefix names the active home from the password
 	// database (GAP-2378), and under a Windows home an MSYS drive mount
@@ -606,15 +723,94 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// The commands an awk program starts through system(), print | and
+	// | getline, written as string literals, are run by the shell as the
+	// hook would run them directly (GAP-0499): that reading is judged too,
+	// and only its block counts.
+	twin, awkReading, awkTwin := awkCommandTwinRequest(request)
+	awkCaps := awkReading.Truncated
+	if awkTwin {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	if awkProgramFilesUnknown(request, awkReading) {
+		// A program file the call runs could not be read, or starts a command
+		// built at run time: the call is unknown (GAP-0499, GAP-0652).
+		defer func() {
+			findings = withAwkDynamicCommand(findings, request.EnforcementCapable)
+		}()
+	}
+	if awkCaps.Any() {
+		// An awk program in shell STRINGs nested past the bound is not read:
+		// the call is truncated (bound rule, cap depth).
+		defer func() {
+			findings = withBoundedTruncation(findings, awkCaps, request)
+		}()
+	}
 
 	if !analyzed {
 		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
-	for _, twin := range windowsReadingTwinRequests(request, facts) {
+	// A Windows call the tokenizer stopped reading at its input bound (one word
+	// over the word limit) is truncated: judged as unknown at the pack's
+	// unknown tier at least, never a clean allow (rel-1-0-10:GAP-0345). So is
+	// a Windows host call past the command size (no dialect read) or under a
+	// POSIX tool label, and a shell command too large to read at all
+	// (actionfacts.TruncatedHostCall).
+	if facts.Parse.Status == actionfacts.StatusLimitExceeded &&
+		slices.Contains(facts.Parse.Issues, actionfacts.IssueInputLimit) &&
+		(facts.Parse.Dialect == actionfacts.DialectPowerShell || facts.Parse.Dialect == actionfacts.DialectCMD ||
+			actionfacts.TruncatedHostCall(request.Input)) {
+		defer func() {
+			findings = withBoundedTruncation(findings, bounded.Of(bounded.Bytes), request)
+		}()
+	}
+	// A download cradle psparse proves on the tree, in a call the tokenizer
+	// cannot prove it in, is judged at the unknown tier of the pack at least
+	// (rel-1-0-10:GAP-0160): an alert outside the strict tier, a block in it.
+	defer func() {
+		findings = withCradleUnknownTier(findings, request)
+	}()
+	analyzedCaps = capFloorAnalysisCaps(facts)
+	// Credential material that reaches a sender whose destination is not read
+	// in full (interpreter code that names a credentials file and a network
+	// capability, a credential-named environment variable piped into an
+	// upload) is the unknown tier of the one bound rule: the profile decides,
+	// an alert in the default and permissive packs, a block in strict
+	// (GAP-0595).
+	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
+		defer func() {
+			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
+		}()
+	}
+	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
+	for _, twin := range windowsTwins {
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	if windowsTwinCut.Any() {
+		defer func() { findings = withBoundedTruncation(findings, windowsTwinCut, request) }()
+	}
+	// A POSIX shell call the analysis stopped reading at a byte bound (one word
+	// past the string bound ends it with no command) is truncated: judged at
+	// the unknown tier of the pack, never a clean allow (rel-1-0-10:GAP-0382).
+	if set := posixParseTruncation(request, facts); set.Any() {
+		defer func() {
+			findings = withBoundedTruncation(findings, set, request)
+		}()
+	}
+	// A word past the bound that the local shell only passes on (a big script
+	// handed to dcx or ssh) is data: the call is judged as its twin with the
+	// word shortened, and the word leaves a detection-only record
+	// (rel-1-0-10:GAP-0382).
+	if twin, ok := posixDataWordTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+			unreadDataWord = true
 		}()
 	}
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
@@ -639,6 +835,30 @@ func dispatchTrustedAction(
 	}
 	// A file-tool call with an argument key outside its reviewed schema is
 	// judged as each reading the harness may run (gas-ux-r1 GAP-0076).
+	// A static powershell, pwsh or cmd launcher, call block or Invoke-Expression
+	// literal also runs the script it names. psparse reads that script (the
+	// launcher itself stays as the tokenizer saw it); the script reading only
+	// ever adds findings (host_script_twin.go).
+	if twins, caps := hostScriptTwinRequests(request, facts); len(twins) != 0 || caps.Any() {
+		defer func() {
+			for _, twin := range twins {
+				twinFindings := dispatchTrustedAction(parent, twin)
+				if twin.hostTwinListed {
+					// A statement of a list read alone is a fragment: that it
+					// is too large to judge says nothing the whole call's own
+					// limit does not. A bound the statement's own reading hit
+					// (a launcher nested past the depth, a body past the size)
+					// is a truncation of the call all the same, alone, in a
+					// list or in a call block: its caps reach the call
+					// (rel-1-0-10:GAP-0477).
+					caps = caps.Union(boundedCapsOf(twinFindings))
+					twinFindings = withoutLimitFindings(twinFindings)
+				}
+				findings = withHostTwinFindings(findings, twinFindings)
+			}
+			findings = withBoundedTruncation(findings, caps, request)
+		}()
+	}
 	twins, overflow := unknownKeyTwinRequests(request, facts)
 	request.UnknownKeyPossibleOverflow = request.UnknownKeyPossibleOverflow || overflow
 	for _, twin := range twins {
@@ -743,6 +963,28 @@ func dispatchTrustedActionWith(
 				if simple.EvaluationFailure != "" {
 					if simple.EvaluationFailure == actionfacts.EvaluationFailureInternal {
 						findings = withSimpleCommandFindings(findings, trustedActionParseFailureFindings(request.EnforcementCapable))
+						continue
+					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureUnresolvedBody {
+						// A nested shell body the walk cannot resolve: what it
+						// runs is unknown (rel-1-0-10:GAP-0535).
+						findings = withSimpleCommandFindings(findings, trustedActionUnresolvedBodyFindings(request.EnforcementCapable))
+						continue
+					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureSyntaxCap {
+						// The reading of the syntax error stopped at a cap:
+						// the unknown tier, and the statements read before it
+						// are judged as the other simple commands are.
+						findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
+						continue
+					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax {
+						// A text with a syntax error: its readable statements
+						// are judged as the simple commands around this one,
+						// and the part that was not read is unknown
+						// (rel-1-0-10:GAP-0526).
+						findings = withSimpleCommandFindings(findings, trustedActionSyntaxUnreadFindings(request.EnforcementCapable,
+							unreadPartMayWriteProtected(request, generation, syntaxUnreadText(wholeCommand))))
 						continue
 					}
 					if simple.EvaluationFailure != "limit" {
@@ -1126,6 +1368,10 @@ func dispatchTrustedActionWith(
 				finding.enforcement = findingEnforcementDetectionOnly
 			}
 			if request.EnforcementCapable && candidate.owner.alertOnly {
+				finding.enforcement = findingEnforcementAlertOnly
+			}
+			if candidate.owner.strictEnforced && !request.StrictPolicy &&
+				finding.enforcement == findingEnforcementAllowed {
 				finding.enforcement = findingEnforcementAlertOnly
 			}
 			finding = finding.withTrustedActionProof(
@@ -5727,8 +5973,15 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 	},
 	"CMD-WIN-IWR-IEX": {
-		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return powerShellDownloadExecPrerequisite(facts)
+		// The pipe form (iwr | iex) and every other spelling of a download
+		// cradle (actionfacts.PowerShellFetchedContentExecution) are one
+		// action. The finding enforces on a complete parse only; a cradle
+		// that is spelled with parentheses or a variable leaves the tokenizer's
+		// parse partial, and the filter below keeps it in shadow (see
+		// powerShellCradleShadowOnly).
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return powerShellDownloadExecPrerequisite(facts) ||
+				actionfacts.PowerShellFetchedContentExecution(input)
 		},
 	},
 	"CMD-PIPE-WGET": {
@@ -6430,6 +6683,136 @@ func commandByID(
 	return actionfacts.CommandFact{}, false
 }
 
+// powerShellCradleShadowOnly reports a download cradle (psparse's reading of
+// the script: Invoke-Expression of fetched content, in a spelling the tokenizer
+// cannot prove) in a call whose parse is partial. It adds the download-execute
+// finding in shadow: recorded, never enforced. The pipe form keeps the product's
+// rule when the tokenizer's parse is partial for a reason of its own (a sibling
+// statement it does not model raises nothing, the partial-sibling fixture). A
+// statement list alone is no such reason: the tokenizer only does not read a
+// list of statements, and a fetch whose output feeds Invoke-Expression is a
+// cradle wherever it stands in a list of statements psparse reads in full
+// (rel-1-0-10:GAP-0160).
+func powerShellCradleShadowOnly(input actionfacts.Input, facts actionfacts.Facts) bool {
+	if powerShellDownloadExecPrerequisite(facts) &&
+		(!powerShellStatementListOnly(facts) || !actionfacts.PowerShellStatementList(input)) {
+		return false
+	}
+	return actionfacts.PowerShellFetchedContentExecution(input)
+}
+
+// powerShellListSiblings are the programs a statement list around a cradle may
+// hold without making the tokenizer's partial parse more than "a list of
+// statements": the cradle's own words and the statements that only change
+// directory or print.
+var powerShellListSiblings = map[string]bool{
+	"invoke-webrequest": true, "iwr": true, "invoke-restmethod": true, "irm": true, "curl": true, "wget": true,
+	"invoke-expression": true, "iex": true, "new-object": true,
+	"set-location": true, "sl": true, "cd": true, "chdir": true, "push-location": true, "pushd": true,
+	"pop-location": true, "popd": true, "write-output": true, "write-host": true, "echo": true, "get-date": true,
+}
+
+// powerShellStatementListOnly reports a partial parse whose only reasons are
+// that the tokenizer does not read a list of statements (and, for the
+// statements of powerShellListSiblings, the operand grammar of a directory
+// change). A sibling the tokenizer does not model at all is another reason.
+func powerShellStatementListOnly(facts actionfacts.Facts) bool {
+	if facts.Parse.Status != actionfacts.StatusPartial || len(facts.Parse.Issues) == 0 {
+		return false
+	}
+	// A cradle inside a launcher's body keeps the product's rule: the body is
+	// the launcher's operand, and a partial parse of it raises nothing.
+	for _, command := range facts.Commands {
+		switch strings.ToLower(command.Program) {
+		case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
+			return false
+		}
+	}
+	for _, issue := range facts.Parse.Issues {
+		switch issue {
+		case actionfacts.IssueUnsupportedConstruct:
+		case actionfacts.IssueUnknownOperandGrammar:
+			for _, command := range facts.Commands {
+				if !powerShellListSiblings[strings.ToLower(command.Program)] {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// withCradleUnknownTier raises a download-cradle finding the tokenizer could
+// not prove (it is recorded, not enforced) to the unknown tier of the pack when
+// psparse proves the cradle on the tree: alert-only outside the strict tier,
+// enforced in it. It only raises; a finding already enforced stays.
+func withCradleUnknownTier(findings []RuleFinding, request trustedActionRequest) []RuleFinding {
+	if !request.EnforcementCapable {
+		return findings
+	}
+	proven := false
+	for index := range findings {
+		finding := &findings[index]
+		if finding.RuleID != "CMD-WIN-IWR-IEX" || finding.contributesToEnforcement() || finding.contributesToAlertOnly() {
+			continue
+		}
+		if !proven && !actionfacts.PowerShellFetchedContentExecution(request.Input) {
+			return findings
+		}
+		proven = true
+		if request.StrictPolicy || request.ManagedInstall {
+			finding.enforcement = findingEnforcementAllowed
+		} else {
+			finding.enforcement = findingEnforcementAlertOnly
+		}
+	}
+	return findings
+}
+
+// withHostTwinFindings joins the findings of a script reading to those of the
+// call as written (withOverLimitTwinFindings) and keeps the name the call as
+// written gave a rule: a stronger finding of the same rule family from the
+// reading raises the proof, never renames the finding (a Windows path rule
+// stays the Windows path rule).
+//
+// The reading may add only what it proves. A finding of the reading that would
+// enforce without a proof that authorizes the rule (a target the reading could
+// not place, a path it only mentions) is recorded, not enforced: a read-only
+// listing proves no write, and a launcher the tokenizer holds as partial stays
+// partial (rel-1-0-10:GAP-0364).
+func withHostTwinFindings(findings, twin []RuleFinding) []RuleFinding {
+	before := slices.Clone(findings)
+	proven := make([]RuleFinding, len(twin))
+	for index, finding := range twin {
+		if finding.contributesToEnforcement() && !finding.proof.authorizes(finding.RuleID) {
+			finding.enforcement = findingEnforcementDetectionOnly
+		}
+		proven[index] = finding
+	}
+	joined := withOverLimitTwinFindings(findings, proven)
+	for index := range before {
+		if index < len(joined) && joined[index].RuleID != before[index].RuleID &&
+			trustedActionFindingKey(joined[index].RuleID) == trustedActionFindingKey(before[index].RuleID) {
+			joined[index].RuleID, joined[index].Title = before[index].RuleID, before[index].Title
+		}
+	}
+	return withCarriedBoundedCaps(joined, twin)
+}
+
+// withoutLimitFindings drops the evaluation-limit finding of a reading that is
+// a fragment of the call.
+func withoutLimitFindings(findings []RuleFinding) []RuleFinding {
+	kept := findings[:0:0]
+	for _, finding := range findings {
+		if canonicalTrustedRuleID(finding.RuleID) != evaluationLimitRuleID {
+			kept = append(kept, finding)
+		}
+	}
+	return kept
+}
+
 func filterExactFallbackFindings(
 	findings []RuleFinding,
 	input actionfacts.Input,
@@ -6485,7 +6868,8 @@ func filterExactFallbackFindings(
 		// connector input has complete authoritative PowerShell ActionFacts.
 		if finding.RuleID == "CMD-WIN-IWR-IEX" &&
 			(!facts.Authoritative() ||
-				facts.Parse.Status != actionfacts.StatusComplete) {
+				facts.Parse.Status != actionfacts.StatusComplete) &&
+			!powerShellCradleShadowOnly(input, facts) {
 			continue
 		}
 		if hasTag(finding.Tags, trustedParserUncertaintyTag) {
@@ -6993,7 +7377,10 @@ func finalizeTrustedActionFindings(
 	findings []RuleFinding,
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(generation, facts, findings, request.CopilotSharedLocalFile && request.Input.Tool == "read_file")
+	findings = applyTrustedActionContextDisposition(generation, facts, findings, trustedActionDispositionScope{
+		protectedLocalFileRead: request.CopilotSharedLocalFile && request.Input.Tool == "read_file",
+		sendDestination:        request.sendDestination,
+	})
 	if !request.StrictPolicy {
 		findings = trustedActionOrdinaryCredentialCopyFindings(facts, findings)
 	}
@@ -7839,6 +8226,12 @@ func trustedLegacyCommandRuleMatches(
 			trustedRuleHasActionProof(ruleID, input, facts) {
 			matchesByID[ruleID] = struct{}{}
 		}
+	}
+	// A download cradle is one command word (iex) over an argument that
+	// fetches: no pipeline text holds it, so psparse's reading of the chain
+	// (actionfacts.PowerShellFetchedContentExecution) is the match.
+	if actionfacts.PowerShellFetchedContentExecution(input) {
+		matchesByID["CMD-WIN-IWR-IEX"] = struct{}{}
 	}
 	for ruleID := range semanticOwners {
 		if trustedLegacyRuleCategory(generation, ruleID) == "command" &&
@@ -9419,6 +9812,53 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 	return bashReadingRequest(request, command, rewritten), true
 }
 
+// trustedReadingCut is the cap at which the reading of a shell call stopped
+// under the statement budget, the one point every dialect's limit_exceeded
+// reaches (the one bound rule): such a call is TRUNCATED.
+//   - The input bound of a shell command line (actionfacts.MaxCommandBytes),
+//     in every dialect, cap=bytes (a native write or read tool past the
+//     bound keeps its own bounded readings, over_limit_write_targets.go):
+//     a Windows-hook command padded past 64 KiB
+//     was read in no dialect and was a clean allow in every pack, with no
+//     limit finding (rel-1-0-10:GAP-0611). Its bounded twin (comments and
+//     padding removed, overLimitCommandBoundedTwinRequest) still proves
+//     what the text holds.
+//   - The command cap of a CMD or PowerShell reading, cap=items: a CMD
+//     reading capped at 127 to 257 statements had no limit finding and was
+//     allowed in strict (rel-1-0-10:GAP-0426), and so was a PowerShell one:
+//     one `$o = & git rev-parse HEAD` statement is two commands, so about 64
+//     statements fill the cap, and a registry write beside 100 such lines was
+//     found but allowed in every pack (rel-1-0-10:GAP-0589). The statements
+//     of a capped PowerShell reading are read again in runs under the cap
+//     (actionfacts.PowerShellCappedRuns).
+//
+// A POSIX reading is not truncated by its command cap: its per-statement
+// split (SimpleCommands) reads every statement up to the statement budget
+// (ShellStatementsOverBudget), and each is judged.
+func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
+		return bounded.CapSet{}
+	}
+	if command, known := trustedBashCommandInput(input); known && len(command) > actionfacts.MaxCommandBytes &&
+		trustedShellCommandTool(input.Tool) {
+		return bounded.Of(bounded.Bytes)
+	}
+	if facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell {
+		return bounded.Of(bounded.Items)
+	}
+	return bounded.CapSet{}
+}
+
+// trustedShellCommandTool reports a tool whose input is a shell command
+// line: a POSIX, PowerShell or CMD execution tool.
+func trustedShellCommandTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "cmd", "cmd.exe":
+		return true
+	}
+	return trustedBashExecutionTool(tool) || trustedPowerShellExecutionTool(tool)
+}
+
 // trustedStatementBudgetExceeded reports whether a shell call whose
 // analysis is limit-exceeded has more statements than one action evaluates.
 // A POSIX reading, and a call of no known dialect that a POSIX shell runs
@@ -9694,7 +10134,8 @@ func trustedCallOverStatementBudgetWith(input actionfacts.Input, facts actionfac
 	}
 	if facts.Parse.Dialect == actionfacts.DialectPOSIX && facts.Parse.Status != actionfacts.StatusLimitExceeded &&
 		!slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
-			return simple.EvaluationFailure == "parse"
+			return simple.EvaluationFailure == "parse" || simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax ||
+				simple.EvaluationFailure == actionfacts.EvaluationFailureUnresolvedBody
 		}) {
 		// A complete POSIX split already enforced the limit. The extra
 		// count is needed only when the analyzer reached its own bound or
@@ -9715,6 +10156,28 @@ func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bo
 		}
 	}
 	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
+}
+
+// withCredentialSenderFinding adds the unknown-tier verdict of a call that
+// hands credential material to a sender whose destination is not read in
+// full. It is the evaluation-limit finding the profile decides, with the
+// reason of the call as its evidence and its own title.
+func withCredentialSenderFinding(
+	findings []RuleFinding,
+	reason actionfacts.CredentialSenderReason,
+	enforcementCapable bool,
+) []RuleFinding {
+	for _, finding := range findings {
+		if finding.RuleID == "ACTION-COMPOUND-LIMIT" {
+			return findings
+		}
+	}
+	added := trustedActionLimitFindings(enforcementCapable)
+	for index := range added {
+		added[index].Title = "Credential material reaches a sender whose destination is not read"
+		added[index].Evidence = string(reason)
+	}
+	return append(findings, added...)
 }
 
 // withOmittedOperandLimitFinding adds the over-limit verdict for a named
@@ -9811,6 +10274,146 @@ func trustedActionParseFailureFindings(enforcementCapable bool) []RuleFinding {
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
 
+// syntaxUnreadTitle is the reason of a command with a shell syntax error:
+// the statements that parse were judged, the rest was not read.
+const syntaxUnreadTitle = "Part of this command has a shell syntax error and could not be read, so that part was not checked"
+
+// trustedActionSyntaxUnreadFindings is the record of a command read only in
+// part because of a syntax error (actionfacts.EvaluationFailureSyntax):
+// detection-only (unreadPartFindings), or an alert when alert is set
+// (unreadPartMayWriteProtected). A block proven on a statement that was read
+// stays a block (rel-1-0-10:GAP-0526).
+func trustedActionSyntaxUnreadFindings(enforcementCapable, alert bool) []RuleFinding {
+	findings := unreadPartFindings(syntaxUnreadTitle, enforcementCapable)
+	if alert {
+		findings = unreadPartAlert(findings, enforcementCapable)
+	}
+	return findings
+}
+
+// unreadPartMayWriteProtected is the parser-differential check of the
+// strict pack and of a managed install: the shell parser here rejects text
+// that a shell may still run, so the raw text of the syntax-error remainder
+// that was not read (unread) is scanned with what already exists, the
+// DefenseClaw state names (hookpaths.MayNameState) and the pack's tool-call
+// pattern rules of the action categories (ruleActionCategory). A hit turns
+// the record into an alert; it never blocks. Measured on the owner traces
+// (s7-gate syn-rel vs syn-head3, agent-transcripts-sample strict): a
+// blocking check would add 150 false blocks of 56,443 calls, over the 0.1%
+// bar, so 1.0.10 ships it alert-only (lead decision 2026-11-14,
+// rel-1-0-10:GAP-0526). Default and permissive outside managed keep the
+// detection-only record.
+func unreadPartMayWriteProtected(request trustedActionRequest, generation *compiledRulePackCategories, unread string) bool {
+	if !request.StrictPolicy && !request.ManagedInstall || strings.TrimSpace(unread) == "" {
+		return false
+	}
+	if hookpaths.MayNameState(unread) {
+		return true
+	}
+	options := ruleScanOptions{includeToolCallOnly: true, contentScope: ruleContentScopeAll}
+	for _, finding := range scanRuleGeneration(generation, unread, request.Input.Tool, options) {
+		if trustedActionCatalogCategoryIsAction(generation, finding.RuleID) {
+			return true
+		}
+	}
+	return false
+}
+
+// syntaxUnreadText is command with the statements shellparse.ReadSyntaxTail
+// read blanked: the part a shell may run that the readers did not. A text
+// whose syntax error is in a nested body (no top-level reading) is unread
+// whole.
+func syntaxUnreadText(command string) string {
+	tail, ok := shellparse.ReadSyntaxTail(command)
+	if !ok {
+		return command
+	}
+	unread, from := []byte(command), 0
+	for _, statement := range tail.Statements {
+		at := strings.Index(command[from:], statement)
+		if at < 0 {
+			continue
+		}
+		at += from
+		for i := at; i < at+len(statement); i++ {
+			if unread[i] != '\n' {
+				unread[i] = ' '
+			}
+		}
+		from = at + len(statement)
+	}
+	return string(unread)
+}
+
+// trustedActionCatalogCategoryIsAction reports a rule of the generation in a
+// category about what a tool call does (ruleActionCategory).
+func trustedActionCatalogCategoryIsAction(generation *compiledRulePackCategories, ruleID string) bool {
+	if generation == nil {
+		return false
+	}
+	for _, member := range append([]*compiledRulePackCategories{generation}, generation.members...) {
+		for _, category := range member.categories {
+			if !ruleActionCategory(category.Name) {
+				continue
+			}
+			for _, rule := range category.Rules {
+				if rule.ID == ruleID {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// unreadPartFindings is the audit record of the part of a command the
+// readers could not read (a syntax error, an unresolved shell body):
+// parseFailureRuleID, detection-only. What was read is judged in full and a
+// block proven there stands. The unread part itself does not raise the
+// verdict: on the owner traces (agent-transcripts-sample, aidev-sample,
+// small; s7-gate syn-rel vs syn-head2) about 2% of benign calls hold a
+// text Bash rejects or a dynamic -c body, and an enforcing unknown tier
+// alerted 984 of them in default and blocked them in strict
+// (rel-1-0-10:GAP-0526, GAP-0535). The record keeps the call from being a
+// silent allow in the audit log.
+func unreadPartFindings(title string, enforcementCapable bool) []RuleFinding {
+	findings := trustedActionParseFailureFindings(enforcementCapable)
+	for index := range findings {
+		findings[index].Title = title
+		// A record, not a finding about the call: it does not raise the
+		// severity of an allowed answer (the alert variants raise it back).
+		findings[index].Severity = "LOW"
+		findings[index].enforcement = findingEnforcementDetectionOnly
+	}
+	return findings
+}
+
+// unreadPartAlert turns unread-part records into the unknown tier as an
+// alert: CRITICAL, capped below confirm and block (findingEnforcementAlertOnly).
+func unreadPartAlert(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	if !enforcementCapable {
+		return findings
+	}
+	for index := range findings {
+		findings[index].Severity = "CRITICAL"
+		findings[index].enforcement = findingEnforcementAlertOnly
+	}
+	return findings
+}
+
+// unresolvedBodyTitle is the reason of a command that starts a shell body
+// whose text, or whose -c option word, is not known before it runs.
+const unresolvedBodyTitle = "This command runs a shell body that could not be read before it runs, so the body was not checked"
+
+// trustedActionUnresolvedBodyFindings is the finding of a command with a
+// nested shell body the walk cannot resolve
+// (actionfacts.EvaluationFailureUnresolvedBody): the unknown tier as an
+// alert in every pack, never a block (lead decision 2026-11-14,
+// rel-1-0-10:GAP-0535).
+func trustedActionUnresolvedBodyFindings(enforcementCapable bool) []RuleFinding {
+	return unreadPartAlert(unreadPartFindings(unresolvedBodyTitle, enforcementCapable), enforcementCapable)
+}
+
 // shellReadingBound is the reading bound a command is past
 // (trustedActionCommandBound).
 type shellReadingBound uint8
@@ -9902,6 +10505,23 @@ func trustedCallShellParseReason(request trustedActionRequest) string {
 		return ""
 	}
 	return hookpaths.ShellParseReason(request.Connector, request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome)
+}
+
+// trustedCallReadsSyntaxTail reports a call with a plain syntax error, in
+// its command or in a static eval or shell -c body of it, that the
+// per-command pass reads in part (actionfacts.EvaluationFailureSyntax): that
+// pass judges the statements that parse (rel-1-0-10:GAP-0526). It is asked
+// only of a call at the recovered-parse proof bound.
+func trustedCallReadsSyntaxTail(request trustedActionRequest) bool {
+	if _, ok := trustedBashCommandInput(request.Input); !ok {
+		return false
+	}
+	simples := actionfacts.SimpleCommands(request.Input, actionfacts.Analyze(request.Input))
+	return slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
+		return simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax
+	}) && slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
+		return simple.EvaluationFailure == "" && simple.Text != ""
+	})
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {

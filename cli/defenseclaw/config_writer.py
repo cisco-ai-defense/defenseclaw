@@ -913,6 +913,22 @@ def pack_pin_repair(message: str, *, files_digest: str = "<files digest>") -> st
     )
 
 
+_CASCADE_LANE_KEY = re.compile(r"^guardrail\.cascade\.lanes\.(effects|secret_flow|nonshell)$")
+
+
+def _cascade_lane_refusal(name: str, lane: str, value: Any) -> str:
+    """Why a cascade lane value is refused, as the gateway words it (GAP-0546).
+
+    The effects and secret_flow lanes ship shadow-only in 1.0.10, so "on" is a
+    valid spelling that this release does not offer: say that, not "not in the
+    expected format". Mirrors internal/config/cascade_lanes.go Validate.
+    """
+    allowed = "on, shadow, off" if lane == "nonshell" else "off, shadow"
+    if lane != "nonshell" and isinstance(value, str) and value.strip().lower() == "on":
+        return f'{name} "{value}" is not available in 1.0.10; allowed: {allowed}.'
+    return f"{name} must be one of {allowed}."
+
+
 def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -> str:
     """:func:`_plain_error_text` plus the advice the gateway check attached (GAP-0099)."""
     text = _plain_error_text(exc, value=value, directory=directory)
@@ -981,6 +997,11 @@ def _plain_error_text(exc: BaseException, *, value: Any = None, directory: str =
             # A pack folder deleted while the config still selects it blocks every other change too (GAP-0261).
             message += " To stop using the deleted pack: defenseclaw guardrail use-pack default."
         return message
+    lane = _CASCADE_LANE_KEY.match(name)
+    if lane and code in ("enum", "pattern"):
+        # The schema refuses a lane value by its enum (exact values); say why as
+        # the gateway does (GAP-0546).
+        return _cascade_lane_refusal(name, lane.group(1), value)
     if code == "pattern":
         if name == "openshell.trusted_ca_bundle":
             return f"{name} must be an absolute path or start with ~/ (for example, ~/proxy-root-ca.pem)."

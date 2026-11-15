@@ -6,6 +6,7 @@ package config
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -28,18 +29,33 @@ func TestCascadeLanesDefaultIsShadow(t *testing.T) {
 	}
 }
 
-// TestCascadeLanesSchemaEnum accepts the values a shadow-only lane takes in
-// 1.0.10 (off, shadow), refuses "on" with the not-available message, and
-// refuses any other value, so a typo cannot silently disable or enable a lane.
+// TestCascadeLanesSchemaEnum accepts the exact values each lane takes in 1.0.10
+// (a shadow-only lane: off, shadow; nonshell: off, shadow, on), refuses another
+// case or a padded value, refuses "on" for a shadow-only lane, and refuses any
+// other value, so a typo cannot silently disable or enable a lane.
 func TestCascadeLanesSchemaEnum(t *testing.T) {
-	for _, lane := range []string{CascadeLaneEffects, CascadeLaneSecretFlow} {
-		for _, value := range CascadeLaneAllowed(lane) {
+	// The shipped lanes (cascade_test.go registers test lanes the schema does not name).
+	for _, lane := range []string{CascadeLaneEffects, CascadeLaneSecretFlow, CascadeLaneNonShell} {
+		allowed := CascadeLaneAllowed(lane)
+		for _, value := range allowed {
 			raw := []byte("config_version: 9\nguardrail:\n  cascade:\n    lanes:\n      " + lane + ": " + value + "\n")
 			if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err != nil {
 				t.Fatalf("cascade.lanes.%s %s: ValidateCandidate() error = %v, want accept", lane, value, err)
 			}
+			// Exact values: another case or a padded value is refused, never read
+			// as the value (cascade.go).
+			for _, spelling := range []string{strings.ToUpper(value), "' " + value + " '"} {
+				raw := []byte("config_version: 9\nguardrail:\n  cascade:\n    lanes:\n      " + lane + ": " + spelling + "\n")
+				if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err == nil || !strings.Contains(err.Error(), lane) {
+					t.Fatalf("cascade.lanes.%s %s: ValidateCandidate() error = %v, want a refusal naming the lane", lane, spelling, err)
+				}
+			}
 		}
-		for _, value := range []string{"enabled", "true", "Shadow", "on"} {
+		refused := []string{"enabled", "true", "onn", "''"}
+		if !slices.Contains(allowed, "on") {
+			refused = append(refused, "on", "ON")
+		}
+		for _, value := range refused {
 			raw := []byte("config_version: 9\nguardrail:\n  cascade:\n    lanes:\n      " + lane + ": " + value + "\n")
 			if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err == nil ||
 				!strings.Contains(err.Error(), lane) {

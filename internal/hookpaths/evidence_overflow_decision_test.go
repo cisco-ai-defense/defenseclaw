@@ -15,7 +15,7 @@ func TestOverflowHeadersKeepTheProtectedTargetReadingOnlyWhenFound(t *testing.T)
 	for _, found := range []bool{true, false} {
 		for name, evidence := range map[string]string{
 			"incomplete": incompleteEvidenceKeeping(cwd, found),
-			"unproven":   unprovenEvidence(cwd, "trap", cwd, found),
+			"unproven":   unprovenEvidence(cwd, "trap", cwd, found, false),
 		} {
 			targets, ok := Decode(evidence)
 			if !ok {

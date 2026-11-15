@@ -1710,6 +1710,45 @@ func (tx *CorrelationTx) PutRelationshipEvidence(
 	return id, nil
 }
 
+// PutRelationshipFirstSourceEvidence records evidence for a relationship
+// that holds no source evidence yet, as PutRelationshipEvidence does, and
+// records nothing for one that already has; stored says which. It is for the edges
+// of a session that every hook of the session reports again (its agent or
+// turn membership, its reported lineage): one source row per hook made the
+// edge evidence, and RelationshipEvidenceCount inside the hook correlation
+// transaction, grow with the length of the session, and the rows kept every
+// event of a live session from retention (S8 GW1, rel-1-0-10 GAP-0621). The
+// first source stays the edge proof; a hook whose edge lost its evidence to
+// retention records its own. A Secure Client store keeps main: every call
+// records its evidence.
+func (tx *CorrelationTx) PutRelationshipFirstSourceEvidence(
+	ctx context.Context,
+	evidence CorrelationRelationshipEvidence,
+) (id string, stored bool, err error) {
+	if err := tx.usable(ctx); err != nil {
+		return "", false, err
+	}
+	if !tx.repo.store.secureClientSchema {
+		var one int
+		switch err := tx.tx.QueryRowContext(ctx, correlationEvidenceSourceSQL, evidence.RelationshipID,
+			string(CorrelationEvidenceSource)).Scan(&one); {
+		case err == nil:
+			return "", false, nil
+		case !errors.Is(err, sql.ErrNoRows):
+			return "", false, fmt.Errorf("audit: read correlation relationship evidence: %w", err)
+		}
+	}
+	id, err = tx.PutRelationshipEvidence(ctx, evidence)
+	return id, err == nil, err
+}
+
+// correlationEvidenceSourceSQL finds whether a relationship has a source
+// evidence row (seeking idx_correlation_evidence_relationship; the first row
+// of a session edge is its source). Only a source row stops a new one: a
+// corroborating or unverified row of another writer does not.
+const correlationEvidenceSourceSQL = `SELECT 1
+	FROM correlation_relationship_evidence WHERE relationship_id = ? AND evidence_role = ? LIMIT 1`
+
 // RelationshipEvidenceCount returns the durable number of distinct evidence
 // rows supporting a relationship inside the caller-owned transaction. Export
 // callers use this after PutRelationshipEvidence so remote relationship-change
@@ -1737,16 +1776,42 @@ func (tx *CorrelationTx) RelationshipEvidenceCount(
 		RelationshipID: relationshipID, FromKind: CorrelationNodeKind(fromKind), FromID: fromID,
 	})
 	var count int64
-	if err := tx.tx.QueryRowContext(ctx, `SELECT COUNT(*)
-		FROM correlation_relationship_evidence WHERE relationship_id = ? AND evidence_id <> ?`,
-		relationshipID, implied.EvidenceID).Scan(&count); err != nil {
+	if err := tx.tx.QueryRowContext(ctx, correlationEvidenceCountSQL, relationshipID).Scan(&count); err != nil {
 		return 0, fmt.Errorf("audit: count correlation relationship evidence: %w", err)
 	}
-	if hasImplied {
+	if !hasImplied {
+		return count, nil
+	}
+	// The implied row counts once: as stored (a store a 1.0.9 binary wrote,
+	// or a Secure Client store), it is already in count.
+	var stored int
+	switch err := tx.tx.QueryRowContext(ctx, correlationEvidenceStoredSQL,
+		implied.EvidenceID, relationshipID).Scan(&stored); {
+	case errors.Is(err, sql.ErrNoRows):
 		count++
+	case err != nil:
+		return 0, fmt.Errorf("audit: read implied correlation relationship evidence: %w", err)
 	}
 	return count, nil
 }
+
+// correlationEvidenceCountSQL counts a relationship evidence rows from
+// idx_correlation_evidence_relationship alone. A long-lived relationship of
+// a session (its agent or turn membership) gains one row per hook of the
+// session, and RelationshipEvidenceCount runs for each of them inside the
+// hook correlation transaction, on the store one writer. Counting with a
+// condition on evidence_id read the table row of every index entry, so the
+// writer time of each hook grew with the length of its session: at 100
+// calls a second one session reached about 1 ms per hook after 20 s, and
+// several times that over a 2-minute stream (S8 GW1). The index-only count
+// still visits each entry, at a fraction of the cost; the implied row is one
+// primary-key lookup (correlationEvidenceStoredSQL).
+const (
+	correlationEvidenceCountSQL = `SELECT COUNT(*)
+		FROM correlation_relationship_evidence WHERE relationship_id = ?`
+	correlationEvidenceStoredSQL = `SELECT 1
+		FROM correlation_relationship_evidence WHERE evidence_id = ? AND relationship_id = ?`
+)
 
 // impliedCorrelationEvidence is the evidence a relationship from a semantic
 // event implies: that event, as its verified source. Every writer of such a

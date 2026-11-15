@@ -4,6 +4,7 @@
 package hookexec
 
 import (
+	"encoding/json"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,7 +25,15 @@ func lateOrdinaryWatchdog(t *testing.T, tier func() string) (*answerWatchdog, ch
 	opts := perUserRestartOptions(t.TempDir(), "open", false, stdout, stderr, func(code int) { exited <- code })
 	opts.OutageFailModeNow = tier
 	opts.lateOrdinary = func() bool { return true }
-	opts.failurePayload = []byte(gap0268Ordinary)
+	// The late-call reader needs an absolute cwd of this platform: "/tmp"
+	// is not absolute on Windows, where such a call stays closed and the
+	// ordinary answer is never prepared.
+	payload, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": "s1", "cwd": t.TempDir(),
+		"tool_name": "Bash", "tool_input": map[string]any{"command": "git status"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.failurePayload = payload
 	w := prepareAnswerWatchdog(&opts, sp, "open", time.Time{})
 	w.noDecisionPending()
 	w.mu.Lock()

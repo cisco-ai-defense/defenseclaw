@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 )
@@ -83,7 +84,7 @@ var statusShowsOwnState = func() bool {
 		strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)) != "" || windowsEnterpriseIsElevated() {
 		return false
 	}
-	_, present := managedHostWindowsStandalone()
+	_, present := hookcli.ManagedHostWindowsStandalone()
 	return present
 }
 

@@ -3206,6 +3206,45 @@ def _human_size(num_bytes: int) -> str:
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
     _check_audit_db_store(cfg, r)
     _check_moved_aside_audit_stores(str(getattr(cfg, "audit_db", "") or ""), r)
+    _check_unread_calls(cfg, r)
+
+
+def _check_unread_calls(cfg, r: _DoctorResult) -> None:
+    """Count the tool calls the gateway read only in part (ACTION-PARSE-FAILURE
+    records, rel-1-0-10:GAP-0526): a shell syntax error or a shell body it could
+    not resolve. Their readable statements were judged; the rest is allowed in
+    the default and permissive packs, so the admin sees how many there are.
+    A warning when there are any; nothing when the audit store is unreadable
+    (its own check reports that)."""
+    import sqlite3
+
+    from defenseclaw.db import UNREAD_CALLS_SQL
+
+    db_path = str(getattr(cfg, "audit_db", "") or "")
+    if not db_path or not os.path.isfile(db_path):
+        return
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            count = int(conn.execute(UNREAD_CALLS_SQL).fetchone()[0] or 0)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return
+    if count == 0:
+        _emit("pass", "Unread tool calls", "none recorded", r=r, check_id="doctor.guardrail.unread-calls")
+        return
+    _emit(
+        "warn",
+        "Unread tool calls",
+        f"{count} tool call(s) were read only in part (ACTION-PARSE-FAILURE): a shell syntax error or a shell "
+        "body that could not be resolved. Their readable statements were checked; the rest was allowed outside "
+        "the strict pack",
+        r=r,
+        check_id="doctor.guardrail.unread-calls",
+        reason_code="unread-tool-calls",
+        remediation="list them: defenseclaw alerts, or search the audit log for ACTION-PARSE-FAILURE",
+    )
 
 
 _CARRY_OVER_NOTE_SUFFIX = ".carryover.json"
@@ -7733,6 +7772,84 @@ def _check_windows_gateway_diagnostics(
     return True
 
 
+def _capacity_count(counts, key: str) -> int:
+    value = counts.get(key) if isinstance(counts, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _check_hook_capacity(cfg, health: dict | None, r: _DoctorResult) -> None:
+    """The Hook capacity row on every OS (S8 DESIGN 18, review P2-2).
+
+    A managed gateway gives its administrator the window in /health. A
+    per-user gateway serves it only in its authenticated /status, because
+    its /health needs no credential and the counts are this account load
+    (review P3-2), so it is read there with the gateway token, the way the
+    runtime rows are. No row without a credential or on an older gateway.
+    """
+    capacity = health.get("hook_capacity") if isinstance(health, dict) else None
+    if not isinstance(capacity, dict):
+        document, _problem, _checked = _authenticated_gateway_status_document(cfg)
+        capacity = document.get("hook_capacity") if isinstance(document, dict) else None
+    _emit_hook_capacity_row(capacity, r)
+
+
+def _emit_hook_capacity_row(capacity, r: _DoctorResult) -> None:
+    """Hook capacity: tool calls that ended at their answer budget (S8 DESIGN 18).
+
+    The gateway counts, per minute over its last hour, the hook calls it
+    answered in time and the ones that ran out of their answer budget: a
+    deadline deny (the hook blocked the call, the managed and strict
+    answer) or a late allow (the call ran without a check, the default
+    per-user answer). Any of them means the host got more tool calls than it
+    can check in time; the sizing page gives the measured rate per host.
+    """
+    if not isinstance(capacity, dict):
+        return
+    window = capacity.get("window") if isinstance(capacity.get("window"), dict) else {}
+    peak = capacity.get("peak_minute") if isinstance(capacity.get("peak_minute"), dict) else {}
+    minutes = _capacity_count(capacity, "window_minutes") or 60
+    doc = str(capacity.get("sizing_doc") or "")[:200]
+    carried = _capacity_count(capacity, "answered_per_minute_peak")
+    denies, late = _capacity_count(window, "deadline_denies"), _capacity_count(window, "late_allows")
+    shed = _capacity_count(window, "shed")
+    if denies + late + shed == 0:
+        detail = (
+            f"no tool call ran out of its answer budget in the last {minutes} min "
+            f"(peak {carried} calls answered in one minute)"
+        )
+        _emit("pass", "Hook capacity", detail, r=r)
+        return
+    start = str(capacity.get("peak_minute_start") or "")[:40]
+    peak_denies = _capacity_count(peak, "deadline_denies")
+    peak_late = _capacity_count(peak, "late_allows")
+    peak_shed = _capacity_count(peak, "shed")
+    peak_answered = _capacity_count(peak, "answered")
+    clauses = []
+    if denies + late:
+        clauses.append(
+            f"{denies} tool call(s) were denied and {late} ran unchecked "
+            "because DefenseClaw could not check them in time"
+        )
+    if shed:
+        # A refused call is blocked by its hook when its budget ends unless a
+        # resend is admitted (review P2-3).
+        clauses.append(f"{shed} call(s) refused by the admission limits; their hooks block them when the budget ends")
+    verdict = (
+        "This host is over its hook capacity"
+        if denies + late
+        else "An account is over its hook budget or this host is over its hook capacity"
+    )
+    detail = (
+        f"in the last {minutes} min " + "; and ".join(clauses) + f" (busiest minute {start}: "
+        f"{peak_denies} denied, {peak_late} unchecked, {peak_shed} refused, "
+        f"{peak_answered} answered). {verdict}, not a policy result; "
+        f"run fewer agents at once or use a larger host"
+    )
+    if doc:
+        detail += f" (sizing: {doc})"
+    _emit("warn", "Hook capacity", detail, r=r)
+
+
 def _emit_route_peer_broker_row(broker, r: _DoctorResult) -> None:
     """Managed Windows route-only: the hook guardian peer SID broker.
 
@@ -10801,10 +10918,25 @@ _OPENCODE_PLUGIN_SUFFIXES = (".js", ".ts")
 def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
     """The gateway's health from its authenticated ``/status`` document.
 
+    Returns ``(health, "", True)``, or ``(None, reason, checked)`` as
+    ``_authenticated_gateway_status_document`` does.
+    """
+    document, problem, checked = _authenticated_gateway_status_document(cfg)
+    if document is None:
+        return None, problem, checked
+    health = document.get("health")
+    if not isinstance(health, dict):
+        return None, "authenticated status health is malformed", True
+    return health, "", True
+
+
+def _authenticated_gateway_status_document(cfg) -> tuple[dict | None, str, bool]:
+    """The gateway's authenticated ``/status`` document.
+
     The document counts only when the listener is this profile's gateway
     process and the runtime it reports binds back to it, the same trust as
     ``cmd_status._fetch_runtime_bound_health``. Returns
-    ``(health, "", True)``, or ``(None, reason, checked)``: ``checked`` is
+    ``(document, "", True)``, or ``(None, reason, checked)``: ``checked`` is
     False when no gateway runs.
     """
     gateway = getattr(cfg, "gateway", None)
@@ -10840,12 +10972,11 @@ def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
         return None, runtime_detail, True
     try:
         document = json.loads(body)
-        health = document.get("health") if isinstance(document, dict) else None
     except (json.JSONDecodeError, TypeError):
-        health = None
-    if not isinstance(health, dict):
+        document = None
+    if not isinstance(document, dict):
         return None, "authenticated status health is malformed", True
-    return health, "", True
+    return document, "", True
 
 
 def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
@@ -13301,18 +13432,106 @@ def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _systemone_endpoint(routing, cfg) -> str:
+    """The endpoint routing.classifier systemone calls: its own base_url, or
+    the decision model when routing.systemone.use_decision_model is on (the
+    default)."""
+    own = getattr(routing, "systemone", None) or {}
+    own = own if isinstance(own, dict) else {}
+    if own.get("use_decision_model", True) is False:
+        return str(own.get("base_url") or "").strip()
+    return str(getattr(getattr(cfg, "decision_model", None), "base_url", "") or "").strip()
+
+
+def _endpoint_origin(url: str) -> str:
+    """scheme://host[:port] of url: no path, query or credentials in a row."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}" if parts.scheme and host else "the configured endpoint"
+
+
+def _check_systemone_reachable(routing, cfg, r: _DoctorResult) -> None:
+    """One real request to the System One endpoint (any HTTP answer means it
+    is up; the classifier has its own breaker, so a healthy gateway can still
+    be routing on the rules fallback: GAP-0591)."""
+    endpoint = _systemone_endpoint(routing, cfg)
+    if not endpoint:
+        _emit(
+            "warn",
+            "System One classifier",
+            "no endpoint: every request takes the classifier-failure path",
+            remediation=(
+                "set decision_model.base_url and decision_model.model, or set "
+                "routing.systemone.use_decision_model false with routing.systemone.base_url and model"
+            ),
+            r=r,
+        )
+        return
+    code, _detail = _http_probe(endpoint, timeout=2.0)
+    mode = getattr(routing, 'on_classifier_error', '') or 'original'
+    origin = _endpoint_origin(endpoint)
+    if code > 0:
+        _emit("pass", "System One classifier", f"{origin} answers (HTTP {code})", r=r)
+        return
+    _emit(
+        "fail",
+        "System One classifier",
+        f"{origin} is not reachable: routing uses on_classifier_error ({mode}) for every request",
+        remediation=(
+            "start the System One endpoint, or check its URL with defenseclaw setup decision-model --ping; "
+            "routing.on_classifier_error rules keeps keyword routing while it is down"
+        ),
+        r=r,
+    )
+
+
+def _check_inprocess_routing(routing, classifier: str, models: list, r: _DoctorResult, cfg=None) -> None:
+    """The rules and systemone classifiers run inside the gateway: there is no
+    container or router endpoint to probe (GAP-0567). A rules classifier with
+    no routing.decisions sends every request to default_alias (GAP-0565)."""
+    default = str(getattr(routing, "default_alias", "") or "")
+    label = "rules classifier, in process" if classifier == "rules" else f"{classifier} classifier"
+    detail = f"{label}; {len(models)} model(s)" + (f"; default {default}" if default else "")
+    decisions = getattr(routing, "decisions", []) or []
+    if classifier == "rules" and not decisions:
+        first = default or (str(models[0].get("name") or "") if models and isinstance(models[0], dict) else "")
+        first = first or "the default model"
+        _emit(
+            "warn",
+            "Semantic routing",
+            f"{detail}; no route rules (routing.decisions is empty), so every request goes to "
+            f"{first}",
+            remediation=(
+                "add rules: defenseclaw routing setup --route coding=ALIAS (and reasoning, summarize), "
+                "or write routing.signals and routing.decisions in config.yaml"
+            ),
+            r=r,
+        )
+        return
+    _emit("pass", "Semantic routing", detail, r=r)
+    if classifier == "systemone":
+        _check_systemone_reachable(routing, cfg, r)
+
+
 def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     routing = getattr(cfg, "routing", None)
     if routing is None or not bool(getattr(routing, "enabled", False)):
         _emit("skip", "Semantic routing", "disabled", r=r)
         return
 
+    classifier = str(getattr(routing, "classifier", "") or "vllm_sr").strip()
     remote = getattr(routing, "remote", {}) or {}
     remote_endpoint = str(remote.get("endpoint") or "").strip() if isinstance(remote, dict) else ""
     port = int(getattr(routing, "port", 0) or 8080)
     endpoint = remote_endpoint or f"http://127.0.0.1:{port}"
-    mode = "remote" if remote_endpoint else "managed Docker"
     models = getattr(routing, "models", []) or []
+    if classifier != "vllm_sr":
+        _check_inprocess_routing(routing, classifier, models, r, cfg)
+        return
+    mode = "remote" if remote_endpoint else "managed Docker"
 
     live = live_health.get("routing") if isinstance(live_health, dict) else None
     if isinstance(live, dict):
@@ -16540,6 +16759,7 @@ def doctor(
         _check_guardrail_profile(cfg, r)
         _check_agent_identity_ledger(sidecar_health, r)
         _check_live_audit_store(sidecar_health, r)
+        _check_hook_capacity(cfg, sidecar_health, r)
     _check_policy_state(cfg, r, live_health=sidecar_health)
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)
@@ -18716,6 +18936,72 @@ def _prompt_block_capability(connector: str) -> str:
     return _PROMPT_UNKNOWN
 
 
+# Tool-result hook events whose block answer the agent honours (contract
+# block_events, compared without case and punctuation): Claude Code and Codex
+# PostToolUse, Amp tool.result (rel-1-0-10 GAP-0605).
+_TOOL_RESULT_BLOCK_EVENTS = frozenset({"posttooluse", "toolresult"})
+
+
+def tool_result_block_capability(connector: str) -> str:
+    """Whether *connector* has a block form for a tool result, from the hook contract manifest.
+
+    A proxy connector refuses the model call that would carry the output. A
+    hook connector has one when every contract lists a tool-result event in
+    ``block_events``. Every other connector can only alert on a tool-result
+    finding (a prompt injection in a file, page or command output): the
+    output reaches the model. Returns the _PROMPT_* values.
+    """
+    name = normalize_connector(connector)
+    if name in PROXY_CONNECTORS:
+        return _PROMPT_BLOCKS
+    event_sets = [contract.capabilities.get("block_events") for contract in HOOK_CONTRACTS.get(name, ())]
+    if not event_sets:
+        spec = (HOOK_CONTRACT_MANIFEST.get("connectors") or {}).get(name)
+        inventory = spec.get("native_hook_inventory") if isinstance(spec, dict) else None
+        if isinstance(inventory, dict):
+            event_sets = [inventory.get("block_events")]
+    answers = {
+        any(
+            isinstance(event, str) and "".join(ch for ch in event.lower() if ch.isalnum()) in _TOOL_RESULT_BLOCK_EVENTS
+            for event in events
+        )
+        for events in event_sets
+        if isinstance(events, list)
+    }
+    if answers == {True}:
+        return _PROMPT_BLOCKS
+    if answers == {False}:
+        return _PROMPT_NO_HOOK
+    return _PROMPT_UNKNOWN
+
+
+def tool_result_injection_limit(connector: str) -> str:
+    """The documented limit line for a connector with no tool-result block form, else ""."""
+    if tool_result_block_capability(connector) != _PROMPT_NO_HOOK:
+        return ""
+    label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+    return f"tool-result injection: alert only on {label}"
+
+
+def _emit_tool_result_row(connector: str, r: _DoctorResult) -> None:
+    """One row: what a prompt injection in this connector's tool results gets (GAP-0605)."""
+    capability = tool_result_block_capability(connector)
+    label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+    if capability == _PROMPT_BLOCKS:
+        _emit(
+            "pass", "Tool-result injection",
+            "alerts in default and permissive, blocks in strict; the agent is told not to follow it",
+            r=r,
+        )
+    elif capability == _PROMPT_NO_HOOK:
+        _emit(
+            "skip", "Tool-result injection",
+            f"{tool_result_injection_limit(connector)}: {label} has no hook that can block a tool result, "
+            "so the output reaches the model in every posture (see defenseclaw alerts)",
+            r=r,
+        )
+
+
 def _detection_only_prompt_clause(connector: str) -> str:
     """The prompt half of the detection-only rule-pack warning for *connector*.
 
@@ -19188,6 +19474,8 @@ def _check_connector_inventory(
                     "built-in defaults (data_dir unresolved)",
                     r=r,
                 )
+
+    _emit_tool_result_row(connector, r)
 
     # Detection strategy + judge gating for this connector (read-only). This
     # is root #4 in the doctor fix-plan made visible: the judge can be
@@ -19799,6 +20087,7 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
     if acp is None:
         return
     try:
+        from defenseclaw.acp_catalog import own_tools_notice
         from defenseclaw.commands import cmd_acp
 
         data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
@@ -19829,7 +20118,8 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
         except Exception as exc:
             problems, profile, mode = [f"could not be checked: {exc}"], "?", "?"
         if not problems:
-            _emit("pass", label, f"healthy; profile {profile} ({mode})", r=r)
+            notice = own_tools_notice(agent)
+            _emit("pass", label, f"healthy; profile {profile} ({mode})" + (f"; {notice}" if notice else ""), r=r)
             continue
         if all("acp refresh" in problem for problem in problems):
             # The upgraded guard, or an agent the user updated (acp refresh

@@ -476,6 +476,7 @@
               "confidence": 0.8,
               "tags": [
                 "pii",
+                "contact",
                 "structured",
                 "privacy-high-assurance"
               ]
@@ -488,6 +489,7 @@
               "confidence": 0.75,
               "tags": [
                 "pii",
+                "contact",
                 "bulk",
                 "privacy-high-assurance"
               ]
@@ -500,6 +502,7 @@
               "confidence": 0.8,
               "tags": [
                 "pii",
+                "contact",
                 "structured",
                 "privacy-high-assurance"
               ]

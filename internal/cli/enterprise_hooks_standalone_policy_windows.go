@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -252,7 +253,7 @@ func windowsCopilotVSCodeUserOptions(removal bool) (enterprisepolicy.Options, bo
 	if !removal || !enterprisehooks.WindowsStandaloneProcess() {
 		return opts, false, nil
 	}
-	layout, _, _, err := standaloneEnterprisePolicyLayout()
+	layout, _, _, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		return opts, false, err
 	}
@@ -286,7 +287,7 @@ func windowsClaudeManagedHooksOnlyEnforced() bool {
 // path, and whether the trusted managed plugin is installed and named there.
 // Replaced in tests.
 var windowsOpenCodeMachinePolicy = func() (string, bool) {
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		return "", false
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -54,7 +55,7 @@ hook_fail_mode is open.
 Examples:
   defenseclaw-gateway audit compact --dry-run
   defenseclaw-gateway stop && defenseclaw-gateway audit compact && defenseclaw-gateway start`,
-	Annotations:       map[string]string{secureClientAbsentAnnotation: "true"},
+	Annotations:       map[string]string{hookcli.SecureClientAbsentAnnotation: "true"},
 	Args:              cobra.NoArgs,
 	PersistentPreRunE: auditCompactPersistentPreRunE,
 	RunE:              runAuditCompact,

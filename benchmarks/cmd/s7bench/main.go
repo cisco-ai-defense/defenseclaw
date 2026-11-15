@@ -108,10 +108,12 @@ type record struct {
 	DM         *gateway.S7DM         `json:"dm,omitempty"`
 	Judge      *gateway.S7Judge      `json:"judge,omitempty"`
 	JudgeCalls []gateway.S7JudgeCall `json:"judge_calls,omitempty"`
-	PostStatus int                   `json:"post_status,omitempty"`
-	LatencyUs  int64                 `json:"lat_us"`
-	Err        string                `json:"err,omitempty"`
-	Extra      map[string]string     `json:"extra,omitempty"`
+	// ScopeShadow lists the task-scope findings the floor recorded in shadow for this call.
+	ScopeShadow []string          `json:"scope_shadow,omitempty"`
+	PostStatus  int               `json:"post_status,omitempty"`
+	LatencyUs   int64             `json:"lat_us"`
+	Err         string            `json:"err,omitempty"`
+	Extra       map[string]string `json:"extra,omitempty"`
 }
 
 var shellTools = map[string]bool{"bash_command": true, "bash": true, "execute_command": true, "shell": true,
@@ -274,6 +276,7 @@ func main() {
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
 	surface := flag.String("surface", "hook", "hook (tool calls through the connector hook) | prompt (payload.content through the connector UserPromptSubmit hook; the scored decision is the hook answer, the /llm proxy GuardrailInspector text inspection goes to extra.inspect_* for comparison) | tool-result (each event's result as the PostToolUse tool_response; the PostToolUse answer is the decision) | response (payload.content as a model completion through the /llm proxy GuardrailInspector, direction completion, the whole text at once) | response-stream (the same text replayed as a stream: mid-stream scans every 500 bytes decide, the final check beside them is recorded in extra but not enforced, as in the proxy)")
 	promptFromContent := flag.Bool("prompt-from-content", false, "send case-v1 payload.content as the session's UserPromptSubmit before the tool calls (the user's task for intent-aware layers)")
+	intentScope := flag.String("intent-scope", "", "guardrail.judge.intent_scope for the task-scope floor: shadow (the default), off, or alert (a harness-only value: the loader refuses it)")
 	effectsRules := flag.String("cascade-effects", "", "guardrail.cascade.lanes.effects: off|shadow|on (empty keeps the config default; on bypasses validation, harness only)")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
 	printModeled := flag.Bool("print-modeled", false, "print case,idx,tool,modeled for every event of -corpus (-ids, -connector) and exit: whether the gateway's parser models the call's effects (the tool judge's CALL_EFFECTS section); no engine, no judge, no decisions")
@@ -381,6 +384,7 @@ func main() {
 	}
 	cfg.Guardrail.DetectionStrategy = *strategy
 	cfg.Guardrail.DetectionStrategyToolCall = *strategy
+	cfg.Guardrail.Judge.IntentScope = *intentScope
 	if *effectsRules != "" {
 		cfg.Guardrail.Cascade.SetLane(config.CascadeLaneEffects, *effectsRules)
 	}
@@ -483,6 +487,7 @@ func main() {
 	}
 	hasJudge, hasDM := engine.HasJudge()
 	recording := hasJudge && engine.RecordJudgeCalls()
+	engine.RecordScopeShadow()
 	var preHeaders []string
 	if *answerWithin > 0 {
 		preHeaders = []string{"X-DefenseClaw-Hook-Answer-Within-Ms", fmt.Sprint(*answerWithin)}
@@ -715,6 +720,7 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 		r := record{Case: c.ID, Connector: conn, Idx: i, N: len(events), SrcTool: ev.ToolName, Tool: tool, Mapped: mapped, Status: status,
 			LatencyUs: time.Since(t0).Microseconds()}
 		r.JudgeCalls = e.TakeJudgeCalls(sid)
+		r.ScopeShadow = e.TakeScopeShadow(sid)
 		var hr hookResp
 		if err := json.Unmarshal(resp, &hr); err != nil {
 			r.Err = "decode: " + err.Error()

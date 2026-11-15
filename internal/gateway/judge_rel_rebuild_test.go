@@ -18,16 +18,17 @@ import (
 )
 
 // Two judge generations that hold the same session (a config or rule-pack
-// reload while calls run on the old one) never share its target history: a
-// call on either one writes a new map (rel-1-0-10:GAP-0635). Under -race a
-// shared map is a reported race; in the plain build it was "fatal error:
-// concurrent map read and map write".
+// reload while calls run on the old one) write its target history under one
+// lock: the successor takes over the table (inheritToolJudgeContext), and a
+// call never writes a map another call reads (rel-1-0-10:GAP-0635). Under
+// -race a map written by two judges is a reported race; in the plain build it
+// was "fatal error: concurrent map read and map write".
 func TestJudgeGenerationsShareNoSessionTargets(t *testing.T) {
 	ctx := ContextWithSessionID(context.Background(), "gen-carry-1")
 	oldJ, newJ := judgePacketTestJudge(), judgePacketTestJudge()
 	oldJ.ObserveSessionPrompt(ctx, "tidy the docs folder")
 	oldJ.toolJudgeContextSample(ctx, "Bash", `{"command":"cat /repo/docs/a.md"}`)
-	carrySessionForTest(ctx, oldJ, newJ)
+	newJ.inheritToolJudgeContext(oldJ)
 
 	var wg sync.WaitGroup
 	for g, j := range []*LLMJudge{oldJ, newJ} {
@@ -42,18 +43,12 @@ func TestJudgeGenerationsShareNoSessionTargets(t *testing.T) {
 	wg.Wait()
 
 	oldT, newT := sessionTargetsForTest(ctx, oldJ), sessionTargetsForTest(ctx, newJ)
-	if !oldT["/repo/docs/a.md"] || !newT["/repo/docs/a.md"] {
-		t.Fatalf("the carried read is lost: old=%v new=%v", oldT["/repo/docs/a.md"], newT["/repo/docs/a.md"])
+	if !newT["/repo/docs/a.md"] {
+		t.Fatal("the carried read is lost on the new judge")
 	}
-	for path := range newT {
-		if strings.Contains(path, "/g1-") && oldT[path] {
-			t.Fatalf("a call on the new judge wrote the old judge's history: %s", path)
-		}
-	}
-	for path := range oldT {
-		if strings.Contains(path, "/g0-") && newT[path] {
-			t.Fatalf("a call on the old judge wrote the new judge's history: %s", path)
-		}
+	// One session, one history: every call of both generations is in it.
+	if len(oldT) != 101 || len(newT) != 101 {
+		t.Fatalf("history holds %d (old) and %d (new) targets, want 101 in both", len(oldT), len(newT))
 	}
 }
 
@@ -62,8 +57,7 @@ func TestRecordJudgeTargetsIsCopyOnWrite(t *testing.T) {
 	history := map[string]judgeTargetSeen{"/a": {ordinal: 1, accesses: make([]string, 1, 4)}}
 	history["/a"].accesses[0] = "read"
 	effects := judgeCallEffects{modeled: true, targets: []judgeTarget{{access: "write", path: "/a"}, {access: "read", path: "/b"}}}
-	var b strings.Builder
-	next := recordJudgeTargets(&b, history, 2, effects)
+	body, next := recordJudgeTargets(history, 2, effects)
 	if len(history) != 1 || !slices.Equal(history["/a"].accesses, []string{"read"}) || history["/a"].ordinal != 1 {
 		t.Fatalf("input history changed: %+v", history)
 	}
@@ -73,8 +67,8 @@ func TestRecordJudgeTargetsIsCopyOnWrite(t *testing.T) {
 	if !slices.Equal(next["/a"].accesses, []string{"read", "write"}) || next["/b"].ordinal != 2 {
 		t.Fatalf("new history: %+v", next)
 	}
-	if !strings.Contains(b.String(), "/a: read (call 1 of this session)") {
-		t.Fatalf("target history block: %q", b.String())
+	if body != "/a: read (call 1 of this session)" {
+		t.Fatalf("target history body: %q", body)
 	}
 }
 

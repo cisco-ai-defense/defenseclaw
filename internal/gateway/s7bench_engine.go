@@ -40,20 +40,21 @@ import (
 
 // S7Engine is one booted gateway generation and its hook handler.
 type S7Engine struct {
-	sc        *Sidecar
-	api       *APIServer
-	hook      http.HandlerFunc
-	hooks     map[string]http.HandlerFunc
-	connector string
-	profile   string
-	judgeRec  *s7RecordingProvider
-	store     *audit.Store
-	stopGuard context.CancelFunc
-	guardDone chan struct{}
-	passes    atomic.Int64
-	peakWAL   atomic.Int64
-	inspOnce  sync.Once
-	insp      *GuardrailInspector
+	sc          *Sidecar
+	api         *APIServer
+	hook        http.HandlerFunc
+	hooks       map[string]http.HandlerFunc
+	connector   string
+	profile     string
+	judgeRec    *s7RecordingProvider
+	store       *audit.Store
+	stopGuard   context.CancelFunc
+	guardDone   chan struct{}
+	passes      atomic.Int64
+	peakWAL     atomic.Int64
+	inspOnce    sync.Once
+	insp        *GuardrailInspector
+	scopeShadow *s7ScopeShadow
 }
 
 // S7NewEngine boots the sidecar generation for cfg and returns the
@@ -426,7 +427,7 @@ const (
 
 // InspectStream replays text as a streamed completion the way the proxy inspects one: regex-only InspectMidStream whenever 500 more bytes have accumulated
 // (a block cuts the stream), one more check at the end of a stream shorter than the 1024-byte buffer, and the final Inspect of the whole text, which the proxy
-// computes with enforcement off (proxyGuardrailWithoutEnforcement). The decision is the enforced one; the final verdict is returned beside it.
+// enforces since rel-1-0-10:GAP-0212. The decision here is the mid-stream one; the final verdict is returned beside it.
 func (e *S7Engine) InspectStream(ctx context.Context, text string) S7StreamResult {
 	e.ensureInspector()
 	ctx = withPinnedGeneration(ctx, e.sc.Generation())
@@ -473,7 +474,7 @@ func (e *S7Engine) InspectStream(ctx context.Context, text string) S7StreamResul
 		res.UncheckedTail = acc.Len() - lastScan
 	}
 	if acc.Len() > 0 {
-		fv := e.insp.Inspect(proxyGuardrailWithoutEnforcement(ctx), "completion", text, []ChatMessage{{Role: "assistant", Content: text}}, "s7bench", "action")
+		fv := e.insp.Inspect(ctx, "completion", text, []ChatMessage{{Role: "assistant", Content: text}}, "s7bench", "action")
 		if fv != nil {
 			res.FinalAction, res.FinalSeverity, res.FinalFindings = fv.Action, fv.Severity, fv.Findings
 		}

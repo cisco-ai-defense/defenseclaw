@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -34,11 +35,11 @@ func withManagedWindowsProvenanceHost(t *testing.T, port string, readFile func(s
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN=admin-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previousHost, previousLayout, previousFactory, previousRead := managedHostWindowsStandalone, managedScanWindowsLayout, managedGatewayClientFactory, managedScanReadFile
+	previousHost, previousLayout, previousFactory, previousRead := hookcli.ManagedHostWindowsStandalone, managedScanWindowsLayout, managedGatewayClientFactory, managedScanReadFile
 	t.Cleanup(func() {
-		managedHostWindowsStandalone, managedScanWindowsLayout, managedGatewayClientFactory, managedScanReadFile = previousHost, previousLayout, previousFactory, previousRead
+		hookcli.ManagedHostWindowsStandalone, managedScanWindowsLayout, managedGatewayClientFactory, managedScanReadFile = previousHost, previousLayout, previousFactory, previousRead
 	})
-	managedHostWindowsStandalone = func() (string, bool) { return "managed", true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "managed", true }
 	managedScanWindowsLayout = func() (managed.StandaloneLayout, error) {
 		return managed.StandaloneLayout{ConfigPath: configPath, DataDir: root, APIAddr: managed.StandaloneAPIAddr}, nil
 	}

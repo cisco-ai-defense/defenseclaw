@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -1111,7 +1112,7 @@ func TestWindowsEnterprisePolicyDigestRunsUnderTheServicePins(t *testing.T) {
 	t.Setenv(managed.DeploymentModeEnv, "")
 
 	// The console environment must not choose the elevated subprocess image.
-	programFiles, err := trustedWindowsEnterpriseProgramFiles()
+	programFiles, err := hookcli.TrustedWindowsEnterpriseProgramFiles()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2473,9 +2474,9 @@ func stageApprovedSourceWithoutProof(t *testing.T) (managed.StandaloneLayout, st
 	if err := os.WriteFile(filepath.Join(lifecycleRoot, "lifecycle.lock"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	savedRoots := windowsManagedLayout.roots
-	t.Cleanup(func() { windowsManagedLayout.roots = savedRoots })
-	windowsManagedLayout.roots = func(string) (winpath.EnterpriseRoots, error) {
+	savedRoots := hookcli.WindowsManagedLayout.Roots
+	t.Cleanup(func() { hookcli.WindowsManagedLayout.Roots = savedRoots })
+	hookcli.WindowsManagedLayout.Roots = func(string) (winpath.EnterpriseRoots, error) {
 		return winpath.EnterpriseRoots{LifecycleDir: lifecycleRoot}, nil
 	}
 	// A transaction published copy and digest for the installed B; only the

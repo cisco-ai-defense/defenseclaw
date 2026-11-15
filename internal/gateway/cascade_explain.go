@@ -221,6 +221,7 @@ func SimulateCascade(ctx context.Context, cfg *config.Config, connector string, 
 	}
 	flagged, _ := input["flagged"].(bool)
 	uninspected := cascadeInputUninspected(input)
+	provenBlock := uninspected && cascadeInputProvenBlock(input)
 	critical := false
 	if findings, ok := input["findings"].([]any); ok {
 		for _, f := range findings {
@@ -263,7 +264,7 @@ func SimulateCascade(ctx context.Context, cfg *config.Config, connector string, 
 		decisions, evalErr = p.Evaluate(evalCtx, input)
 		cancel()
 	}
-	sim.Outcome = cascadeFinalAction(before, flagged, critical, uninspected, decisions, evalErr, unknown, e)
+	sim.Outcome = cascadeFinalAction(before, flagged, critical, uninspected, provenBlock, decisions, evalErr, unknown, e)
 	if sim.Outcome.DecidedBy == "" {
 		sim.Outcome.DecidedBy = decidedBefore
 	}

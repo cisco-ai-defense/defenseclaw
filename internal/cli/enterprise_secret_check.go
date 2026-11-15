@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
@@ -62,7 +63,7 @@ accepted the key, 1 when it did not (errors[0].code names why), 2 invalid argume
 	}
 	cmd.SetFlagErrorFunc(flagError)
 	cmd.Args = func(c *cobra.Command, args []string) error {
-		if err := strayArgumentError(c, args); err != nil {
+		if err := cliusage.StrayArgumentError(c, args); err != nil {
 			return flagError(c, err)
 		}
 		return nil
@@ -82,7 +83,7 @@ func runEnterpriseSecretCheck(cmd *cobra.Command, opts *enterpriseSecretOptions)
 	}
 	env, err := newUnixLifecycleEnv(enterpriseunix.CurrentGOOS())
 	if err != nil {
-		return fail(withExitCode(err, enterprisestatus.UnixExitFailure))
+		return fail(cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure))
 	}
 	if env.Geteuid() != 0 {
 		return fail(secretFailed("not_root", enterprisestatus.UnixExitFailure,

@@ -83,9 +83,18 @@ func (a *APIServer) boundedTier(ctx context.Context, connectorName string) bound
 // (enforcementCapable false) still alerts: a truncated input is never a
 // silent allow.
 func boundedTruncatedFinding(set bounded.CapSet, enforcementCapable bool) RuleFinding {
+	finding := unknownReasonFinding(boundedTruncatedTitle, set.Reason(), enforcementCapable)
+	finding.boundedCaps = set
+	return finding
+}
+
+// unknownReasonFinding is the evaluation-limit finding of an input the
+// readers cannot judge, with a ship-authored title and a reason from a closed
+// set (a cap name, awkprog.DynamicReason). The profile maps it to the
+// unknown tier of the pack.
+func unknownReasonFinding(title, reason string, enforcementCapable bool) RuleFinding {
 	finding := trustedActionLimitFindings(enforcementCapable)[0]
-	reason := set.Reason()
-	finding.Title = boundedTruncatedTitle + " (" + reason + ")"
+	finding.Title = title + " (" + reason + ")"
 	finding.Evidence = reason
 	if !enforcementCapable {
 		finding.enforcement = findingEnforcementAlertOnly
@@ -109,10 +118,13 @@ func withBoundedReason(finding *RuleFinding, reason string) {
 }
 
 // boundedLimitIndex is the index of the evaluation-limit finding in
-// findings, or -1.
+// findings, or -1. The detection-only record of a data word
+// (RuleFinding.dataWordRecord) is not a limit the call hit and is skipped:
+// only an enforcing cap or a truncated reading counts, so a record never
+// makes a call capped or stands in for its limit finding (rel-1-0-10:GAP-0760).
 func boundedLimitIndex(findings []RuleFinding) int {
 	return slices.IndexFunc(findings, func(finding RuleFinding) bool {
-		return canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
+		return !finding.dataWordRecord && canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
 	})
 }
 
@@ -121,7 +133,8 @@ func boundedLimitIndex(findings []RuleFinding) int {
 // maps the result to at least the unknown tier of the pack and never below
 // those findings (guardrailActionForProfile). An evaluation-limit finding the
 // call already carries is kept, title included, and gains the bounded reason,
-// so a call has one limit finding. The caller's slice is not changed. No cap
+// so a call has one limit finding; a data-word record beside it is not one
+// and stays detection-only (GAP-0760). The caller's slice is not changed. No cap
 // hit: findings as they are, without allocation.
 func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request trustedActionRequest) []RuleFinding {
 	if !set.Any() {
@@ -130,7 +143,15 @@ func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request t
 	if set.Misuse() && request.recordTelemetry != nil {
 		request.recordTelemetry(trustedActionTelemetry{ParserUncertaintyCount: 1})
 	}
-	bound := boundedTruncatedFinding(set, request.EnforcementCapable)
+	return withUnknownFinding(findings, boundedTruncatedFinding(set, request.EnforcementCapable))
+}
+
+// withUnknownFinding adds the unknown-tier finding bound to what was read
+// before it, which keeps deciding on its own (the profile maps the result to
+// at least the unknown tier of the pack and never below those findings). An
+// evaluation-limit finding the call already carries is kept, title included,
+// and gains the reason, so a call has one limit finding.
+func withUnknownFinding(findings []RuleFinding, bound RuleFinding) []RuleFinding {
 	index := boundedLimitIndex(findings)
 	if index < 0 {
 		return append(slices.Clip(findings), bound)
@@ -138,11 +159,42 @@ func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request t
 	out := slices.Clone(findings)
 	existing := &out[index]
 	withBoundedReason(existing, bound.Evidence)
+	existing.boundedCaps = existing.boundedCaps.Union(bound.boundedCaps)
 	if !existing.contributesToEnforcement() && !existing.contributesToAlertOnly() {
 		// A detection-only limit finding would leave the call allowed.
 		existing.enforcement = bound.enforcement
 		existing.proof = bound.proof
 	}
+	return out
+}
+
+// boundedCapsOf is the union of the caps the evaluation-limit findings in
+// findings stand for: the truncation a reading hit, wherever in its own
+// readings it was hit.
+func boundedCapsOf(findings []RuleFinding) bounded.CapSet {
+	var set bounded.CapSet
+	for _, finding := range findings {
+		if canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID {
+			set = set.Union(finding.boundedCaps)
+		}
+	}
+	return set
+}
+
+// withCarriedBoundedCaps keeps the truncation of a second reading in the call
+// it was joined to: a join keeps the call's own evaluation-limit finding over
+// the reading's, so the call's finding gains the reading's caps and their
+// reason (rel-1-0-10:GAP-0477). The join already holds a limit finding when
+// the reading had one; without one the findings are returned as they are.
+func withCarriedBoundedCaps(joined, reading []RuleFinding) []RuleFinding {
+	set := boundedCapsOf(reading)
+	index := boundedLimitIndex(joined)
+	if !set.Any() || index < 0 {
+		return joined
+	}
+	out := slices.Clone(joined)
+	withBoundedReason(&out[index], set.Reason())
+	out[index].boundedCaps = out[index].boundedCaps.Union(set)
 	return out
 }
 

@@ -1175,6 +1175,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 	}
 	router := newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	router.SetAuditLogger(s.logger)
 	s.modelRouter = router
 	activeEngineRouter.Store(router)
 
@@ -2394,6 +2395,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		if err != nil {
 			return err
 		}
+		nextJudge.inheritToolJudgeContext(s.sharedJudge())
 	}
 
 	if judgeChanged {
@@ -2404,6 +2406,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// The cascade-2 judge (decision model, no LLM) follows the same inputs.
 	if judgeChanged || previousGen == nil {
 		nextGen.decisionJudge = newDecisionOnlyJudge(&next)
+		if previousGen != nil {
+			nextGen.decisionJudge.inheritToolJudgeContext(previousGen.decisionJudge)
+		}
 	} else {
 		nextGen.decisionJudge = previousGen.decisionJudge
 	}

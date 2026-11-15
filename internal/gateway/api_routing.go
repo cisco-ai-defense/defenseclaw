@@ -96,11 +96,13 @@ type routingBudgetView struct {
 // budget, only the percent used. Named user and group budgets are not shown
 // to a user (their selectors are the administrator's policy).
 func routingBudgetViews(cfg *config.Config, key string, admin bool, now time.Time) []routingBudgetView {
+	// Always a non-nil slice: JSON null would reach the CLI as a missing list
+	// (GAP-0561).
+	views := []routingBudgetView{}
 	if cfg == nil || cfg.Routing.Admin == nil {
-		return nil
+		return views
 	}
 	ledger := routingAdminRuntime.Ledger()
-	var views []routingBudgetView
 	for _, b := range cfg.Routing.Admin.Budgets {
 		view := routingBudgetView{ID: b.ID, Scope: b.Scope, Period: b.Period, LimitUSD: b.LimitUSD, OnExceed: b.OnExceed,
 			ResetsAt: routingadmin.NextReset(b.Period, now).Format(time.RFC3339)}
@@ -158,11 +160,11 @@ func (a *APIServer) handleRoutingEffective(w http.ResponseWriter, r *http.Reques
 		"enabled": cfg != nil && cfg.Routing.Enabled,
 		"admin":   admin,
 		"budgets": routingBudgetViews(cfg, key, admin, time.Now()),
-		"recent":  routingAdminRuntime.Decisions().Recent(key, admin, recent),
+		"recent":  nonNilSlice(routingAdminRuntime.Decisions().Recent(key, admin, recent)),
 	}
 	if admin && cfg != nil && cfg.Routing.Admin != nil {
-		body["rules"] = cfg.Routing.Admin.Rules
-		body["allowed_aliases"] = cfg.Routing.Admin.AllowedAliases
+		body["rules"] = nonNilSlice(cfg.Routing.Admin.Rules)
+		body["allowed_aliases"] = nonNilSlice(cfg.Routing.Admin.AllowedAliases)
 	}
 	writeRoutingJSON(w, http.StatusOK, body)
 }
@@ -290,8 +292,8 @@ func (a *APIServer) handleRoutingTest(w http.ResponseWriter, r *http.Request) {
 	d := eng.Decide(r.Context(), engineRequest(in))
 	body := map[string]any{
 		"category": d.Category, "confidence": d.Confidence, "candidate_alias": d.Candidate,
-		"filtered_by": d.FilteredBy, "rule_ids": d.RuleIDs, "outcome": d.Outcome, "source": d.Source,
-		"warnings": d.Warnings, "failure": d.FailureCode, "simulated": simulated,
+		"filtered_by": d.FilteredBy, "rule_ids": nonNilSlice(d.RuleIDs), "outcome": d.Outcome, "source": d.Source,
+		"warnings": nonNilSlice(d.Warnings), "failure": d.FailureCode, "simulated": nonNilSlice(simulated),
 	}
 	if d.Backend != nil {
 		body["selected_alias"], body["selected_model"] = d.Backend.Alias, d.Backend.Model
@@ -300,4 +302,13 @@ func (a *APIServer) handleRoutingTest(w http.ResponseWriter, r *http.Request) {
 		body["deny"] = map[string]string{"code": d.Deny.Code, "message": d.Deny.Message}
 	}
 	writeRoutingJSON(w, http.StatusOK, body)
+}
+
+// nonNilSlice returns v, or an empty slice for a nil one, so the JSON answer
+// holds [] and never null.
+func nonNilSlice[T any](v []T) []T {
+	if v == nil {
+		return []T{}
+	}
+	return v
 }

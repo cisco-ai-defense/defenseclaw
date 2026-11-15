@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -208,7 +209,8 @@ func judgePacketAccess(access actionfacts.PathAccess) string {
 }
 
 // judgePacketValue bounds one value taken from the call: no control
-// characters (a newline would forge a packet line), no block tags.
+// characters, so a newline cannot forge a packet line. Section tags need no
+// rewriting: only tags with the call's nonce are sections (tool_judge_nonce.go).
 func judgePacketValue(value string) string {
 	value = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
@@ -216,12 +218,12 @@ func judgePacketValue(value string) string {
 		}
 		return r
 	}, value)
-	return neutralizeToolJudgeDelimiters(utf8SafePrefix(strings.TrimSpace(value), maxJudgePacketValueBytes))
+	return utf8SafePrefix(strings.TrimSpace(value), maxJudgePacketValueBytes)
 }
 
-// render writes the CALL_EFFECTS block; nothing when the parser found no
+// render writes the CALL_EFFECTS section; nothing when the parser found no
 // effect to report.
-func (e judgeCallEffects) render(b *strings.Builder) {
+func (e judgeCallEffects) render(b *strings.Builder, nonce string) {
 	if !e.modeled {
 		return
 	}
@@ -229,9 +231,9 @@ func (e judgeCallEffects) render(b *strings.Builder) {
 	if e.complete {
 		state = "complete"
 	}
-	fmt.Fprintf(b, "\n<CALL_EFFECTS parse=%q coverage=%q>\n", e.parse, state)
+	var lines []string
 	if len(e.programs) > 0 {
-		b.WriteString("programs: " + strings.Join(e.programs, ", ") + "\n")
+		lines = append(lines, "programs: "+strings.Join(e.programs, ", "))
 	}
 	byAccess := map[string][]string{}
 	for _, target := range e.targets {
@@ -239,19 +241,20 @@ func (e judgeCallEffects) render(b *strings.Builder) {
 	}
 	for _, access := range []string{"read", "list", "write", "delete", "execute", "connect"} {
 		if paths := byAccess[access]; len(paths) > 0 {
-			b.WriteString(access + ": " + strings.Join(paths, ", ") + "\n")
+			lines = append(lines, access+": "+strings.Join(paths, ", "))
 		}
 	}
 	if len(e.network) > 0 {
-		b.WriteString("network: " + strings.Join(e.network, "; ") + "\n")
+		lines = append(lines, "network: "+strings.Join(e.network, "; "))
 	} else {
-		b.WriteString("network: none\n")
+		lines = append(lines, "network: none")
 	}
-	b.WriteString("</CALL_EFFECTS>")
+	writeToolJudgeSection(b, nonce, "CALL_EFFECTS", fmt.Sprintf("parse=%q coverage=%q", e.parse, state), strings.Join(lines, "\n"))
 }
 
-// recordJudgeTargets renders what the session did earlier to this call's
-// targets and returns the session history with this call's effects added.
+// recordJudgeTargets returns what the session did earlier to this call's
+// targets (the TARGET_HISTORY body, "" when nothing) and the session history
+// with this call's effects added.
 //
 // The history it is given is never written: the result is a new map (and new
 // access slices) whenever the call adds anything. A session entry is copied
@@ -259,19 +262,17 @@ func (e judgeCallEffects) render(b *strings.Builder) {
 // session's context, rel-1-0-10:GAP-0635), so a map written in place would be
 // shared by two judges under two locks, and Go stops the process on a
 // concurrent map write. Copy-on-write makes any copy of an entry safe.
-func recordJudgeTargets(b *strings.Builder, history map[string]judgeTargetSeen, ordinal int, effects judgeCallEffects) map[string]judgeTargetSeen {
+func recordJudgeTargets(history map[string]judgeTargetSeen, ordinal int, effects judgeCallEffects) (string, map[string]judgeTargetSeen) {
 	var lines []string
 	for _, target := range effects.targets {
 		if seen, ok := history[target.path]; ok && len(lines) < maxJudgePacketHistoryLines {
 			lines = append(lines, fmt.Sprintf("%s: %s (call %d of this session)", target.path, strings.Join(seen.accesses, ", "), seen.ordinal))
 		}
 	}
-	if len(lines) > 0 {
-		sort.Strings(lines)
-		b.WriteString("\n<TARGET_HISTORY>\n" + strings.Join(lines, "\n") + "\n</TARGET_HISTORY>")
-	}
+	sort.Strings(lines)
+	body := strings.Join(lines, "\n")
 	if len(effects.targets) == 0 {
-		return history
+		return body, history
 	}
 	next := make(map[string]judgeTargetSeen, len(history)+len(effects.targets))
 	for path, seen := range history {
@@ -294,7 +295,87 @@ func recordJudgeTargets(b *strings.Builder, history map[string]judgeTargetSeen, 
 		}
 		delete(next, oldest)
 	}
-	return next
+	return body, next
+}
+
+// judgeTargetSessions is the tool judge's TARGET_HISTORY table, per judge
+// session key (judgeSessionKey): what each earlier call of the session did to
+// each resolved target. The intent store (intentstore.Store) keeps the turn's
+// task and recent calls; it has no place for targets. Bounded like the store:
+// maxToolJudgeContextSessions sessions, toolJudgeContextTTL. A new turn
+// (ObserveSessionPromptScope) or session (ResetToolJudgeSession) starts over.
+// A rebuilt judge shares the table (inheritToolJudgeContext), so both
+// generations write one map under one lock (rel-1-0-10:GAP-0635).
+//
+// The table is per process, like the scope table: on a gateway with several
+// replicas sharing one intent store, a replica sees only the calls it judged.
+type judgeTargetSessions struct {
+	mu       sync.Mutex
+	sessions map[string]judgeTargetSession
+}
+
+type judgeTargetSession struct {
+	calls    int
+	targets  map[string]judgeTargetSeen
+	lastSeen time.Time
+}
+
+// judgeTargets is the judge's table, made on first use (a judge built as a
+// struct literal works too).
+func (j *LLMJudge) judgeTargets() *judgeTargetSessions {
+	if t := j.targets.Load(); t != nil {
+		return t
+	}
+	j.targets.CompareAndSwap(nil, &judgeTargetSessions{})
+	return j.targets.Load()
+}
+
+// record counts one judged call of key and returns the TARGET_HISTORY body
+// for it ("" when no earlier call touched its targets).
+func (t *judgeTargetSessions) record(key string, effects judgeCallEffects, now time.Time) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.sessions == nil {
+		t.sessions = make(map[string]judgeTargetSession)
+	}
+	if _, held := t.sessions[key]; !held && len(t.sessions) >= maxToolJudgeContextSessions {
+		t.pruneLocked(now)
+	}
+	entry := t.sessions[key]
+	entry.calls++
+	entry.lastSeen = now
+	var body string
+	body, entry.targets = recordJudgeTargets(entry.targets, entry.calls, effects)
+	t.sessions[key] = entry
+	return body
+}
+
+func (t *judgeTargetSessions) reset(key string) {
+	t.mu.Lock()
+	delete(t.sessions, key)
+	t.mu.Unlock()
+}
+
+// pruneLocked frees one place: expired sessions first, then the least
+// recently seen ones.
+func (t *judgeTargetSessions) pruneLocked(now time.Time) {
+	for k, entry := range t.sessions {
+		if now.Sub(entry.lastSeen) >= toolJudgeContextTTL {
+			delete(t.sessions, k)
+		}
+	}
+	for len(t.sessions) >= maxToolJudgeContextSessions {
+		oldestKey, oldest := "", time.Time{}
+		for k, entry := range t.sessions {
+			if oldestKey == "" || entry.lastSeen.Before(oldest) {
+				oldestKey, oldest = k, entry.lastSeen
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(t.sessions, oldestKey)
+	}
 }
 
 type judgeFlaggingRulesKey struct{}
@@ -324,12 +405,12 @@ func withJudgeFlaggingRules(ctx context.Context, current *ToolInspectVerdict) co
 	return context.WithValue(ctx, judgeFlaggingRulesKey{}, rules)
 }
 
-func renderJudgeFlaggingRules(ctx context.Context, b *strings.Builder) {
+func renderJudgeFlaggingRules(ctx context.Context, b *strings.Builder, nonce string) {
 	rules, _ := ctx.Value(judgeFlaggingRulesKey{}).([]string)
 	if len(rules) == 0 {
 		return
 	}
-	b.WriteString("\n<FLAGGING_RULES>\n" + strings.Join(rules, "\n") + "\n</FLAGGING_RULES>")
+	writeToolJudgeSection(b, nonce, "FLAGGING_RULES", "", strings.Join(rules, "\n"))
 }
 
 // judgeReadOnlyPrograms only read what their operands name and print to
@@ -501,7 +582,7 @@ func (e judgeCallEffects) summary(fileTool bool) string {
 }
 
 // toolResultHeaderValue bounds one header value: one line, no control
-// characters, no sample or block tags.
+// characters, no sample delimiters.
 func toolResultHeaderValue(value string, maxBytes int) string {
 	value = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
@@ -510,7 +591,7 @@ func toolResultHeaderValue(value string, maxBytes int) string {
 		return r
 	}, value)
 	value = strings.Join(strings.Fields(value), " ")
-	value = strings.NewReplacer("<<<", "‹‹‹", ">>>", "›››").Replace(neutralizeToolJudgeDelimiters(value))
+	value = strings.NewReplacer("<<<", "‹‹‹", ">>>", "›››").Replace(value)
 	if len(value) > maxBytes {
 		value = utf8SafePrefix(value, maxBytes) + " [truncated]"
 	}
@@ -539,7 +620,9 @@ func redactToolResultCall(value string) string {
 }
 
 // sessionUserIntent is the user's request for the session's current turn,
-// as the connector's prompt event recorded it.
+// as the connector's prompt event recorded it: the turn's task in the scope
+// table ("" after ClearSessionTask). The intent store cannot be read without
+// recording a call (intent_scope_session.go).
 func (j *LLMJudge) sessionUserIntent(ctx context.Context) string {
 	if j == nil {
 		return ""
@@ -548,9 +631,8 @@ func (j *LLMJudge) sessionUserIntent(ctx context.Context) string {
 	if sessionID == "" {
 		return ""
 	}
-	j.toolContextMu.Lock()
-	defer j.toolContextMu.Unlock()
-	return j.toolContext[sessionID].userIntent
+	entry, _ := j.scopeSessions().get(sessionID)
+	return entry.task
 }
 
 // toolResultJudgeHeader is the trusted context block for the tool-result
