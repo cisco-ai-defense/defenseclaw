@@ -248,6 +248,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		// Quoting makes *, ? and [ literal only in a POSIX reading of a
 		// POSIX home; a Windows-spelled home reads them as wildcards.
 		literalReading := !spelledWindows && !actionPosixWindowsHome(home)
+		// The read-only excuse of ActionMentionsNoWriteRole follows the
+		// call-level GAP-0570 rules (actionCallKeepsMentions): where a reader
+		// can hand a name on ($_) or run something else (an assignment, a
+		// function, an echo of an expansion), no statement of the call is
+		// excused as a reader (rel-1-0-10:GAP-0643, GAP-0860). A program of
+		// unknown role keeps its own excuse (GAP-0013, GAP-0708).
+		callKeeps := memo.nonWritesExcused() && !stateOnly && actionCallKeepsMentions(file, home)
 		if memo.nonWritesExcused() && !stateOnly {
 			// A pipeline of readers (sudo sha256sum KEYS | sed -n 1,5p | tail) prints
 			// to the terminal: its statements read like a direct reader does.
@@ -419,8 +426,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					readOnly = actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) ||
 						actionReaderToUnknownSink(stmt, home)
 				}
-				// The excuse of ActionMentionsNoWriteRole reads a call as a reader,
-				// or as a program of unknown role, only when the program it runs
+				// The excuse of ActionMentionsNoWriteRole reads a call as a reader
+				// only when the program it runs
 				// (and a bash -c body's) is a bare name or one in a system folder:
 				// ./ls, ~/bin/cat or a copied file run by its path can be anything,
 				// so the name it holds keeps the rel reading (rel-1-0-10:GAP-0715 in
@@ -428,7 +435,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// ./gradlew beside ls ~/.ssh does not make ls something else.
 				systemPrograms := !memo.nonWritesExcused() || stateOnly ||
 					actionReadersAreSystemPrograms(&syntax.File{Stmts: []*syntax.Stmt{{Cmd: call}}}, home, 0)
-				if !systemPrograms {
+				if !systemPrograms || callKeeps {
 					readOnly = false
 				}
 				readsReplaced := len(replacedEntries) > 0 && readOnly
@@ -452,7 +459,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						break
 					}
 				}
-				roleUnknown := memo.nonWritesExcused() && systemPrograms && !callHasGlob && actionCallRoleUnknown(call, home)
+				roleUnknown := memo.nonWritesExcused() && !callHasGlob && actionCallRoleUnknown(call, home)
 				// A statement that only reads, outside a pipeline and not a cd, names
 				// the file to read it: its words leave the text scan too (a quoted
 				// remote command, a shell body), as a read-only statement's hit words
