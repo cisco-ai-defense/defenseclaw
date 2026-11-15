@@ -23,6 +23,14 @@ const (
 	routeCredentialMissing = "missing"         // custody host without a gateway credential: every call is 503
 )
 
+// Closed causes of a route-only connector that is not ready, published next
+// to the free-text problem so status can name the cause without free text
+// (internal/enterprisestatus RoutingCauses lists the same set).
+const (
+	routeCauseEpoch             = "route_epoch"
+	routeCauseAliasNoCredential = "allowed_alias_no_credential"
+)
+
 // routeOnlyReadiness is the route-only state of one connector, published in
 // /health routing.details.route_only so doctor, status and the TUI read it
 // without a new endpoint.
@@ -40,6 +48,7 @@ type routeOnlyReadiness struct {
 	// reports a missing render); nil off managed hosts.
 	EnrolledUsers *int   `json:"enrolled_users,omitempty"`
 	Ready         bool   `json:"ready"`
+	Cause         string `json:"cause,omitempty"` // route* cause constants; "" for any other problem
 	Problem       string `json:"problem,omitempty"`
 	Fix           string `json:"fix,omitempty"`
 }
@@ -119,7 +128,7 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 			if dead := routeOnlyDeadAllowRules(cfg, name, r.Provider); len(dead) > 0 {
 				// An allowed alias without a gateway key refuses every call
 				// of its rule as "not allowed" (rel-1-0-10 GAP-0921).
-				r.Ready = false
+				r.Ready, r.Cause = false, routeCauseAliasNoCredential
 				r.Problem = "routing.admin rule " + dead[0].ID + " allows only " + strings.Join(dead[0].Aliases, ", ") + ", which has no gateway credential on this host: every " + name + " call it matches is refused"
 				r.Fix = "name a protected credential in routing.models[].credential for " + strings.Join(dead[0].Aliases, ", ") + " in the policy bundle and store its key: defenseclaw-gateway enterprise secret set --name <name> --from-stdin"
 			}
@@ -243,6 +252,7 @@ func withRouteEpochReadiness(out []routeOnlyReadiness, problem string) []routeOn
 	}
 	for i := range out {
 		if out[i].Problem == "" {
+			out[i].Cause = routeCauseEpoch
 			out[i].Problem = problem + ", so the hook guardian cannot render route-only for any account"
 			out[i].Fix = "check gateway.log for 'route epoch not published' (the machine data dir hooks folder must be writable by the gateway service), then restart DefenseClawGateway"
 		}

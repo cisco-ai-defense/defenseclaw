@@ -6,6 +6,7 @@ package enterprisestatus
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -57,7 +58,15 @@ type RoutingRouteOnly struct {
 	// report. ReasonCode says why it is absent or false.
 	Ready      *bool  `json:"ready,omitempty"`
 	ReasonCode string `json:"reason_code,omitempty"`
+	// Cause is a closed code (RoutingCauses) of why the gateway reports the
+	// connector not ready; absent for any other problem. doctor and the
+	// gateway /health carry the full text.
+	Cause string `json:"cause,omitempty"`
 }
+
+// RoutingCauses are the causes of a not-ready route-only connector that
+// status names; the gateway publishes the same codes in /health.
+var RoutingCauses = []string{"route_epoch", "allowed_alias_no_credential"}
 
 // RoutingInputs are what BuildRouting reads.
 type RoutingInputs struct {
@@ -85,6 +94,7 @@ func BuildRouting(in RoutingInputs) *RoutingState {
 		state.Rules, state.Budgets = len(r.Admin.Rules), len(r.Admin.Budgets)
 	}
 	ready := parseRouteOnlyReadiness(in.Health)
+	causes := parseRouteOnlyCauses(in.Health)
 	connectors := append([]string(nil), r.RouteOnly.Connectors...)
 	sort.Strings(connectors)
 	for _, name := range connectors {
@@ -106,6 +116,7 @@ func BuildRouting(in RoutingInputs) *RoutingState {
 			row.Ready = &ok
 			if !ok {
 				row.ReasonCode = RoutingReasonNotReady
+				row.Cause = causes[name]
 			}
 		}
 		state.RouteOnly = append(state.RouteOnly, row)
@@ -148,6 +159,31 @@ func parseRouteOnlyReadiness(body []byte) map[string]bool {
 	return out
 }
 
+// parseRouteOnlyCauses reads the closed cause of each not-ready route-only
+// connector of a gateway /health body; an unknown code is dropped.
+func parseRouteOnlyCauses(body []byte) map[string]string {
+	var health struct {
+		Routing struct {
+			Details struct {
+				RouteOnly []struct {
+					Connector string `json:"connector"`
+					Cause     string `json:"cause"`
+				} `json:"route_only"`
+			} `json:"details"`
+		} `json:"routing"`
+	}
+	out := map[string]string{}
+	if len(body) == 0 || json.Unmarshal(body, &health) != nil {
+		return out
+	}
+	for _, row := range health.Routing.Details.RouteOnly {
+		if connectorIDPattern.MatchString(row.Connector) && slices.Contains(RoutingCauses, row.Cause) {
+			out[row.Connector] = row.Cause
+		}
+	}
+	return out
+}
+
 // RoutingLines are the text status lines of the routing block.
 func RoutingLines(state *RoutingState) []string {
 	if state == nil {
@@ -167,6 +203,9 @@ func RoutingLines(state *RoutingState) []string {
 				status = "ready"
 			case row.Ready != nil:
 				status = "not ready"
+				if row.Cause != "" {
+					status += " (" + row.Cause + ")"
+				}
 			}
 			parts = append(parts, row.Connector+" "+status)
 		}

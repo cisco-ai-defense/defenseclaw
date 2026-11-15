@@ -24,7 +24,7 @@ func TestRouteOnlyReadinessAllowedAliasWithoutCredential(t *testing.T) {
 	var signers bedrockSigners
 
 	r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, nil))
-	if r.Ready || !strings.Contains(r.Problem, "fixture-bedrock") || !strings.Contains(r.Problem, "fixture-rule") || !strings.Contains(r.Fix, "enterprise secret set") {
+	if r.Ready || !strings.Contains(r.Problem, "fixture-bedrock") || !strings.Contains(r.Problem, "fixture-rule") || !strings.Contains(r.Fix, "enterprise secret set") || r.Cause != routeCauseAliasNoCredential {
 		t.Fatalf("allowed alias without a key: %+v", r)
 	}
 

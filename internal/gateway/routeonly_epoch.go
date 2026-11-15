@@ -198,14 +198,42 @@ func (s *routeEpochState) unpublished() string {
 		return ""
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	switch {
 	case s.epoch == nil:
+		s.mu.Unlock()
 		return "the gateway has not started its route epoch yet"
 	case s.dirty && s.lastErr != "":
+		s.mu.Unlock()
 		return "the gateway could not publish its route epoch: " + truncateUTF8(s.lastErr, 200)
 	case s.dirty:
+		s.mu.Unlock()
 		return "the gateway has not published its route epoch yet"
+	}
+	mine, load, dir := *s.epoch, s.load, strings.TrimSpace(s.dataDir())
+	mine.Generations = maps.Clone(s.epoch.Generations)
+	s.mu.Unlock()
+	return publishedEpochProblem(mine, load, dir)
+}
+
+// publishedEpochProblem reads the published epoch back, the way the
+// guardian reads it, and says why it cannot render from it: the file is
+// missing, unreadable (not private, not valid) or not the epoch this gateway
+// accepts. A write that returned success does not prove any of these (an
+// account that can replace the file, a failed rename, an earlier gateway
+// run). "" when it matches, and when there is no file to read (no data dir,
+// no reader). It runs on a readiness recheck, never per request.
+func publishedEpochProblem(mine connector.RouteEpoch, load func(string) (*connector.RouteEpoch, error), dir string) string {
+	if load == nil || dir == "" {
+		return ""
+	}
+	got, err := load(dir)
+	switch {
+	case err != nil:
+		return "the published route epoch cannot be read: " + truncateUTF8(err.Error(), 200)
+	case got == nil:
+		return "the published route epoch file is missing"
+	case got.Epoch != mine.Epoch || !maps.Equal(got.Generations, mine.Generations) && (len(got.Generations) > 0 || len(mine.Generations) > 0):
+		return "the published route epoch is not the one this gateway accepts"
 	}
 	return ""
 }
