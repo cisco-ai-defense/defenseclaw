@@ -419,6 +419,17 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					readOnly = actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) ||
 						actionReaderToUnknownSink(stmt, home)
 				}
+				// The excuse of ActionMentionsNoWriteRole reads a statement as a
+				// reader, or as a program of unknown role, only when every program
+				// it runs is a bare name or one in a system folder: ./ls, ~/bin/cat
+				// or a copied file run by its path can be anything, so the name it
+				// holds keeps the rel reading (rel-1-0-10:GAP-0715 in the excused
+				// scan).
+				systemPrograms := !memo.nonWritesExcused() || stateOnly ||
+					actionReadersAreSystemPrograms(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0)
+				if !systemPrograms {
+					readOnly = false
+				}
 				readsReplaced := len(replacedEntries) > 0 && readOnly
 				var quick func([]string) bool
 				if !stateOnly {
@@ -440,7 +451,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						break
 					}
 				}
-				roleUnknown := memo.nonWritesExcused() && !callHasGlob && actionCallRoleUnknown(call, home)
+				roleUnknown := memo.nonWritesExcused() && systemPrograms && !callHasGlob && actionCallRoleUnknown(call, home)
 				// A statement that only reads, outside a pipeline and not a cd, names
 				// the file to read it: its words leave the text scan too (a quoted
 				// remote command, a shell body), as a read-only statement's hit words
@@ -5858,7 +5869,9 @@ func actionReaderToUnknownSink(stmt *syntax.Stmt, home string) bool {
 
 // actionReadOnlyPipelines returns the statements of every list operand or top
 // level statement that is a pipeline whose stages all only read, with no
-// redirect: the statements of such a pipeline, stage by stage.
+// redirect, and run only system programs (actionReadersAreSystemPrograms: a
+// stage run by its path, ls KEYS | ./head, can be anything,
+// rel-1-0-10:GAP-0715): the statements of such a pipeline, stage by stage.
 func actionReadOnlyPipelines(file *syntax.File, home string) map[*syntax.Stmt]bool {
 	out := map[*syntax.Stmt]bool{}
 	var mark func(stmt *syntax.Stmt)
@@ -5887,7 +5900,8 @@ func actionReadOnlyPipelines(file *syntax.File, home string) map[*syntax.Stmt]bo
 			mark(binary.Y)
 		case syntax.Pipe, syntax.PipeAll:
 			if len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated &&
-				actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) {
+				actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) &&
+				actionReadersAreSystemPrograms(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0) {
 				stages(stmt)
 			}
 		}
