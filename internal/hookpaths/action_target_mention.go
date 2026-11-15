@@ -507,6 +507,9 @@ func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]
 	if file == nil {
 		return nil
 	}
+	if actionRebindsReaderNames(file, home) {
+		return nil
+	}
 	neutral := actionFixedTextEchoes(file)
 	// An agent's exit-status wrapper (status=$?; printf '%s' "$status";
 	// exit "$status", GAP-2168) prints the status only and stays neutral.
@@ -582,6 +585,83 @@ func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]
 		visit(stmt)
 	}
 	return reads
+}
+
+// actionRebindsReaderNames reports a call that changes what a bare program
+// name runs, so a bare reader name in it is not the system reader
+// (rel-1-0-10:GAP-0790): a hash -p or an alias that binds a name to another
+// program, or a file the call writes (a redirect, tee, or the destination of
+// cp, mv, ln, install) under the name of a bare program the call runs, in any
+// folder (a copy named ls in ~/bin or /usr/local/bin).
+func actionRebindsReaderNames(file *syntax.File, home string) bool {
+	programs := map[string]bool{}
+	var written []string
+	rebound := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Redirect:
+			switch node.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll:
+				if node.Word != nil {
+					written = append(written, actionWordLiteralText(node.Word))
+				}
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				return true
+			}
+			program, known := staticProgramWord(node.Args[0], home)
+			if !known {
+				return true
+			}
+			base := programBase(program)
+			if !strings.Contains(program, "/") {
+				programs[base] = true
+			}
+			var operands []string
+			for _, arg := range node.Args[1:] {
+				operands = append(operands, actionWordLiteralText(arg))
+			}
+			switch base {
+			case "hash":
+				rebound = slices.Contains(operands, "-p")
+			case "alias":
+				for _, operand := range operands {
+					rebound = rebound || strings.Contains(operand, "=")
+				}
+			case "tee":
+				for _, operand := range operands {
+					if !strings.HasPrefix(operand, "-") {
+						written = append(written, operand)
+					}
+				}
+			case "cp", "mv", "ln", "install":
+				var names []string
+				for _, operand := range operands {
+					if !strings.HasPrefix(operand, "-") {
+						names = append(names, operand)
+					}
+				}
+				if len(names) > 0 {
+					written = append(written, names[len(names)-1])
+					if strings.HasSuffix(names[len(names)-1], "/") {
+						// Into a folder: each source keeps its name there.
+						written = append(written, names[:len(names)-1]...)
+					}
+				}
+			}
+		}
+		return !rebound
+	})
+	if rebound {
+		return true
+	}
+	for _, path := range written {
+		if name := filepath.Base(path); name != "." && name != "/" && programs[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // actionReadersAreSystemPrograms reports that every program a plain reader
