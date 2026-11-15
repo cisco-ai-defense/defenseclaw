@@ -562,7 +562,11 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		text = actionBlankComments(text, command)
 	}
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
-	for _, token := range actionMentionToken.FindAllString(text, -1) {
+	for _, span := range actionMentionToken.FindAllStringIndex(text, -1) {
+		token := text[span[0]:span[1]]
+		if actionURLAuthorityToken(text, span[0], token) {
+			continue
+		}
 		literalTilde := strings.HasPrefix(token, actionLiteralTilde)
 		token = strings.ReplaceAll(token, actionLiteralTilde, "~")
 		if strings.ContainsAny(token, "*?[]") && (parsed || !strings.ContainsAny(token, "/\\")) {
@@ -1407,6 +1411,35 @@ func patchCommandResolutionChange(line string) bool {
 const actionLiteralTilde = "\x1e"
 
 var actionMentionToken = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
+
+// actionURLAuthorityToken reports a mention token that is the //host/... part
+// of a URL (scheme://host/...): a token stops at the colon, so the scan reads
+// http://x/y.sh as http and //x/y.sh. That part names no file of this
+// machine. Where it would be read as a network share (a Windows UNC path,
+// \\x\y.sh), asking it opens an SMB session to the host the URL names with
+// the user's credentials, before the command runs and for a command that
+// only downloads (rel-1-0-10:GAP-0920), so it is no mention there. On a host
+// where //x/y.sh is a local path the reading is unchanged, and an empty host
+// (file:///path) names a local path everywhere.
+func actionURLAuthorityToken(text string, start int, token string) bool {
+	if start < 2 || text[start-1] != ':' || len(token) < 3 || token[0] != '/' || token[1] != '/' || token[2] == '/' {
+		return false
+	}
+	scheme := start - 1
+	for scheme > 0 && actionURLSchemeByte(text[scheme-1]) {
+		scheme--
+	}
+	if scheme == start-1 || !asciiLetter(text[scheme]) {
+		return false
+	}
+	return networkShareRootOf(token) != ""
+}
+
+// actionURLSchemeByte is a byte of a URL scheme (RFC 3986: ALPHA *( ALPHA /
+// DIGIT / "+" / "-" / "." )).
+func actionURLSchemeByte(c byte) bool {
+	return asciiLetter(c) || c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'
+}
 
 func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 	literal := true
