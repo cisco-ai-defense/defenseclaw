@@ -1351,6 +1351,23 @@ func rollbackTargetLacksRouteOnly(target string) bool {
 	return nums[0] < 1 || (nums[0] == 1 && nums[1] == 0 && nums[2] < 10)
 }
 
+// managedRouteOnlyConnectors lists the agents a standalone managed
+// deployment routes with route-only: the guardian writes their route
+// settings into each enrolled account, and no release before 1.0.10 takes
+// them back (rel-1-0-10 GAP-0647).
+func managedRouteOnlyConnectors(cfg *config.Config) []string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	var routed []string
+	for _, name := range config.RouteOnlyCapableConnectors {
+		if cfg.RouteOnlyRouted(name) {
+			routed = append(routed, name)
+		}
+	}
+	return routed
+}
+
 func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 	dataDir := resolveConnectorDataDir()
 	if dataDir == "" {
