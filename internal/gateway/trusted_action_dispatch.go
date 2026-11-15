@@ -536,7 +536,8 @@ func dispatchTrustedAction(
 		// is a possible write to it, which blocks in every mode and
 		// profile, as the readers' proof of a state write did before the
 		// budget refused to read the call (GAP-0254, GAP-0255, GAP-0281).
-		return withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable))
+		return withPowerShellCapPieces(parent, request,
+			withBudgetStateBlock(request, trustedActionBudgetFindings(request.EnforcementCapable)))
 	}
 	if bound == shellReadingTooDeep || bound == shellReadingNestedBodies {
 		// Past the reading bounds: no reader below parses it, and the call
@@ -544,11 +545,11 @@ func dispatchTrustedAction(
 		// GAP-0677). It is decided before the recovered-parse reading
 		// below, which would read the same bodies again for the same
 		// finding.
-		return trustedActionLimitFindings(request.EnforcementCapable)
+		return withPowerShellCapPieces(parent, request, trustedActionLimitFindings(request.EnforcementCapable))
 	}
 	if request.EnforcementCapable && shellReason == "shell-parse-bound" {
 		if !trustedCallReadsSyntaxTail(request) {
-			return trustedActionLimitFindings(true)
+			return withPowerShellCapPieces(parent, request, trustedActionLimitFindings(true))
 		}
 		// A plain syntax error stops the recovering parse at its proof
 		// bound too, but the statements that parse are read: they are
@@ -610,29 +611,31 @@ func dispatchTrustedAction(
 			// proven write to the active state, and that proof is formed
 			// only there (withOverBudgetStateMutation).
 			// A call whose analysis also stopped at a byte bound names that cap
-			// (GAP-0382); the finding is the same one.
-			return withOverBudgetStateMutation(parent, request, facts,
-				withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
-					posixParseTruncation(request, facts), request))
+			// (GAP-0382); the finding is the same one. The statements at the start
+			// and the end of a PowerShell call are also judged alone: a protected
+			// write beside the padding that put the call past the budget keeps its
+			// block (GAP-0693).
+			return withPowerShellCapPieces(parent, request,
+				withOverBudgetStateMutation(parent, request, facts,
+					withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
+						posixParseTruncation(request, facts), request)))
 		}
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
-		if facts.Parse.Status == actionfacts.StatusLimitExceeded &&
-			(facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell) {
-			// A CMD or PowerShell reading stopped at its command cap under the
-			// statement budget is truncated (the one bound rule): the call is
-			// never judged below the unknown tier of its pack. A CMD reading
-			// capped at 127 to 257 statements had no limit finding and was
-			// allowed in strict (rel-1-0-10:GAP-0426), and so was a PowerShell
-			// one: one `$o = & git rev-parse HEAD` statement is two commands,
-			// so about 64 statements fill the cap, and a registry write beside
-			// 100 such lines was found but allowed in every pack
-			// (rel-1-0-10:GAP-0589). A POSIX reading is not truncated by its
-			// command cap: its per-statement split (SimpleCommands) reads every
-			// statement up to the statement budget (ShellStatementsOverBudget),
-			// and each is judged.
-			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Items), request) }()
+		if facts.Parse.Status == actionfacts.StatusLimitExceeded {
+			// A PowerShell call the reading stopped at a cap of its own (a
+			// nesting, word, statement or command cap, or the input bound)
+			// keeps the blocks its first and last statements prove alone
+			// (GAP-0693).
+			defer func() { findings = withPowerShellCapPieces(parent, request, findings) }()
+		}
+		if cut := trustedReadingCut(request.Input, facts); cut.Any() {
+			// The reading of the call stopped at a cap of its own under the
+			// statement budget: the call is TRUNCATED (the one bound rule),
+			// never judged below the unknown tier of its pack, and what was
+			// read still decides (trustedReadingCut).
+			defer func() { findings = withBoundedTruncation(findings, cut, request) }()
 			if facts.Parse.Dialect == actionfacts.DialectPowerShell && !request.readingTwin {
 				// The statements of the call are also read in runs that fit
 				// under the cap, so a block proven on a run keeps its own
@@ -9769,6 +9772,53 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 		return trustedActionRequest{}, false
 	}
 	return bashReadingRequest(request, command, rewritten), true
+}
+
+// trustedReadingCut is the cap at which the reading of a shell call stopped
+// under the statement budget, the one point every dialect's limit_exceeded
+// reaches (the one bound rule): such a call is TRUNCATED.
+//   - The input bound of a shell command line (actionfacts.MaxCommandBytes),
+//     in every dialect, cap=bytes (a native write or read tool past the
+//     bound keeps its own bounded readings, over_limit_write_targets.go):
+//     a Windows-hook command padded past 64 KiB
+//     was read in no dialect and was a clean allow in every pack, with no
+//     limit finding (rel-1-0-10:GAP-0611). Its bounded twin (comments and
+//     padding removed, overLimitCommandBoundedTwinRequest) still proves
+//     what the text holds.
+//   - The command cap of a CMD or PowerShell reading, cap=items: a CMD
+//     reading capped at 127 to 257 statements had no limit finding and was
+//     allowed in strict (rel-1-0-10:GAP-0426), and so was a PowerShell one:
+//     one `$o = & git rev-parse HEAD` statement is two commands, so about 64
+//     statements fill the cap, and a registry write beside 100 such lines was
+//     found but allowed in every pack (rel-1-0-10:GAP-0589). The statements
+//     of a capped PowerShell reading are read again in runs under the cap
+//     (actionfacts.PowerShellCappedRuns).
+//
+// A POSIX reading is not truncated by its command cap: its per-statement
+// split (SimpleCommands) reads every statement up to the statement budget
+// (ShellStatementsOverBudget), and each is judged.
+func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
+		return bounded.CapSet{}
+	}
+	if command, known := trustedBashCommandInput(input); known && len(command) > actionfacts.MaxCommandBytes &&
+		trustedShellCommandTool(input.Tool) {
+		return bounded.Of(bounded.Bytes)
+	}
+	if facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell {
+		return bounded.Of(bounded.Items)
+	}
+	return bounded.CapSet{}
+}
+
+// trustedShellCommandTool reports a tool whose input is a shell command
+// line: a POSIX, PowerShell or CMD execution tool.
+func trustedShellCommandTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "cmd", "cmd.exe":
+		return true
+	}
+	return trustedBashExecutionTool(tool) || trustedPowerShellExecutionTool(tool)
 }
 
 // trustedStatementBudgetExceeded reports whether a shell call whose
