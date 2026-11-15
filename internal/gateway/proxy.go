@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -656,7 +658,7 @@ func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 
 // toolCallAction maps tool calls found in a response with the thresholds of
 // the request's connector and verified profile.
-func (p *GuardrailProxy) toolCallAction(ctx context.Context, findings []RuleFinding) string {
+func (p *GuardrailProxy) toolCallVerdictAction(ctx context.Context, findings []RuleFinding) string {
 	connectorName := thresholdConnectorFrom(ctx)
 	if ManagedEnterpriseActive() {
 		// The Secure Client integration keeps the global levels here.
@@ -5790,6 +5792,65 @@ func injectNotificationForPassthrough(raw json.RawMessage, content, path string)
 // inspectToolCalls scans tool call arguments in an OpenAI-format tool_calls
 // JSON array. Returns a verdict when the configured guardrail policy produces
 // an alert or block; unsupported HILT confirmations degrade to alert+audit.
+// toolCallAction is one tool call of a model reply as the trusted action the
+// hook routes judge for the same tool meaning (inspectAgentHookToolCall): the
+// connector's tool and argument projections, the working directory the call
+// names, the caller's home and the strict and managed tiers. The proxy judged the bare name and arguments, so a ~ target
+// named no home file and an unverifiable argument was never graded strict,
+// and every hook connector blocked what the proxy allowed
+// (rel-1-0-10:GAP-0782). A model reply names no session directory: a
+// relative target stays unresolved, as on /inspect/tool.
+func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args string) trustedActionRequest {
+	connectorName := p.connectorName()
+	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, json.RawMessage(args))
+	cfg := proxyDecisionConfig(ctx)
+	action := trustedActionRequest{
+		Input: actionfacts.Input{
+			Tool:       agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS),
+			Args:       trusted,
+			CWD:        inspectToolTrustedShellCWD(toolCWD),
+			ActiveHome: hookActiveHome(ctx),
+		},
+		LegacyText:         args,
+		Connector:          connectorName,
+		EnforcementCapable: true,
+		StrictPolicy:       p.toolCallStrictTier(ctx, cfg),
+		ManagedInstall:     cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode),
+		recordTelemetry: func(observation trustedActionTelemetry) {
+			p.recordParserUncertaintyMetricV8(
+				ctx,
+				observation.ParserUncertaintyCount,
+			)
+		},
+	}
+	return action
+}
+
+// toolCallStrictTier reports whether the proxy judges its connector's tool
+// calls in the strict tier: the request's policy configuration when it has
+// one, else the proxy's own rule pack (the posture toolCallVerdictAction
+// maps findings by).
+func (p *GuardrailProxy) toolCallStrictTier(ctx context.Context, cfg *config.Config) bool {
+	connectorName := p.proxyRequestConnector(ctx)
+	if cfg != nil {
+		return cfg.HookPolicyTierForConnector(connectorName) == config.HookPolicyTierStrict
+	}
+	p.rtMu.RLock()
+	gc := p.cfg
+	p.rtMu.RUnlock()
+	return gc != nil && guardrailPackPosture(gc, gc.EffectiveRulePackRef(connectorName)) == config.HookPolicyTierStrict
+}
+
+// toolCallSecureClient reports a Secure Client install, which keeps its own
+// tool policy.
+func (p *GuardrailProxy) toolCallSecureClient(ctx context.Context) bool {
+	if p.secureClient.Load() {
+		return true
+	}
+	cfg := proxyDecisionConfig(ctx)
+	return cfg != nil && cfg.SecureClientIntegration()
+}
+
 func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON json.RawMessage) *ScanVerdict {
 	if len(toolCallsJSON) == 0 {
 		return nil
@@ -5818,21 +5879,7 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		toolName := tc.Function.Name
 		args := tc.Function.Arguments
 
-		findings := dispatchTrustedAction(ctx, trustedActionRequest{
-			Input: actionfacts.Input{
-				Tool: toolName,
-				Args: json.RawMessage(args),
-			},
-			LegacyText:         args,
-			Connector:          p.connectorName(),
-			EnforcementCapable: true,
-			recordTelemetry: func(observation trustedActionTelemetry) {
-				p.recordParserUncertaintyMetricV8(
-					ctx,
-					observation.ParserUncertaintyCount,
-				)
-			},
-		})
+		findings := trustedToolCallFindings(ctx, p.toolCallAction(ctx, toolName, args), "", p.toolCallSecureClient(ctx))
 		// Stamp the tool's capability class (read_fs / exec_shell /
 		// network_fetch / …) onto each finding from this call so the
 		// sliding-window correlator can reason about operator-defined
@@ -5856,7 +5903,7 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	severity := HighestSeverity(allFindings)
 	confidence := HighestConfidence(allFindings, severity)
 
-	action := p.toolCallAction(ctx, allFindings)
+	action := p.toolCallVerdictAction(ctx, allFindings)
 	if action == guardrailActionConfirm {
 		action = guardrailActionAlert
 	}

@@ -1062,6 +1062,30 @@ func (a *APIServer) toolBlockListVerdict(ctx context.Context, req *ToolInspectRe
 	return nil
 }
 
+// trustedToolCallFindings is every rule reading of one trusted tool call:
+// the rule packs, proved high-severity writes, outbound PII, the agent hook
+// configuration targets, the MCP/app tool effects, the shell tool effects and
+// the DefenseClaw control guard. The hook routes, /inspect/tool and the LLM
+// proxy's tool-call route all judge a call through it, so one tool meaning
+// gets one set of findings whichever route carries it (rel-1-0-10:GAP-0782:
+// the proxy ran the rule packs alone). secureClient is a Secure Client
+// install, which keeps its own tool policy (GAP-0048 adds no finding there).
+func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
+	findings := inspectDispatchTrustedAction(ctx, action)
+	findings = provedHighWriteFindings(ctx, action, findings)
+	findings = outboundPIIFindings(action, findings)
+	if !secureClient {
+		findings = agentHookConfigFindings(ctx, action, findings)
+	}
+	// An MCP or app tool is read as effects (internal/toolshape): the path it
+	// names, its SQL, code, settings and send destinations (rel-1-0-10:GAP-0016).
+	findings = nonShellToolFindings(ctx, action, findings, mcpServer)
+	findings = shellToolFindings(ctx, action, findings)
+	// The DefenseClaw CLI, gateway and services are not an agent's to stop
+	// (GAP-0596): the rule holds on every install, Secure Client included.
+	return defenseClawControlFindings(ctx, action, findings)
+}
+
 func (a *APIServer) inspectTrustedToolPolicyCtx(
 	ctx context.Context,
 	req *ToolInspectRequest,
@@ -1165,21 +1189,8 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	if isWriteTool {
 		waitCodeGuard = a.startCodeGuardOnArgs(ctx, req)
 	}
-	ruleFindings := inspectDispatchTrustedAction(ctx, action)
-	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
-	ruleFindings = outboundPIIFindings(action, ruleFindings)
-	// A Secure Client install keeps its own tool policy (GAP-0048 adds no
-	// finding there).
-	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-		ruleFindings = agentHookConfigFindings(ctx, action, ruleFindings)
-	}
-	// An MCP or app tool is read as effects (internal/toolshape): the path it
-	// names, its SQL, code, settings and send destinations (rel-1-0-10:GAP-0016).
-	ruleFindings = nonShellToolFindings(ctx, action, ruleFindings, req.MCPServerName)
-	ruleFindings = shellToolFindings(ctx, action, ruleFindings)
-	// The DefenseClaw CLI, gateway and services are not an agent's to stop
-	// (GAP-0596): the rule holds on every install, Secure Client included.
-	ruleFindings = defenseClawControlFindings(ctx, action, ruleFindings)
+	cfg := a.decisionConfig(ctx)
+	ruleFindings := trustedToolCallFindings(ctx, action, req.MCPServerName, cfg != nil && cfg.SecureClientIntegration())
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
 		cgScan = waitCodeGuard()
