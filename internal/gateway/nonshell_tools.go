@@ -363,6 +363,36 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 		for _, id := range toolshape.PathRules(string(p.Access), path, text) {
 			add(id, "")
 		}
+		// The developer-token files of an account's home (the credentials
+		// table's class of PATH-GIT-CREDS) are read by the native file tools as
+		// the shell and MCP lanes read them (rel-1-0-10:GAP-0816). The class
+		// comes from the one table, so each branch's table decides which names
+		// are in it; the home is found by position.
+		if p.Access == actionfacts.PathAccessRead && developerTokenFileOfAccountHome(path) {
+			add("PATH-GIT-CREDS", "")
+		}
 	}
 	return out
+}
+
+// developerTokenFileOfAccountHome reports an absolute path that is a file of
+// the developer-token class directly in an account home, found by its position
+// (isRecognizedHomeRoot: /root, /home/<acct>, /Users/<acct>, <drive>:/Users/<acct>)
+// and never by the name of a folder deeper in the path: a project folder that
+// is only called home, homes or users, and a fixture tree, hold no account home
+// (rel-1-0-10:GAP-0836).
+func developerTokenFileOfAccountHome(value string) bool {
+	value = canonicalSemanticPath(value)
+	if !isAbsoluteSemanticPath(value) || integrityPathHasFixtureSegment(value) {
+		return false
+	}
+	for dir := path.Dir(value); dir != "/" && dir != "." && dir != ""; dir = path.Dir(dir) {
+		if !isRecognizedHomeRoot(dir) {
+			continue
+		}
+		relative := strings.TrimPrefix(value, dir+"/")
+		shape, ok := actionfacts.MatchCredentialFileShape(relative)
+		return ok && shape.Class == actionfacts.CredentialFileDeveloperToken && shape.Relative == relative
+	}
+	return false
 }
