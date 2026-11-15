@@ -25,11 +25,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -88,7 +91,7 @@ lifecycle does.`,
 			}
 			if err := pinStandaloneManagedEnv(); err != nil {
 				// A standard account's refusal (GAP-2114), as discovery gives it.
-				var coded *exitCodeError
+				var coded *cliusage.ExitCodeError
 				if enterprisePolicyJSON && errors.As(err, &coded) {
 					writeManagedViewRefusalJSON(cmd.OutOrStdout(), err)
 					silenceJSONReportedError(cmd, true, err)
@@ -101,7 +104,7 @@ lifecycle does.`,
 	if platform != "" {
 		// Main has only `enterprise policy`; a Secure Client computer keeps
 		// main's tree.
-		group.Annotations = map[string]string{secureClientAbsentAnnotation: "true"}
+		group.Annotations = map[string]string{hookcli.SecureClientAbsentAnnotation: "true"}
 	}
 	show = &cobra.Command{
 		Use:   "show",
@@ -172,7 +175,7 @@ var standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) 
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return enterprisePolicyContext{}, errors.New("enterprise policy commands require deployment_mode: managed_enterprise with enterprise.profile: standalone (Secure Client manages its own machine policy)")
 	}
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		return enterprisePolicyContext{}, err
 	}
@@ -395,7 +398,7 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 				WorkingDir:    project,
 				HookBinary:    ctx.opts.HookBinary,
 				Policy:        policy,
-				OwnedCommands: perUserOwnedHookCommandsForBinary(name, target.UserHome, "", ctx.opts.HookBinary),
+				OwnedCommands: hookcli.PerUserOwnedHookCommandsForBinary(name, target.UserHome, "", ctx.opts.HookBinary),
 			})
 			userReport.Decisions[name] = decision
 			if decision.Deny {
@@ -519,7 +522,7 @@ func runEnterprisePolicyVerify(cmd *cobra.Command, _ []string) error {
 			UID:         target.UID,
 			GID:         target.GID,
 			Timeout:     enterprisePolicyTimeout,
-			AuditDB:     enterprisePolicyAuditDBPath(),
+			HookRecords: enterprisePolicyHookRecords(enterprisePolicyAuditDBPath()),
 			Credential:  enterprisePolicyLiveCredential(target),
 		})
 		if liveErr != nil {
@@ -763,4 +766,15 @@ func dashIfEmpty(value string) string {
 		return "-"
 	}
 	return value
+}
+
+// enterprisePolicyHookRecords searches the audit database at path for the
+// record of a hook, or is nil when no audit database is configured.
+func enterprisePolicyHookRecords(path string) func(context.Context, audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	return func(ctx context.Context, query audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error) {
+		return audit.FindHookToolInvocation(ctx, path, query)
+	}
 }

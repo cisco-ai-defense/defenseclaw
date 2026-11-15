@@ -9,6 +9,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 )
 
@@ -22,7 +23,7 @@ const managedRefusalReportBudget = 500 * time.Millisecond
 // (GAP-2639). Only the command's fixed words and the reason are sent. It is
 // best effort; the refusal does not depend on it.
 var reportManagedCommandRefusal = func(command, reason string) {
-	if _, managed := managedHostWindowsStandalone(); !managed {
+	if _, managed := hookcli.ManagedHostWindowsStandalone(); !managed {
 		return
 	}
 	if reason == "" {

@@ -90,7 +90,7 @@ _HOOK_FAIL_MODE_LINES = json.loads(
 # The hooks/.hookcfg bodies the Go test TestReadHookSidecarSharedVectors runs
 # through the native hook's reader (readHookSidecar).
 _WINDOWS_SIDECAR_VECTORS = json.loads(
-    (Path(__file__).resolve().parents[2] / "internal/cli/testdata/windows_hook_sidecar_vectors.json").read_text(
+    (Path(__file__).resolve().parents[2] / "internal/hookcli/testdata/windows_hook_sidecar_vectors.json").read_text(
         encoding="utf-8"
     )
 )["vectors"]

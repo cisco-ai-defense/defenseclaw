@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -80,7 +81,7 @@ var (
 	// windowsEnterpriseEnrolledTargets returns the targets the installed
 	// guardian manifest enrolls, keyed as windowsEnterpriseManifestRowKey.
 	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) {
-		layout, err := windowsManagedLayout.standalone()
+		layout, err := hookcli.WindowsManagedLayout.Standalone()
 		if err != nil {
 			return nil, err
 		}
@@ -109,7 +110,7 @@ var (
 	// put back each target's hooks, keyed as windowsEnterpriseManifestRowKey,
 	// or an error when its record stays unreadable.
 	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
-		layout, err := windowsManagedLayout.standalone()
+		layout, err := hookcli.WindowsManagedLayout.Standalone()
 		if err != nil {
 			return nil, err
 		}

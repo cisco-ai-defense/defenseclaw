@@ -20,7 +20,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -37,9 +39,9 @@ func TestWindowsEnterpriseSecretCheckReportsTheKeyOutcome(t *testing.T) {
 	if !found {
 		t.Fatal("enterprise secret has no check verb on Windows")
 	}
-	savedCheck, savedLoad, savedElevated, savedHost := checkAIDefense, loadSecretCheckConfig, windowsSecretIsElevated, managedHostWindowsStandalone
+	savedCheck, savedLoad, savedElevated, savedHost := checkAIDefense, loadSecretCheckConfig, windowsSecretIsElevated, hookcli.ManagedHostWindowsStandalone
 	t.Cleanup(func() {
-		checkAIDefense, loadSecretCheckConfig, windowsSecretIsElevated, managedHostWindowsStandalone = savedCheck, savedLoad, savedElevated, savedHost
+		checkAIDefense, loadSecretCheckConfig, windowsSecretIsElevated, hookcli.ManagedHostWindowsStandalone = savedCheck, savedLoad, savedElevated, savedHost
 	})
 	cfg := &config.Config{Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone}}
 	cfg.Enterprise.Inspection.AIDefense.Credential = "ai-defense-api-key"
@@ -56,7 +58,7 @@ func TestWindowsEnterpriseSecretCheckReportsTheKeyOutcome(t *testing.T) {
 		check.SetArgs(args)
 		code := 0
 		if err := check.ExecuteContext(context.Background()); err != nil {
-			code = commandExitCode(err)
+			code = cliusage.ExitCode(err)
 		}
 		var doc map[string]any
 		if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
@@ -88,7 +90,7 @@ func TestWindowsEnterpriseSecretCheckReportsTheKeyOutcome(t *testing.T) {
 		t.Fatalf("a name that is not the AI Defense credential: exit %d, %v", code, doc)
 	}
 	windowsSecretIsElevated = func() bool { return false }
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + hookcli.WindowsEnterpriseMarkerKey, true }
 	doc, code = run("--name", "ai-defense-api-key", "--json")
 	if code != 5 || firstCode(doc) != "elevation_required" {
 		t.Fatalf("a standard account: exit %d, %v", code, doc)

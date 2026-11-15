@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -378,7 +379,7 @@ func resolveWindowsStagedRetireInstallRoot(executable string) (string, error) {
 	if !exists {
 		return "", errors.New("staged managed-hook retirement requires protected installed deployment metadata")
 	}
-	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return "", err
 	}

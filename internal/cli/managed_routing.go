@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 )
 
@@ -65,7 +66,7 @@ func newManagedRoutingCmd() *cobra.Command {
 		if command, ok := launcherAuditedWriter(words); ok {
 			reportManagedCommandRefusal(command, "")
 		}
-		return withExitCode(managedDeviceAnswer(managedRoutingRefusal(words[1:])), 3)
+		return cliusage.WithExitCode(managedDeviceAnswer(managedRoutingRefusal(words[1:])), 3)
 	}
 	read := func(path string) func(*cobra.Command, []string) error {
 		return func(cmd *cobra.Command, _ []string) error { return runManagedRoutingRead(cmd, path) }

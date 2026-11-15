@@ -32,6 +32,8 @@ func TestStatusV2SchemaDescribesEveryMember(t *testing.T) {
 		"#/$defs/identitySource":        reflect.TypeOf(IdentitySource{}),
 		"#/$defs/accountJoin":           reflect.TypeOf(accountjoin.Summary{}),
 		"#/$defs/accountJoinGeneration": reflect.TypeOf(accountjoin.GenerationCount{}),
+		"#/$defs/routingState":          reflect.TypeOf(RoutingState{}),
+		"#/$defs/routingRouteOnly":      reflect.TypeOf(RoutingRouteOnly{}),
 		"#/$defs/coworkState":           reflect.TypeOf(CoworkState{}),
 		"#/$defs/coworkAccount":         reflect.TypeOf(CoworkAccount{}),
 		"#/$defs/coworkDesktop":         reflect.TypeOf(CoworkDesktopState{}),
