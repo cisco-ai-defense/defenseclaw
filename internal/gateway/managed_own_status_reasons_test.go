@@ -157,6 +157,11 @@ func TestOwnStatusEveryNotProtectedConnectorRowSaysWhyAndWhatToDo(t *testing.T) 
 	// The enumerator records this reason with no action when version discovery fails.
 	scanIncomplete := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeInstallScanIncomplete,
 		"the account's agent versions and private installs could not be inspected this cycle")
+	// A part of the install scan that did not finish (rel-1-0-10 GAP-0802)
+	// leaves the row to the hook evidence.
+	scanGap := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeInstallScanIncomplete,
+		"the bounded scan of the private agent installs of this account was incomplete")
+	scanGap.Skipped, scanGap.Folder = enterprisehooks.PrivateInstallSkippedHome, "/home/alice/work/huge"
 	strictDeny := func(cfg *config.Config) { cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledDeny }
 	rootDeny := func(cfg *config.Config) { cfg.Enterprise.Enrollment.Root = config.EnterpriseRootDeny }
 	scenarios := []ownReasonsScenario{
@@ -183,6 +188,9 @@ func TestOwnStatusEveryNotProtectedConnectorRowSaysWhyAndWhatToDo(t *testing.T) 
 			want: map[string]string{"opencode": "not protected: the plugin folder is not writable by the agent. " + ownScanNextStep}},
 		{name: "scan entry whose reason starts with a hidden path", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{hiddenPath},
 			want: map[string]string{"opencode": "not protected: .claude/settings.json is not writable by the agent. " + ownScanNextStep}},
+		{name: "scan gap of a hooked connector", uid: "5001", user: "alice", view: vendorOnly,
+			guardian: guardianFor("bob", 5002, "hermes"), scan: []enterprisehooks.UnprotectedAgent{scanGap},
+			want: map[string]string{"opencode": "protected"}},
 		{name: "scan entry whose reason names no action", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{scanIncomplete},
 			want: map[string]string{"opencode": "not protected: " + scanIncomplete.Reason + ". " + ownScanNextStep}},
 		{name: "root denied", uid: "0", user: "root", view: proven, configure: rootDeny,
