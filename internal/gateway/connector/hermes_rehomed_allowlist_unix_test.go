@@ -54,7 +54,7 @@ func rehomedHermesFixture(t *testing.T) (oldHome, newHome, allowlist, command, o
 	if err := os.MkdirAll(newHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	allowlist = filepath.Join(newHome, ".hermes", hermesAllowlistFileName)
+	allowlist = filepath.Join(newHome, ".hermes", HermesAllowlistFileName)
 	command = hermesConfiguredHookCommand(filepath.Join(newHome, ".defenseclaw", "hooks", hermesHookScriptName), "")
 	oldCommand = hermesConfiguredHookCommand(filepath.Join(oldHome, ".defenseclaw", "hooks", hermesHookScriptName), "")
 	return oldHome, newHome, allowlist, command, oldCommand

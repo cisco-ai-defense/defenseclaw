@@ -409,7 +409,7 @@
 {"id": "g596b-k263", "dialect": "", "command": "nohup ~/.local/bin/defenseclaw-gateway stop &", "want": "stop"}
 {"id": "g596b-x020", "dialect": "", "command": "~bob/.local/bin/defenseclaw-gateway stop", "want": "unproven"}
 {"id": "g596b-x021", "dialect": "", "command": "$USER_HOME/.local/bin/defenseclaw-gateway stop", "want": "unproven"}
-{"id": "g596b-x218", "dialect": "", "command": "defenseclaw config set observability.enabled false", "want": ""}
+{"id": "g596b-x218", "dialect": "", "command": "defenseclaw config set observability.enabled false", "want": "config"}
 {"id": "g596b-x219", "dialect": "", "command": "defenseclaw config set routing.enabled false", "want": ""}
 {"id": "g596b-x220", "dialect": "", "command": "defenseclaw config set skills.foo.enabled false", "want": ""}
 {"id": "g596b-x222", "dialect": "", "command": "defenseclaw plugin uninstall foo", "want": ""}
@@ -423,10 +423,10 @@
 {"id": "g596b-t06", "dialect": "", "command": "printf '%s\\n' 'defenseclaw status' | zsh", "want": ""}
 {"id": "g596b-t07", "dialect": "", "command": "echo '0 3 * * * defenseclaw-gateway status' | crontab -", "want": ""}
 {"id": "g596b-t08", "dialect": "", "command": "sg wheel -c 'defenseclaw doctor'", "want": ""}
-{"id": "g596b-t09", "dialect": "", "command": "defenseclaw config set 'observability.destinations[0].enabled' false", "want": ""}
+{"id": "g596b-t09", "dialect": "", "command": "defenseclaw config set 'observability.destinations[0].enabled' false", "want": "config"}
 {"id": "g596b-t10", "dialect": "", "command": "defenseclaw config unset routing.enabled", "want": ""}
 {"id": "g596b-t11", "dialect": "", "command": "defenseclaw config set guardrail.block_at HIGH", "want": "config"}
-{"id": "g596b-t12", "dialect": "", "command": "defenseclaw config set $KEY false", "want": "unproven"}
+{"id": "g596b-t12", "dialect": "", "command": "defenseclaw config set $KEY false", "want": "config"}
 {"id": "g596b-t13", "dialect": "", "command": "defenseclaw config set 'asset_policy.skill.denied[0].name' x", "want": "config"}
 {"id": "g596b-t14", "dialect": "", "command": "defenseclaw plugin uninstall foo", "want": ""}
 {"id": "g596b-t15", "dialect": "", "command": "defenseclaw skill uninstall foo", "want": ""}
@@ -447,9 +447,9 @@
 {"id": "g596c-e44", "dialect": "", "command": "defenseclaw config set --json --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 llm.model x", "want": "config"}
 {"id": "g596c-e45", "dialect": "", "command": "defenseclaw config set --new-option v guardrail.enabled false", "want": "unproven"}
 {"id": "g596c-e46", "dialect": "", "command": "defenseclaw config set --new-option v observability.sinks.x true", "want": "unproven"}
-{"id": "g596c-b01", "dialect": "", "command": "defenseclaw config set --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 observability.sinks.x true", "want": ""}
+{"id": "g596c-b01", "dialect": "", "command": "defenseclaw config set --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 observability.sinks.x true", "want": "config"}
 {"id": "g596c-b02", "dialect": "", "command": "defenseclaw config set routing.mode auto --json", "want": ""}
-{"id": "g596c-b03", "dialect": "", "command": "defenseclaw config unset --json observability.sinks", "want": ""}
+{"id": "g596c-b03", "dialect": "", "command": "defenseclaw config unset --json observability.sinks", "want": "config"}
 {"id": "g596c-b04", "dialect": "", "command": "defenseclaw config set notifications.enabled -1", "want": ""}
 {"id": "g596c-e04", "dialect": "", "command": "bash -c \"$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\"", "want": "stop"}
 {"id": "g596c-e05", "dialect": "", "command": "eval \"$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\"", "want": "stop"}
@@ -524,6 +524,15 @@
 {"id": "g596c-b19", "dialect": "", "command": "cat > job.sh <<'EOF'\ndefenseclaw stop\nEOF\nscp job.sh host:/tmp/job.sh", "want": ""}
 {"id": "g596c-e56", "dialect": "", "command": "cat > job.sh <<'EOF'\ndefenseclaw stop\nEOF\nsource job.sh", "want": "stop"}
 {"id": "g596c-e57", "dialect": "", "command": "cat > job.sh <<'EOF'\ndefenseclaw stop\nEOF\nbash ./job.sh", "want": "stop"}
+{"id": "g923-c12", "dialect": "", "command": "defenseclaw config set '[\"observability\"].enabled' false", "want": "config"}
+{"id": "g923-c13", "dialect": "", "command": "defenseclaw config unset '[\"observability\"]'", "want": "config"}
+{"id": "g923-c14", "dialect": "", "command": "defenseclaw config set '[\"guardrail\"].enabled' false", "want": "config"}
+{"id": "g923-c15", "dialect": "", "command": "defenseclaw config set '[\"routing\"].enabled' false", "want": "config"}
+{"id": "g923-c16", "dialect": "", "command": "defenseclaw config set '[\"skills\"].foo.enabled' false", "want": "config"}
+{"id": "g923-c17", "dialect": "", "command": "defenseclaw config set ROUTING.enabled false", "want": "config"}
+{"id": "g923-c18", "dialect": "", "command": "defenseclaw config set '' false", "want": "config"}
+{"id": "g923-c19", "dialect": "", "command": "defenseclaw config set ' routing.enabled' false", "want": "config"}
+{"id": "g923-c20", "dialect": "", "command": "defenseclaw config unset routing.enabled '[\"guardrail\"]'", "want": "config"}
 {"id": "sub19-01", "dialect": "", "command": "defenseclaw config set substrate.chain_egress_action alert", "want": "config"}
 {"id": "sub19-02", "dialect": "", "command": "defenseclaw config set substrate.require_attested_templates false", "want": "config"}
 {"id": "sub19-03", "dialect": "", "command": "defenseclaw config get substrate.chain_egress_action", "want": ""}

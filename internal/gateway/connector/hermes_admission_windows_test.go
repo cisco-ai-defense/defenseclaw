@@ -185,7 +185,7 @@ func TestHermesSetupAdmissionRejectsChangedPathBytesVersionAndCustodyBeforeMutat
 			if err := os.WriteFile(configPath, []byte("operator_literal: KEEP-CONFIG-BYTES\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+			allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 			if err := os.WriteFile(allowlistPath, []byte("{\"approvals\":[],\"operator\":\"KEEP-ALLOWLIST-BYTES\"}\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -276,7 +276,7 @@ func loadHermesReceiptDigestForTest(t *testing.T, dataDir string) string {
 func hermesAdmissionMutationTargets(opts SetupOpts, configPath string) []string {
 	return []string{
 		configPath,
-		filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
+		filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName),
 		filepath.Join(opts.DataDir, activeConnectorFile),
 		filepath.Join(opts.DataDir, hookContractLockFile),
 		filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"),

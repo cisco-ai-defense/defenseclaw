@@ -1450,6 +1450,27 @@ The standalone profile runs its transaction on PowerShell 7, which must be insta
 | `--attest-claude-effective-policy` | Install, upgrade, repair: record that an administrator confirmed that Claude Code runs DefenseClaw's managed hooks |
 | `--json` | Print the result as JSON |
 
+Before an older release's Setup, the gateway runs one more step from an elevated prompt:
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise windows hook-image retire [--skip-profile <SID>]... [--json]`.
+It points every agent hook back at `bin\defenseclaw-hook.exe` and ends `ok` only when no machine file and no
+enrolled account's agent config names a launch folder; otherwise `hook_image_retire_pending` lists each file in
+`still_named`, each machine file with the `cause` that kept it from being rewritten; do not run the older Setup then
+([Roll back](/docs/enterprise/lifecycle#roll-back)). The account files are every connector's hook configs and the
+files its [managed install](/docs/enterprise/managed-commands) writes beside them (the Copilot VS Code Local hook file and plugin hooks, the Hermes
+allowlist, the Kiro `defenseclaw` agent). An account file `retire` could not read or verify (a link on its path below
+the account home, access denied, too large, no answer within 5 seconds, an agent home moved out of the profile, or the
+Hermes home of a signed-out account, whose `HERMES_HOME` cannot be read while it is signed out) also holds it back: it
+is listed with `account: true`, `unreadable: true` and the `cause`. Each account's files are found as the guardian
+finds them; the agent homes the administrator's shell sets (`CODEX_HOME` and the like) are ignored. An elevated administrator is denied some account folders, so run `retire` as
+LocalSystem. An enrolled account that is signed out does not hold back the machine
+files: `retire` drops its launch-folder runtime selections and lists it in `signed_out_profiles`; its own files still
+need its sign-in (the guardian rewrites them) or `--skip-profile`. `--skip-profile <SID>` (repeatable, no blanket
+form) leaves one enrolled profile's own configs unconverted: the SID must be an enrolled profile that still holds
+`retire` back, or `retire` refuses with nothing changed. Each skip writes a HIGH `config-update` audit row
+(target `hook-image-retire-skip`: who, when, the SID and its files), is listed in `skipped_profiles`, and
+`enterprise windows status` and `verify` report it as `hook_image_profile_not_retired` until none of its files
+names a launch folder.
+
 Exit codes: standalone `0`, `1603` failure, `1618` busy, `1639` invalid
 arguments, `5` when run from a standard account (`status` and `verify` need an elevated prompt; the JSON error code is `elevation_required`), and `3010` (reserved). Secure Client: `0` and `1603`.
 
