@@ -1132,7 +1132,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					// simple commands where the client keyed its evidence.
 					if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; !filepath.IsAbs(moveInput.CWD) && filepath.IsAbs(cwd) {
 						moveInput.CWD = filepath.Clean(cwd)
-						moveFacts = actionfacts.Analyze(moveInput)
+						moveFacts = actionfacts.Analyze(moveInput).AtHookFolder()
 					}
 					plainMoves = hookpaths.PlainMoveDestinationsWithStatements(moveInput, moveFacts)
 				}

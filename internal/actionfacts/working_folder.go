@@ -541,6 +541,11 @@ func staticWorkFolderWord(word *syntax.Word) (string, bool) {
 	}
 	argument := projectPOSIXWord(word)
 	if !argument.Expands {
+		if strings.HasPrefix(argument.Value, "~") {
+			// A quoted tilde is a folder of that name in the folder the
+			// shell is in (cd '~', the twin of env --chdir=~), not the home.
+			return "./" + argument.Value, true
+		}
 		return argument.Value, true
 	}
 	// A leading tilde the shell expands: all literal parts.

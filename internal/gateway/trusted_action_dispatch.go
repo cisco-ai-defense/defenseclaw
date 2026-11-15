@@ -3940,7 +3940,9 @@ func managedLinkWalkView(request trustedActionRequest) (actionfacts.Facts, trust
 	}
 	placed := request
 	placed.Input.CWD = cwd
-	return actionfacts.Analyze(placed.Input), placed, true
+	// The link-walk facts are keyed by the client walk (the hook folder
+	// reading of each path, Facts.AtHookFolder).
+	return actionfacts.Analyze(placed.Input).AtHookFolder(), placed, true
 }
 
 // protectedHomeClientDirectory is the directory a managed hook call runs in
@@ -4668,7 +4670,10 @@ func protectedHomePlacedReading(facts actionfacts.Facts, request trustedActionRe
 		return facts, request
 	}
 	request.Input.CWD = client
-	return actionfacts.Analyze(request.Input), request
+	// The client keyed its link facts by its own walk of the call, which
+	// places a command by the hook folder: read the paths there too, or a
+	// write the gateway places after a cd misses its keys (GAP-0426).
+	return actionfacts.Analyze(request.Input).AtHookFolder(), request
 }
 
 // placedLinkedStateWrite reads each top-level statement in the directory
