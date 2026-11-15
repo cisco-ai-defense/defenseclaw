@@ -438,3 +438,16 @@
 {"id": "g596b-t22", "dialect": "", "command": "strace -f sh -c 'defenseclaw status'", "want": ""}
 {"id": "g596b-t23", "dialect": "", "command": "tail -10 out.log ssh -n host sudo -iu u bash -lc 'defenseclaw-gateway stop'", "want": ""}
 {"id": "g596b-t24", "dialect": "", "command": "strace -f -o out.txt sh -c 'defenseclaw-gateway stop'", "want": "unproven"}
+{"id": "g596c-e01", "dialect": "", "command": "defenseclaw config set --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 guardrail.enabled false", "want": "config"}
+{"id": "g596c-e02", "dialect": "", "command": "defenseclaw config set --json guardrail.enabled false", "want": "config"}
+{"id": "g596c-e03", "dialect": "", "command": "defenseclaw config set --expect-sha256=0000000000000000000000000000000000000000000000000000000000000000 guardrail.enabled false", "want": "config"}
+{"id": "g596c-e41", "dialect": "", "command": "defenseclaw config set guardrail.enabled false --json", "want": "config"}
+{"id": "g596c-e42", "dialect": "", "command": "defenseclaw config unset --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 guardrail.enabled", "want": "config"}
+{"id": "g596c-e43", "dialect": "", "command": "defenseclaw config unset observability.sinks guardrail.enabled", "want": "config"}
+{"id": "g596c-e44", "dialect": "", "command": "defenseclaw config set --json --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 llm.model x", "want": "config"}
+{"id": "g596c-e45", "dialect": "", "command": "defenseclaw config set --new-option v guardrail.enabled false", "want": "unproven"}
+{"id": "g596c-e46", "dialect": "", "command": "defenseclaw config set --new-option v observability.sinks.x true", "want": "unproven"}
+{"id": "g596c-b01", "dialect": "", "command": "defenseclaw config set --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 observability.sinks.x true", "want": ""}
+{"id": "g596c-b02", "dialect": "", "command": "defenseclaw config set routing.mode auto --json", "want": ""}
+{"id": "g596c-b03", "dialect": "", "command": "defenseclaw config unset --json observability.sinks", "want": ""}
+{"id": "g596c-b04", "dialect": "", "command": "defenseclaw config set notifications.enabled -1", "want": ""}

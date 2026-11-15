@@ -1160,26 +1160,53 @@ func pidFileInState(text, home string) bool {
 	}
 }
 
+// optionName returns the lower-case name, without its "=value", of an
+// argument that is a flag: one that starts with "-" or, for Windows tools,
+// "/" followed by a letter.
+func optionName(arg string) (string, bool) {
+	switch {
+	case strings.HasPrefix(arg, "--") && len(arg) > 2, strings.HasPrefix(arg, "-") && len(arg) > 1:
+		flag := strings.ToLower(arg)
+		if cut := strings.Index(flag, "="); cut > 0 {
+			flag = flag[:cut]
+		}
+		return flag, true
+	case len(arg) > 1 && arg[0] == '/' && !strings.ContainsAny(arg[1:], `/\.`) &&
+		arg[1] >= 'A' && (arg[1] <= 'Z' || arg[1] >= 'a' && arg[1] <= 'z'):
+		return strings.ToLower(arg), true
+	}
+	return "", false
+}
+
 // splitOperands separates words from options. A word that starts with "-" or,
 // for Windows tools, "/" followed by a letter is a flag (lower case, without
 // its "=value").
 func splitOperands(args []string) (words, flags []string) {
 	for _, arg := range args {
-		switch {
-		case strings.HasPrefix(arg, "--") && len(arg) > 2, strings.HasPrefix(arg, "-") && len(arg) > 1:
-			flag := strings.ToLower(arg)
-			if cut := strings.Index(flag, "="); cut > 0 {
-				flag = flag[:cut]
-			}
+		if flag, ok := optionName(arg); ok {
 			flags = append(flags, flag)
-		case len(arg) > 1 && arg[0] == '/' && !strings.ContainsAny(arg[1:], `/\.`) &&
-			arg[1] >= 'A' && (arg[1] <= 'Z' || arg[1] >= 'a' && arg[1] <= 'z'):
-			flags = append(flags, strings.ToLower(arg))
-		default:
-			words = append(words, arg)
+			continue
 		}
+		words = append(words, arg)
 	}
 	return words, flags
+}
+
+// argsAfterOperand returns the arguments that follow the nth operand (counted
+// as splitOperands counts them), options and their values included, so a
+// reader that knows a verb's own options can walk them.
+func argsAfterOperand(args []string, n int) []string {
+	seen := 0
+	for index, arg := range args {
+		if _, isOption := optionName(arg); isOption {
+			continue
+		}
+		if seen == n {
+			return args[index+1:]
+		}
+		seen++
+	}
+	return nil
 }
 
 func hasWord(values []string, want string) bool {
@@ -1377,24 +1404,95 @@ var (
 	defenseClawWeakValues = map[string]bool{"observe": true, "open": true}
 )
 
-// configChangeKind judges `config set KEY VALUE` and `config unset KEY`
-// from the section the key lives under (GAP-0753). A key under a guard section
-// is the configuration change; a key under a neutral section (an
-// observability sink, routing, a webhook) is not a guard change; a key the
-// parse left open is a reading the rules cannot prove either way.
-func configChangeKind(operands []string) (DefenseClawControlKind, bool) {
-	if len(operands) == 0 || operands[0] == "" {
+// defenseClawConfigValueOptions and defenseClawConfigFlagOptions are the
+// options of `config set` and `config unset`: the first take the next word as
+// their value (--expect-sha256 HEX), the second take none. A drift test reads
+// both verbs' click options, so a new option is classified when it is added.
+var (
+	defenseClawConfigValueOptions = map[string]bool{"--expect-sha256": true}
+	defenseClawConfigFlagOptions  = map[string]bool{"--json": true}
+)
+
+// configChangeKind judges `config set KEY VALUE` and `config unset KEY...`
+// from the section each key lives under (GAP-0753). args are the arguments
+// after the verb, options included: click takes an option anywhere, so the
+// key is the first word that is not an option or an option's value
+// (GAP-0787, `config set --expect-sha256 HEX KEY VALUE`). A key under a guard
+// section is the configuration change; a key under a neutral section (an
+// observability sink, routing, a webhook) is not a guard change; a key or an
+// option the parse left open is a reading the rules cannot prove either way.
+func configChangeKind(args []string, unset bool) (DefenseClawControlKind, bool) {
+	var keys []string
+	words, afterTerminator := 0, false
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if !afterTerminator && arg == "--" {
+			afterTerminator = true
+			continue
+		}
+		if !afterTerminator && strings.HasPrefix(arg, "-") && len(arg) > 1 && !isNumberWord(arg) {
+			name := strings.ToLower(arg)
+			hasValue := false
+			if cut := strings.Index(name, "="); cut > 0 {
+				name, hasValue = name[:cut], true
+			}
+			switch {
+			case defenseClawConfigValueOptions[name]:
+				if !hasValue {
+					index++
+				}
+			case defenseClawConfigFlagOptions[name]:
+			default:
+				// An option this reader does not know may take the next word as
+				// its value, so which word is the key is not proven.
+				return "", false
+			}
+			continue
+		}
+		if unset || words == 0 {
+			keys = append(keys, arg)
+		}
+		words++
+	}
+	if len(keys) == 0 {
 		return "", false
 	}
-	key := strings.ToLower(strings.Trim(operands[0], `"'`))
-	root := key
-	if cut := strings.IndexAny(key, ".["); cut >= 0 {
-		root = key[:cut]
+	open := false
+	for _, key := range keys {
+		if key == "" {
+			open = true
+			continue
+		}
+		key = strings.ToLower(strings.Trim(key, `"'`))
+		root := key
+		if cut := strings.IndexAny(key, ".["); cut >= 0 {
+			root = key[:cut]
+		}
+		if defenseClawGuardConfigRoots[root] {
+			return DefenseClawControlConfig, true
+		}
 	}
-	if defenseClawGuardConfigRoots[root] {
-		return DefenseClawControlConfig, true
+	if open {
+		return "", false
 	}
 	return "", true
+}
+
+// isNumberWord reports a word that is a number (a negative value, not an
+// option).
+func isNumberWord(word string) bool {
+	digits := strings.TrimPrefix(word, "-")
+	if digits == "" {
+		return false
+	}
+	for _, char := range digits {
+		if char < '0' || char > '9' {
+			if char != '.' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // guardGroupBefore reports a guardrail command group among the words before
@@ -1481,7 +1579,7 @@ func judgeDefenseClawCLI(args []string, program string, dynamic bool) (kind Defe
 			if index+1 < len(lower) {
 				switch lower[index+1] {
 				case "set", "unset":
-					return configChangeKind(words[index+2:])
+					return configChangeKind(argsAfterOperand(args, index+1), lower[index+1] == "unset")
 				case "migrate":
 					return "", false
 				}
