@@ -1380,12 +1380,23 @@ type codeGuardArgsScan struct {
 // Claude Code and none on Codex, Copilot, Kiro, Antigravity, Amp, OpenCode
 // and the proxy (rel-1-0-10:GAP-0776).
 func codeGuardWriteRequest(req *ToolInspectRequest, action trustedActionRequest) (*ToolInspectRequest, bool) {
-	if tool := action.Input.Tool; isWriteToolName(strings.ToLower(tool)) && len(action.Input.Args) != 0 {
+	if tool := action.Input.Tool; codeGuardWriteTool(tool) && len(action.Input.Args) != 0 {
 		view := *req
 		view.Tool, view.Args = tool, action.Input.Args
 		return &view, true
 	}
 	return req, isWriteToolName(strings.ToLower(req.Tool))
+}
+
+// codeGuardWriteTool reports a trusted action tool whose arguments carry the
+// content of a file write: the write tool names, and the Copilot CLI create
+// tool ({path, file_text}), which ActionFacts reads as a write but which is
+// not in isWriteToolName, the raw-name list other routes share (a bare
+// "create" there could name any tool). The trusted action tool is a
+// connector's projected name, so here it is the Copilot write.
+func codeGuardWriteTool(tool string) bool {
+	tool = strings.ToLower(strings.TrimSpace(tool))
+	return isWriteToolName(tool) || tool == "create"
 }
 
 func (a *APIServer) runCodeGuardOnArgsWithProvenance(ctx context.Context, req *ToolInspectRequest) codeGuardArgsScan {
@@ -1437,7 +1448,7 @@ func codeGuardScanWriteArgs(rulesDir, tool string, raw json.RawMessage) codeGuar
 
 	filePath, pathComplete := exactCodeGuardStringField(parsed, bestEffort, "path", "file_path", "filePath")
 	content, contentComplete := exactCodeGuardStringField(parsed, bestEffort,
-		"content", "new_string", "newString", "new_str", "file_text", "text", "body")
+		"content", "new_string", "newString", "new_str", "newText", "file_text", "text", "body")
 	if filePath == "" || content == "" {
 		return codeGuardArgsScan{}
 	}
