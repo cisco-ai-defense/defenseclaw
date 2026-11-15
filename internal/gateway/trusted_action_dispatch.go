@@ -166,6 +166,17 @@ type trustedActionRequest struct {
 	// because a managed device fails closed.
 	ManagedInstall             bool
 	UnknownKeyPossibleOverflow bool
+	// hostTwinDepth is the number of wrapper layers the call's parents used
+	// reading it as a script (actionfacts.HostScriptReadings): one budget for a
+	// call however its twins nest.
+	hostTwinDepth int
+	// hostTwinListed: the call is a statement, or a run of statements, of a
+	// list already read one by one.
+	hostTwinListed bool
+	// hostScriptTwinOff turns the script reading off, so a test can compare a
+	// call's findings with and without it (TestHostScriptTwinOnlyAddsFindings).
+	// Production requests never set it.
+	hostScriptTwinOff bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
@@ -661,6 +672,26 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
+	// A Windows call the tokenizer stopped reading at its input bound (one word
+	// over the word limit) is truncated: judged as unknown at the pack's
+	// unknown tier at least, never a clean allow (rel-1-0-10:GAP-0345). So is
+	// a Windows host call past the command size (no dialect read) or under a
+	// POSIX tool label, and a shell command too large to read at all
+	// (actionfacts.TruncatedHostCall).
+	if facts.Parse.Status == actionfacts.StatusLimitExceeded &&
+		slices.Contains(facts.Parse.Issues, actionfacts.IssueInputLimit) &&
+		(facts.Parse.Dialect == actionfacts.DialectPowerShell || facts.Parse.Dialect == actionfacts.DialectCMD ||
+			actionfacts.TruncatedHostCall(request.Input)) {
+		defer func() {
+			findings = withBoundedTruncation(findings, bounded.Of(bounded.Bytes), request)
+		}()
+	}
+	// A download cradle psparse proves on the tree, in a call the tokenizer
+	// cannot prove it in, is judged at the unknown tier of the pack at least
+	// (rel-1-0-10:GAP-0160): an alert outside the strict tier, a block in it.
+	defer func() {
+		findings = withCradleUnknownTier(findings, request)
+	}()
 	// Credential material that reaches a sender whose destination is not read
 	// in full (interpreter code that names a credentials file and a network
 	// capability, a credential-named environment variable piped into an
@@ -703,6 +734,30 @@ func dispatchTrustedAction(
 	}
 	// A file-tool call with an argument key outside its reviewed schema is
 	// judged as each reading the harness may run (gas-ux-r1 GAP-0076).
+	// A static powershell, pwsh or cmd launcher, call block or Invoke-Expression
+	// literal also runs the script it names. psparse reads that script (the
+	// launcher itself stays as the tokenizer saw it); the script reading only
+	// ever adds findings (host_script_twin.go).
+	if twins, caps := hostScriptTwinRequests(request, facts); len(twins) != 0 || caps.Any() {
+		defer func() {
+			for _, twin := range twins {
+				twinFindings := dispatchTrustedAction(parent, twin)
+				if twin.hostTwinListed {
+					// A statement of a list read alone is a fragment: that it
+					// is too large to judge says nothing the whole call's own
+					// limit does not. A bound the statement's own reading hit
+					// (a launcher nested past the depth, a body past the size)
+					// is a truncation of the call all the same, alone, in a
+					// list or in a call block: its caps reach the call
+					// (rel-1-0-10:GAP-0477).
+					caps = caps.Union(boundedCapsOf(twinFindings))
+					twinFindings = withoutLimitFindings(twinFindings)
+				}
+				findings = withHostTwinFindings(findings, twinFindings)
+			}
+			findings = withBoundedTruncation(findings, caps, request)
+		}()
+	}
 	twins, overflow := unknownKeyTwinRequests(request, facts)
 	request.UnknownKeyPossibleOverflow = request.UnknownKeyPossibleOverflow || overflow
 	for _, twin := range twins {
@@ -5817,8 +5872,15 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 	},
 	"CMD-WIN-IWR-IEX": {
-		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return powerShellDownloadExecPrerequisite(facts)
+		// The pipe form (iwr | iex) and every other spelling of a download
+		// cradle (actionfacts.PowerShellFetchedContentExecution) are one
+		// action. The finding enforces on a complete parse only; a cradle
+		// that is spelled with parentheses or a variable leaves the tokenizer's
+		// parse partial, and the filter below keeps it in shadow (see
+		// powerShellCradleShadowOnly).
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return powerShellDownloadExecPrerequisite(facts) ||
+				actionfacts.PowerShellFetchedContentExecution(input)
 		},
 	},
 	"CMD-PIPE-WGET": {
@@ -6520,6 +6582,136 @@ func commandByID(
 	return actionfacts.CommandFact{}, false
 }
 
+// powerShellCradleShadowOnly reports a download cradle (psparse's reading of
+// the script: Invoke-Expression of fetched content, in a spelling the tokenizer
+// cannot prove) in a call whose parse is partial. It adds the download-execute
+// finding in shadow: recorded, never enforced. The pipe form keeps the product's
+// rule when the tokenizer's parse is partial for a reason of its own (a sibling
+// statement it does not model raises nothing, the partial-sibling fixture). A
+// statement list alone is no such reason: the tokenizer only does not read a
+// list of statements, and a fetch whose output feeds Invoke-Expression is a
+// cradle wherever it stands in a list of statements psparse reads in full
+// (rel-1-0-10:GAP-0160).
+func powerShellCradleShadowOnly(input actionfacts.Input, facts actionfacts.Facts) bool {
+	if powerShellDownloadExecPrerequisite(facts) &&
+		(!powerShellStatementListOnly(facts) || !actionfacts.PowerShellStatementList(input)) {
+		return false
+	}
+	return actionfacts.PowerShellFetchedContentExecution(input)
+}
+
+// powerShellListSiblings are the programs a statement list around a cradle may
+// hold without making the tokenizer's partial parse more than "a list of
+// statements": the cradle's own words and the statements that only change
+// directory or print.
+var powerShellListSiblings = map[string]bool{
+	"invoke-webrequest": true, "iwr": true, "invoke-restmethod": true, "irm": true, "curl": true, "wget": true,
+	"invoke-expression": true, "iex": true, "new-object": true,
+	"set-location": true, "sl": true, "cd": true, "chdir": true, "push-location": true, "pushd": true,
+	"pop-location": true, "popd": true, "write-output": true, "write-host": true, "echo": true, "get-date": true,
+}
+
+// powerShellStatementListOnly reports a partial parse whose only reasons are
+// that the tokenizer does not read a list of statements (and, for the
+// statements of powerShellListSiblings, the operand grammar of a directory
+// change). A sibling the tokenizer does not model at all is another reason.
+func powerShellStatementListOnly(facts actionfacts.Facts) bool {
+	if facts.Parse.Status != actionfacts.StatusPartial || len(facts.Parse.Issues) == 0 {
+		return false
+	}
+	// A cradle inside a launcher's body keeps the product's rule: the body is
+	// the launcher's operand, and a partial parse of it raises nothing.
+	for _, command := range facts.Commands {
+		switch strings.ToLower(command.Program) {
+		case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
+			return false
+		}
+	}
+	for _, issue := range facts.Parse.Issues {
+		switch issue {
+		case actionfacts.IssueUnsupportedConstruct:
+		case actionfacts.IssueUnknownOperandGrammar:
+			for _, command := range facts.Commands {
+				if !powerShellListSiblings[strings.ToLower(command.Program)] {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// withCradleUnknownTier raises a download-cradle finding the tokenizer could
+// not prove (it is recorded, not enforced) to the unknown tier of the pack when
+// psparse proves the cradle on the tree: alert-only outside the strict tier,
+// enforced in it. It only raises; a finding already enforced stays.
+func withCradleUnknownTier(findings []RuleFinding, request trustedActionRequest) []RuleFinding {
+	if !request.EnforcementCapable {
+		return findings
+	}
+	proven := false
+	for index := range findings {
+		finding := &findings[index]
+		if finding.RuleID != "CMD-WIN-IWR-IEX" || finding.contributesToEnforcement() || finding.contributesToAlertOnly() {
+			continue
+		}
+		if !proven && !actionfacts.PowerShellFetchedContentExecution(request.Input) {
+			return findings
+		}
+		proven = true
+		if request.StrictPolicy || request.ManagedInstall {
+			finding.enforcement = findingEnforcementAllowed
+		} else {
+			finding.enforcement = findingEnforcementAlertOnly
+		}
+	}
+	return findings
+}
+
+// withHostTwinFindings joins the findings of a script reading to those of the
+// call as written (withOverLimitTwinFindings) and keeps the name the call as
+// written gave a rule: a stronger finding of the same rule family from the
+// reading raises the proof, never renames the finding (a Windows path rule
+// stays the Windows path rule).
+//
+// The reading may add only what it proves. A finding of the reading that would
+// enforce without a proof that authorizes the rule (a target the reading could
+// not place, a path it only mentions) is recorded, not enforced: a read-only
+// listing proves no write, and a launcher the tokenizer holds as partial stays
+// partial (rel-1-0-10:GAP-0364).
+func withHostTwinFindings(findings, twin []RuleFinding) []RuleFinding {
+	before := slices.Clone(findings)
+	proven := make([]RuleFinding, len(twin))
+	for index, finding := range twin {
+		if finding.contributesToEnforcement() && !finding.proof.authorizes(finding.RuleID) {
+			finding.enforcement = findingEnforcementDetectionOnly
+		}
+		proven[index] = finding
+	}
+	joined := withOverLimitTwinFindings(findings, proven)
+	for index := range before {
+		if index < len(joined) && joined[index].RuleID != before[index].RuleID &&
+			trustedActionFindingKey(joined[index].RuleID) == trustedActionFindingKey(before[index].RuleID) {
+			joined[index].RuleID, joined[index].Title = before[index].RuleID, before[index].Title
+		}
+	}
+	return withCarriedBoundedCaps(joined, twin)
+}
+
+// withoutLimitFindings drops the evaluation-limit finding of a reading that is
+// a fragment of the call.
+func withoutLimitFindings(findings []RuleFinding) []RuleFinding {
+	kept := findings[:0:0]
+	for _, finding := range findings {
+		if canonicalTrustedRuleID(finding.RuleID) != evaluationLimitRuleID {
+			kept = append(kept, finding)
+		}
+	}
+	return kept
+}
+
 func filterExactFallbackFindings(
 	findings []RuleFinding,
 	input actionfacts.Input,
@@ -6575,7 +6767,8 @@ func filterExactFallbackFindings(
 		// connector input has complete authoritative PowerShell ActionFacts.
 		if finding.RuleID == "CMD-WIN-IWR-IEX" &&
 			(!facts.Authoritative() ||
-				facts.Parse.Status != actionfacts.StatusComplete) {
+				facts.Parse.Status != actionfacts.StatusComplete) &&
+			!powerShellCradleShadowOnly(input, facts) {
 			continue
 		}
 		if hasTag(finding.Tags, trustedParserUncertaintyTag) {
@@ -7932,6 +8125,12 @@ func trustedLegacyCommandRuleMatches(
 			trustedRuleHasActionProof(ruleID, input, facts) {
 			matchesByID[ruleID] = struct{}{}
 		}
+	}
+	// A download cradle is one command word (iex) over an argument that
+	// fetches: no pipeline text holds it, so psparse's reading of the chain
+	// (actionfacts.PowerShellFetchedContentExecution) is the match.
+	if actionfacts.PowerShellFetchedContentExecution(input) {
+		matchesByID["CMD-WIN-IWR-IEX"] = struct{}{}
 	}
 	for ruleID := range semanticOwners {
 		if trustedLegacyRuleCategory(generation, ruleID) == "command" &&

@@ -84,6 +84,7 @@ func boundedTruncatedFinding(set bounded.CapSet, enforcementCapable bool) RuleFi
 	reason := set.Reason()
 	finding.Title = boundedTruncatedTitle + " (" + reason + ")"
 	finding.Evidence = reason
+	finding.boundedCaps = set
 	if !enforcementCapable {
 		finding.enforcement = findingEnforcementAlertOnly
 	}
@@ -135,11 +136,42 @@ func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request t
 	out := slices.Clone(findings)
 	existing := &out[index]
 	withBoundedReason(existing, bound.Evidence)
+	existing.boundedCaps = existing.boundedCaps.Union(set)
 	if !existing.contributesToEnforcement() && !existing.contributesToAlertOnly() {
 		// A detection-only limit finding would leave the call allowed.
 		existing.enforcement = bound.enforcement
 		existing.proof = bound.proof
 	}
+	return out
+}
+
+// boundedCapsOf is the union of the caps the evaluation-limit findings in
+// findings stand for: the truncation a reading hit, wherever in its own
+// readings it was hit.
+func boundedCapsOf(findings []RuleFinding) bounded.CapSet {
+	var set bounded.CapSet
+	for _, finding := range findings {
+		if canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID {
+			set = set.Union(finding.boundedCaps)
+		}
+	}
+	return set
+}
+
+// withCarriedBoundedCaps keeps the truncation of a second reading in the call
+// it was joined to: a join keeps the call's own evaluation-limit finding over
+// the reading's, so the call's finding gains the reading's caps and their
+// reason (rel-1-0-10:GAP-0477). The join already holds a limit finding when
+// the reading had one; without one the findings are returned as they are.
+func withCarriedBoundedCaps(joined, reading []RuleFinding) []RuleFinding {
+	set := boundedCapsOf(reading)
+	index := boundedLimitIndex(joined)
+	if !set.Any() || index < 0 {
+		return joined
+	}
+	out := slices.Clone(joined)
+	withBoundedReason(&out[index], set.Reason())
+	out[index].boundedCaps = out[index].boundedCaps.Union(set)
 	return out
 }
 
