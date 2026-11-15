@@ -101,10 +101,20 @@ func runWindowsHookImageRetire() windowsHookImageRetireReport {
 		ReconcileCodex:  reconcileWindowsCodexRequirementsForHookImage,
 		RestartGuardian: func() error { return restartWindowsHookImageGuardian(guardian) },
 		Scan:            func() windowsHookImageConfigScan { return scanWindowsHookImageConfigs(roots, bin) },
-		Now:             time.Now,
-		Sleep:           time.Sleep,
-		Wait:            windowsHookImageRetireWait,
-		Poll:            windowsHookImageRetirePoll,
+		RouteOnlyRouted: func() ([]string, error) {
+			cfg, err := loadWindowsEnterpriseStandaloneConfig("")
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil, nil
+			}
+			if err != nil {
+				return nil, err
+			}
+			return managedRouteOnlyConnectors(cfg), nil
+		},
+		Now:   time.Now,
+		Sleep: time.Sleep,
+		Wait:  windowsHookImageRetireWait,
+		Poll:  windowsHookImageRetirePoll,
 	})
 }
 

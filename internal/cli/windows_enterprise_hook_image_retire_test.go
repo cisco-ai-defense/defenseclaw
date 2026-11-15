@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -862,5 +863,51 @@ func TestHookImageVendorEntryWithAnUnreadableOwnerIsAnAccountEntry(t *testing.T)
 	}, "\n")
 	if got := vendorFileLines(files); got != want || len(problems) != 0 {
 		t.Fatalf("planted file: files =\n%s\nwant\n%s\nproblems %v", got, want, problems)
+	}
+}
+
+// rel-1-0-10 GAP-0647: retire is the step before an older Setup, which
+// neither serves nor takes back route-only settings: it refuses while the
+// installed config routes an agent, before anything changes.
+func TestHookImageRetireRefusesWhileRouteOnlyRoutes(t *testing.T) {
+	r := newRetireFixture(t)
+	r.named = []map[string][]string{{}}
+	steps := r.steps()
+	steps.RouteOnlyRouted = func() ([]string, error) { return []string{"claudecode", "codex"}, nil }
+	report := retireWindowsHookImages(steps)
+	if report.OK || report.Reason != windowsHookImageRetireRefused || len(r.markers) != 0 || r.restarted != 0 || r.reconciled != 0 {
+		t.Fatalf("retire with route-only on = %+v; it must refuse and change nothing", report)
+	}
+	for _, want := range []string{"claudecode, codex", "routing.route_only.connectors", "/ensure", "route_config_drift", "Nothing was changed"} {
+		if !strings.Contains(report.Error, want) {
+			t.Fatalf("refusal %q does not name %q", report.Error, want)
+		}
+	}
+	steps.RouteOnlyRouted = func() ([]string, error) { return nil, nil }
+	if report := retireWindowsHookImages(steps); !report.OK || len(r.markers) != 1 {
+		t.Fatalf("retire with routing off = %+v", report)
+	}
+	steps.RouteOnlyRouted = func() ([]string, error) { return nil, errors.New("config_invalid") }
+	report = retireWindowsHookImages(steps)
+	if !report.OK || !strings.Contains(strings.Join(report.Notes, "\n"), "route_only_unchecked") {
+		t.Fatalf("retire with an unreadable config = %+v; want ok with a route_only_unchecked note", report)
+	}
+}
+
+func TestManagedRouteOnlyConnectors(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.Routing.Enabled = true
+	cfg.Routing.RouteOnly = config.RoutingRouteOnlyConfig{Connectors: []string{"codex", "cursor", "claudecode"}}
+	if got := strings.Join(managedRouteOnlyConnectors(cfg), ","); got != "claudecode,codex" {
+		t.Fatalf("routed = %q", got)
+	}
+	cfg.Routing.Enabled = false
+	if got := managedRouteOnlyConnectors(cfg); len(got) != 0 {
+		t.Fatalf("routing off routes %v", got)
+	}
+	cfg.Routing.Enabled, cfg.DeploymentMode, cfg.Enterprise.Profile = true, "", ""
+	if got := managedRouteOnlyConnectors(cfg); len(got) != 0 || managedRouteOnlyConnectors(nil) != nil {
+		t.Fatalf("an OSS config routes %v", got)
 	}
 }
