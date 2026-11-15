@@ -389,3 +389,5 @@
 {"id": "g596r2-y16", "dialect": "", "command": "kill $(cat \"$home/.defenseclaw/gateway.pid\")", "want": ""}
 {"id": "g596r2-y17", "dialect": "", "command": "kill $(cat /tmp/x/.defenseclaw/gateway.pid)", "want": ""}
 {"id": "g596r2-y18", "dialect": "", "command": "kill $(cat $HOME/.defenseclaw/gateway.pid)", "want": "stop"}
+{"id": "g596d3-c01", "dialect": "", "command": "defenseclaw guardrail cascade explain", "want": ""}
+{"id": "g596d3-c02", "dialect": "", "command": "defenseclaw guardrail cascade explain --json --last 5", "want": ""}
