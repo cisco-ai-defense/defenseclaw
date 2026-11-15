@@ -1411,7 +1411,7 @@ var (
 		"quarantine_dir": true, "plugin_dir": true, "policy_dir": true, "environment": true,
 		"tenant_id": true, "workspace_id": true, "deployment_mode": true, "discovery_source": true,
 		"claw": true, "agent": true, "acp": true, "inspect_llm": true, "cisco_ai_defense": true,
-		"scanners": true, "openshell": true, "watch": true, "firewall": true, "guardrail": true,
+		"scanners": true, "openshell": true, "substrate": true, "watch": true, "firewall": true, "guardrail": true,
 		"gateway": true, "cloud_auth": true, "asset_policy": true, "registries": true,
 		"claude_code": true, "codex": true, "connector_hooks": true, "application_protection": true,
 		"managed": true, "enterprise": true, "fleet": true, "connectors": true, "admission": true,
