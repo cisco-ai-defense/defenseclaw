@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"path"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -18,8 +19,16 @@ import (
 const maxArgvDecodeBytes = 256 << 10
 
 // maxLauncherBodyDepth bounds the launchers read through one another
-// (cmd /c powershell -Command ...): each level is one more analysis.
-const maxLauncherBodyDepth = 2
+// (cmd /c powershell -Command ...): each level is one more analysis. It is the
+// depth the over-limit launcher screen reads (actionfacts
+// maxLauncherScriptDepth); a launcher nested deeper is TRUNCATED at the depth
+// cap, never a silent allow (rel-1-0-10:GAP-0806).
+const maxLauncherBodyDepth = 4
+
+// maxLauncherPrefixBytes is the most a wrapper's words before the launcher
+// (sudo -u x, env NAME=value, timeout 5) may hold for the launcher script to
+// count as the whole call: longer wrapper words are not read either.
+const maxLauncherPrefixBytes = 4 << 10
 
 // trustedArgvCommandInput returns the argv array a shell execution tool call
 // sends as its command (the Codex shell tool: ["powershell.exe", "-Command",
@@ -51,14 +60,27 @@ func trustedArgvCommandInput(input actionfacts.Input) ([]string, bool) {
 	return argv, true
 }
 
+// launcherBodyReading is the second reading of a shell launcher call
+// (launcherBodyTwinRequest): the request that reads it, whether the launcher's
+// script is all the call runs (fully: no unread wrapper words, no words after
+// a POSIX -c script that it may run), and whether a launcher was found past
+// maxLauncherBodyDepth (depthCut).
+type launcherBodyReading struct {
+	twin     trustedActionRequest
+	read     bool
+	fully    bool
+	depthCut bool
+}
+
 // launcherBodyTwinRequest is the second reading of a shell launcher call, so
 // that a launcher gets the same verdict as an argv command and as one command
-// string (rel-1-0-10:GAP-0711, GAP-0712, GAP-0735). The Codex Windows shell
-// tool sends powershell.exe -Command, pwsh -c or cmd /c as an argv array or as
-// one string. The argv analysis stopped at the launcher unless the startup
-// scripts were switched off (-NoProfile, /d) and read no word past 4 KiB, so a
-// protected write in the script went unread in every pack, and a script past
-// the reading bounds had no limit finding at all.
+// string, however it is spelled (rel-1-0-10:GAP-0711, GAP-0712, GAP-0735,
+// GAP-0804, GAP-0805). The Codex Windows shell tool sends powershell.exe
+// -Command, pwsh -c or cmd /c as an argv array or as one string, at any
+// install path, behind a wrapper (start "", wsl -e, sudo, env, nohup,
+// timeout, xargs) or in a later statement. actionfacts.ShellLauncherCall
+// names the launcher with the over-limit screen's wrapper reading, so the
+// screen and this reading agree on which launcher a call runs.
 //
 //   - CMD launcher (argv or string): the script is judged as the CMD command
 //     it is, whatever AutoRun does before it.
@@ -67,62 +89,76 @@ func trustedArgvCommandInput(input actionfacts.Input) ([]string, bool) {
 //     command, with its own statement budget, PowerShellCappedRuns and the
 //     TRUNCATED floor of trustedReadingCut: a proven finding in the read
 //     part keeps its verdict, the rest is at least the unknown tier.
-//   - PowerShell launcher in an argv array, script within the bounds: the
-//     same call as one command string (powerShellLineOfArgv), so the
-//     existing readings of a string launcher (the profile wrapper reduction,
-//     which counts only a match a profile or an outer redirect cannot undo)
-//     decide, and the two forms agree.
+//   - PowerShell launcher within the bounds in an argv array, behind a
+//     wrapper, at a path or in a later statement: the launcher alone, as the
+//     one command line `<pwsh|powershell>[.exe] <words>` the bare launcher
+//     is (powerShellLineOfArgv), so the readings of a bare launcher string
+//     (psparse's script reading, the profile wrapper reduction, which counts
+//     only a match a profile or an outer redirect cannot undo) decide, and
+//     every spelling agrees with the bare one.
 //   - POSIX launcher (bash -c): the script only when the call's own analysis
 //     is limit_exceeded.
 //
-// A PowerShell launcher string within the bounds keeps the readings it had.
-func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Facts) (trustedActionRequest, bool) {
-	if request.simpleCommandPass || request.readingTwin || request.launcherDepth >= maxLauncherBodyDepth {
-		return trustedActionRequest{}, false
+// A bare PowerShell launcher string within the bounds keeps the readings it
+// has.
+func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Facts) launcherBodyReading {
+	if request.simpleCommandPass || request.readingTwin || request.hostScriptTwinOff {
+		// hostScriptTwinOff turns both launcher script readings off: this one
+		// and psparse's (hostScriptTwinRequests).
+		return launcherBodyReading{}
 	}
 	var (
-		body    string
-		dialect actionfacts.Dialect
-		argv    []string
+		call      actionfacts.LauncherCall
+		words     []string
+		statement int
+		ok        bool
 	)
 	argv, isArgv := trustedArgvCommandInput(request.Input)
 	if isArgv {
-		var ok bool
-		if body, dialect, ok = actionfacts.ShellLauncherBody(argv); !ok {
-			return trustedActionRequest{}, false
-		}
+		words = argv
+		call, ok = actionfacts.ShellLauncherCall(argv)
 	} else {
 		text, known := trustedBashCommandInput(request.Input)
 		if !known {
-			return trustedActionRequest{}, false
+			return launcherBodyReading{}
 		}
-		var ok bool
-		if body, dialect, ok = actionfacts.ShellLauncherBodyOfText(text); !ok {
-			return trustedActionRequest{}, false
-		}
+		call, words, statement, ok = actionfacts.ShellLauncherCallOfText(text)
 	}
+	if !ok {
+		return launcherBodyReading{}
+	}
+	if request.launcherDepth >= maxLauncherBodyDepth {
+		return launcherBodyReading{depthCut: true}
+	}
+	prefix := 0
+	for _, word := range words[:call.Start] {
+		prefix += len(word)
+	}
+	reading := launcherBodyReading{read: true, fully: !call.Trailing && prefix <= maxLauncherPrefixBytes}
 	twin := request
 	twin.launcherDepth++
 	twin.record, twin.recordTelemetry = nil, nil
 	twin.conflictSource = nil
-	switch dialect {
+	switch call.Dialect {
 	case actionfacts.DialectPOSIX:
 		// A POSIX launcher string keeps the readings it has (its script is
 		// read inside the call); only an argv array, whose words the analysis
 		// bounds one by one, needs the script read on its own.
 		if !isArgv || facts.Parse.Status != actionfacts.StatusLimitExceeded {
-			return trustedActionRequest{}, false
+			return launcherBodyReading{}
 		}
 	case actionfacts.DialectPowerShell:
 		bodyFacts := actionfacts.Analyze(actionfacts.Input{
-			Tool: request.Input.Tool, Command: body, DialectHint: dialect, CWD: request.Input.CWD,
+			Tool: request.Input.Tool, Command: call.Body, DialectHint: call.Dialect, CWD: request.Input.CWD,
 			ActiveHome: request.Input.ActiveHome,
 		})
 		if bodyFacts.Parse.Status != actionfacts.StatusLimitExceeded {
-			if !isArgv {
-				return trustedActionRequest{}, false
+			launcher := words[call.Start:]
+			bare := launcherProgramName(launcher[0])
+			if !isArgv && statement == 0 && call.Start == 0 && bare == launcher[0] {
+				return launcherBodyReading{}
 			}
-			line := powerShellLineOfArgv(argv)
+			line := powerShellLineOfArgv(append([]string{bare}, launcher[1:]...))
 			twin.Input.Command, twin.Input.Args, twin.Input.Argv = line, nil, nil
 			// The dialect the Windows hook gives the same text as a string.
 			twin.Input.DialectHint = actionfacts.DialectPowerShell
@@ -131,13 +167,23 @@ func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Fac
 				twin.Input.DialectHint, _ = selectWindowsShellDialectReading(request.Input.Tool, line, twin.Input)
 			}
 			twin.LegacyText = line
-			return twin, true
+			reading.twin = twin
+			return reading
 		}
 	}
-	twin.Input.Command, twin.Input.Args, twin.Input.Argv = body, nil, nil
-	twin.Input.DialectHint = dialect
-	twin.LegacyText = body
-	return twin, true
+	twin.Input.Command, twin.Input.Args, twin.Input.Argv = call.Body, nil, nil
+	twin.Input.DialectHint = call.Dialect
+	twin.LegacyText = call.Body
+	reading.twin = twin
+	return reading
+}
+
+// launcherProgramName is the launcher program word as the bare launcher is
+// written: the lower-case file name of the program at any path (a quoted
+// install path such as C:\Program Files\PowerShell\7\pwsh.exe is pwsh.exe,
+// rel-1-0-10:GAP-0804).
+func launcherProgramName(word string) string {
+	return strings.ToLower(path.Base(strings.ReplaceAll(word, `\`, "/")))
 }
 
 // powerShellLineOfArgv is argv as one PowerShell command line: each word that

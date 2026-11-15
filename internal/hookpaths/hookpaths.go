@@ -1438,7 +1438,7 @@ func ResolveWriteTarget(path string) (string, bool) {
 	// The reach scans of a shell call ask for every word of it again for each
 	// statement, 446,000 file system reads for 100 PowerShell lines, 27 s on a
 	// Windows host (rel-1-0-10:GAP-0766).
-	if call := currentHookCall(); call != nil {
+	if call := memoHookCall(); call != nil {
 		return call.targets().resolveWriteTarget(path)
 	}
 	return resolveWritePath(path, 0)
@@ -1505,7 +1505,7 @@ func newProtectedFiles(home string) protectedFiles {
 	// shell call ask for it for every statement, and each read walks every key
 	// file path and reads each file (rel-1-0-10:GAP-0766). The files are the
 	// same files for the whole decision.
-	if call := currentHookCall(); call != nil {
+	if call := memoHookCall(); call != nil {
 		return call.targets().protectedFiles(home)
 	}
 	return newProtectedFilesWith(home, nil)
@@ -4492,6 +4492,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	// the command changes directory first.
 	changesDirectory := tactics.RunsProgram(command, cdPrograms...)
 	sequential := sequentialListCalls(file)
+	pipedCalls := pipedInputCalls(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
 		if !isCall || len(call.Args) == 0 {
@@ -4601,7 +4602,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			})
 		}
 		if opaqueProgram(program) {
-			if program == "new-item" && !powerShellNewItemMayMakeLink(words[1:], static[1:]) {
+			if program == "new-item" && !powerShellNewItemMayMakeLink(words[1:], static[1:], pipedCalls[call]) {
 				// A file or a folder: New-Item makes no link (GAP-0801).
 				return true
 			}
@@ -8844,4 +8845,20 @@ func stepFollows(parts []string) bool {
 		}
 	}
 	return false
+}
+
+// pipedInputCalls are the calls that read the output of the pipeline stage
+// before them (every stage after the first): a PowerShell parameter can bind
+// from that input (rel-1-0-10:GAP-0849).
+func pipedInputCalls(file *syntax.File) map[*syntax.CallExpr]bool {
+	piped := make(map[*syntax.CallExpr]bool)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if pipe, ok := node.(*syntax.BinaryCmd); ok && (pipe.Op == syntax.Pipe || pipe.Op == syntax.PipeAll) && pipe.Y != nil {
+			if call, isCall := pipe.Y.Cmd.(*syntax.CallExpr); isCall {
+				piped[call] = true
+			}
+		}
+		return true
+	})
+	return piped
 }
