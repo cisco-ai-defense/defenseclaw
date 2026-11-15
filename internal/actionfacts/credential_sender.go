@@ -260,9 +260,15 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 	}
 	reason := CredentialSenderNone
 	for _, sender := range reading.Senders {
-		// an exact projected upload of a complete call is judged by the
-		// credential-file upload rule
-		exact := !(sender.Origin == SenderProjected && facts.Authoritative())
+		// A projected upload or remote copy (curl, scp, rsync, wget: the
+		// exact credential-file upload rule judges its files) keeps that
+		// rule's reach; the file check here is for the senders it does not
+		// read: a network role, an unproven role, a part the projection did
+		// not read.
+		exact := sender.Origin != SenderProjected && sender.Origin != SenderRemoteCopy
+		if sender.Origin == SenderRemoteCopy && remoteOperandCount(sender.Operands) >= 2 {
+			exact = true // scp -3: the file goes through the local host to a second remote
+		}
 		for _, operand := range sender.Operands {
 			if exact && credentialPathOperand(operand, facts.CWD, facts.ActiveHome) {
 				return CredentialSenderFile
@@ -301,7 +307,7 @@ func credentialToRemoteOperand(facts Facts) CredentialSenderReason {
 			switch {
 			case credentialPathOperand(word, facts.CWD, facts.ActiveHome):
 				credential = true
-			case unprovenRemoteOperand(word) || namedRemoteOperand(word):
+			case unprovenRemoteOperand(word):
 				remote = true
 			}
 		}
@@ -310,13 +316,6 @@ func credentialToRemoteOperand(facts Facts) CredentialSenderReason {
 		}
 	}
 	return CredentialSenderNone
-}
-
-// namedRemoteOperand is name:path of a configured remote (rclone remote:bucket,
-// docker cp ctr:/path): a name of two letters or more before the colon.
-func namedRemoteOperand(word string) bool {
-	m := senderRemoteOperand.FindStringSubmatch(word)
-	return m != nil && len(m[1]) >= 2 && len(word) > len(m[0])
 }
 
 // credentialProducerFeeds reports a command, up to hops pipe stages before
@@ -370,7 +369,7 @@ func credentialPathOperand(word, cwd, home string) bool {
 // remote operand.
 func senderOperandPath(word, cwd, home string) (string, bool) {
 	value := strings.TrimSpace(word)
-	if value == "" || len(value) > 4096 || strings.ContainsAny(value, "\x00\n") ||
+	if value == "" || len(value) > 4096 || strings.ContainsAny(value, "\x00\n$`{}") ||
 		strings.HasPrefix(value, "-") || senderURLOperand.MatchString(value) || unprovenRemoteOperand(value) {
 		return "", false
 	}
@@ -466,4 +465,14 @@ func credentialMayHold(word, cwd, home string) bool {
 		return canonical == home || canonical == "/" || strings.HasPrefix(home, canonical+"/")
 	}
 	return canonical == "/"
+}
+
+func remoteOperandCount(operands []string) int {
+	count := 0
+	for _, operand := range operands {
+		if _, remote := remoteOperandHost(operand); remote {
+			count++
+		}
+	}
+	return count
 }
