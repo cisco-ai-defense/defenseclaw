@@ -149,6 +149,7 @@ func (e *S7Engine) Deterministic(ctx context.Context, toolName string, args json
 	}()
 	actionTool := agentHookTrustedActionTool(e.connector, toolName, runtime.GOOS)
 	trusted, toolCWD := agentHookTrustedActionArgs(e.connector, toolName, args)
+	actionTool, trusted = agentHookNativeFileView(actionTool, trusted)
 	if toolCWD == "" {
 		toolCWD = cwd
 	}

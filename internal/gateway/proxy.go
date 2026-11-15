@@ -5804,10 +5804,11 @@ func injectNotificationForPassthrough(raw json.RawMessage, content, path string)
 func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args string) trustedActionRequest {
 	connectorName := p.connectorName()
 	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, json.RawMessage(args))
+	actionTool, trusted := agentHookNativeFileView(agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS), trusted)
 	cfg := proxyDecisionConfig(ctx)
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
-			Tool:       agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS),
+			Tool:       actionTool,
 			Args:       trusted,
 			CWD:        proxyToolCallCWD(toolCWD),
 			ActiveHome: hookActiveHome(ctx),

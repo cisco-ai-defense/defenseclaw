@@ -886,10 +886,11 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 	if strings.EqualFold(strings.TrimSpace(req.Connector), "opencode") {
 		actionTool = agentHookTrustedActionTool(req.Connector, req.Tool, "")
 	}
+	actionTool, actionArgs := agentHookNativeFileView(actionTool, req.Args)
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
 			Tool:       actionTool,
-			Args:       req.Args,
+			Args:       actionArgs,
 			ActiveHome: hookActiveHome(ctx),
 		},
 		LegacyText:         string(req.Args),

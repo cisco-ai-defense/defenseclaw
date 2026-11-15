@@ -4156,6 +4156,9 @@ func (a *APIServer) inspectAgentHookToolCall(
 			actionTool, trustedArgs = tool, args
 		}
 	}
+	if actionTool == fallbackTool {
+		actionTool, trustedArgs = agentHookNativeFileView(actionTool, trustedArgs)
+	}
 	// A sandbox shell call is also judged on its command alone when its
 	// other arguments leave the parse partial.
 	command, commandTool := sandboxShellCommand(ctx, req.ConnectorName, req.HookEventName, req.ToolName, actionTool, req.ToolArgs)
@@ -4298,6 +4301,17 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 	// argument) still runs its command in the directory it names; judged
 	// in the session's, the command alone could miss a rule (GAP-0694).
 	return args, connector.ShellCommandCWD(connectorName, toolName, args)
+}
+
+// agentHookNativeFileView is a native file write, edit or read tool call as
+// the Claude Code Write, Edit or Read it performs
+// (connector.NativeFileToolView), so it gets the same file facts, protected
+// paths and content scan on every route; any other call is unchanged.
+func agentHookNativeFileView(tool string, args json.RawMessage) (string, json.RawMessage) {
+	if view, projected, ok := connector.NativeFileToolView(tool, args); ok {
+		return view, projected
+	}
+	return tool, args
 }
 
 // agentHookWindowsDialectHint reports whether a structured tool call's
