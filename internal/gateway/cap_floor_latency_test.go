@@ -45,10 +45,11 @@ func capFloorLatencyShapes() []struct{ name, connector, command string } {
 
 // capFloorLatencyRel is each shape's median decision time over the median
 // time of the reference call (ls -la), measured on rel/1.0.10 16f68a06f6
-// with this test (plain build, GOMAXPROCS=4, dc-s7-bench2, GAP-0844).
+// with this test (plain build, GOMAXPROCS=4, dc-s7-bench2, mean of 5 runs at
+// load 40 to 65, GAP-0844).
 var capFloorLatencyRel = map[string]float64{
-	"T1-one-file-write": 1.95, "T2-write-4-targets": 10.0, "T3-codex-git-status": 1.01, "T4-benign-read": 1.13,
-	"T5-compound-1.5KB": 72.0, "L1-and-chain-6KB": 3.73, "L2-redirects600-9.5KB": 105.5, "L3-list-7KB": 11.8,
+	"T1-one-file-write": 1.83, "T2-write-4-targets": 9.74, "T3-codex-git-status": 1.07, "T4-benign-read": 1.12,
+	"T5-compound-1.5KB": 74.5, "L1-and-chain-6KB": 3.55, "L2-redirects600-9.5KB": 103.3, "L3-list-7KB": 11.0,
 }
 
 // TestCapFloorLatencyStaysNearRel is the GAP-0844 latency guard: a benign

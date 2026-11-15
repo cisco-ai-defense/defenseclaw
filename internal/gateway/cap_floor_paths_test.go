@@ -85,7 +85,7 @@ func TestCapFloorLinkedProjectPathKeepsItsBlock(t *testing.T) {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		alone, _ := boundedDecideClaudeCode(t, api, env, boundedShellCommand(statement))
 		for name, command := range map[string]string{
-			"nest":  strings.Repeat("(", 64) + statement + strings.Repeat(")", 64),
+			"nest": strings.Repeat("(", 64) + statement + strings.Repeat(")", 64),
 			// Past the analysis depth, under the statement budget.
 			"chain": capFloorGrepChain(40) + " && " + statement + " && " + capFloorGrepChain(40),
 		} {
