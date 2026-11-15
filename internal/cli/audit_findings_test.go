@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -231,8 +232,8 @@ func TestAuditFindingsBadFlagFailsBeforeStoreOpens(t *testing.T) {
 	for _, c := range cases {
 		auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit, auditFindingsTarget = c.since, c.newOnly, c.limit, c.target
 		err := auditFindingsPersistentPreRunE(auditFindingsCmd, nil)
-		if commandExitCode(err) != 2 || !strings.Contains(err.Error(), "--help") {
-			t.Errorf("%+v = %v (exit %d), want a usage error with exit 2", c, err, commandExitCode(err))
+		if cliusage.ExitCode(err) != 2 || !strings.Contains(err.Error(), "--help") {
+			t.Errorf("%+v = %v (exit %d), want a usage error with exit 2", c, err, cliusage.ExitCode(err))
 		}
 		if auditStore != nil {
 			t.Fatalf("%+v opened the audit store", c)

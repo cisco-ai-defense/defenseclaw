@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
@@ -61,9 +62,9 @@ func newEnterpriseBundleFloorCheckCommand() *cobra.Command {
 			}
 			env, err := newUnixLifecycleEnv(runtime.GOOS)
 			if err != nil {
-				return withExitCode(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}, bundleFloorRefusedExit)
+				return cliusage.WithExitCode(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}, bundleFloorRefusedExit)
 			}
-			return withExitCode(env.BundleProductFloorRefusal(strings.TrimSpace(version)), bundleFloorRefusedExit)
+			return cliusage.WithExitCode(env.BundleProductFloorRefusal(strings.TrimSpace(version)), bundleFloorRefusedExit)
 		},
 	}
 	cmd.Flags().StringVar(&version, "product-version", "", "the DefenseClaw version about to be installed")

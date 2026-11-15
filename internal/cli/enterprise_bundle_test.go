@@ -29,8 +29,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/spf13/cobra"
 )
 
@@ -131,7 +133,7 @@ func runBundle(t *testing.T, args ...string) (string, int) {
 	if err == nil {
 		return out.String(), 0
 	}
-	return out.String(), commandExitCode(err)
+	return out.String(), cliusage.ExitCode(err)
 }
 
 func (e *bundleCLIEnv) signArgs(extra ...string) []string {
@@ -334,9 +336,9 @@ func TestEnterpriseBundleRefusals(t *testing.T) {
 
 // Secure Client keeps the command tree of main: the group is absent.
 func TestEnterpriseBundleAbsentOnSecureClient(t *testing.T) {
-	saved := secureClientHost
-	t.Cleanup(func() { secureClientHost = saved })
-	secureClientHost = func() bool { return true }
+	saved := hookcli.SecureClientHost
+	t.Cleanup(func() { hookcli.SecureClientHost = saved })
+	hookcli.SecureClientHost = func() bool { return true }
 	root := &cobra.Command{Use: "defenseclaw-gateway"}
 	enterprise := &cobra.Command{Use: "enterprise"}
 	enterprise.AddCommand(newEnterpriseBundleCommand())

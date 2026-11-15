@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -81,11 +82,11 @@ func managedScanUnavailable(kind, target string) error {
 		scanner = "plugin"
 	}
 	if err := managedScanUnixRuntime(); errors.Is(err, managed.ErrNoScannerRuntime) {
-		return withExitCode(fmt.Errorf("scan %s: this DefenseClaw deployment has no %s scanner: the managed defenseclaw-enterprise package "+
+		return cliusage.WithExitCode(fmt.Errorf("scan %s: this DefenseClaw deployment has no %s scanner: the managed defenseclaw-enterprise package "+
 			"(rpm, deb or macOS pkg) installs the scanner runtime, a deployment from the payload archive does not. Install the package "+
 			"to run this scan. Nothing was scanned", kind, scanner), 3)
 	} else if err != nil {
-		return withExitCode(fmt.Errorf("scan %s: the scanner runtime the package installed is not trusted (%v); reinstall the "+
+		return cliusage.WithExitCode(fmt.Errorf("scan %s: the scanner runtime the package installed is not trusted (%v); reinstall the "+
 			"defenseclaw-enterprise package to restore it. Nothing was scanned", kind, err), 3)
 	}
 	if kind == "mcp" {
@@ -110,7 +111,7 @@ func managedScanTargetReadable(kind, target string) error {
 	}
 	for _, dir := range hidden {
 		if resolved == dir || strings.HasPrefix(resolved, dir+"/") {
-			return withExitCode(fmt.Errorf("scan %s: %s is inside %s, which the managed DefenseClaw gateway service cannot read. "+
+			return cliusage.WithExitCode(fmt.Errorf("scan %s: %s is inside %s, which the managed DefenseClaw gateway service cannot read. "+
 				"Copy the folder outside home and temporary folders, readable by all accounts (for example `sudo mkdir -p /opt/defenseclaw-scan && "+
 				"sudo cp -R %s /opt/defenseclaw-scan/`), and scan that copy. Nothing was scanned", kind, target, dir, target), 3)
 		}

@@ -20,7 +20,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // The identity views of a managed host. A managed install ships this Go CLI
@@ -83,7 +85,6 @@ const enterpriseIdentityViewAnnotation = "defenseclaw.identity-view"
 // changed, and the flag annotation secureClientUsageAnnotation the usage
 // line of main for a flag (issue #1092).
 const (
-	secureClientAbsentAnnotation = "defenseclaw.secure-client-absent"
 	secureClientHiddenAnnotation = "defenseclaw.secure-client-hidden"
 	secureClientShortAnnotation  = "defenseclaw.secure-client-short"
 	secureClientLongAnnotation   = "defenseclaw.secure-client-long"
@@ -104,13 +105,13 @@ const (
 // acp, audit export, rulepack), or a flag carries secureClientUsageAnnotation
 // (enterprise windows discovery --user, sandbox setup --no-mounts).
 func keepCommandTreeOfMainOnSecureClient(root *cobra.Command) {
-	if !secureClientHost() {
+	if !hookcli.SecureClientHost() {
 		return
 	}
 	var keep func(parent *cobra.Command)
 	keep = func(parent *cobra.Command) {
 		for _, cmd := range parent.Commands() {
-			if cmd.Annotations[enterpriseIdentityViewAnnotation] != "" || cmd.Annotations[secureClientAbsentAnnotation] != "" {
+			if cmd.Annotations[enterpriseIdentityViewAnnotation] != "" || cmd.Annotations[hookcli.SecureClientAbsentAnnotation] != "" {
 				parent.RemoveCommand(cmd)
 				continue
 			}
@@ -143,7 +144,7 @@ func keepCommandTreeOfMainOnSecureClient(root *cobra.Command) {
 // does. pflag cannot delete a flag, so the command gets new flag sets with
 // every other flag (and its value binding) kept.
 func dropSecureClientAbsentFlags(cmd *cobra.Command) {
-	absent := func(flag *pflag.Flag) bool { return len(flag.Annotations[secureClientAbsentAnnotation]) > 0 }
+	absent := func(flag *pflag.Flag) bool { return len(flag.Annotations[hookcli.SecureClientAbsentAnnotation]) > 0 }
 	found := false
 	for _, set := range []*pflag.FlagSet{cmd.Flags(), cmd.PersistentFlags()} {
 		set.VisitAll(func(flag *pflag.Flag) { found = found || absent(flag) })
@@ -280,7 +281,7 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 				// command fails, as `defenseclaw guardrail profile explain`
 				// does. A resolved account with no matching profile succeeds.
 				if lookupErr := unresolvedProfileExplainAccount(answer); lookupErr != "" {
-					failure := withExitCode(fmt.Errorf("user lookup failed: %s", lookupErr), enterprisestatus.UnixExitFailure)
+					failure := cliusage.WithExitCode(fmt.Errorf("user lookup failed: %s", lookupErr), enterprisestatus.UnixExitFailure)
 					silenceJSONReportedError(cmd, asJSON, failure)
 					return failure
 				}
@@ -309,7 +310,7 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 // elevation_required, and for a --json caller the errors[] document on
 // stdout instead of a bare line, so every view refuses alike (GAP-0333).
 func managedAdminViewRefusal(cmd *cobra.Command, err error, asJSON bool) error {
-	refusal := withExitCode(&managedViewRefusal{code: "elevation_required", message: err.Error()}, enterprisestatus.UnixExitFailure)
+	refusal := cliusage.WithExitCode(&managedViewRefusal{code: "elevation_required", message: err.Error()}, enterprisestatus.UnixExitFailure)
 	if asJSON {
 		writeManagedViewRefusalJSON(cmd.OutOrStdout(), refusal)
 		silenceJSONReportedError(cmd, true, refusal)
@@ -338,10 +339,10 @@ func printEnterpriseIdentityView(w io.Writer, answer json.RawMessage) error {
 // enterpriseIdentityViewError keeps an invalid-arguments refusal's exit code
 // and gives any other failure the platform's failure code.
 func enterpriseIdentityViewError(err error) error {
-	if commandExitCode(err) == enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
+	if cliusage.ExitCode(err) == enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
 		return err
 	}
-	return withExitCode(err, enterprisestatus.UnixExitFailure)
+	return cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 }
 
 // unresolvedProfileExplainAccount returns the gateway's lookup_error when

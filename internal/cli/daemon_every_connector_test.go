@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
@@ -33,7 +34,7 @@ func TestEveryConnectorGuardedErrorNamesEachSkippedConnector(t *testing.T) {
 		},
 	}
 	err := everyConnectorGuardedError(cfg, snap)
-	if code := commandExitCode(err); code != 3 {
+	if code := cliusage.ExitCode(err); code != 3 {
 		t.Fatalf("exit code = %d (err %v), want 3", code, err)
 	}
 	for _, want := range []string{
@@ -82,7 +83,7 @@ func TestEveryConnectorGuardedErrorRefusesAGuardrailThatIsNotRunning(t *testing.
 			snap.Guardrail.LastError = "multi-connector boot: all 2 configured connectors failed setup"
 		}
 		err := everyConnectorGuardedError(cfg, snap)
-		if code := commandExitCode(err); code != 3 || !strings.Contains(err.Error(), "guards no connector yet") {
+		if code := cliusage.ExitCode(err); code != 3 || !strings.Contains(err.Error(), "guards no connector yet") {
 			t.Fatalf("guardrail %s: exit %d err %v, want 3 naming the unguarded state", state, code, err)
 		}
 	}
@@ -94,7 +95,7 @@ func TestEveryConnectorGuardedErrorKeepsTheAdmissionRefusal(t *testing.T) {
 	snap.Guardrail.LastError = "hook contract admission failed: connector codex hook contract drift detected"
 	snap.Guardrail.Details = map[string]interface{}{gateway.GuardrailHookContractAdmissionRefused: []interface{}{"codex"}}
 	err := everyConnectorGuardedError(cfg, snap)
-	if code := commandExitCode(err); code != 3 || !strings.Contains(err.Error(), "hook-contract admission refused codex") {
+	if code := cliusage.ExitCode(err); code != 3 || !strings.Contains(err.Error(), "hook-contract admission refused codex") {
 		t.Fatalf("exit %d err %v, want the admission refusal", code, err)
 	}
 }

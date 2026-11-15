@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 var (
@@ -44,7 +45,7 @@ Administrator prompt (Windows): it then reads the managed deployment's
 store.`,
 	// The store is never on there, so a Secure Client computer keeps main's
 	// command set (issue #1092).
-	Annotations: map[string]string{secureClientAbsentAnnotation: "true"},
+	Annotations: map[string]string{hookcli.SecureClientAbsentAnnotation: "true"},
 	// A bad flag value fails before the audit store opens (GAP-2126).
 	PersistentPreRunE: auditRejectedPersistentPreRunE,
 	RunE:              runAuditRejected,

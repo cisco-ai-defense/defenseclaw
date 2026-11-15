@@ -31,11 +31,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -81,14 +83,14 @@ func checkLockWait(cmd *cobra.Command, wait time.Duration) error {
 func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLifecycleOptions) error {
 	goos := platformGOOS(platform)
 	if enterpriseunix.CurrentGOOS() != goos {
-		return withExitCode(fmt.Errorf("`enterprise %s` manages %s hosts; this host is %s", platform, goos, enterpriseunix.CurrentGOOS()), enterprisestatus.UnixExitInvalidArgs)
+		return cliusage.WithExitCode(fmt.Errorf("`enterprise %s` manages %s hosts; this host is %s", platform, goos, enterpriseunix.CurrentGOOS()), enterprisestatus.UnixExitInvalidArgs)
 	}
 	if err := checkLockWait(cmd, opts.lockWait); err != nil {
 		return lifecycleArgumentError(cmd, action, opts.json, err)
 	}
 	env, err := newUnixLifecycleEnv(goos)
 	if err != nil {
-		return withExitCode(err, enterprisestatus.UnixExitFailure)
+		return cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait
@@ -150,11 +152,11 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 func runUnixTransactionWatch(cmd *cobra.Command, platform string, pid int, snapshot string) error {
 	goos := platformGOOS(platform)
 	if enterpriseunix.CurrentGOOS() != goos {
-		return withExitCode(fmt.Errorf("`enterprise %s` manages %s hosts; this host is %s", platform, goos, enterpriseunix.CurrentGOOS()), enterprisestatus.UnixExitInvalidArgs)
+		return cliusage.WithExitCode(fmt.Errorf("`enterprise %s` manages %s hosts; this host is %s", platform, goos, enterpriseunix.CurrentGOOS()), enterprisestatus.UnixExitInvalidArgs)
 	}
 	env, err := newUnixLifecycleEnv(goos)
 	if err != nil {
-		return withExitCode(err, enterprisestatus.UnixExitFailure)
+		return cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	return enterpriseunix.WatchTransaction(cmd.Context(), env, pid, snapshot)
 }
@@ -243,12 +245,12 @@ func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairComman
 		if result.PendingApply && result.ExitCode != 0 {
 			// A status that found a change being applied is ok, and exits
 			// 75 so its caller asks again for the full state (GAP-0129).
-			return withExitCode(errors.New(result.Action+" found another lifecycle run applying a change (pending_apply); run it again when that run finishes"), result.ExitCode)
+			return cliusage.WithExitCode(errors.New(result.Action+" found another lifecycle run applying a change (pending_apply); run it again when that run finishes"), result.ExitCode)
 		}
 		return nil
 	}
 	if asJSON || len(result.Errors) == 0 {
-		return withExitCode(errors.New(lifecycleErrorSummary(result)), result.ExitCode)
+		return cliusage.WithExitCode(errors.New(lifecycleErrorSummary(result)), result.ExitCode)
 	}
 	message := fmt.Sprintf("%s failed; see the %s listed above", result.Action, countNoun(len(result.Errors), "problem"))
 	// A status that found another run in progress checked nothing, so
@@ -264,12 +266,12 @@ func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairComman
 		}
 		message += ". Run `" + repairCommand + "` as root to fix " + target
 	}
-	return withExitCode(errors.New(message), result.ExitCode)
+	return cliusage.WithExitCode(errors.New(message), result.ExitCode)
 }
 
 func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON bool) error {
 	if asJSON {
-		result.PreserveNotRootDeploymentState = secureClientHost()
+		result.PreserveNotRootDeploymentState = hookcli.SecureClientHost()
 		encoder := json.NewEncoder(w)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(result)
@@ -554,7 +556,7 @@ func runUnixSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) erro
 	goos := enterpriseunix.CurrentGOOS()
 	env, err := newUnixLifecycleEnv(goos)
 	if err != nil {
-		return withExitCode(err, enterprisestatus.UnixExitFailure)
+		return cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	states, err := env.SecretStatus()
 	if errors.Is(err, fs.ErrPermission) {
@@ -564,7 +566,7 @@ func runUnixSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) erro
 			filepath.Join(env.Layout.BinDir, "defenseclaw-gateway")))
 	}
 	if err != nil {
-		return withExitCode(err, enterprisestatus.UnixExitFailure)
+		return cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	if opts.json {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"schema_version": 1, "secrets": states})
@@ -587,7 +589,7 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	goos := enterpriseunix.CurrentGOOS()
 	env, err := newUnixLifecycleEnv(goos)
 	if err != nil {
-		return nil, false, nil, withExitCode(err, enterprisestatus.UnixExitFailure)
+		return nil, false, nil, cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	if env.Geteuid() != 0 {
 		return nil, false, nil, secretFailed("not_root", enterprisestatus.UnixExitFailure, errors.New("run this command as root"))
@@ -614,7 +616,7 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	if action == "set" {
 		if opts.fromFile != "" {
 			if err := enterpriseunix.TrustedSecretSource(opts.fromFile); err != nil {
-				return nil, false, nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+				return nil, false, nil, cliusage.WithExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 			}
 			file, err := os.Open(opts.fromFile)
 			if err != nil {
@@ -622,7 +624,7 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 			}
 			defer file.Close()
 			if value, err = enterpriseunix.ReadSecretValue(file); err != nil {
-				return nil, false, nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+				return nil, false, nil, cliusage.WithExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 			}
 		} else if value, err = readUnixSecretStdin(cmd.InOrStdin(), caller); err != nil {
 			return nil, false, nil, err
@@ -829,11 +831,11 @@ func readUnixSecretStdin(source io.Reader, caller int) ([]byte, error) {
 		}
 	}
 	if got.err != nil {
-		return nil, withExitCode(got.err, enterprisestatus.UnixExitInvalidArgs)
+		return nil, cliusage.WithExitCode(got.err, enterprisestatus.UnixExitInvalidArgs)
 	}
 	value, err := enterpriseunix.ParseSecretValue(got.data)
 	if err != nil {
-		return nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+		return nil, cliusage.WithExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 	}
 	return value, nil
 }

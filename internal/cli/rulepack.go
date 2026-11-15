@@ -32,7 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
-	"github.com/defenseclaw/defenseclaw/policies"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 const rulePackWireVersion = 1
