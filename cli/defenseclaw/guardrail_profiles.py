@@ -84,10 +84,37 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "fbb392bb8ac84607447cefa5a889cfe95ad396026c46159501d634c52bdd25ef",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "bada955b0ca029db29465c2ab0d5b4ffde02406eed0e16c36e70c7bc1de27ec6",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             "0dcc0d9a1cd54d73c8267c8950bb759806cd8e5a36b50b90d979ac39cc9eae18",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "b82abc998f4b917dbbc856bda3bb4f9211ce829b3ab86a6464a031b6953b680a",
+            # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
+            "ab20b275b3c44a0ade2cc47942dbe18d40a4cadb5626315ecb097b905f110f76",
+            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN
+            # and the batch 9 shell recall rules.
+            "b5cd7987ebc0047977727d2ce6ed58bee849229f4b6b6e3a5e07f3d3e6275e79",
+            # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
+            # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
+            "09f044aa6791dab5e73c031c65d7217098cef576c5f8d16a02ce059d4da5a7a2",
+            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall, toolresult, nonshell,
+            # psfloor, sender and response-fields packs.
+            "bcea83c78cdebc78f4cd5ac07321a9ce8cc91f9d7d6f0d9b49dbb6d7f6829870",
+            # 1.0.10 (rel/1.0.10 INT batch 11 delta 3): + g596 self-protection rules.
+            "b8be2e07c3cdfcd48ea89580512d0c79629bfa61bb84a9571313a82997fd5267",
+            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and
+            # command rule ids.
+            "b10430a9f09cf9341d1810047bdc4db50be2987e2f27584af20e579e13e20b09",
+            # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule
+            # ids.
+            "bae849da47c25cb44132971419ea52e8c7a87b0bd994fece05d1f98bccda2392",
+            # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
+            "a86801cc5e8efd1c6c8c4b88164c9bcd608fad5200371e7cc0632e297309bd7a",
+            # 1.0.10 (s7/response-fields): SEC-BEARER-BARE and SEC-PASSWORD-ASSIGN (GAP-0371).
+            "69e71164e4798439ed96acd8070ff36eb03bfe2ce260b3c46221824497610275",
+            # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
+            "657b41873648522db2f5f1d2237a822f94712b4775267cd7e129b62c2bfbbc16",
         }
     ),
     "permissive": frozenset(
@@ -128,10 +155,37 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "9a79a431a425ee9a61e856af9bccfe840d0dbc1cd14757d7ba352eee704c671a",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "a35b1f3babbf06082de85953c1b6f7743233cff459a7ec19dbbf6c64181c5177",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             "976c0343636d8163f496e37746aa26c57f5495c906a5cd7142fda001d78bdeb0",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "969de899d5a8544152cd09ad05b1e67ac841a4da53c4bb1e992a3b55c796f7a1",
+            # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
+            "33c8403eee2442fcde01f22d118261ac3e8ded4d6652875d335ffaef70d823bc",
+            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN
+            # and the batch 9 shell recall rules.
+            "2bc8b27f12facb6c1b1356c52801fc529a39f63110e4d8ac6742acc9c3e25b41",
+            # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
+            # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
+            "d86064891b13281853484ff4f038b6e2c7c88c6aa049437ad631675b6e77f828",
+            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall, toolresult, nonshell,
+            # psfloor, sender and response-fields packs.
+            "b27db48e2e35664d39cdcf1bdd022de5b8a6514ed42088faf8de6e34fdeb9b1a",
+            # 1.0.10 (rel/1.0.10 INT batch 11 delta 3): + g596 self-protection rules.
+            "098589e5aad658e8e575589b3f3c0fbceeb50433f6d4935a05c77d3ffe7102bd",
+            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and
+            # command rule ids.
+            "2fc01f00e12d004a400b70939788dda568c097ba4ef895f5392735f698238142",
+            # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule
+            # ids.
+            "e37c3a00b671321ae3e047606610d2fe08083a6282e8ed8778f2b1aac82959a4",
+            # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
+            "6632604f57eb9a3d0618857cadeaa1ffa53b031115492e82799e917b7d21cc50",
+            # 1.0.10 (s7/response-fields): SEC-BEARER-BARE and SEC-PASSWORD-ASSIGN (GAP-0371).
+            "1e424c14053a75a0eb15df080839833433717195bd0bd7736ec35cddd4564524",
+            # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
+            "d0744d25ec528674c66da161034c6bfe2478a54cde9167647fe80c3e86454d8b",
         }
     ),
     "strict": frozenset(
@@ -171,10 +225,37 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "bdd27d5347627c74b8b90da944b7dca7de20d5488c6e36c50b28d5a9d73763fc",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "18bef68d5e6cf60390d9f3925667fa2afa39d9d74b70ee5114c02de8b714c3ec",
             # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             "437f688e218aef5d3c5b47eb1591330401fecc157964c742f7570781f885a9b3",
             # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             "f6ba060634b55b87887932700fbd73cd7d658f175f2bc83a75b057e45e8355aa",
+            # 1.0.10 (s7/secret-recall delta sr5, merged with rel/1.0.10): SEC-SECRET-ASSIGN reads = ( ) in a value.
+            "5353b7ce79f3fc38085c93b43cae0075973d4f38f34a0ebd7bc11b065f870caa",
+            # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN
+            # and the batch 9 shell recall rules.
+            "67d67ccace7e9cac5dfdf024d9492b92917af77ca6795bd5f194765ec95814b7",
+            # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
+            # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
+            "d907a3f35099a86d92ebbf062e92fdb3ee4eee38a7ff9b3b75be6f05a70fc12b",
+            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall, toolresult, nonshell,
+            # psfloor, sender and response-fields packs.
+            "6f5ab18b2bbbbfe1c6852b58ac5c2b6949632f28620518d7f5c9ad157531876d",
+            # 1.0.10 (rel/1.0.10 INT batch 11 delta 3): + g596 self-protection rules.
+            "235f5925f206724402760fbd8aa969def4c3518e3b3c3d4d82e55d7d3426301b",
+            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and
+            # command rule ids.
+            "80a72f2d44b59278db1dec7d86ec2c26709638f4f56de6948de7f4040b5802d6",
+            # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule
+            # ids.
+            "d7e4600212678a341448694e23e271de3dce897e0897dde4d7eaf9f4a12f8e23",
+            # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
+            "b70be45b7d2384a6b05eeb85893ad80926d19207e7a6896390e16aadb06a551b",
+            # 1.0.10 (s7/response-fields): SEC-BEARER-BARE and SEC-PASSWORD-ASSIGN (GAP-0371).
+            "23259c8008f836ee1e60f5dd9ebe86050736da685dc76e8bf4fdcbd56ab53f0f",
+            # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
+            "b956db73b9de22f9b3d9b107754c458bf4c042d7d109ae4baeb32803f9f378d7",
         }
     ),
 }

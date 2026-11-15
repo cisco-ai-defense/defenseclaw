@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/rxprefilter"
@@ -98,6 +99,17 @@ type RuleFinding struct {
 	// file. It is private and value-free; guardrailActionForProfile keeps its
 	// block in every profile.
 	omittedOperand bool
+	// boundedCaps are the caps of a reader's truncation this evaluation-limit
+	// finding stands for (withBoundedTruncation). It is private and
+	// value-free; a reading joined as a fragment of the call drops its limit
+	// finding but carries these caps to the call (rel-1-0-10:GAP-0477).
+	boundedCaps bounded.CapSet
+	// dataWordRecord marks the detection-only record of a shell word past the
+	// byte bound that the local shell only passes on (withPosixDataWordRecord).
+	// It is a record, not a cap: boundedLimitIndex skips it, so no cap logic
+	// counts it as a limit the call hit or raises it to an enforcing one
+	// (rel-1-0-10:GAP-0760). Private and value-free.
+	dataWordRecord bool
 	// evaluationFault marks the finding of a call the evaluation failed on:
 	// the shell parser failed on its text (shellparse.ErrParserFault) or a
 	// reader panicked (recoverTrustedActionFault). Nothing proves what the
@@ -873,15 +885,22 @@ func scanContentRuleCategoryWithGeneration(
 	scope ruleContentScope,
 	category string,
 ) []RuleFinding {
+	return scanContentRulesWithOptions(generation, text, toolName, scope, ruleScanOptions{onlyCategory: category})
+}
+
+// scanContentRulesWithOptions is scanContentRuleCategoryWithGeneration with
+// the caller's category options (the content scope is set from scope).
+func scanContentRulesWithOptions(
+	generation *compiledRulePackCategories,
+	text, toolName string,
+	scope ruleContentScope,
+	options ruleScanOptions,
+) []RuleFinding {
 	if scope == ruleContentScopeSource {
 		text = neutralizeKnownFixtureDataLiterals(text)
 	}
-	findings := scanRuleGeneration(
-		generation,
-		text,
-		toolName,
-		ruleScanOptions{contentScope: scope, onlyCategory: category},
-	)
+	options.contentScope = scope
+	findings := scanRuleGeneration(generation, text, toolName, options)
 	if scope == ruleContentScopeSource {
 		// Physically verified test, fixture, and bundled rule sources are useful
 		// telemetry, but their contents are not an action by the agent. Keeping
@@ -1151,6 +1170,9 @@ func scanRuleCategoriesWithOptions(
 				}
 				if seen[rule.ID] {
 					continue // already found on raw pass
+				}
+				if assignmentRuleReadAsWritten(rule.ID) {
+					continue
 				}
 				loc := normalizedMatches.match(rule, normalizedText, normalizedScan)
 				if loc == nil {

@@ -121,7 +121,7 @@ On a managed standalone host, `hook_fail_mode: open` allows at most a classified
 
 A gateway-backed guarded tool call runs during an outage under `open` only on Linux or macOS and only when its agent process has a current clean-session note. A restart or a gateway that gives no answer blocks it in every mode, and so does every guarded call on Windows. Managed Windows Amp checks its session locally and is rendered closed for gateway failures.
 
-These outcomes apply to supported blocking events; a recovered evaluator panic also blocks Claude Code `PostToolBatch`. An event whose native hook cannot block, such as Claude Code or Antigravity `PostToolUse` and Cursor `afterFileEdit`, is allowed with `would_block` and audited as not enforced. No failure blocks a stop, session-end or idle event ([Stop and session-end events](#stop-and-session-end-events)). Failure records and later alerts depend on the connector ([Reporting](#reporting-and-diagnosis)).
+These outcomes apply to supported blocking events; a recovered evaluator panic also blocks Claude Code `PostToolBatch`. An event whose native hook cannot block, such as Antigravity `PostToolUse` and Cursor `afterFileEdit`, is allowed with `would_block` and audited as not enforced. No failure blocks a stop, session-end or idle event ([Stop and session-end events](#stop-and-session-end-events)). Failure records and later alerts depend on the connector ([Reporting](#reporting-and-diagnosis)).
 
 | Failure | Secure Client `open` | Managed standalone `open` | Per-user, default or permissive | Per-user strict and effective `closed` |
 | --- | --- | --- | --- | --- |
@@ -212,7 +212,7 @@ Fail mode can block only where the agent protocol has a block shape. A closed fa
 
 | Connector | Events that can block | Native ask | Fail closed |
 | --- | --- | --- | --- |
-| Claude Code | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` | Yes |
+| Claude Code | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `PostToolUse` (a tool-result injection finding in strict and managed strict only: `decision: block` with a reason), `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` | Yes |
 | Codex | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | None | Yes |
 | Cursor | `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt` | None | Yes |
 | GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No (the DefenseClaw hook blocks `preToolUse` and `permissionRequest` in fail mode closed) |

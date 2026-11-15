@@ -16,6 +16,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestGAP0524DeliveredPerUserKeepsBothDecisionRecordsAfterEarlierDeadline(t *testing.T) {
@@ -135,7 +136,10 @@ func TestGAP0524QueuedPerUserDecisionSurvivesExpiredForegroundContext(t *testing
 		if !result.AuditPersisted || !result.DecisionSettled {
 			t.Fatalf("expired foreground context lost terminal records: %+v", result)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(max(30*time.Second, testenv.Scale(5*time.Second, 3*testenv.HostSlowdown()))):
+		// The records settle as soon as the writer returns, so this is the
+		// wait for a signal, not a speed limit: it stretches with the host
+		// (GAP-0510: a box at load 100 took 3.7 s of a 5 s window).
 		t.Fatal("queued terminal records did not settle after the writer returned")
 	}
 	audit.CloseCallWrites(batchCtx)

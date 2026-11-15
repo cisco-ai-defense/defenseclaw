@@ -16,6 +16,10 @@
 
 package actionfacts
 
+// MaxCommandBytes is the longest command line an analysis reads
+// (maxCommandBytes); a longer one is limit_exceeded with input_limit.
+const MaxCommandBytes = maxCommandBytes
+
 const (
 	maxArgsJSONBytes          = 256 << 10
 	maxCommandBytes           = 64 << 10
@@ -40,6 +44,9 @@ const (
 	maxWindowsTokenBytes      = maxScalarBytes
 	maxClassificationSteps    = 4096
 )
+
+// MaxCommandTextBytes is the longest command text the analysis reads.
+const MaxCommandTextBytes = maxCommandBytes
 
 // MaxArgvItems is the most argv words one command keeps path facts for. A
 // longer command (a touch of 300 files) has no complete facts for its

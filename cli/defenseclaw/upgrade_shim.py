@@ -78,12 +78,38 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # guardrail.chains and connectors (connectors.agent_gateway) are set aside
 # whole: an older release refuses the block itself, so taking only the inner
 # key out would leave an empty block behind.
+# Every key the schema has and the previous release's schema lacks is listed
+# (test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade); 1.0.9 refuses
+# each 1.0.10 key below, at gateway start and on every config write.
 NEWER_CONFIG_KEYS = (
     ("openshell.trusted_ca_bundle", (1, 0, 3)),
     ("guardrail.internal_domains", (1, 0, 6)),
     ("guardrail.chains", (1, 0, 6)),
     ("connectors", (1, 0, 6)),
     ("connectors.openclaw", (1, 0, 10)),
+    ("guardrail.cascade", (1, 0, 10)),
+    ("guardrail.secret_flow", (1, 0, 10)),
+    ("guardrail.effects_rules_tier", (1, 0, 10)),
+    ("decision_model.block_risk_score", (1, 0, 10)),
+    ("decision_model.escalate_rule_flagged", (1, 0, 10)),
+    ("decision_model.flow_guard", (1, 0, 10)),
+    ("decision_model.history_tool_results", (1, 0, 10)),
+    ("decision_model.history_turns", (1, 0, 10)),
+    ("decision_model.protocol", (1, 0, 10)),
+    ("observability.local.keep_rejected_records", (1, 0, 10)),
+    ("observability.local.rejected_records_max_rows", (1, 0, 10)),
+    ("observability.pricing", (1, 0, 10)),
+    ("observability.tokenomics", (1, 0, 10)),
+    ("routing.admin", (1, 0, 10)),
+    ("routing.allow_user_override", (1, 0, 10)),
+    ("routing.categories", (1, 0, 10)),
+    ("routing.classifier", (1, 0, 10)),
+    ("routing.default_alias", (1, 0, 10)),
+    ("routing.min_confidence", (1, 0, 10)),
+    ("routing.on_classifier_error", (1, 0, 10)),
+    ("routing.route_only", (1, 0, 10)),
+    ("routing.sensitive", (1, 0, 10)),
+    ("routing.systemone", (1, 0, 10)),
 )
 # Where a downgrade keeps the keys it set aside, in the data folder:
 # {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
@@ -392,16 +418,137 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
+    released, was_running = False, False
     if _key(version) < _key(installed):
         try:
+            released, was_running = _release_route_only(version, yes=yes)
             _set_aside_newer_keys(version)
         except BaseException:
             shutil.rmtree(workdir, ignore_errors=True)
+            if released and was_running:
+                _start_gateway_again("this release's")
             raise
     # Only a downgrade to a release that keeps the newer hook helper waits
-    # for its installer and drops the helper (rel-1-0-4:GAP-2503).
+    # for its installer and drops the helper (rel-1-0-4:GAP-2503); one that
+    # put the route-only settings back waits too: it stopped the gateway, so
+    # the older installer saw none running and does not start one.
     newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
-    return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer, rerun=rerun)
+    rc = 1
+    try:
+        args = (["--yes"] if yes else []) + extra
+        rc = _run_installer(installer, args, workdir, newer=newer, rerun=rerun, wait=released)
+    finally:
+        if released and was_running:
+            # The installed gateway: the older one after a success, this
+            # release's (which writes the route settings again) otherwise.
+            _start_gateway_again(f"DefenseClaw {version}" if rc == 0 else "this release's")
+    return rc
+
+
+# Route-only (1.0.10) points Claude Code and Codex at the gateway route
+# listener in their own settings; a release before it has no such listener,
+# so the agent got 401 on every call after a rollback or a downgrade
+# (rel-1-0-10 GAP-0602).
+ROUTE_ONLY_SINCE = (1, 0, 10)
+
+
+def _route_only_rendered() -> list[str]:
+    """The connectors whose agent settings still hold a route-only render."""
+
+    def home(variable: str, default_dir: str) -> str:
+        configured = os.environ.get(variable, "").strip()
+        if configured:
+            return os.path.abspath(os.path.expanduser(os.path.expandvars(configured)))
+        return os.path.join(os.path.expanduser("~"), default_dir)
+
+    def read(path: str) -> str:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                return handle.read(4 << 20)
+        except OSError:
+            return ""
+
+    found = []
+    claude = read(os.path.join(home("CLAUDE_CONFIG_DIR", ".claude"), "settings.json"))
+    if "/r/claudecode" in claude or "X-DC-Route-Auth" in claude:
+        found.append("claudecode")
+    if "defenseclaw_route" in read(os.path.join(home("CODEX_HOME", ".codex"), "config.toml")):
+        found.append("codex")
+    return found
+
+
+class _RouteOnlyPartlyRestoredError(ShimError):
+    """Some agent settings were put back, others were not."""
+
+    changed_nothing = False
+
+
+def _release_route_only(target: str, *, yes: bool) -> tuple[bool, bool]:
+    """Put back the agent model settings route-only changed before the
+    installer of ``target``, a release without route-only, runs (a Unix
+    downgrade; the older installer cannot do it, and a rollback or a Windows
+    downgrade runs this release's installer, whose prepare-rollback step
+    does). Returns whether it put settings back, and whether the gateway
+    was running (the caller starts it again after the installer).
+
+    It asks first unless ``yes``, then stops the gateway, so its connector
+    repair cannot write the settings again, and checks the files. When they
+    cannot be put back it starts the gateway again and refuses.
+    """
+
+    if os.name == "nt" or (_VERSION.fullmatch(target) and _key(target) >= ROUTE_ONLY_SINCE):
+        return False, False
+    rendered = _route_only_rendered()
+    if not rendered:
+        return False, False
+    names = ", ".join(rendered)
+    if not yes:
+        if not sys.stdin.isatty():
+            raise ShimError(
+                f"DefenseClaw {target} has no route-only, so the {names} model settings route-only changed must be "
+                "put back first; run this command again with --yes"
+            )
+        answer = input(
+            f"  ? DefenseClaw {target} has no route-only: put back the {names} model settings and downgrade? [y/N] "
+        )
+        if answer.strip().lower() not in ("y", "yes"):
+            raise ShimError("downgrade cancelled")
+    from defenseclaw.gateway_path import canonical_install_path, path_gateway
+
+    gateway = path_gateway(honor_override=False) or canonical_install_path()
+    was_running = _gateway_running(_data_home())
+    if was_running and _gateway_call(gateway, "stop") != 0:
+        raise ShimError("the gateway did not stop, so the route-only settings could not be put back safely")
+    _gateway_call(gateway, "connector", "route-restore", "--all")
+    left = _route_only_rendered()
+    if left:
+        restarted = not was_running or _gateway_call(gateway, "start") == 0
+        disable = " && ".join(f"defenseclaw routing disable --connector {name}" for name in left)
+        error = ShimError if left == rendered and restarted else _RouteOnlyPartlyRestoredError
+        raise error(
+            f"the {', '.join(left)} settings still point at the DefenseClaw route-only listener, which DefenseClaw "
+            f"{target} does not have, so the agent would get 401 on every call. Run: {disable} (or remove the "
+            "DefenseClaw base URL and route header from those settings by hand), then run this command again"
+            + ("" if restarted else ". The gateway is stopped: defenseclaw-gateway start")
+        )
+    print(f"  → Put back the {names} model settings that route-only changed (DefenseClaw {target} has no route-only).")
+    print("    Restart the agent. Installing 1.0.10 or later again routes it again from config.yaml.")
+    return True, was_running
+
+
+def _gateway_call(gateway: str, *args: str) -> int:
+    try:
+        return subprocess.call([gateway, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)  # noqa: S603 - the installed gateway
+    except (OSError, subprocess.TimeoutExpired):
+        return 1
+
+
+def _start_gateway_again(which: str) -> None:
+    from defenseclaw.gateway_path import canonical_install_path, path_gateway
+
+    gateway = path_gateway(honor_override=False) or canonical_install_path()
+    if _gateway_call(gateway, "start") != 0:
+        print(f"  ! {which} gateway did not start; run: defenseclaw-gateway start", file=sys.stderr)
 
 
 def _refuse_unguarding_downgrade(version: str) -> None:
@@ -430,6 +577,69 @@ def _active_config_path() -> str:
     return os.path.expanduser(override) if override else os.path.join(_data_home(), "config.yaml")
 
 
+# More keys added after 1.0.9, read like NEWER_CONFIG_KEYS, where a "*"
+# segment is one entry of a map of named entries (a connector, a profile).
+# 1.0.9 refuses a cascade block under any scope, as it refuses
+# guardrail.cascade itself (GAP-0544, GAP-0583); a downgrade sets each
+# entry's block aside under its own dotted key. The decision_model keys are
+# System One's (s7/sysone); a profile's routing block is the router's.
+NEWER_CONFIG_SUBTREES = (
+    ("guardrail.connectors.*.cascade", (1, 0, 10)),
+    ("guardrail.profiles.*.cascade", (1, 0, 10)),
+    ("guardrail.profiles.*.connectors.*.cascade", (1, 0, 10)),
+    ("application_protection.guardrail.cascade", (1, 0, 10)),
+    ("application_protection.connectors.*.guardrail.cascade", (1, 0, 10)),
+    ("decision_model.flow_guard", (1, 0, 10)),
+    ("decision_model.history_tool_results", (1, 0, 10)),
+    ("decision_model.history_turns", (1, 0, 10)),
+    ("guardrail.profiles.*.routing", (1, 0, 10)),
+)
+
+
+def _expand_dotted(node: object, parts: list[str], prefix: tuple[str, ...] = ()):
+    """Yield (dotted key, value) for each key ``parts`` names in ``node``; "*" is every entry."""
+
+    if not parts:
+        yield ".".join(prefix), node
+        return
+    if not isinstance(node, dict):
+        return
+    head, rest = parts[0], parts[1:]
+    if head != "*":
+        if head in node:
+            yield from _expand_dotted(node[head], rest, (*prefix, head))
+        return
+    for name in sorted(k for k in node if isinstance(k, str)):
+        # Connector and profile names have no dots (the schema), so the
+        # dotted key of an entry is never ambiguous.
+        if name and "." not in name:
+            yield from _expand_dotted(node[name], rest, (*prefix, name))
+
+
+def newer_config_values(raw: object, target: tuple[int, int, int]) -> dict[str, object]:
+    """The keys of config ``raw`` that release ``target`` does not have, by dotted key."""
+
+    found: dict[str, object] = {}
+    for dotted, since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
+        if target >= since:
+            continue
+        for key, node in _expand_dotted(raw, dotted.split(".")):
+            if node not in (None, ""):
+                found[key] = node
+    return found
+
+
+def is_newer_config_key(key: str) -> bool:
+    """Whether ``key`` (a dotted key a downgrade set aside) is one this release has."""
+
+    parts = key.split(".")
+    for dotted, _since in (*NEWER_CONFIG_KEYS, *NEWER_CONFIG_SUBTREES):
+        pattern = dotted.split(".")
+        if len(pattern) == len(parts) and all(p in ("*", k) for p, k in zip(pattern, parts)):
+            return True
+    return False
+
+
 def _set_aside_newer_keys(version: str) -> None:
     """Take the keys DefenseClaw ``version`` does not have out of config.yaml.
 
@@ -449,15 +659,7 @@ def _set_aside_newer_keys(version: str) -> None:
             raw = yaml.safe_load(stream)
     except Exception:  # noqa: BLE001 - no config or one that does not parse: the installer's check names it
         return
-    found: dict[str, object] = {}
-    for dotted, since in NEWER_CONFIG_KEYS:
-        if target >= since:
-            continue
-        node: object = raw
-        for part in dotted.split("."):
-            node = node.get(part) if isinstance(node, dict) else None
-        if node not in (None, ""):
-            found[dotted] = node
+    found = newer_config_values(raw, target)
     if not found:
         return
     names = ", ".join(found)
@@ -665,6 +867,8 @@ def _rollback(*, yes: bool) -> int:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
     rerun = "defenseclaw rollback" + (" --yes" if yes else "")
+    # The route-only agent settings go back in the saved installer's
+    # prepare-rollback step, after its prompt and with the gateway stopped.
     return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir, rerun=rerun)
 
 
@@ -932,7 +1136,9 @@ def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: dict[s
         time.sleep(_INSTALLER_LOG_POLL)
 
 
-def _run_installer(path: str, args: list[str], workdir: str, *, rerun: str, newer: str | None = None) -> int:
+def _run_installer(
+    path: str, args: list[str], workdir: str, *, rerun: str, newer: str | None = None, wait: bool = False
+) -> int:
     # The installer downloads the release assets: hand it update.source
     # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
     configured = _configured_update_source()
@@ -1043,12 +1249,13 @@ def _run_installer(path: str, args: list[str], workdir: str, *, rerun: str, newe
     bash = "/bin/bash" if os.path.exists("/bin/bash") else (shutil.which("bash") or "bash")
     sys.stdout.flush()
     sys.stderr.flush()
-    if newer:
+    if newer or wait:
         # A downgrade from newer: the older installer keeps the hook helper of
-        # this release, so the shim waits for it (rel-1-0-4:GAP-2503).
+        # this release, so the shim waits for it (rel-1-0-4:GAP-2503). wait:
+        # the caller undoes its own step when the installer fails (GAP-0602).
         rc = _wait_for_installer([bash, path, *args])
         shutil.rmtree(workdir, ignore_errors=True)
-        if rc == 0:
+        if rc == 0 and newer:
             _drop_newer_hook_helper(newer)
         return rc
     try:

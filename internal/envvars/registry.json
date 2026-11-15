@@ -7600,6 +7600,30 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_STANDALONE_ENSURE_VERIFY_DEGRADED",
+      "category": "upgrade_internal",
+      "purpose": "Asks the standalone Windows installer's Verify, run by ensure to decide whether to repair, to accept a fresh, complete guardian reconcile whose only failures are user targets the guardian itself reported failed or pending (a signed-out account, a hook file DefenseClaw did not write). A repair cannot fix those, so ensure reports them and does not repair. The administrator's verify stays strict. It is not an installer parameter because the installer parameter set is the Secure Client command line. The installer reads it only for a Verify and clears it so no child process inherits it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/windows_enterprise_standalone.go",
+          "description": "Sets it in the strict installer environment only for the Verify an ensure runs before it plans a repair"
+        },
+        {
+          "location": "packaging/windows/install-enterprise.ps1",
+          "description": "Reads and clears it, and passes AcceptDegradedTargets to the lifecycle only for the Verify action"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DCLAW_FLEET_API_TOKEN",
       "category": "fleet",
       "purpose": "Opaque bearer token for the Fleet management API; the CLI generator uses URL-safe random text.",
@@ -8342,6 +8366,26 @@
         }
       ],
       "since": "1.0.7"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_TIMEOUT_SCALE",
+      "category": "test_fixture",
+      "purpose": "Fixes the host slowdown factor that wall-clock-bounded Go tests multiply their windows by (internal/testenv HostSlowdown), instead of measuring it: a number of at least 1, for example 4 on a CI runner known to run about four times slower than an idle host. It changes only how long a test waits, never the verdict a test asserts.",
+      "default": "unset",
+      "accepted_values": [
+        "number >= 1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/testenv/hostslowdown.go",
+          "description": "HostSlowdown returns the value (capped at MaxHostSlowdown) when it is set; the GAP-0558 hook tests stretch their windows by it"
+        }
+      ],
+      "since": "1.0.10"
     },
     {
       "name": "DEFENSECLAW_INSTALL_POLICY_API",

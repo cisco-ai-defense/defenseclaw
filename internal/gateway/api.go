@@ -65,6 +65,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
+	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
 
 // APIServer exposes a local REST API for CLI and plugin communication
@@ -532,6 +533,25 @@ func (a *APIServer) hookSessionJudges(ctx context.Context) []*LLMJudge {
 		}
 	}
 	return out
+}
+
+// observeUserTurn starts a new turn for the session after its prompt was
+// inspected: on every hook-lane judge, and in the user-download allowance. The
+// prompt becomes the turn's task, and names run-from hosts, only when the
+// guardrail did not block it: a blocked prompt is not a task DefenseClaw lets
+// later tool calls be excused by. scopeText is the part of the prompt that may
+// name scope targets; "" when it is not known to be what the owner typed.
+func (a *APIServer) observeUserTurn(ctx context.Context, prompt, scopeText, cwd string, verdict *ToolInspectVerdict) {
+	if verdict != nil && normalizedGuardrailAction(verdict.Action) == guardrailActionBlock {
+		prompt, scopeText = "", ""
+	} else {
+		// Only text the owner typed names a run-from host, as for the scope.
+		a.observeUserDownloadRequest(ctx, scopeText)
+	}
+	for _, judge := range a.hookSessionJudges(ctx) {
+		judge.ObserveSessionPromptScope(ctx, prompt, scopeText)
+		judge.SnapshotSessionGitRemotes(ctx, cwd)
+	}
 }
 
 // SetHookJudge wires the LLM judge onto the API server so the hook
@@ -4900,10 +4920,19 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 	})
 }
 
-const (
-	apiRequestBodyMaxBytes  int64 = 1 << 20
-	otlpRequestBodyMaxBytes int64 = 64 << 20
-)
+const otlpRequestBodyMaxBytes int64 = 64 << 20
+
+// apiRequestBodyMaxBytes is the ordinary API request body limit, read from the
+// embedded limits file the OpenClaw plugin build copies too.
+var apiRequestBodyMaxBytes = func() int64 {
+	var limits struct {
+		BodyMax int64 `json:"body_max_bytes"`
+	}
+	if err := json.Unmarshal(publicschemas.InspectToolRequestLimits, &limits); err != nil || limits.BodyMax <= 0 {
+		panic("gateway: schemas/inspect-tool-request-limits.json has no body_max_bytes")
+	}
+	return limits.BodyMax
+}()
 
 // apiBodyLimitMiddleware preserves the ordinary API mutation ceiling while
 // allowing exact OTLP-HTTP ingest routes to receive exporter batches. The
