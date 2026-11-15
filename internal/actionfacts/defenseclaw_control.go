@@ -1471,25 +1471,40 @@ func configChangeKind(args []string, unset bool) (DefenseClawControlKind, bool) 
 	if len(keys) == 0 {
 		return "", false
 	}
-	open := false
 	for _, key := range keys {
-		if key == "" {
-			open = true
-			continue
-		}
-		key = strings.ToLower(strings.Trim(key, `"'`))
-		root := key
-		if cut := strings.IndexAny(key, ".["); cut >= 0 {
-			root = key[:cut]
-		}
-		if defenseClawGuardConfigRoots[root] {
+		// A first segment that is not a plain section name is one the CLI path
+		// parser may read as any section (["guardrail"].enabled), so it is not
+		// proven neutral: it is the configuration change, as on rel
+		// (rel-1-0-10:GAP-0923).
+		if root, plain := plainConfigRoot(key); !plain || defenseClawGuardConfigRoots[root] {
 			return DefenseClawControlConfig, true
 		}
 	}
-	if open {
+	return "", true
+}
+
+// plainConfigRoot is the first segment of a config key when that segment is a
+// plain section name: lower-case ASCII letters, digits and underscores, not
+// starting with a digit, followed by the end of the key, a dot or a bracket.
+// Every other first segment (a bracket or a quote, an empty key, white space,
+// an escape, upper case, a non-ASCII letter) is one config_writer.parse_path
+// may normalise to a section name, so it is reported as not plain
+// (rel-1-0-10:GAP-0923). The reader does not port parse_path: it only proves
+// the plain spelling.
+func plainConfigRoot(key string) (string, bool) {
+	end := 0
+	for end < len(key) {
+		char := key[end]
+		if char >= 'a' && char <= 'z' || char == '_' || end > 0 && char >= '0' && char <= '9' {
+			end++
+			continue
+		}
+		break
+	}
+	if end == 0 || end < len(key) && key[end] != '.' && key[end] != '[' {
 		return "", false
 	}
-	return "", true
+	return key[:end], true
 }
 
 // isNumberWord reports a word that is a number (a negative value, not an

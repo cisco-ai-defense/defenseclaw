@@ -478,3 +478,12 @@
 {"id": "g596c-b19", "dialect": "", "command": "cat > job.sh <<'EOF'\ndefenseclaw stop\nEOF\nscp job.sh host:/tmp/job.sh", "want": ""}
 {"id": "g596c-e56", "dialect": "", "command": "cat > job.sh <<'EOF'\ndefenseclaw stop\nEOF\nsource job.sh", "want": "stop"}
 {"id": "g596c-e57", "dialect": "", "command": "cat > job.sh <<'EOF'\ndefenseclaw stop\nEOF\nbash ./job.sh", "want": "stop"}
+{"id": "g923-c12", "dialect": "", "command": "defenseclaw config set '[\"observability\"].enabled' false", "want": "config"}
+{"id": "g923-c13", "dialect": "", "command": "defenseclaw config unset '[\"observability\"]'", "want": "config"}
+{"id": "g923-c14", "dialect": "", "command": "defenseclaw config set '[\"guardrail\"].enabled' false", "want": "config"}
+{"id": "g923-c15", "dialect": "", "command": "defenseclaw config set '[\"routing\"].enabled' false", "want": "config"}
+{"id": "g923-c16", "dialect": "", "command": "defenseclaw config set '[\"skills\"].foo.enabled' false", "want": "config"}
+{"id": "g923-c17", "dialect": "", "command": "defenseclaw config set ROUTING.enabled false", "want": "config"}
+{"id": "g923-c18", "dialect": "", "command": "defenseclaw config set '' false", "want": "config"}
+{"id": "g923-c19", "dialect": "", "command": "defenseclaw config set ' routing.enabled' false", "want": "config"}
+{"id": "g923-c20", "dialect": "", "command": "defenseclaw config unset routing.enabled '[\"guardrail\"]'", "want": "config"}
