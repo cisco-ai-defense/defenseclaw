@@ -165,7 +165,7 @@ func (f *hermesPluginFixture) plugin(root, name string) string {
 // pinVendor records the current bytes of a plugin as one of its vendor digests.
 func (f *hermesPluginFixture) pinVendor(name, path string) {
 	f.t.Helper()
-	digest, err := hermesPluginTreeDigest(path, hermesScannerLoader(f.t))
+	digest, err := hermesPluginTreeDigest(path)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -178,6 +178,22 @@ func (f *hermesPluginFixture) pinVendor(name, path string) {
 			delete(hermesPluginVendorDigests, name)
 		}
 	})
+}
+
+// scannedBaseline gives a shipped plugin a scanned baseline with no findings
+// and starts the scan count again at zero. A plugin with a bytecode cache file
+// is not vendor content (rel-1-0-10:GAP-0808), so its cache writes follow the
+// change hash (skippedTreeHash) like any scanned shipped plugin.
+func (f *hermesPluginFixture) scannedBaseline(path string) {
+	f.t.Helper()
+	delete(f.scan.findings, path)
+	f.w.runRescanCycle(context.Background())
+	if n := f.scan.scans(path); n != 1 {
+		f.t.Fatalf("baseline scans of %s = %d, want 1", path, n)
+	}
+	f.scan.mu.Lock()
+	f.scan.scanned = nil
+	f.scan.mu.Unlock()
 }
 
 // findingConnectors lists the connector of every finding log so far.
@@ -258,12 +274,15 @@ func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *t
 	f.w.runRescanCycle(context.Background())
 	f.unscannedVendor(late)
 
-	// A bytecode cache Hermes writes at run time leaves the plugin vendor code.
-	writePluginFile(t, filepath.Join(vendor, "__pycache__", "provider.cpython-312.pyc"), "cache")
+	// A bytecode cache file is code CPython runs in place of the verified
+	// source, so it voids the vendor match: admission scans and refuses the
+	// plugin (rel-1-0-10:GAP-0808).
+	writePluginFile(t, filepath.Join(late, "__pycache__", "provider.cpython-312.pyc"), "cache")
 	f.w.runRescanCycle(context.Background())
-	if n := f.scan.scans(vendor); n != 0 {
-		t.Fatalf("vendor plugin with a bytecode cache scanned %d times", n)
+	if n := f.scan.scans(late); n != 1 {
+		t.Fatalf("vendor plugin with a bytecode cache scans = %d, want 1", n)
 	}
+	f.refused(late)
 
 	// A change to shipped bytes or an added file is not vendor code: the
 	// baseline of the pristine bytes makes it a change, so install admission
@@ -279,8 +298,8 @@ func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *t
 	}
 	changed := f.findingConnectors()
 	onlyHermes(t, changed)
-	if len(changed) != len(first)+2 {
-		t.Fatalf("changed shipped plugins logged %d findings, want 2", len(changed)-len(first))
+	if len(changed) != len(first)+3 {
+		t.Fatalf("changed shipped plugins logged %d findings, want 3", len(changed)-len(first))
 	}
 
 	// Unchanged plugins do not log again, and a clean user plugin is allowed.
@@ -372,7 +391,7 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 	dir := t.TempDir()
 	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: a\n")
 	writePluginFile(t, filepath.Join(dir, "lib", "a.py"), "A = 1\n")
-	base, err := hermesPluginTreeDigest(dir, hermesScannerLoader(t))
+	base, err := hermesPluginTreeDigest(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +403,7 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 		func() { writePluginFile(t, filepath.Join(dir, "node_modules", "x.js"), "") },
 	} {
 		change()
-		got, err := hermesPluginTreeDigest(dir, hermesScannerLoader(t))
+		got, err := hermesPluginTreeDigest(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -393,21 +412,29 @@ func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
 		}
 		seen = append(seen, got)
 	}
-	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "a.pyc"), "cache")
-	if got, err := hermesPluginTreeDigest(dir, hermesScannerLoader(t)); err != nil || got != seen[len(seen)-1] {
-		t.Fatalf("bytecode cache changed the digest: %s, %v", got, err)
-	}
-	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "x.node"), "native")
-	if _, err := hermesPluginTreeDigest(dir, hermesScannerLoader(t)); err == nil {
-		t.Fatal("a native payload in a bytecode cache produced a vendor digest")
-	}
-	if err := os.Remove(filepath.Join(dir, "lib", "__pycache__", "x.node")); err != nil {
+	// CPython runs a bytecode cache file in place of its source, so any file
+	// in a cache, a native payload too, leaves the tree with no vendor digest
+	// (rel-1-0-10:GAP-0808); an empty cache folder does not.
+	if err := os.MkdirAll(filepath.Join(dir, "lib", "__pycache__"), 0o700); err != nil {
 		t.Fatal(err)
+	}
+	if got, err := hermesPluginTreeDigest(dir); err != nil || got != seen[len(seen)-1] {
+		t.Fatalf("an empty bytecode cache folder changed the digest: %s, %v", got, err)
+	}
+	for _, cached := range []string{"a.cpython-312.pyc", "x.node"} {
+		file := filepath.Join(dir, "lib", "__pycache__", cached)
+		writePluginFile(t, file, "cache")
+		if _, err := hermesPluginTreeDigest(dir); err == nil {
+			t.Fatalf("a tree with %s in a bytecode cache produced a vendor digest", cached)
+		}
+		if err := os.Remove(file); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Symlink(filepath.Join(dir, "plugin.yaml"), filepath.Join(dir, "link.yaml")); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
-	if _, err := hermesPluginTreeDigest(dir, hermesScannerLoader(t)); err == nil {
+	if _, err := hermesPluginTreeDigest(dir); err == nil {
 		t.Fatal("a linked entry produced a vendor digest")
 	}
 }
@@ -721,7 +748,10 @@ func TestHermesVendorPluginNativePayloadInScannerSkippedDir(t *testing.T) {
 	}
 }
 
-func TestHermesVendorPluginBytecodeCacheIsNotAChange(t *testing.T) {
+// rel-1-0-10:GAP-0808: a bytecode cache file written into vendor content
+// (CPython runs it in place of the verified source) voids the vendor match in
+// the rescan and in live admission: the plugin is admitted and scanned.
+func TestHermesVendorPluginBytecodeCacheVoidsTheVendorMatch(t *testing.T) {
 	f := newHermesPluginFixture(t)
 	f.cfg.Watch.RescanEnabled = true
 	path := f.plugin(f.bundledRoot, "web/ddgs")
@@ -731,17 +761,12 @@ func TestHermesVendorPluginBytecodeCacheIsNotAChange(t *testing.T) {
 	writePluginFile(t, filepath.Join(path, "__pycache__", "provider.cpython-312.pyc"), "cache")
 	writePluginFile(t, filepath.Join(path, "lib", "__pycache__", "a.cpython-312.opt-1.pyc"), "cache")
 	f.w.runRescanCycle(context.Background())
-	f.unscannedVendor(path)
-	events := f.w.pendingInstallEvents(path)
-	if len(events) != 1 {
-		t.Fatalf("live events = %#v", events)
+	if n := f.scan.scans(path); n != 1 {
+		t.Fatalf("vendor plugin scans after a bytecode write = %d, want 1", n)
 	}
-	if res := f.w.runAdmission(context.Background(), events[0]); res.Verdict != VerdictAllowed || res.Reason != hermesVendorPluginReason {
-		t.Fatalf("live admission = %#v", res)
-	}
-	f.unscannedVendor(path)
-	if logs := f.findingConnectors(); len(logs) != 0 {
-		t.Fatalf("bytecode cache raised findings: %q", logs)
+	f.refused(path)
+	if f.w.hermesVendorPlugin(InstallEvent{Type: InstallPlugin, Path: path}) {
+		t.Fatal("a plugin with bytecode cache files still matches the vendor digest")
 	}
 }
 
@@ -1074,11 +1099,12 @@ func TestHermesManifestFilesMatchScanner(t *testing.T) {
 	}
 }
 
-// A manifest-declared entrypoint inside a bytecode cache is vendor content
-// only while its bytes are the pinned ones: the digest hashes it, so an edit
+// A manifest-declared entrypoint in a skipped folder is vendor content only
+// while its bytes are the pinned ones: the digest hashes it, so an edit
 // reaches admission and is scanned instead of being allowed as vendor bytes.
+// (A file in a bytecode cache voids the vendor match outright; GAP-0808.)
 func TestHermesDeclaredEntrypointIsBoundByVendorDigest(t *testing.T) {
-	for _, dir := range []string{"node_modules", "__pycache__", "lib/__pycache__"} {
+	for _, dir := range []string{"node_modules", "lib/node_modules"} {
 		for name, manifest := range hermesDeclaredEntrypointForms {
 			t.Run(dir+"/"+name, func(t *testing.T) {
 				f := newHermesPluginFixture(t)
@@ -1185,8 +1211,7 @@ func TestHermesManifestProseDeclaresNothing(t *testing.T) {
 				path := f.plugin(f.bundledRoot, "web/ddgs")
 				writePluginFile(t, filepath.Join(path, filepath.FromSlash(manifest.file)),
 					strings.ReplaceAll(manifest.body, "DIR", dir))
-				before, err := hermesPluginTreeDigest(path, hermesScannerLoader(t))
-				if err != nil {
+				if _, err := hermesPluginTreeDigest(path); err != nil {
 					t.Fatal(err)
 				}
 				f.w.runRescanCycle(context.Background())
@@ -1206,8 +1231,10 @@ func TestHermesManifestProseDeclaresNothing(t *testing.T) {
 				if got := len(f.admitted[path]); got != admissions {
 					t.Fatalf("generated cache file caused %d admissions", got-admissions)
 				}
-				if after, err := hermesPluginTreeDigest(path, hermesScannerLoader(t)); err != nil || after != before {
-					t.Fatalf("generated cache file changed the vendor digest: %v", err)
+				// A cache file leaves no vendor digest (GAP-0808); this
+				// plugin was scanned, so the change hash decides, as above.
+				if _, err := hermesPluginTreeDigest(path); err == nil {
+					t.Fatal("a tree with a generated cache file has a vendor digest")
 				}
 				if extra := skippedTreeHash(path, hermesScannerLoader(t)); extra != "" {
 					t.Fatalf("generated cache file hashed: %q", extra)

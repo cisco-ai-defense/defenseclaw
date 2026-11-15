@@ -51,9 +51,15 @@ import (
 // (hermesBaselineOwesAdmission). A plugin that differs from its digest in any
 // byte, file or link is scanned as any other, under hermes, and a shipped
 // plugin that had such a baseline is admitted, so an edit of vendor bytes is
-// refused when HIGH. Change detection for a shipped plugin covers the folders
-// the snapshot leaves out (skippedTreeHash), so a later change anywhere the
-// scanner can read reaches a scan whatever was admitted before. A Hermes
+// refused when HIGH. Hermes imports a plugin through the CPython source
+// loader, which runs a bytecode cache file in place of the source when its
+// header names the source (mtime and size, or source hash) or is an
+// unchecked hash pyc, and nothing reads those bytes; so a plugin with any
+// file in a bytecode cache is not vendor content, and a vendor baseline is
+// read again in every cycle, so bytecode written after it reaches admission
+// (rel-1-0-10:GAP-0808). Change detection for a shipped plugin covers the
+// folders the snapshot leaves out (skippedTreeHash), so a later change
+// anywhere the scanner can read reaches a scan whatever was admitted before. A Hermes
 // release newer than every release in the table (doctor and status name it),
 // or a main-channel checkout between releases, matches no digest: its shipped
 // plugins are scanned as any other plugin, and the ones with a vendor baseline
@@ -124,7 +130,7 @@ func (w *InstallWatcher) hermesVendorPlugin(evt InstallEvent) bool {
 	if !ok || len(hermesPluginVendorDigests[name]) == 0 {
 		return false
 	}
-	digest, err := hermesPluginTreeDigest(filepath.Clean(evt.Path), w.manifestLoader())
+	digest, err := hermesPluginTreeDigest(filepath.Clean(evt.Path))
 	return err == nil && slices.Contains(hermesPluginVendorDigests[name], digest)
 }
 
@@ -156,7 +162,9 @@ func (w *InstallWatcher) rescanHermesVendorPlugin(evt InstallEvent, snap *Target
 // vendor bytes (or after a failed scan), so changed bytes, and bytes that
 // differ from the digest although the snapshot hash is the same, are admitted
 // and refused when HIGH, not scanned as a first sight. The decision reads the
-// plugin again; nothing stored says it is vendor content.
+// plugin again; nothing stored says it is vendor content. The rescan asks it
+// in every cycle, the unchanged ones too, because a bytecode cache write
+// leaves the content hash as it was and voids the vendor match.
 func (w *InstallWatcher) hermesBaselineOwesAdmission(evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot) bool {
 	if baseline == nil || baseline.ScanID != "" || snap == nil {
 		return false
@@ -176,20 +184,18 @@ func (w *InstallWatcher) logHermesVendorPlugin(evt InstallEvent, targetType stri
 // hermesPluginTreeDigest reads every regular file under path once, through
 // one os.Root, and returns the vendor digest of those bytes: the name, size
 // and bytes of each file, in lexical walk order. Links, devices, special
-// mode bits and oversize trees make the tree unverifiable. Python bytecode
-// caches, which Hermes writes beside its plugins at run time, are left out,
-// as the plugin scanner leaves them out, except a file a manifest declares as
-// an entrypoint (hermesDeclaredFiles), which the scanner reads and which is
-// hashed like any other file; a native payload inside a cache makes the tree
-// unverifiable, as the scanner reports it.
-func hermesPluginTreeDigest(path string, load hermesManifestLoader) (string, error) {
+// mode bits and oversize trees make the tree unverifiable, and so does any
+// file in a Python bytecode cache: CPython runs a cache file instead of the
+// verified source whenever its header names that source, so its bytes are
+// code no digest of a release (a checkout has no cache) can vouch for
+// (rel-1-0-10:GAP-0808). An empty cache folder is nothing to run.
+func hermesPluginTreeDigest(path string) (string, error) {
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return "", err
 	}
 	defer root.Close()
 	digest := sha256.New()
-	declared := &hermesDeclaredSet{root: root, dir: path, load: load}
 	entries, total := 0, int64(0)
 	err = fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -210,20 +216,7 @@ func hermesPluginTreeDigest(path string, load hermesManifestLoader) (string, err
 			return errHermesPluginUnverified
 		}
 		if inBytecodeCache(name) {
-			// Hermes writes these at run time, so they are not hashed; but
-			// the plugin scanner audits them for native payloads, which a
-			// digest match must not vouch for, and reads one a manifest
-			// declares, which it must bind.
-			if hermesNativePayload(name) {
-				return errHermesPluginUnverified
-			}
-			info, err := root.Lstat(name)
-			if err != nil {
-				return err
-			}
-			if !declared.declares(info) {
-				return nil
-			}
+			return errHermesPluginUnverified
 		}
 		file, err := root.Open(name)
 		if err != nil {
@@ -389,7 +382,9 @@ func (s *hermesDeclaredSet) declares(info fs.FileInfo) bool {
 // and the plugin scanner ignores. The plugin scanner reports a native file in
 // those folders and reads a declared entrypoint there, so a shipped plugin
 // folds this hash into its content hash: a change anywhere in the tree
-// reaches a scan, whatever was admitted before. Every
+// reaches a scan, whatever was admitted before. A cache write into vendor
+// content is not left to this hash: every cycle reads a vendor baseline again
+// (hermesBaselineOwesAdmission), and a cache file voids the vendor match. Every
 // file the scanner can read (up to hermesScannerReadBytes) is hashed, however
 // much skipped data precedes it, and so is a declared entrypoint of any size;
 // another larger file is described by name and size, since the scanner reads
