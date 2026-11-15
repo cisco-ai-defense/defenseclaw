@@ -214,10 +214,11 @@ func TestApplySandboxVerdictReasonLeavesHostAndAllowAlone(t *testing.T) {
 		t.Fatalf("plain allow reason = %q", got.Reason)
 	}
 	// A block Claude cannot enforce on a tool result is flagged, not
-	// blocked.
+	// blocked. PostToolUseFailure stays advisory (PostToolUse answers
+	// decision block since GAP-0605).
 	result := agentHookResponse{Action: "allow", RawAction: "block", WouldBlock: true, RuleIDs: []string{"E2E-SANDBOX-MARKER"}}
-	postReq := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PostToolUse"}
-	postBody := []byte(`{"hook_event_name":"PostToolUse","tool_name":"Bash"}`)
+	postReq := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PostToolUseFailure"}
+	postBody := []byte(`{"hook_event_name":"PostToolUseFailure","tool_name":"Bash"}`)
 	got = api.applySandboxVerdictReason(ctx, profile, "claudecode", postReq, postBody, map[string]interface{}{}, result)
 	if !strings.HasPrefix(got.Reason, "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-MARKER") ||
 		!strings.Contains(got.AdditionalContext, got.Reason) || strings.Contains(got.AdditionalContext, "would block") {

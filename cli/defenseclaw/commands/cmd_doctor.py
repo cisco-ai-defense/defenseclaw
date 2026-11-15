@@ -3206,6 +3206,45 @@ def _human_size(num_bytes: int) -> str:
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
     _check_audit_db_store(cfg, r)
     _check_moved_aside_audit_stores(str(getattr(cfg, "audit_db", "") or ""), r)
+    _check_unread_calls(cfg, r)
+
+
+def _check_unread_calls(cfg, r: _DoctorResult) -> None:
+    """Count the tool calls the gateway read only in part (ACTION-PARSE-FAILURE
+    records, rel-1-0-10:GAP-0526): a shell syntax error or a shell body it could
+    not resolve. Their readable statements were judged; the rest is allowed in
+    the default and permissive packs, so the admin sees how many there are.
+    A warning when there are any; nothing when the audit store is unreadable
+    (its own check reports that)."""
+    import sqlite3
+
+    from defenseclaw.db import UNREAD_CALLS_SQL
+
+    db_path = str(getattr(cfg, "audit_db", "") or "")
+    if not db_path or not os.path.isfile(db_path):
+        return
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            count = int(conn.execute(UNREAD_CALLS_SQL).fetchone()[0] or 0)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return
+    if count == 0:
+        _emit("pass", "Unread tool calls", "none recorded", r=r, check_id="doctor.guardrail.unread-calls")
+        return
+    _emit(
+        "warn",
+        "Unread tool calls",
+        f"{count} tool call(s) were read only in part (ACTION-PARSE-FAILURE): a shell syntax error or a shell "
+        "body that could not be resolved. Their readable statements were checked; the rest was allowed outside "
+        "the strict pack",
+        r=r,
+        check_id="doctor.guardrail.unread-calls",
+        reason_code="unread-tool-calls",
+        remediation="list them: defenseclaw alerts, or search the audit log for ACTION-PARSE-FAILURE",
+    )
 
 
 _CARRY_OVER_NOTE_SUFFIX = ".carryover.json"
@@ -18751,6 +18790,72 @@ def _prompt_block_capability(connector: str) -> str:
     return _PROMPT_UNKNOWN
 
 
+# Tool-result hook events whose block answer the agent honours (contract
+# block_events, compared without case and punctuation): Claude Code and Codex
+# PostToolUse, Amp tool.result (rel-1-0-10 GAP-0605).
+_TOOL_RESULT_BLOCK_EVENTS = frozenset({"posttooluse", "toolresult"})
+
+
+def tool_result_block_capability(connector: str) -> str:
+    """Whether *connector* has a block form for a tool result, from the hook contract manifest.
+
+    A proxy connector refuses the model call that would carry the output. A
+    hook connector has one when every contract lists a tool-result event in
+    ``block_events``. Every other connector can only alert on a tool-result
+    finding (a prompt injection in a file, page or command output): the
+    output reaches the model. Returns the _PROMPT_* values.
+    """
+    name = normalize_connector(connector)
+    if name in PROXY_CONNECTORS:
+        return _PROMPT_BLOCKS
+    event_sets = [contract.capabilities.get("block_events") for contract in HOOK_CONTRACTS.get(name, ())]
+    if not event_sets:
+        spec = (HOOK_CONTRACT_MANIFEST.get("connectors") or {}).get(name)
+        inventory = spec.get("native_hook_inventory") if isinstance(spec, dict) else None
+        if isinstance(inventory, dict):
+            event_sets = [inventory.get("block_events")]
+    answers = {
+        any(
+            isinstance(event, str) and "".join(ch for ch in event.lower() if ch.isalnum()) in _TOOL_RESULT_BLOCK_EVENTS
+            for event in events
+        )
+        for events in event_sets
+        if isinstance(events, list)
+    }
+    if answers == {True}:
+        return _PROMPT_BLOCKS
+    if answers == {False}:
+        return _PROMPT_NO_HOOK
+    return _PROMPT_UNKNOWN
+
+
+def tool_result_injection_limit(connector: str) -> str:
+    """The documented limit line for a connector with no tool-result block form, else ""."""
+    if tool_result_block_capability(connector) != _PROMPT_NO_HOOK:
+        return ""
+    label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+    return f"tool-result injection: alert only on {label}"
+
+
+def _emit_tool_result_row(connector: str, r: _DoctorResult) -> None:
+    """One row: what a prompt injection in this connector's tool results gets (GAP-0605)."""
+    capability = tool_result_block_capability(connector)
+    label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+    if capability == _PROMPT_BLOCKS:
+        _emit(
+            "pass", "Tool-result injection",
+            "alerts in default and permissive, blocks in strict; the agent is told not to follow it",
+            r=r,
+        )
+    elif capability == _PROMPT_NO_HOOK:
+        _emit(
+            "skip", "Tool-result injection",
+            f"{tool_result_injection_limit(connector)}: {label} has no hook that can block a tool result, "
+            "so the output reaches the model in every posture (see defenseclaw alerts)",
+            r=r,
+        )
+
+
 def _detection_only_prompt_clause(connector: str) -> str:
     """The prompt half of the detection-only rule-pack warning for *connector*.
 
@@ -19223,6 +19328,8 @@ def _check_connector_inventory(
                     "built-in defaults (data_dir unresolved)",
                     r=r,
                 )
+
+    _emit_tool_result_row(connector, r)
 
     # Detection strategy + judge gating for this connector (read-only). This
     # is root #4 in the doctor fix-plan made visible: the judge can be

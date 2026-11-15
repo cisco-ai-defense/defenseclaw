@@ -120,6 +120,10 @@ type messageExtract struct {
 	Truncated bounded.CapSet
 	// Routing holds the strings under routing keys, by dotted key path.
 	Routing map[string]interface{}
+	// decoded is the base64 characters the attachment readers consumed, all
+	// readings together: the work the payload budget bounds, counted in
+	// characters, never wall-clock time (TestExtractMessageArgsAttachmentBudget).
+	decoded int
 }
 
 // extractMessageArgs reads a message call's args once. Args that are not a
@@ -143,7 +147,7 @@ func extractMessageArgs(raw json.RawMessage) messageExtract {
 	w := messageWalk{routing: map[string]interface{}{}, routingSeen: map[string]int{}}
 	w.walk(value, 0, "")
 	text := strings.Join(w.parts, "\n")
-	out.Text, out.Truncated = text, w.trunc.Set()
+	out.Text, out.Truncated, out.decoded = text, w.trunc.Set(), w.decoded
 	if len(w.routing) > 0 {
 		out.Routing = w.routing
 	}
@@ -152,6 +156,7 @@ func extractMessageArgs(raw json.RawMessage) messageExtract {
 
 type messageWalk struct {
 	payloadUsed int
+	decoded     int // base64 characters the attachment readers consumed
 	parts       []string
 	nodes       int
 	trunc       bounded.Truncated
@@ -425,7 +430,9 @@ func (w *messageWalk) attachment(s string) bool {
 		// to a reader. Both readings are scanned, so neither hides the other.
 		w.leaf(read)
 	}
-	if text := messageAttachmentText(read); text != "" {
+	text, decoded := messageAttachmentText(read)
+	w.decoded += decoded
+	if text != "" {
 		w.leaf(text)
 	}
 	return true
@@ -434,13 +441,18 @@ func (w *messageWalk) attachment(s string) bool {
 // messageAttachmentText is the text of a base64 payload: the runs of its 8-bit
 // reading, and, when it looks like UTF-16 (a byte order mark, or a NUL beside
 // every other byte), the runs of that reading too: a file that guesses wrong
-// either way still gives up its text.
-func messageAttachmentText(payload string) string {
-	text := messageStreamTextRuns(newMessageBase64Reader(payload))
+// either way still gives up its text. decoded is the base64 characters its
+// readers consumed.
+func messageAttachmentText(payload string) (text string, decoded int) {
+	plain, probe := newMessageBase64Reader(payload), newMessageBase64Reader(payload)
+	text = messageStreamTextRuns(plain)
 	head := make([]byte, messageUTF16ProbeBytes)
-	n, _ := io.ReadFull(newMessageBase64Reader(payload), head)
+	n, _ := io.ReadFull(probe, head)
+	decoded = plain.i + probe.i
 	if be, skipBOM, ok := messageUTF16(head[:n]); ok {
-		u16 := messageStreamTextRuns(&messageUTF16Reader{r: newMessageBase64Reader(payload), be: be, bom: skipBOM, buf: make([]byte, messagePayloadChunk)})
+		wide := newMessageBase64Reader(payload)
+		u16 := messageStreamTextRuns(&messageUTF16Reader{r: wide, be: be, bom: skipBOM, buf: make([]byte, messagePayloadChunk)})
+		decoded += wide.i
 		switch {
 		case text == "":
 			text = u16
@@ -448,7 +460,7 @@ func messageAttachmentText(payload string) string {
 			text += "\n" + u16
 		}
 	}
-	return text
+	return text, decoded
 }
 
 // messageBase64Value is the class of each byte in a base64 value: its six

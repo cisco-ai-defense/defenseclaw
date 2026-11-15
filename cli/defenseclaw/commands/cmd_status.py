@@ -462,9 +462,12 @@ def status(app: AppContext, as_json: bool) -> None:
             for label, val in (
                 ("Total scans", counts.total_scans),
                 ("Active alerts", counts.alerts),
+                ("Unread calls", counts.unread_calls),
             ):
                 if val is None:
                     val = ux.dim("not counted (too many audit events to count quickly; list them: defenseclaw alerts)")
+                elif label == "Unread calls" and val:
+                    val = f"{val} " + ux.dim("(ACTION-PARSE-FAILURE: tool calls read only in part)")
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
@@ -1210,6 +1213,13 @@ def _print_agents(
                     f"                {dim_text}{degraded}",
                     18,
                 )
+    # A connector with no tool-result block form says so (GAP-0605).
+    from defenseclaw.commands.cmd_doctor import tool_result_injection_limit
+
+    for conn in actives:
+        limit = tool_result_injection_limit(conn) if _is_enabled(conn) else ""
+        if limit:
+            _echo_wrapped(" " * 16 + ux.dim(f"{limit}: the output reaches the model; see defenseclaw alerts"), 16)
 
 
 class _PublicForegroundHealth(dict):
@@ -2561,6 +2571,7 @@ def _status_payload(app) -> dict:
             payload["activity"] = {
                 "total_scans": counts.total_scans,
                 "active_alerts": counts.alerts,
+                "unread_calls": counts.unread_calls,
             }
     else:
         payload["enforcement"] = None
