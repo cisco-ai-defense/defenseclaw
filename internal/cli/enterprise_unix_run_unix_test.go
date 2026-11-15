@@ -26,6 +26,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -100,8 +101,8 @@ func TestEnterpriseSecretStatusAsStandardUserNamesAdministratorRights(t *testing
 		!strings.Contains(err.Error(), "sudo "+layout.BinDir+"/defenseclaw-gateway enterprise secret status") {
 		t.Fatalf("secret status error = %q", err)
 	}
-	if commandExitCode(err) != 1 {
-		t.Fatalf("exit code %d", commandExitCode(err))
+	if cliusage.ExitCode(err) != 1 {
+		t.Fatalf("exit code %d", cliusage.ExitCode(err))
 	}
 }
 
@@ -198,8 +199,8 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	if want := "verify failed; see the 2 problems listed above. Run `" + repair + "` as root to fix them"; err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
 	}
-	if commandExitCode(err) != result.ExitCode {
-		t.Fatalf("exit code %d, want %d", commandExitCode(err), result.ExitCode)
+	if cliusage.ExitCode(err) != result.ExitCode {
+		t.Fatalf("exit code %d, want %d", cliusage.ExitCode(err), result.ExitCode)
 	}
 	if err := lifecycleFailure(result, true, repair); strings.Contains(err.Error(), "repair") {
 		t.Fatalf("--json error line = %q, want the problems only", err)
@@ -232,7 +233,7 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	busy.Installed, busy.PendingApply = true, true
 	busy.AddWarning("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress")
 	busy.Finish("darwin", enterprisestatus.UnixExitBusy)
-	if err := lifecycleFailure(busy, false, repair); err == nil || strings.Contains(err.Error(), "repair") || commandExitCode(err) != 75 || !busy.OK {
+	if err := lifecycleFailure(busy, false, repair); err == nil || strings.Contains(err.Error(), "repair") || cliusage.ExitCode(err) != 75 || !busy.OK {
 		t.Fatalf("busy status: %v (ok=%v), want exit 75 and no repair advice", err, busy.OK)
 	}
 	// GAP-0265: a config that enables no connector is fixed in config.yaml
@@ -321,9 +322,9 @@ func TestUnixLifecycleLockWaitOutOfRange(t *testing.T) {
 		-time.Second:     "--lock-wait takes a duration from 0 to 15m, not -1s\nUsage: ",
 	} {
 		runErr := runUnixLifecycle(cmd, platform, "ensure", &unixLifecycleOptions{lockWait: wait})
-		if runErr == nil || commandExitCode(runErr) != 2 || !strings.HasPrefix(runErr.Error(), want) ||
+		if runErr == nil || cliusage.ExitCode(runErr) != 2 || !strings.HasPrefix(runErr.Error(), want) ||
 			!strings.HasSuffix(runErr.Error(), "Try '"+cmd.CommandPath()+" --help' for help.") {
-			t.Fatalf("--lock-wait %s: %v (exit %d)", wait, runErr, commandExitCode(runErr))
+			t.Fatalf("--lock-wait %s: %v (exit %d)", wait, runErr, cliusage.ExitCode(runErr))
 		}
 	}
 }
@@ -407,7 +408,7 @@ func TestEnterpriseSecretArgumentErrorsPrintUsage(t *testing.T) {
 			!strings.HasSuffix(msg, "Try '"+cmd.CommandPath()+" --help' for help.") {
 			t.Fatalf("%s %+v: %q", tc.action, tc.opts, msg)
 		}
-		if got := commandExitCode(err); got != enterprisestatus.UnixExitInvalidArgs {
+		if got := cliusage.ExitCode(err); got != enterprisestatus.UnixExitInvalidArgs {
 			t.Fatalf("%s %+v exits %d", tc.action, tc.opts, got)
 		}
 		if out.Len() != 0 {
@@ -505,7 +506,7 @@ func TestUnixLifecycleLockWaitMessagesStayInsideTheCap(t *testing.T) {
 		v := cmd.Flags().Lookup("lock-wait").Value.(*lockWaitValue)
 		*v.wait, v.typed = 0, ""
 	})
-	if got := plainFlagValueError(cmd.ParseFlags([]string{"--lock-wait=banana"})); got != `--lock-wait takes a duration from 0 to 15m, such as 30s or 5m, not "banana"` {
+	if got := cliusage.PlainFlagValueError(cmd.ParseFlags([]string{"--lock-wait=banana"})); got != `--lock-wait takes a duration from 0 to 15m, such as 30s or 5m, not "banana"` {
 		t.Fatalf("--lock-wait banana: %q", got)
 	}
 	if err := cmd.ParseFlags([]string{"--lock-wait=1h"}); err != nil {
@@ -513,8 +514,8 @@ func TestUnixLifecycleLockWaitMessagesStayInsideTheCap(t *testing.T) {
 	}
 	opts := &unixLifecycleOptions{lockWait: time.Hour}
 	runErr := runUnixLifecycle(cmd, platform, "ensure", opts)
-	if runErr == nil || commandExitCode(runErr) != 2 || !strings.HasPrefix(runErr.Error(), "--lock-wait takes at most 15m, not 1h\nUsage: ") {
-		t.Fatalf("--lock-wait 1h: %v (exit %d)", runErr, commandExitCode(runErr))
+	if runErr == nil || cliusage.ExitCode(runErr) != 2 || !strings.HasPrefix(runErr.Error(), "--lock-wait takes at most 15m, not 1h\nUsage: ") {
+		t.Fatalf("--lock-wait 1h: %v (exit %d)", runErr, cliusage.ExitCode(runErr))
 	}
 	if strings.Contains(cmd.Flags().FlagUsages(), "default 0") {
 		t.Fatalf("--help shows a zero default:\n%s", cmd.Flags().FlagUsages())
@@ -542,8 +543,8 @@ func TestEnterpriseLeavesRejectAStrayArgumentAsUnexpected(t *testing.T) {
 		}
 		got := cmd.ValidateArgs([]string{"extra-arg"})
 		want := `unexpected argument "extra-arg" for "` + cmd.CommandPath() + `"` + "\nUsage: "
-		if got == nil || commandExitCode(got) != 2 || !strings.HasPrefix(got.Error(), want) {
-			t.Fatalf("%v extra-arg: exit %d, %v", path, commandExitCode(got), got)
+		if got == nil || cliusage.ExitCode(got) != 2 || !strings.HasPrefix(got.Error(), want) {
+			t.Fatalf("%v extra-arg: exit %d, %v", path, cliusage.ExitCode(got), got)
 		}
 		if err := cmd.ValidateArgs(nil); err != nil {
 			t.Fatalf("%v without arguments: %v", path, err)
@@ -630,7 +631,7 @@ func TestSecretSetRefusesAKeyFileOthersCanWrite(t *testing.T) {
 	cmd.SetOut(&out)
 	opts := enterpriseSecretOptions{name: "ai-defense-api-key", fromFile: key}
 	err = runEnterpriseSecret(cmd, "set", &opts)
-	if err == nil || !strings.Contains(err.Error(), "writable by group or other") || commandExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
+	if err == nil || !strings.Contains(err.Error(), "writable by group or other") || cliusage.ExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
 		t.Fatalf("a world-writable key file was not refused: %v", err)
 	}
 	if out.Len() != 0 {

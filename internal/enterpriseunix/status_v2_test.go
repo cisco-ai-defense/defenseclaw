@@ -720,3 +720,29 @@ func TestStatusReportsAGuardianFailedHermesTargetLikeEveryConnector(t *testing.T
 		})
 	}
 }
+
+// S8 review P3-1: Linux and macOS status and verify read the hook load from
+// the administrator /health posture and warn hook_over_capacity, also for
+// refused calls alone; a quiet window or an older gateway gives no warning.
+func TestGatewayPostureWarnsHookOverCapacity(t *testing.T) {
+	h := newTestHost(t, "linux")
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{"hook_capacity":{"window_minutes":60,"window":{"answered":10,"deadline_denies":4}}}`, true},
+		{`{"hook_capacity":{"window_minutes":60,"window":{"answered":10,"shed":2}}}`, true},
+		{`{"hook_capacity":{"window_minutes":60,"window":{"answered":10}}}`, false},
+		{`{}`, false},
+	} {
+		l := &lifecycle{env: h.env, opts: Options{Action: ActionVerify}, result: enterprisestatus.New(ActionVerify, "standalone", "linux", "1.0.10")}
+		l.readGatewayPosture([]byte(tc.body))
+		got := false
+		for _, warning := range l.result.Warnings {
+			got = got || warning.Code == enterprisestatus.CodeHookOverCapacity
+		}
+		if got != tc.want {
+			t.Fatalf("%s: hook_over_capacity = %v, want %v (warnings %+v)", tc.body, got, tc.want, l.result.Warnings)
+		}
+	}
+}

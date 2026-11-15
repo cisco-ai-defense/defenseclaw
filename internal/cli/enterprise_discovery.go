@@ -32,6 +32,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -82,12 +83,12 @@ does not run the skill or MCP scanners.`,
 			}
 			layout, err := managed.StandaloneLayoutFor(goos)
 			if err != nil {
-				return withExitCode(err, enterprisestatus.UnixExitFailure)
+				return cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 			}
 			dir := filepath.Join(layout.GuardianAuthDir, inventory.UserScanDirName)
 			runtimeCommand = cmd
 			if err := writeEnterpriseDiscovery(cmd.OutOrStdout(), dir, user, asJSON); err != nil {
-				return withExitCode(err, enterprisestatus.UnixExitFailure)
+				return cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 			}
 			return nil
 		},
@@ -487,7 +488,7 @@ func writeManagedViewRefusalJSON(w io.Writer, err error) {
 		OK       bool                       `json:"ok"`
 		Errors   []enterprisestatus.Message `json:"errors"`
 		ExitCode int                        `json:"exit_code"`
-	}{Errors: []enterprisestatus.Message{{Code: code, Message: message}}, ExitCode: commandExitCode(err)})
+	}{Errors: []enterprisestatus.Message{{Code: code, Message: message}}, ExitCode: cliusage.ExitCode(err)})
 }
 
 // enterpriseDiscoveryStatusHint is the status command for this platform. A
@@ -537,9 +538,9 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 	if err != nil {
 		// A refusal with its own exit code (elevation_required) is already
 		// the whole answer (GAP-2039).
-		var coded *exitCodeError
+		var coded *cliusage.ExitCodeError
 		if !errors.As(err, &coded) {
-			err = withExitCode(fmt.Errorf("read the AI Discovery inventory: %w", err), 1)
+			err = cliusage.WithExitCode(fmt.Errorf("read the AI Discovery inventory: %w", err), 1)
 		}
 		if asJSON {
 			writeManagedViewRefusalJSON(w, err)
@@ -589,7 +590,7 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 		if secureClient {
 			message = fmt.Sprintf("no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)
 		}
-		err := withExitCode(&managedViewRefusal{code: "account_not_found", message: message}, 1)
+		err := cliusage.WithExitCode(&managedViewRefusal{code: "account_not_found", message: message}, 1)
 		if asJSON {
 			writeManagedViewRefusalJSON(w, err)
 		}

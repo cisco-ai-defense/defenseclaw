@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peversion"
 )
@@ -32,7 +33,7 @@ func readWindowsEnterpriseInstalledProductVersion(opts *windowsEnterpriseLifecyc
 		root = strings.TrimSpace(opts.installRoot)
 	}
 	if root == "" {
-		roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+		roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 		if err != nil {
 			return "", err
 		}
@@ -90,7 +91,7 @@ func windowsEnterpriseRepairRecordingOptions(action string, opts *windowsEnterpr
 var windowsEnterprisePendingRestoredVersion = readWindowsEnterprisePendingRestoredVersion
 
 func readWindowsEnterprisePendingRestoredVersion(opts *windowsEnterpriseLifecycleOptions) (string, bool) {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.MetadataPath) == "" {
 		return "", false
 	}

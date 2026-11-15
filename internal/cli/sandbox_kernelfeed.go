@@ -28,6 +28,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/sandboxfeed"
@@ -106,24 +107,24 @@ per-user feed installer is not part of it.`,
 // configuration is not the user's), and run on Linux only.
 func sandboxKernelFeedPreRun(*cobra.Command, []string) error {
 	if sandboxKernelFeedGOOS != "linux" {
-		return withExitCode(errors.New("the sandbox kernel feed is Linux only: it reads Tetragon, which runs on Linux"), 3)
+		return cliusage.WithExitCode(errors.New("the sandbox kernel feed is Linux only: it reads Tetragon, which runs on Linux"), 3)
 	}
 	return nil
 }
 
 func runSandboxKernelFeedInstall(cmd *cobra.Command) error {
 	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
-		return withExitCode(errors.New("the sandbox kernel feed installer is not available in managed_enterprise deployments: managed sandboxes are part of the managed deployment, and this per-user feed installer is not"), 3)
+		return cliusage.WithExitCode(errors.New("the sandbox kernel feed installer is not available in managed_enterprise deployments: managed sandboxes are part of the managed deployment, and this per-user feed installer is not"), 3)
 	}
 	if record, present := managedHostUnixRecord(nil); present {
-		return withExitCode(fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s); its sandboxes are part of the managed deployment, and this per-user sandbox kernel feed installer is not available there", record), 3)
+		return cliusage.WithExitCode(fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s); its sandboxes are part of the managed deployment, and this per-user sandbox kernel feed installer is not available there", record), 3)
 	}
 	gateway := sandboxGatewayPath()
 	helper := filepath.Join(filepath.Dir(gateway), sandboxfeed.HelperName)
 	result, err := sandboxKernelFeed().Install(cmd.Context(), helper, appVersion)
 	if err != nil {
 		if errors.Is(err, sandboxfeed.ErrNotRoot) {
-			return withExitCode(fmt.Errorf("%w: sudo %s sandbox kernel-feed install", err, gateway), 1)
+			return cliusage.WithExitCode(fmt.Errorf("%w: sudo %s sandbox kernel-feed install", err, gateway), 1)
 		}
 		return err
 	}
@@ -150,7 +151,7 @@ func runSandboxKernelFeedUninstall(cmd *cobra.Command) error {
 	removed, err := sandboxKernelFeed().Uninstall(cmd.Context())
 	if err != nil {
 		if errors.Is(err, sandboxfeed.ErrNotRoot) {
-			return withExitCode(fmt.Errorf("%w: sudo %s sandbox kernel-feed uninstall", err, gateway), 1)
+			return cliusage.WithExitCode(fmt.Errorf("%w: sudo %s sandbox kernel-feed uninstall", err, gateway), 1)
 		}
 		return err
 	}

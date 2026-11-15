@@ -26,6 +26,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -71,21 +72,21 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 			"cursor": {Route: enterprisepolicy.RouteMachinePolicy, ForeignHooks: mode, Guard: true},
 		},
 	}
-	previousPath, previousLoad := hookForeignGuardSummaryPath, hookForeignGuardLoad
-	previousAccountHome, previousEnvHomes := hookForeignGuardAccountHome, hookForeignGuardEnvHomes
-	previousProcess := hookForeignGuardAgentProcess
-	previousExchange := hookForeignGuardExchange
-	previousMirror, previousFailsOpen := hookForeignGuardCleanMirror, hookForeignGuardOutageFailsOpen
-	hookForeignGuardCleanMirror = func(enterprisepolicy.SessionKey) error {
+	previousPath, previousLoad := hookcli.HookForeignGuardSummaryPath, hookcli.HookForeignGuardLoad
+	previousAccountHome, previousEnvHomes := hookcli.HookForeignGuardAccountHome, hookcli.HookForeignGuardEnvHomes
+	previousProcess := hookcli.HookForeignGuardAgentProcess
+	previousExchange := hookcli.HookForeignGuardExchange
+	previousMirror, previousFailsOpen := hookcli.HookForeignGuardCleanMirror, hookcli.HookForeignGuardOutageFailsOpen
+	hookcli.HookForeignGuardCleanMirror = func(enterprisepolicy.SessionKey) error {
 		if fixture.cleanMirror {
 			return nil
 		}
 		return os.ErrNotExist
 	}
-	hookForeignGuardOutageFailsOpen = func(string, string) bool { return false }
+	hookcli.HookForeignGuardOutageFailsOpen = func(string, string) bool { return false }
 	gatewayState := t.TempDir()
-	hookForeignGuardSummaryPath = func() (string, bool) { return "/etc/defenseclaw/machine-policy.json", true }
-	hookForeignGuardLoad = func(string) (*enterprisepolicy.PublicPolicy, error) {
+	hookcli.HookForeignGuardSummaryPath = func() (string, bool) { return "/etc/defenseclaw/machine-policy.json", true }
+	hookcli.HookForeignGuardLoad = func(string) (*enterprisepolicy.PublicPolicy, error) {
 		if fixture.loadErr != nil {
 			return nil, fixture.loadErr
 		}
@@ -94,10 +95,10 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 		}
 		return fixture.summary, nil
 	}
-	hookForeignGuardAccountHome = func() string { return fixture.home }
-	hookForeignGuardEnvHomes = func() []string { return nil }
-	hookForeignGuardAgentProcess = func() string { return fixture.process }
-	hookForeignGuardExchange = func(_ string, _ string, _, _ time.Time, exchange enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	hookcli.HookForeignGuardAccountHome = func() string { return fixture.home }
+	hookcli.HookForeignGuardEnvHomes = func() []string { return nil }
+	hookcli.HookForeignGuardAgentProcess = func() string { return fixture.process }
+	hookcli.HookForeignGuardExchange = func(_ string, _ string, _, _ time.Time, exchange enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 		if exchange.Key.Session == "" && exchange.Key.Process == "" {
 			return exchange.Decision, nil
 		}
@@ -107,11 +108,11 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 		}), nil
 	}
 	t.Cleanup(func() {
-		hookForeignGuardSummaryPath, hookForeignGuardLoad = previousPath, previousLoad
-		hookForeignGuardAccountHome, hookForeignGuardEnvHomes = previousAccountHome, previousEnvHomes
-		hookForeignGuardAgentProcess = previousProcess
-		hookForeignGuardExchange = previousExchange
-		hookForeignGuardCleanMirror, hookForeignGuardOutageFailsOpen = previousMirror, previousFailsOpen
+		hookcli.HookForeignGuardSummaryPath, hookcli.HookForeignGuardLoad = previousPath, previousLoad
+		hookcli.HookForeignGuardAccountHome, hookcli.HookForeignGuardEnvHomes = previousAccountHome, previousEnvHomes
+		hookcli.HookForeignGuardAgentProcess = previousProcess
+		hookcli.HookForeignGuardExchange = previousExchange
+		hookcli.HookForeignGuardCleanMirror, hookcli.HookForeignGuardOutageFailsOpen = previousMirror, previousFailsOpen
 	})
 	return fixture
 }
@@ -131,7 +132,7 @@ func (f *foreignGuardFixture) run(t *testing.T, managed bool) (hookexec.Options,
 	payload := `{"hook_event_name":"preToolUse","cwd":"` + filepath.Join(f.project, "src") + `","tool_name":"Shell"}`
 	var stderr bytes.Buffer
 	opts := hookexec.Options{Connector: "cursor", ManagedEnterprise: managed, Stdin: strings.NewReader(payload), Stderr: &stderr}
-	applyEnterpriseForeignHookGuard(&opts)
+	hookcli.ApplyEnterpriseForeignHookGuard(&opts)
 	replayed, err := io.ReadAll(opts.Stdin)
 	if err != nil {
 		t.Fatal(err)
@@ -189,15 +190,15 @@ func TestForeignHookGuardIsInertWithoutStandaloneSummary(t *testing.T) {
 	fixture.write(t, filepath.Join(fixture.project, ".cursor", "hooks.json"), `{"version": 1, "hooks": {"preToolUse": [{"command": "./rewrite.sh"}]}}`)
 	payload := strings.NewReader(`{"cwd":"/tmp"}`)
 	opts := hookexec.Options{Connector: "cursor", ManagedEnterprise: true, Stdin: payload}
-	applyEnterpriseForeignHookGuard(&opts)
+	hookcli.ApplyEnterpriseForeignHookGuard(&opts)
 	if opts.ManagedRuntimeFailure != "" || opts.Stdin != io.Reader(payload) || payload.Len() != len(`{"cwd":"/tmp"}`) {
 		t.Fatalf("Secure Client and unmanaged hosts (no summary) must be untouched: %+v", opts)
 	}
-	previous := hookForeignGuardSummaryPath
-	hookForeignGuardSummaryPath = func() (string, bool) { return "", false }
-	defer func() { hookForeignGuardSummaryPath = previous }()
+	previous := hookcli.HookForeignGuardSummaryPath
+	hookcli.HookForeignGuardSummaryPath = func() (string, bool) { return "", false }
+	defer func() { hookcli.HookForeignGuardSummaryPath = previous }()
 	opts = hookexec.Options{Connector: "cursor", ManagedEnterprise: false, Stdin: payload}
-	applyEnterpriseForeignHookGuard(&opts)
+	hookcli.ApplyEnterpriseForeignHookGuard(&opts)
 	if opts.ManagedEnterprise || opts.ManagedRuntimeFailure != "" {
 		t.Fatalf("a host without a standalone layout must be untouched: %+v", opts)
 	}
@@ -207,12 +208,12 @@ func TestForeignHookGuardFailsClosedOnUntrustedSummary(t *testing.T) {
 	fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
 	fixture.loadErr = errors.New("machine policy summary is group-writable")
 	opts := hookexec.Options{Connector: "cursor", Stdin: strings.NewReader("{}")}
-	applyEnterpriseForeignHookGuard(&opts)
+	hookcli.ApplyEnterpriseForeignHookGuard(&opts)
 	if !opts.ManagedEnterprise || opts.ManagedRuntimeFailure != "enterprise_machine_policy_summary_untrusted" {
 		t.Fatalf("an untrusted summary must fail closed: %+v", opts)
 	}
 	existing := hookexec.Options{Connector: "cursor", ManagedEnterprise: true, ManagedRuntimeFailure: "enterprise_managed_runtime_invalid"}
-	applyEnterpriseForeignHookGuard(&existing)
+	hookcli.ApplyEnterpriseForeignHookGuard(&existing)
 	if existing.ManagedRuntimeFailure != "enterprise_managed_runtime_invalid" {
 		t.Fatalf("an earlier runtime failure must be preserved: %q", existing.ManagedRuntimeFailure)
 	}
@@ -254,7 +255,7 @@ func TestForeignHookGuardOwnsPerUserScriptOnlyUnderTheAccountHome(t *testing.T) 
 	fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
 	fixture.summary.Connectors["devin"] = enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove, Guard: true}
 	agentHome := t.TempDir()
-	hookForeignGuardEnvHomes = func() []string { return []string{agentHome} }
+	hookcli.HookForeignGuardEnvHomes = func() []string { return []string{agentHome} }
 	t.Setenv("DEFENSECLAW_HOME", filepath.Join(agentHome, "dc"))
 	t.Setenv("XDG_CONFIG_HOME", "")
 	userConfig := filepath.Join(fixture.home, ".config", "devin", "config.json")
@@ -267,7 +268,7 @@ func TestForeignHookGuardOwnsPerUserScriptOnlyUnderTheAccountHome(t *testing.T) 
 	run := func() string {
 		payload := `{"hook_event_name":"PreToolUse","cwd":"` + fixture.project + `"}`
 		opts := hookexec.Options{Connector: "devin", Home: filepath.Join(agentHome, "dc"), Stdin: strings.NewReader(payload), Stderr: io.Discard}
-		applyEnterpriseForeignHookGuard(&opts)
+		hookcli.ApplyEnterpriseForeignHookGuard(&opts)
 		return opts.ManagedRuntimeFailure
 	}
 	register(filepath.Join(fixture.home, ".defenseclaw", "hooks", "devin-hook.sh"))
@@ -296,7 +297,7 @@ func TestForeignHookGuardDenialUsesVendorBlockResponse(t *testing.T) {
 		Stdout:            &stdout,
 		Stderr:            &stderr,
 	}
-	applyEnterpriseForeignHookGuard(&opts)
+	hookcli.ApplyEnterpriseForeignHookGuard(&opts)
 	// Claude Code blocks a PreToolUse call on exit 2 and shows stderr.
 	if code := hookexec.Run(context.Background(), opts); code != 2 {
 		t.Fatalf("the denial must block the tool call: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -326,7 +327,7 @@ func TestForeignHookGuardCopilotDenialNamesTheFile(t *testing.T) {
 			Stdout:            &stdout,
 			Stderr:            &stderr,
 		}
-		applyEnterpriseForeignHookGuard(&opts)
+		hookcli.ApplyEnterpriseForeignHookGuard(&opts)
 		if code := hookexec.Run(context.Background(), opts); code != 0 {
 			t.Fatalf("%s: Copilot reads the structured deny on exit 0: code=%d stderr=%s", event, code, stderr.String())
 		}
@@ -360,10 +361,10 @@ func TestForeignHookGuardStartsTheRequestBudgetBeforeScanning(t *testing.T) {
 	if !opts.StartedAt.IsZero() {
 		t.Fatalf("a host without a standalone summary must keep the budget start unchanged: %v", opts.StartedAt)
 	}
-	if budget := hookForeignGuardScanBudget("codex", "SessionEnd"); budget <= 0 || budget >= hookexec.RequestTimeout("codex", "SessionEnd") {
+	if budget := hookcli.HookForeignGuardScanBudget("codex", "SessionEnd"); budget <= 0 || budget >= hookexec.RequestTimeout("codex", "SessionEnd") {
 		t.Fatalf("the scan budget must fit inside the request budget: %v", budget)
 	}
-	if budget := hookForeignGuardScanBudget("copilot", "preToolUse"); budget != hookForeignGuardMaxScan {
+	if budget := hookcli.HookForeignGuardScanBudget("copilot", "preToolUse"); budget != hookcli.HookForeignGuardMaxScan {
 		t.Fatalf("the scan budget is capped: %v", budget)
 	}
 }
@@ -397,14 +398,14 @@ func TestForeignHookCheckAnswersInAgentPlugins(t *testing.T) {
 	fixture := newForeignGuardFixture(t, config.ForeignHooksRemove)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	fixture.summary.Connectors["opencode"] = enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove, Guard: true}
-	check := func() foreignHookCheckResult {
+	check := func() hookcli.ForeignHookCheckResult {
 		t.Helper()
 		var out bytes.Buffer
 		payload := `{"hook_event_name":"tool.execute.before","cwd":"` + fixture.project + `"}`
-		if code := runForeignHookCheck("opencode", strings.NewReader(payload), &out); code != 0 {
+		if code := hookcli.RunForeignHookCheck("opencode", strings.NewReader(payload), &out); code != 0 {
 			t.Fatalf("the check always exits 0, got %d", code)
 		}
-		var result foreignHookCheckResult
+		var result hookcli.ForeignHookCheckResult
 		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
 			t.Fatalf("the answer must be JSON: %v: %q", err, out.String())
 		}
@@ -496,7 +497,7 @@ func TestForeignHookGuardOpenCodeGuardsOnlyThePreToolEvent(t *testing.T) {
 		t.Helper()
 		payload := `{"hook_event_name":"` + event + `","cwd":"` + fixture.project + `"}`
 		opts := hookexec.Options{Connector: "opencode", Event: event, ManagedEnterprise: true, Stdin: strings.NewReader(payload), Stderr: io.Discard}
-		applyEnterpriseForeignHookGuard(&opts)
+		hookcli.ApplyEnterpriseForeignHookGuard(&opts)
 		return opts
 	}
 	for _, event := range []string{"tool.execute.after", "defenseclaw.plugin.loaded", "session.updated"} {
@@ -512,7 +513,7 @@ func TestForeignHookGuardOpenCodeGuardsOnlyThePreToolEvent(t *testing.T) {
 		t.Fatalf("the pre-tool event must deny and name the plugin: %q", opts.ManagedRuntimeFailure)
 	}
 	for _, name := range []string{"cursor", "copilot"} {
-		if !foreignHookGuardedEvent(name, "") || !foreignHookGuardedEvent(name, "tool.execute.after") {
+		if !hookcli.ForeignHookGuardedEvent(name, "") || !hookcli.ForeignHookGuardedEvent(name, "tool.execute.after") {
 			t.Fatalf("%s is guarded on every event", name)
 		}
 	}
@@ -525,23 +526,25 @@ func TestForeignHookCheckAmpOnWindowsKeepsTheSessionLocally(t *testing.T) {
 	fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	fixture.summary.Connectors["amp"] = enterprisepolicy.PublicConnectorPolicy{Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove, Guard: true}
-	previousGOOS, previousExchange := hookForeignGuardGOOS, hookForeignGuardExchange
-	hookForeignGuardGOOS = "windows"
-	hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+	previousGOOS, previousExchange := hookcli.HookForeignGuardGOOS, hookcli.HookForeignGuardExchange
+	hookcli.HookForeignGuardGOOS = "windows"
+	hookcli.HookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 		return enterprisepolicy.GuardDecision{}, errors.New("standalone hook runtime unavailable")
 	}
-	t.Cleanup(func() { hookForeignGuardGOOS, hookForeignGuardExchange = previousGOOS, previousExchange })
-	check := func(event string) foreignHookCheckResult {
+	t.Cleanup(func() {
+		hookcli.HookForeignGuardGOOS, hookcli.HookForeignGuardExchange = previousGOOS, previousExchange
+	})
+	check := func(event string) hookcli.ForeignHookCheckResult {
 		t.Helper()
 		var out bytes.Buffer
 		payload, err := json.Marshal(map[string]string{"hook_event_name": event, "cwd": fixture.project})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if code := runForeignHookCheck("amp", bytes.NewReader(payload), &out); code != 0 {
+		if code := hookcli.RunForeignHookCheck("amp", bytes.NewReader(payload), &out); code != 0 {
 			t.Fatalf("the check always exits 0, got %d", code)
 		}
-		var result foreignHookCheckResult
+		var result hookcli.ForeignHookCheckResult
 		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
 			t.Fatalf("the answer must be JSON: %v: %q", err, out.String())
 		}

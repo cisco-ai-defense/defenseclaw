@@ -1024,7 +1024,9 @@ func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response, call mode
 				}
 			}
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return werr
+				// The caller went away: the upstream did not fail
+				// (modelusage.ErrClientGone records it as cancelled).
+				return fmt.Errorf("%w: %v", modelusage.ErrClientGone, werr)
 			}
 			if flusher != nil {
 				flusher.Flush()

@@ -9,12 +9,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
@@ -100,7 +100,7 @@ func hookDataDirsNow() ([]string, error) {
 		if !sameExistingFile(alias, configFile) {
 			continue
 		}
-		if _, own, loadErr := loadHookRuntimeConfig(alias); loadErr == nil && pathidentity.Same(own, folder) {
+		if _, own, loadErr := hookcli.LoadHookRuntimeConfig(alias); loadErr == nil && pathidentity.Same(own, folder) {
 			add(folder)
 		}
 	}
@@ -112,7 +112,7 @@ func hookDataDirsNow() ([]string, error) {
 	// from that file leads to (a hard link, or a link in another folder).
 	// It is named even when it is not there yet (a custom DEFENSECLAW_HOME):
 	// install.sh makes it for the install, so the lock is there to find.
-	if home := outageAccountHome(); home != "" {
+	if home := hookcli.OutageAccountHome(); home != "" {
 		add(filepath.Join(home, config.DefaultDataDirName))
 	}
 	return dirs, nil
@@ -167,47 +167,6 @@ func sameExistingFile(a, b string) bool {
 	return os.SameFile(left, right)
 }
 
-// loadHookRuntimeConfig loads configFile as the hook runtime of its folder
-// does, and names the data directory it gives that runtime: the one rule
-// hook-outage-mode (whether a hook may open an outage) and hook-data-dir
-// (which folder install.sh locks) share. The load leaves out
-// DEFENSECLAW_CONFIG, which a hook inherits from the agent and install.sh
-// from its caller: naming this file, it would move a default data_dir to
-// DEFENSECLAW_HOME (loadConfigSourceChecked). The data directory is the
-// config's data_dir, a relative one taken from the config's folder, or that
-// folder; "" for a config path that is not absolute.
-func loadHookRuntimeConfig(configFile string) (*config.Config, string, error) {
-	if !filepath.IsAbs(configFile) {
-		return nil, "", fmt.Errorf("config path %q is not absolute", configFile)
-	}
-	value, present := os.LookupEnv(managed.ConfigPathEnv)
-	if present {
-		if err := os.Unsetenv(managed.ConfigPathEnv); err != nil {
-			return nil, "", err
-		}
-		defer func() { _ = os.Setenv(managed.ConfigPathEnv, value) }()
-	}
-	loaded, err := config.LoadFromFile(configFile)
-	if err != nil || loaded == nil {
-		return nil, "", fmt.Errorf("load %s: %w", configFile, err)
-	}
-	return loaded, configDataDir(configFile, loaded.DataDir), nil
-}
-
-// configDataDir is the absolute data directory a data_dir value of the
-// config at configFile names: an absolute value as it is, a relative one
-// from the config's folder; "" without an absolute config path or a value.
-func configDataDir(configFile, dataDir string) string {
-	dataDir = strings.TrimSpace(dataDir)
-	if dataDir == "" || !filepath.IsAbs(configFile) {
-		return ""
-	}
-	if !filepath.IsAbs(dataDir) {
-		dataDir = filepath.Join(filepath.Dir(configFile), dataDir)
-	}
-	return filepath.Clean(dataDir)
-}
-
 func hookDataDirOfConfig(configFile string) (string, error) {
 	if _, err := os.Lstat(configFile); errors.Is(err, fs.ErrNotExist) {
 		return absoluteOrEmpty(config.DefaultDataPath()), nil
@@ -215,7 +174,7 @@ func hookDataDirOfConfig(configFile string) (string, error) {
 		return "", fmt.Errorf("read %s: %w", configFile, err)
 	}
 	if loaded, err := config.LoadFromFile(configFile); err == nil && loaded != nil {
-		return absoluteOrEmpty(configDataDir(configFile, loaded.DataDir)), nil
+		return absoluteOrEmpty(hookcli.ConfigDataDir(configFile, loaded.DataDir)), nil
 	}
 	raw, err := os.ReadFile(configFile)
 	if err != nil {
@@ -236,7 +195,7 @@ func hookDataDirOfConfig(configFile string) (string, error) {
 	if dir == "" {
 		return absoluteOrEmpty(config.DefaultDataPath()), nil
 	}
-	return absoluteOrEmpty(configDataDir(configFile, dir)), nil
+	return absoluteOrEmpty(hookcli.ConfigDataDir(configFile, dir)), nil
 }
 
 // absoluteInstallerEnv binds a relative DEFENSECLAW_CONFIG and

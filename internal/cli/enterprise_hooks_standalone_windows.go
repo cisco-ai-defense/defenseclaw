@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -156,7 +157,7 @@ func enterpriseHookStandaloneConfigRefresh(w io.Writer) {
 // opened the computer's real lock, so an elevated run held it, and a
 // standard user, who cannot open it, never recorded a generation.
 var windowsEnterpriseConfigLifecycleClaim = func() managedConfigOwnership {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return managedConfigOwnership{reason: "the lifecycle folder cannot be resolved (" + err.Error() + ")"}
 	}

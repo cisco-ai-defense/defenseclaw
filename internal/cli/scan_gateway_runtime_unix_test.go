@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -52,12 +54,12 @@ func TestGAP1234ManagedUnixScanRunsWhenThePackageInstalledTheRuntime(t *testing.
 func TestGAP1234ManagedUnixScanWithoutTheRuntimeNamesThePackage(t *testing.T) {
 	stubManagedUnixScan(t, true, managed.ErrNoScannerRuntime, "linux")
 	err := managedScanUnavailable("skill", "/opt/defenseclaw-scan/review-skill")
-	if err == nil || commandExitCode(err) != 3 || !strings.Contains(err.Error(), "installs the scanner runtime") {
-		t.Fatalf("payload deployment answer = %v (exit %d)", err, commandExitCode(err))
+	if err == nil || cliusage.ExitCode(err) != 3 || !strings.Contains(err.Error(), "installs the scanner runtime") {
+		t.Fatalf("payload deployment answer = %v (exit %d)", err, cliusage.ExitCode(err))
 	}
 	stubManagedUnixScan(t, true, errors.New("/opt/defenseclaw/scanner-runtime/python: group/other writable"), "linux")
 	err = managedScanUnavailable("plugin", "/opt/defenseclaw-scan/p")
-	if err == nil || commandExitCode(err) != 3 || !strings.Contains(err.Error(), "not trusted") || !strings.Contains(err.Error(), "reinstall") {
+	if err == nil || cliusage.ExitCode(err) != 3 || !strings.Contains(err.Error(), "not trusted") || !strings.Contains(err.Error(), "reinstall") {
 		t.Fatalf("untrusted runtime answer = %v", err)
 	}
 	stubManagedUnixScan(t, false, managed.ErrNoScannerRuntime, "linux")
@@ -70,7 +72,7 @@ func TestGAP1234ManagedUnixScanRefusesAFolderTheServiceCannotRead(t *testing.T) 
 	stubManagedUnixScan(t, true, nil, "linux")
 	for _, target := range []string{"/home/dcad-r103-eng1/project/skill", "/root/skill", "/tmp/skill", "/var/tmp/x"} {
 		err := managedScanUnavailable("skill", target)
-		if err == nil || commandExitCode(err) != 3 || !strings.Contains(err.Error(), "cannot read") || !strings.Contains(err.Error(), "/opt/defenseclaw-scan") {
+		if err == nil || cliusage.ExitCode(err) != 3 || !strings.Contains(err.Error(), "cannot read") || !strings.Contains(err.Error(), "/opt/defenseclaw-scan") {
 			t.Fatalf("%s: answer = %v", target, err)
 		}
 	}
@@ -112,12 +114,12 @@ func TestGAP1234ManagedUnixScanVerifiesTheGatewayService(t *testing.T) {
 	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	restorePath, restoreTrust, restoreManaged, restorePerUser := managedHostDescriptorPath, managedHostRecordTrusted, managedGatewayClientFactory, perUserGatewayClientFactory
+	restorePath, restoreTrust, restoreManaged, restorePerUser := hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostRecordTrusted, managedGatewayClientFactory, perUserGatewayClientFactory
 	t.Cleanup(func() {
-		managedHostDescriptorPath, managedHostRecordTrusted, managedGatewayClientFactory, perUserGatewayClientFactory = restorePath, restoreTrust, restoreManaged, restorePerUser
+		hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostRecordTrusted, managedGatewayClientFactory, perUserGatewayClientFactory = restorePath, restoreTrust, restoreManaged, restorePerUser
 	})
-	managedHostDescriptorPath = func() string { return descriptor }
-	managedHostRecordTrusted = func(string) error { return nil }
+	hookcli.ManagedHostDescriptorPath = func() string { return descriptor }
+	hookcli.ManagedHostRecordTrusted = func(string) error { return nil }
 	service := ""
 	managedGatewayClientFactory = func(_ time.Duration, _ string, name string) (*http.Client, error) {
 		service = name
@@ -130,7 +132,7 @@ func TestGAP1234ManagedUnixScanVerifiesTheGatewayService(t *testing.T) {
 	if _, err := gatewayPeerClientForURL(nil, "http://"+managed.StandaloneAPIAddr, time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if service != managedServiceName(false) {
-		t.Fatalf("listener checked against %q, want %q", service, managedServiceName(false))
+	if service != hookcli.ManagedServiceName(false) {
+		t.Fatalf("listener checked against %q, want %q", service, hookcli.ManagedServiceName(false))
 	}
 }

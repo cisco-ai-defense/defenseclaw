@@ -17,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 func withAuditRejectedFlags(t *testing.T, since string, limit int, keep, keepKnown bool) {
@@ -135,7 +136,7 @@ func TestAuditRejectedFlagsAreUsageErrors(t *testing.T) {
 			t.Fatalf("since=%q limit=%d: error %v", tc.since, tc.limit, err)
 		}
 	}
-	if auditRejectedCmd.Annotations[secureClientAbsentAnnotation] != "true" {
+	if auditRejectedCmd.Annotations[hookcli.SecureClientAbsentAnnotation] != "true" {
 		t.Fatal("audit rejected is not hidden on Secure Client")
 	}
 }
