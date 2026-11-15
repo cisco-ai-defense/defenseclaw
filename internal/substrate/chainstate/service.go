@@ -791,7 +791,10 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 	s.mu.Unlock()
 	cst = forkClock(cst, pst)
 	copyAt := cst.running(at)
-	cst.RunningHighUnixNano = copyAt.UnixNano()
+	// The child's high-water mark is the parent's saved one (forkClock), not
+	// the copy time: at is the controller's clock, and a controller clock
+	// ahead of the leader's would otherwise move the child's running time
+	// forward and age the secret read it inherits (GAP-0319).
 	result := LifecycleResult{}
 	if _, err := os.Stat(s.dbPath(parent)); err == nil {
 		r, err := st.CopyToolChainFork(ctx, s.dbPath(parent), audit.ToolChainForkCopy{
@@ -1408,8 +1411,10 @@ func (s *Service) revert(ctx context.Context, e *actorEntry, at time.Time) (Life
 // answers from the actor's memo (no store access, GAP-0179) and hands an
 // allowed step to the egress worker, which records it in the actor window
 // under its active ruleset. A refused request sent nothing, so it is not
-// recorded: refused attempts never age a secret read out of its chain's
-// event window. A cold memo answers errWarming and the worker reads it
+// recorded as a step: refused attempts never use up the steps of a chain's
+// event window. They are the actor's own requests, though, so they do run
+// its clock (touch, stamp), and the window's time limit still ages a secret
+// read across them (GAP-0319). A cold memo answers errWarming and the worker reads it
 // back. A new forked actor's memo is linked to its parent's first
 // (linkMemo).
 //
