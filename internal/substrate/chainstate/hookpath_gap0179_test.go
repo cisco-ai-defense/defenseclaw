@@ -95,7 +95,7 @@ func TestPreparedSecretReadCountsWhileItRunsGAP0179(t *testing.T) {
 	}
 	// A pending read past its expiry no longer counts.
 	h.prepare(actorA, secretRead(t), strings.Repeat("b", 64))
-	h.advance(guardrail.ToolChainMaxHorizon + time.Minute)
+	h.work(actorA, guardrail.ToolChainMaxHorizon+time.Minute)
 	if v, err := h.egress(actorA); err != nil || v.Deny {
 		t.Fatalf("egress after the pending read expired: %+v %v", v, err)
 	}

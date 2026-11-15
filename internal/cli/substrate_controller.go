@@ -192,8 +192,9 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	}
 	ctl, err := newSubstrateController(cfg, client, reg, act, cpu, sink, true, resets, ns, resolver)
 	if err == nil {
-		// The leader's chain state runs each actor's clock on the
-		// controller's lifecycle events (A13).
+		// The leader's chain state gets the actors' lifecycle events: forks,
+		// reverts, deletes, crashes, and suspends for retention (A13). Its
+		// running-time clock needs none (GAP-0292).
 		ctl.SetLifecycle(&chainstate.Client{Leader: toLeader})
 	}
 	if err != nil {

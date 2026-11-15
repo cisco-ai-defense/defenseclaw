@@ -303,6 +303,32 @@ func (f *Fake) CompleteUpload(ref *ateapi.ObjectRef) error {
 	return nil
 }
 
+// Detach drops the node copy of a SUSPENDED actor's snapshots, as atelet
+// does after --snapshot-detach-delay (30 minutes by default): locality is
+// cleared, then assigned_node; the snapshots stay. Like the API it refuses
+// while the newest snapshot on the node is not uploaded.
+func (f *Fake) Detach(ref *ateapi.ObjectRef) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.actors[key(ref)]
+	if !ok {
+		return status.Errorf(codes.NotFound, "actor %s not found", key(ref))
+	}
+	s := a.Status
+	if s.State != ateapi.ActorStateSuspended {
+		return status.Errorf(codes.FailedPrecondition, "actor %s is %s", key(ref), s.State)
+	}
+	if h := head(s); h.GetLocality() != "" && h.GetDurableSnapshot().GetState() != ateapi.SnapshotStorageCompleted {
+		return status.Errorf(codes.FailedPrecondition, "snapshot generation %d of %s is not durable", h.GetGeneration(), key(ref))
+	}
+	for _, sn := range s.Snapshots {
+		sn.Locality = ""
+	}
+	s.AssignedNode = ""
+	f.bump(a.Metadata)
+	return nil
+}
+
 // RemoveActor deletes an actor and its policy, as DeleteActor would.
 func (f *Fake) RemoveActor(ref *ateapi.ObjectRef) {
 	f.mu.Lock()

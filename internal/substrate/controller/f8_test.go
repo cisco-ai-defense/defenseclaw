@@ -81,8 +81,10 @@ func TestR3bSuspendThenRevertBetweenPassesIsSent(t *testing.T) {
 }
 
 // A sync suspend (upload done) keeps the snapshot; the revert only drops its
-// node-local files. Still a revert.
-func TestRevertOfAnUploadedSuspendedActorIsSent(t *testing.T) {
+// node-local files, and the actor resumes from that same snapshot, as after
+// a detach. No revert of what the windows saw, so no barrier that would end
+// its egress chains (GAP-0292).
+func TestRevertOfAnUploadedSuspendedActorKeepsItsSnapshot(t *testing.T) {
 	r, life := lifeRig(t)
 	a := r.actor("eng-web", "alice-f8a", ateapi.ActorStateRunning, "sub-alice")
 	ref := ateapi.RefOf(a.GetMetadata())
@@ -100,7 +102,7 @@ func TestRevertOfAnUploadedSuspendedActorIsSent(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.pass()
-	wantLife(t, life, "suspended", "reverted")
+	wantLife(t, life, "suspended")
 }
 
 // A revert of a running actor followed at once by a resume: the controller
@@ -131,8 +133,8 @@ func TestRevertAndResumeInsideOnePollIsSent(t *testing.T) {
 	wantLife(t, life, "suspended", "resumed", "reverted")
 }
 
-// A revert of a running actor seen only as RUNNING -> SUSPENDED pauses the
-// clock too (the leader pauses running time only on suspended).
+// A revert of a running actor seen only as RUNNING -> SUSPENDED sends
+// suspended too (retention), then reverted.
 func TestRevertOfARunningActorPausesTheClock(t *testing.T) {
 	r, life := lifeRig(t)
 	a := r.actor("eng-web", "alice-f8c", ateapi.ActorStateRunning, "sub-alice")
