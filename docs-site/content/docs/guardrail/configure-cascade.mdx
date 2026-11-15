@@ -53,7 +53,7 @@ The released keys keep their meaning: `guardrail.mode`, `block_at`, `alert_at`, 
 | `cascade.judge.no_verdict` | `rules`, `unknown` | When the judge (or System One alone) gives no answer: keep the rules' verdict, or judge the call at the unknown tier. |
 | `cascade.system_one.on_unsure` | `confirm`, `alert`, `rules` | System One without the judge, on an unsure answer or a refusal: ask, alert, or add nothing. |
 | `cascade.system_one.allow_threshold`, `.block_threshold`, `.block_risk_score`, `.escalate_rule_flagged` | the `decision_model` values | Per connector or profile only: override [System One's routing](/docs/guardrail/decision-model) for that scope. The global values stay in `decision_model`. |
-| `cascade.lanes.<lane>` | each lane's shipped value | `off`, `shadow` (record the lane's verdict, never change the answer) or `on`. A lane that ships shadow-only in this release accepts `off` and `shadow`. `defenseclaw guardrail cascade explain` lists the lanes. |
+| `cascade.lanes.<lane>` | each lane's shipped value | `off`, `shadow` (record the lane's verdict, never change the answer) or `on`. A lane that ships shadow-only in this release accepts `off` and `shadow`. The [alignment check](/docs/guardrail/alignment-check) lane takes `off` (default), `shadow`, `alert` or `block`. `defenseclaw guardrail cascade explain` lists the lanes. |
 | `cascade.policy.module` | unset | `{path: /absolute/path/cascade.rego, digest: "sha256:<hex>"}`. The Rego policy, pinned by its digest. |
 | `cascade.policy.lowest` | `alert`, `allow`, `log`, `confirm` | The lowest action the policy may set on a call any layer flagged. |
 | `cascade.policy.highest` | `block`, `confirm`, `alert` | The highest action the policy may set. |

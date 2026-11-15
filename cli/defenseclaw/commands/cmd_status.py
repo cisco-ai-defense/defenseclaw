@@ -534,6 +534,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health, cfg)
         _print_decision_model(cfg)
+        _print_alignment_lane(cfg)
         _print_hook_guardian(cfg)
         _print_fleet_health(cfg, _fleet_status_client(client, health))
         hint(
@@ -2175,6 +2176,17 @@ def _print_judge_fallbacks(details: dict, cfg=None) -> None:
     if summary:
         hint = judge_max_parallel_hint(cfg)
         _status_row("Judge fallbacks", ux._style(summary + ("; " + hint if hint else ""), fg="yellow"))
+
+
+def _print_alignment_lane(cfg) -> None:
+    """``Alignment check`` row while guardrail.cascade.lanes.alignment is not
+    off (the lane is opt-in; nothing is printed while it is off)."""
+    from defenseclaw import cascade
+
+    mode = cascade.alignment_mode(cfg)
+    if mode.startswith("off") and "scopes" not in mode:
+        return
+    _status_row("Alignment check", mode)
 
 
 def _print_decision_model(cfg) -> None:

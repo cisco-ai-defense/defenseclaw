@@ -236,6 +236,7 @@ func main() {
 	limit := flag.Int("limit", 0, "max cases")
 	strategy := flag.String("strategy", "regex_only", "guardrail.detection_strategy for the hook path")
 	judgeModel := flag.String("judge-model", "", "judge model (OpenAI-compatible name at -judge-url); empty: no judge")
+	alignmentLane := flag.String("alignment", "", "guardrail.cascade.lanes.alignment (off, shadow, alert, block); needs -judge-model")
 	judgeURL := flag.String("judge-url", "", "judge base URL")
 	dmURL := flag.String("dm-url", "", "decision model System One URL; empty: off")
 	dmModel := flag.String("dm-model", "", "decision model name")
@@ -424,6 +425,13 @@ func main() {
 			model += "#" + judgeCacheTag
 		}
 		cfg.Guardrail.Judge.LLM = config.LLMConfig{Model: "openai/" + model, Provider: "openai", BaseURL: *judgeURL, APIKey: "s7-local-proxy"}
+	}
+	if *alignmentLane != "" {
+		cfg.Guardrail.Cascade.Lanes = map[string]string{"alignment": *alignmentLane}
+		// The lane asks only for connectors whose hooks the judge is on for
+		// (guardrail.judge.hook_connectors, GAP-0680); -connector auto
+		// drives every connector.
+		cfg.Guardrail.Judge.HookConnectors = []string{"*"}
 	}
 	if err := dmFillJudgeRefused(*dmFill, *judgeModel, *judgeURL, *layers); err != nil {
 		fmt.Fprintln(os.Stderr, "[s7bench] FATAL:", err)
