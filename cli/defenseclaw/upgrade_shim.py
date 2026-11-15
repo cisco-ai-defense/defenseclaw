@@ -111,6 +111,7 @@ NEWER_CONFIG_KEYS = (
     ("routing.allow_user_override", (1, 0, 10)),
     ("routing.categories", (1, 0, 10)),
     ("routing.classifier", (1, 0, 10)),
+    ("routing.context", (1, 0, 10)),
     ("routing.default_alias", (1, 0, 10)),
     ("routing.min_confidence", (1, 0, 10)),
     ("routing.models[].apis", (1, 0, 10)),
