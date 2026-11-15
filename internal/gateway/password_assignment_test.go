@@ -80,6 +80,7 @@ func TestPasswordAssignmentRule(t *testing.T) {
 		`password: required`,
 		`password = None`,
 		`password: changeme`,
+		`password: changeme123456`, // the shared placeholder reading (SEC-SECRET-ASSIGN's)
 		`password = "********"`,
 		`password: xxxxxxxxxx`,
 		`pwd: /home/user/project`,
@@ -101,6 +102,7 @@ func TestPasswordAssignmentRule(t *testing.T) {
 		`password: "^`+pw("Wq7mz", "2Lp")+`"`,      // a caret, not a regex
 		`"password": "**`+pw("Wq7m", "z2Lp")+`**"`, // stars around a password
 		`"pwd": "`+pw("Wq7m", "/z2Lp!")+`"`,        // a slash, not a path
+		`password: `+pw("Kj7mNp2", "Qr9sVw4"),      // a real password where changeme123456 was
 	)
 	for _, in := range report {
 		if !hasRule(ScanAllRules(in, "write_file"), passwordAssignRuleID) {

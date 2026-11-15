@@ -54,8 +54,10 @@ const (
 // [REDACTED], **redacted**, @Password), a rule list
 // (required|string|min:8), a regex, a scheme reference (env:DB_PASSWORD),
 // a relative path, or a fill-in that names its own key
-// (your-password-here) is not a password, quoted or not. No word list:
-// every test reads the shape of the value or the key of the match.
+// (your-password-here) is not a password, quoted or not. These tests read
+// the shape of the value or the key of the match. A stand-in value
+// (changeme123456, dummy_password_2024) is read by the placeholder helper
+// SEC-SECRET-ASSIGN uses, credentialPlaceholderValue, not by a second list.
 func acceptedPasswordAssignment(text, match string, start int) bool {
 	if start > 0 && start <= len(text) && (text[start-1] == '/' || text[start-1] == '\\') {
 		// The key is a path name (/etc/passwd:...), not a key.
@@ -65,7 +67,7 @@ func acceptedPasswordAssignment(text, match string, start int) bool {
 	if !ok || len(value) < 8 {
 		return false
 	}
-	if credentialReference(value) || pathLikeValue(value) || obviousCredentialPlaceholder(value) {
+	if credentialReference(value) || pathLikeValue(value) || credentialPlaceholderValue(value) {
 		return false
 	}
 	if !quoted && unquotedCodeValue(value) {

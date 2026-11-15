@@ -111,6 +111,25 @@ func secretAssignmentPlaceholderValue(value string) bool {
 	return sawPlaceholder
 }
 
+// assignmentRuleReadAsWritten reports a credential-assignment rule that is
+// read only in the text as written, never in the shell-normalized text:
+// normalizeShell turns an escaped newline into the letter n and so joins one
+// assignment to the next (changeme123456\napi_key becomes
+// changeme123456napi_key), and both patterns read the JSON escape themselves.
+func assignmentRuleReadAsWritten(ruleID string) bool {
+	return ruleID == secretAssignmentRuleID || ruleID == passwordAssignRuleID
+}
+
+// credentialPlaceholderValue is the one placeholder reading of an assigned
+// credential value, shared by SEC-SECRET-ASSIGN and SEC-PASSWORD-ASSIGN: a
+// value made only of stand-in words (changeme123456, your_api_key_here_1234,
+// dummy_password_2024) or a known dummy (example, a keyboard run, a repeated
+// unit). Both rules read a value the same way, so a placeholder that one
+// leaves as none the other cannot alert on.
+func credentialPlaceholderValue(value string) bool {
+	return secretAssignmentPlaceholderValue(value) || obviousCredentialPlaceholder(value)
+}
+
 // secretAssignmentMostlyPlaceholderWord reports one token that is a
 // placeholder word with a short tail (examplekey, changemenow).
 func secretAssignmentMostlyPlaceholderWord(token string) bool {
@@ -209,10 +228,7 @@ func secretAssignmentRejection(raw string) string {
 	if secretAssignmentVarRef.MatchString(value) || secretAssignmentCodeRef.MatchString(value) {
 		return "reference"
 	}
-	if secretAssignmentPlaceholderValue(value) {
-		return "placeholder"
-	}
-	if obviousCredentialPlaceholder(value) {
+	if credentialPlaceholderValue(value) {
 		return "placeholder"
 	}
 	// A path, a host name or a file name is not a secret.
