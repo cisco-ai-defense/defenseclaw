@@ -95,7 +95,10 @@ func TestHookImageRetireSkipProfileRecordsAndAuditsTheSkip(t *testing.T) {
 	s.accountFile(skipTestFile, skipTestSID)
 	s.named = []map[string][]string{{folder: {skipTestFile}}}
 	report := retireWindowsHookImages(s.skipSteps(skipTestSID))
-	if !report.OK || len(report.StillNamed) != 0 {
+	// GAP-0794 slot decision: a skip makes a partial retire, never a
+	// downgrade-ready one.
+	if report.OK || report.DowngradeReady || report.Reason != windowsHookImageRetirePartial || len(report.StillNamed) != 0 ||
+		!strings.Contains(report.Error, skipTestSID) || !strings.Contains(report.Error, "must not run") {
 		t.Fatalf("retire with the blocking profile skipped = %+v", report)
 	}
 	if len(report.SkippedProfiles) != 1 || report.SkippedProfiles[0].SID != skipTestSID ||
@@ -112,15 +115,26 @@ func TestHookImageRetireSkipProfileRecordsAndAuditsTheSkip(t *testing.T) {
 		t.Fatal("no marker")
 	}
 	var marker windowsHookImageRetireMarker
-	if err := json.Unmarshal([]byte(node.data), &marker); err != nil || len(marker.SkippedProfiles) != 1 ||
+	if err := json.Unmarshal([]byte(node.data), &marker); err != nil || len(marker.SkippedProfiles) != 1 || !marker.Partial ||
 		marker.SkippedProfiles[0].SID != skipTestSID || marker.SkippedProfiles[0].Home != `C:\Users\dcw-std2` {
 		t.Fatalf("marker %s: %v", node.data, err)
 	}
 	// A repeated retire keeps the recorded skip.
 	again := retireWindowsHookImages(s.skipSteps(skipTestSID))
 	node, _ = s.fs.get(report.Marker)
-	if !again.OK || !strings.Contains(node.data, skipTestSID) {
+	if again.OK || again.Reason != windowsHookImageRetirePartial || !strings.Contains(node.data, skipTestSID) {
 		t.Fatalf("second retire = %+v, marker %s", again, node.data)
+	}
+	// Once the profile is converted, retire without a skip ends ok and
+	// downgrade-ready and clears the partial state.
+	s.named = []map[string][]string{{}}
+	s.scans = 0
+	done := retireWindowsHookImages(s.skipSteps())
+	node, _ = s.fs.get(report.Marker)
+	marker = windowsHookImageRetireMarker{}
+	if err := json.Unmarshal([]byte(node.data), &marker); err != nil || !done.OK || !done.DowngradeReady ||
+		marker.Partial || len(marker.SkippedProfiles) != 0 {
+		t.Fatalf("retire after the conversion = %+v, marker %s", done, node.data)
 	}
 }
 
@@ -189,7 +203,7 @@ func TestHookImageRetireSkipProfileThatGotRewrittenIsNotSkipped(t *testing.T) {
 	s.accountFile(skipTestFile, skipTestSID)
 	s.named = []map[string][]string{{folder: {skipTestFile}}, {}}
 	report := retireWindowsHookImages(s.skipSteps(skipTestSID))
-	if !report.OK || len(report.SkippedProfiles) != 0 || len(s.audits) != 0 {
+	if !report.OK || !report.DowngradeReady || len(report.SkippedProfiles) != 0 || len(s.audits) != 0 {
 		t.Fatalf("retire = %+v audits %v", report, s.audits)
 	}
 }
@@ -300,5 +314,36 @@ func TestHookImageScanReadsEveryRenderedBridge(t *testing.T) {
 				t.Errorf("%s: folders = %q", name, got)
 			}
 		}
+	}
+}
+
+// A complete retire is the only downgrade-ready one.
+func TestHookImageRetireCompleteIsDowngradeReady(t *testing.T) {
+	r := newRetireFixture(t)
+	r.named = []map[string][]string{{}}
+	if report := retireWindowsHookImages(r.steps()); !report.OK || !report.DowngradeReady || report.Reason != "" {
+		t.Fatalf("retire = %+v", report)
+	}
+	pending := newRetireFixture(t)
+	folder, _ := winpath.EnterpriseHookImageDigest(pending.recorded["hook"])
+	pending.named = []map[string][]string{{folder: {`C:\ProgramData\x.json`}}}
+	if report := retireWindowsHookImages(pending.steps()); report.OK || report.DowngradeReady {
+		t.Fatalf("pending retire = %+v", report)
+	}
+}
+
+// Status and verify say a partial retire is not ready for an older Setup,
+// also once the skipped profiles are converted, until retire runs again.
+func TestHookImageRetirePartialStatus(t *testing.T) {
+	partial, _ := json.Marshal(windowsHookImageRetireMarker{SchemaVersion: 1, Partial: true, SkippedProfiles: []windowsHookImageSkippedProfile{{SID: skipTestSID}}})
+	if line := windowsHookImageRetirePartialLine(partial, 1); !strings.Contains(line, "partial") || !strings.Contains(line, "must not run") {
+		t.Fatalf("partial with an unconverted profile: %q", line)
+	}
+	if line := windowsHookImageRetirePartialLine(partial, 0); !strings.Contains(line, "run retire again") {
+		t.Fatalf("partial with every profile converted: %q", line)
+	}
+	full, _ := json.Marshal(windowsHookImageRetireMarker{SchemaVersion: 1})
+	if line := windowsHookImageRetirePartialLine(full, 0); line != "" {
+		t.Fatalf("complete retire: %q", line)
 	}
 }

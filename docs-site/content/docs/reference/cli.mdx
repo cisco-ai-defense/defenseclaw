@@ -1459,7 +1459,9 @@ form) leaves one enrolled profile's own configs unconverted: the SID must be an 
 `retire` back, or `retire` refuses with nothing changed. Each skip writes a HIGH `config-update` audit row
 (target `hook-image-retire-skip`: who, when, the SID and its files), is listed in `skipped_profiles`, and
 `enterprise windows status` and `verify` report it as `hook_image_profile_not_retired` until none of its files
-names a launch folder.
+names a launch folder. A retire with a skip is partial (`ok: false`, `downgrade_ready: false`,
+`hook_image_retire_partial`): run the older Setup only after a retire without `--skip-profile` reports
+`downgrade_ready: true`.
 
 Exit codes: standalone `0`, `1603` failure, `1618` busy, `1639` invalid
 arguments, `5` when run from a standard account (`status` and `verify` need an elevated prompt; the JSON error code is `elevation_required`), and `3010` (reserved). Secure Client: `0` and `1603`.
