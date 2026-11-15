@@ -31,9 +31,10 @@ import (
 //  1. a judge that does not answer (unreachable, timed out) never lowers
 //     anything: cascade 3 then gives exactly cascade 2's verdict, an unsure
 //     System One ask or alert included;
-//  2. an unsure System One answer has no verdict of its own, so a clean judge
-//     answer may resolve it, never below the rules (cascade 1); a confident
-//     System One block is never lowered (GAP-0867).
+//  2. an unsure System One answer (a confirm, or a block on a call the rules
+//     flagged, which System One never confidently blocks) has no verdict of
+//     its own, so a clean judge answer may resolve it, never below the rules
+//     (cascade 1); a confident System One block is never lowered (GAP-0867).
 
 // stalledLLMProvider never answers before the call's deadline.
 type stalledLLMProvider struct{}
@@ -152,8 +153,11 @@ func TestRaiseOnlyAcrossLayers(t *testing.T) {
 				for jname, judge := range judges {
 					c3 := verdicts(3, judge)
 					for i := range calls {
+						// A clean judge may resolve anything but a confident
+						// System One block; it never goes below the rules.
 						floor, layer := c2[i], "rules+S1"
-						if name == "confirm" && jname == "clean" {
+						confident := c2[i].Action == guardrailActionBlock && c2[i].Severity == "CRITICAL" && slices.Contains(c2[i].Findings, decisionModelFindingID)
+						if jname == "clean" && !confident {
 							floor, layer = c1[i], "rules"
 						}
 						if raiseOnlyActionRank(c3[i].Action) < raiseOnlyActionRank(floor.Action) {
