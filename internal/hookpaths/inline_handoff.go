@@ -16,7 +16,7 @@ import (
 
 // inlineInterpreterNames are the substrings a command holds when it can run
 // an inline-code interpreter (actionfacts.InlineCodeHandoff).
-var inlineInterpreterNames = []string{"python", "pypy", "node", "bun", "ruby", "php"}
+var inlineInterpreterNames = tminTable(tminInterpreters)
 
 // InlineMaxShellDepth bounds how many nested shell -c bodies (and launcher
 // bodies: su -c, script -c, ssh) the hand-off reader opens. A body past it
@@ -294,7 +294,7 @@ func launcherBody(child []string) (string, bool) {
 			if child[i] == "--command" || strings.HasPrefix(child[i], "-") && !strings.HasPrefix(child[i], "--") && strings.HasSuffix(child[i], "c") {
 				return child[i+1], child[i+1] != "$"
 			}
-			if value, ok := strings.CutPrefix(child[i], "--command="); ok {
+			if value, ok := strings.CutPrefix(child[i], tminTable(tminCommandEquals)[0]); ok {
 				return value, value != "$"
 			}
 		}
@@ -311,7 +311,7 @@ func sshCommandWords(child []string) []string {
 	if _, ok := inlineSSHCommand(child); !ok {
 		return nil
 	}
-	valued := "bcDEeFIiJLlmOopQRSWw"
+	valued := tminTable(tminSSHValueLetters)[0]
 	for i := 1; i < len(child); i++ {
 		word := child[i]
 		switch {
@@ -333,7 +333,7 @@ func sshCommandWords(child []string) []string {
 // inlineSSHCommand is the command words after the host of an ssh call,
 // joined as the remote shell reads them.
 func inlineSSHCommand(child []string) (string, bool) {
-	valued := "bcDEeFIiJLlmOopQRSWw"
+	valued := tminTable(tminSSHValueLetters)[0]
 	for i := 1; i < len(child); i++ {
 		word := child[i]
 		switch {
@@ -361,8 +361,9 @@ func inlineSSHCommand(child []string) (string, bool) {
 // reading continues at the first word that names an inline interpreter.
 func inlineLauncherChild(child []string) ([]string, bool) {
 	switch programBase(child[0]) {
-	case "uv", "poetry", "pipenv", "conda", "pdm", "rye":
-		if len(child) < 3 || child[1] != "run" {
+	case tminTable(tminLaunchers)[0], tminTable(tminLaunchers)[1], tminTable(tminLaunchers)[2], tminTable(tminLaunchers)[3],
+		tminTable(tminLaunchers)[4], tminTable(tminLaunchers)[5]:
+		if len(child) < 3 || child[1] != tminTable(tminLauncherRun)[0] {
 			return nil, false
 		}
 	case "watch":
@@ -438,7 +439,7 @@ func FindExecChildCommands(command, cwd, home string) []string {
 			}
 			quoted := make([]string, len(exec))
 			for i, word := range exec {
-				word = strings.ReplaceAll(word, "{}", "tmin-entry")
+				word = strings.ReplaceAll(word, "{}", tminTable(tminFindEntry)[0])
 				quoted[i] = "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
 			}
 			out = append(out, strings.Join(quoted, " "))

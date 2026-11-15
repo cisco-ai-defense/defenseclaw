@@ -232,7 +232,7 @@ func archiveMembersUnknown(program string, words []string) bool {
 		for _, word := range words {
 			if strings.HasPrefix(word, "--") {
 				switch tarLongName(strings.SplitN(word, "=", 2)[0]) {
-				case "--files-from", "--transform", "--xform":
+				case tminTable(tminTarMemberList)[0], tminTable(tminTarMemberList)[1], tminTable(tminTarMemberList)[2]:
 					return true
 				}
 				continue
@@ -382,15 +382,11 @@ func sevenZipMembers(words []string) []string {
 
 // tarValueLetters are the tar short options whose value is the rest of the
 // cluster or the next word; tarValueOptions the long ones whose value is
-// the next word when it is not attached.
-const tarValueLetters = "fCTXbHIKLNVg"
-
-var tarValueOptions = map[string]bool{
-	"--file": true, "--directory": true, "--exclude": true, "--files-from": true, "--exclude-from": true,
-	"--transform": true, "--xform": true, "--owner": true, "--group": true, "--mode": true, "--mtime": true,
-	"--format": true, "--use-compress-program": true, "--newer": true, "--after-date": true, "--label": true,
-	"--blocking-factor": true, "--record-size": true, "--strip-components": true,
-}
+// the next word when it is not attached (both from tminTableSpec).
+var (
+	tarValueLetters = tminTable(tminTarValueLetters)[0]
+	tarValueOptions = tminTableSet(tminTarValueOptions)
+)
 
 func tarMembers(words []string) []string {
 	var operands []string
@@ -407,7 +403,7 @@ func tarMembers(words []string) []string {
 			switch name {
 			case "--extract", "--get":
 				extract = true
-			case "--to-stdout", "--list", "--to-command":
+			case tminTable(tminTarStdout)[0], tminTable(tminTarStdout)[1], tminTable(tminTarStdout)[2]:
 				stdout = true
 			case "--absolute-names":
 				absolute = true
@@ -417,7 +413,7 @@ func tarMembers(words []string) []string {
 					value = words[i]
 				}
 			}
-			if name == "--strip-components" {
+			if name == tminTable(tminTarStrip)[0] {
 				strip, _ = strconv.Atoi(value)
 			}
 		case strings.HasPrefix(word, "-") && len(word) > 1 || i == 0:
@@ -487,7 +483,7 @@ func unzipMembers(words []string) []string {
 			if strings.ContainsAny(cluster, "lptvzZc") {
 				return nil
 			}
-			junk = junk || strings.Contains(cluster, "j")
+			junk = junk || strings.IndexByte(cluster, 'j') >= 0
 			if last || word == "-P" {
 				i++
 			}
