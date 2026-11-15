@@ -165,10 +165,11 @@ path_rules:
   - {id: PATH-K8S-CLUSTER-CRED, access: [read], re: "^/etc/(k8s|kubernetes)/(admin|kubelet)[.]conf$|^/etc/kubernetes/pki/.*[.]key$"}
   - {id: PATH-CRED-STORE, access: [read], re: "^/(private/)?etc/(master[.]passwd|gshadow|security/opasswd|krb5[.]keytab)$|^/var/lib/jenkins/(credentials[.]xml$|secrets/)|^/etc/(aws|azure|gcloud)/credentials$|/[^/]+[.]keytab$"}
   - {id: PATH-CRED-STORE-USER, access: [read], re: "/[.](azure/(credentials|accessTokens[.]json)|config/gh/hosts[.]yml|my[.]cnf|pgpass|vault-token)$"}
-  # The developer-token files of an account's home (the class of PATH-GIT-CREDS: .git-credentials, .netrc, _netrc, .pgpass), in any home: /root, or one
-  # user folder below a folder named home, homes or users (/home/bob, /mnt/home/alice, /srv/homes/carol). A native file tool reads them as the typed
-  # owner does on the shell and MCP lanes (rel-1-0-10:GAP-0816); the rule's own owner decides the active home and the fixture folders.
-  - {id: PATH-GIT-CREDS, access: [read], re: "(?i)^(?:/root|/(?:[^/]+/)*(?:home|homes|users)/[^/]+)/(?:[.](?:git-credentials|netrc|pgpass)|_netrc)$"}
+  # The developer-token files of an account's home (the class of PATH-GIT-CREDS: .git-credentials, .netrc, _netrc, .pgpass). A native file tool reads them
+  # as the typed owner does on the shell and MCP lanes (rel-1-0-10:GAP-0816). The home is found by its position, as isRecognizedHomeRoot reads it: /root, or
+  # the account folder directly below /home, /Users or <drive>:/Users. A folder of a project that is only called home, homes or users, at any depth, is
+  # no account home (rel-1-0-10:GAP-0836).
+  - {id: PATH-GIT-CREDS, access: [read], re: "(?i)^(?:/root|/(?:home|users)/[^/]+|[a-z]:/users/[^/]+)/(?:[.](?:git-credentials|netrc|pgpass)|_netrc)$"}
   - {id: PATH-ETC-PASSWD, access: [write, append, delete], re: "^/etc/passwd$", text_re: ":[^:[:space:]]*:0:0:"}
   - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "^/etc/(cron[.](d|daily|hourly|weekly|monthly)/|crontab$|sudoers[.]d/)|^/var/spool/cron/", text_re: "(?i)(^|[^a-z])root[[:space:]]+([^[:space:]]+[[:space:]]+)*(/home/|/tmp/|/var/tmp/|/dev/shm/|~/)"}
 command_rules:
