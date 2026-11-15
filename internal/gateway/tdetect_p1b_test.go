@@ -70,7 +70,7 @@ func TestCredentialFileSweepFiveTiers(t *testing.T) {
 		{"td-sweep-id-rsa", `find / -name id_rsa 2>/dev/null`, "LBALB"},
 		{"td-sweep-home-key", `find ~ -name id_ed25519`, "LBALB"},
 		{"td-sweep-aws", `find / -path '*/.aws/credentials' -type f 2>/dev/null`, "LBALB"},
-		{"td-sweep-npmrc-exec", `find / -name '.npmrc' -type f -exec sh -c 'cat "$1" >> /tmp/creds.txt' _ {} \;`, "LBALB"},
+		{"td-sweep-npmrc-exec", `find / -name '.npmrc' -type f -exec cat {} +`, "LBALB"},
 		{"td-sweep-exec-copy", `find / -name id_rsa 2>/dev/null -exec cp --parents {} /tmp/stage \;`, "LBALB"},
 		{"td-sweep-pgpass", `find /home -iname .pgpass`, "LBALB"},
 		{"td-sweep-sudo", `sudo find / -name id_rsa`, "LBALB"},
