@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -24,24 +25,67 @@ import (
 // fixtures and the Windows redirect of the GAP-0611 tests; the padding is
 // generated.
 func TestGAP0693PowerShellPaddingNextToAProtectedWriteKeepsTheBlock(t *testing.T) {
-	gap0589WindowsHost(t)
-	cwd := `C:\Users\alice`
+	if runtime.GOOS == "windows" {
+		// The matrix is 300 hook calls, most of them over 100 KB: about 40 s
+		// here and 25 minutes on a busy Windows host, which would hold a
+		// native CI shard (GAP-0766). The logic does not depend on the host
+		// (windowsHookHost is forced); the smoke test below runs natively,
+		// and the matrix ran once natively on dc-ent-win for this change.
+		t.Skip("the full matrix runs on POSIX hosts; TestGAP0693PowerShellPaddingSmoke runs everywhere")
+	}
+	gap0693PaddingMatrix(t, gap0693Fillers(true), boundedTestTiers, gap0589Routes)
+}
+
+// TestGAP0693PowerShellPaddingSmoke is the small, host-independent cut of the
+// matrix above: the Claude Code PowerShell tool in the default and strict
+// packs, the two cheap fillers, so a native Windows run stays under a minute.
+func TestGAP0693PowerShellPaddingSmoke(t *testing.T) {
+	var tiers []struct {
+		name    string
+		posture string
+		managed bool
+		tier    bounded.Tier
+	}
+	for _, tier := range boundedTestTiers {
+		if tier.name == "default" || tier.name == "strict" {
+			tiers = append(tiers, tier)
+		}
+	}
+	gap0693PaddingMatrix(t, gap0693Fillers(false), tiers, gap0589Routes[:1])
+}
+
+func gap0693Fillers(all bool) []struct{ name, text string } {
 	r := strings.Repeat
 	fillers := []struct{ name, text string }{
 		{"paren513", r("(", 513) + "1" + r(")", 513)},
-		{"subexpr513", r("$(", 513) + "1" + r(")", 513)},
-		{"words131073", "Write-Output " + r("a ", 131073)},
 		{"stmts2100", r("a;", 2100)},
 	}
+	if all {
+		fillers = append(fillers,
+			struct{ name, text string }{"subexpr513", r("$(", 513) + "1" + r(")", 513)},
+			struct{ name, text string }{"words131073", "Write-Output " + r("a ", 131073)})
+	}
+	return fillers
+}
+
+func gap0693PaddingMatrix(t *testing.T, fillers []struct{ name, text string }, tiers []struct {
+	name    string
+	posture string
+	managed bool
+	tier    bounded.Tier
+}, routes []gap0589Route) {
+	t.Helper()
+	gap0589WindowsHost(t)
+	cwd := `C:\Users\alice`
 	type unit struct{ name, command, ruleID string }
 	units := []unit{{"redirect", overLimitWindowsRedirect, ""}}
 	for _, fixture := range windowsAtomicParityPositives[2:4] {
 		units = append(units, unit{fixture.name, fixture.command, fixture.ruleID})
 	}
 	benign := `Get-ChildItem C:\Users\alice\project`
-	for _, tier := range boundedTestTiers {
+	for _, tier := range tiers {
 		floor := bounded.Unknown(tier.tier)
-		for _, route := range gap0589Routes {
+		for _, route := range routes {
 			api := gap0589TierAPI(t, route.connector, tier.posture, tier.managed, tier.tier)
 			for _, filler := range fillers {
 				for _, layout := range []string{"before", "after"} {
