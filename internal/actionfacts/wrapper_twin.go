@@ -429,6 +429,46 @@ func StaticPrefixWrapperChild(words []string, static []bool) (PrefixWrapperRun, 
 	return run, true
 }
 
+// WrapperChildIndex is the index of the program word the wrappers at the
+// head of argv run (static[i] is false for a word the shell expands at run
+// time), or -1: the prefix wrappers StaticPrefixWrapperChild reads (taskset,
+// flock, chrt, ...), unbuffer, and chroot, nsenter and xargs by their own
+// grammars. It is the answer to "which program does this wrapper run" for a
+// reader that looks through a wrapper without reading its child as the
+// caller's own call: the excused mention scan of hookpaths
+// (rel-1-0-10:GAP-0910).
+func WrapperChildIndex(argv []string, static []bool) int {
+	if len(argv) == 0 || len(static) != len(argv) {
+		return -1
+	}
+	if run, ok := StaticPrefixWrapperChild(argv, static); ok {
+		return run.Index
+	}
+	switch commandProgram(argv[0]) {
+	case "unbuffer":
+		// expect's unbuffer [-p] COMMAND.
+		if len(argv) > 2 && argv[1] == "-p" {
+			return 2
+		}
+		if len(argv) > 1 && !strings.HasPrefix(argv[1], "-") {
+			return 1
+		}
+	case "chroot":
+		if parsed := parseChrootInvocation(argv); parsed.complete && parsed.childIndex > 0 {
+			return parsed.childIndex
+		}
+	case "nsenter":
+		if parsed := parseNSEnterInvocation(argv); parsed.complete && parsed.childIndex > 0 {
+			return parsed.childIndex
+		}
+	case "xargs":
+		if start, _, known := XargsProgram(argv); known {
+			return start
+		}
+	}
+	return -1
+}
+
 func wrapperProgramName(word string) string {
 	if slash := strings.LastIndexByte(word, 47); slash >= 0 {
 		return word[slash+1:]
