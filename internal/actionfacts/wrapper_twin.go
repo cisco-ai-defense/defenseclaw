@@ -442,7 +442,7 @@ func WrapperChildIndex(argv []string, static []bool) int {
 		return -1
 	}
 	if run, ok := StaticPrefixWrapperChild(argv, static); ok {
-		return run.Index
+		return wrapperChildProgram(argv, static, run.Index)
 	}
 	switch commandProgram(argv[0]) {
 	case "unbuffer":
@@ -455,18 +455,30 @@ func WrapperChildIndex(argv []string, static []bool) int {
 		}
 	case "chroot":
 		if parsed := parseChrootInvocation(argv); parsed.complete && parsed.childIndex > 0 {
-			return parsed.childIndex
+			return wrapperChildProgram(argv, static, parsed.childIndex)
 		}
 	case "nsenter":
 		if parsed := parseNSEnterInvocation(argv); parsed.complete && parsed.childIndex > 0 {
-			return parsed.childIndex
+			return wrapperChildProgram(argv, static, parsed.childIndex)
 		}
 	case "xargs":
 		if start, _, known := XargsProgram(argv); known {
-			return start
+			return wrapperChildProgram(argv, static, start)
 		}
 	}
 	return -1
+}
+
+// wrapperChildProgram is index when argv[index] can be the program the
+// wrapper runs, or -1. An option word is no program: flock FILE -c STRING
+// (or --command STRING) runs sh -c STRING, so the word after the lock file
+// is flock's option, not its child; a reader of WrapperChildIndex then
+// keeps the wrapper itself as the call (rel-1-0-10:GAP-0925).
+func wrapperChildProgram(argv []string, static []bool, index int) int {
+	if index <= 0 || index >= len(argv) || !static[index] || strings.HasPrefix(argv[index], "-") {
+		return -1
+	}
+	return index
 }
 
 func wrapperProgramName(word string) string {
