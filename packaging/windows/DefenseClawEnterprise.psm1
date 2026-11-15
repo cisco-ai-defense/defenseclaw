@@ -42513,7 +42513,10 @@ function Test-DefenseClawGuardianReportCompletedWithFailedTargets {
 # <account> while that account is signed out: ...", the account "user (SID)"
 # or the SID alone. Without those three, no rollback or recovery accepted the
 # restored release's degraded reconcile while an account was signed out, and
-# every DefenseClaw service stayed stopped (GAP-0601). Any other error (a
+# every DefenseClaw service stayed stopped (GAP-0601). The status of 1.0.10
+# and later starts each of those lines with "last guardian reconcile failed
+# for <connector>@<account>: ", which a Setup before 1.0.10 accepts too
+# (GAP-0794); the three bare forms are what a restored 1.0.9 status writes. Any other error (a
 # missing or unreadable authorization or activation, an untrusted manifest,
 # an unreadable state) rejects the report.
 function Test-DefenseClawGuardianReportErrorsAttributable {

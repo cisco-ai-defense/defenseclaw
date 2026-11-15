@@ -45,3 +45,17 @@ func TestHermesLaunchImageFamilyCommand(t *testing.T) {
 		t.Fatal("no standalone install must recognize nothing")
 	}
 }
+
+// rel-1-0-10 GAP-0794: after `hook-image retire` the guardian writes the
+// Hermes allowlist entry for the transition image. 1.0.9 recognizes only its
+// own exact command for that path (the 1.0.9 guardian refused any other
+// marked entry as "a tampered DefenseClaw command"), so this release must
+// render exactly what 1.0.9 rendered: the literal below is the 1.0.9
+// windowsHermesDirectHookCommand output (tag 1.0.9, helpers.go).
+func TestHermesTransitionCommandIsThe109Command(t *testing.T) {
+	const transition = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	const released109 = `"C:/Program Files/Cisco/DefenseClaw/bin/defenseclaw-hook.exe" hook --connector hermes`
+	if got := windowsHermesDirectHookCommand(transition); got != released109 {
+		t.Fatalf("Hermes transition command = %q, want the 1.0.9 command %q", got, released109)
+	}
+}
