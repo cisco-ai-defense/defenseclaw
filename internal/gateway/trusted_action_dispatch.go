@@ -660,8 +660,15 @@ func dispatchTrustedAction(
 			}()
 		}
 		// A script past the input bound is not read in full, so the bound of the argv
-		// call still cuts it (rel-1-0-10:GAP-0712).
-		if cut := trustedReadingCut(request.Input, facts, launcherRead && len(launcherTwin.Input.Command) <= actionfacts.MaxCommandBytes); cut.Any() {
+		// call still cuts it (rel-1-0-10:GAP-0712). An argv call the POSIX
+		// reading judges past its byte bound as the text of its words
+		// (posixParseTruncation: a word in code position truncated, a data word
+		// judged as its twin) keeps that reading, which is the finer floor: a
+		// plain operand past 4 KiB of echo or dcx stays data, as in the text
+		// form (rel-1-0-10:GAP-0689). The argv cut covers every other argv call.
+		argvRead := launcherRead && len(launcherTwin.Input.Command) <= actionfacts.MaxCommandBytes ||
+			posixByteBoundCommand(request, facts) != ""
+		if cut := trustedReadingCut(request.Input, facts, argvRead); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
 			// statement budget: the call is TRUNCATED (the one bound rule),
 			// never judged below the unknown tier of its pack, and what was
@@ -9878,9 +9885,11 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 //   - An argv command that no launcher script covers (trustedArgvReadingCut):
 //     a word over 4 KiB, over 64 KiB in all, or more than 256 words
 //     (rel-1-0-10:GAP-0712). bodyRead is set when the script of the launcher
-//     is read on its own (launcherBodyTwinRequest): a word over the argv
-//     bounds is then not a cut of the reading, and the script's own cuts are
-//     the ones that count.
+//     is read on its own (launcherBodyTwinRequest), or when the POSIX reading
+//     judges the call past its byte bound as the text of its words
+//     (posixParseTruncation, rel-1-0-10:GAP-0689): a word over the argv
+//     bounds is then not a cut of the reading, and that reading's own cuts
+//     are the ones that count.
 //
 // A POSIX reading is not truncated by its command cap: its per-statement
 // split (SimpleCommands) reads every statement up to the statement budget
