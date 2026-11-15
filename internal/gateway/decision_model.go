@@ -836,15 +836,15 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", res.logLine)
 	}
 	var v *ScanVerdict
-	switch {
-	case res.route == decisionAllow:
+	switch res.route {
+	case decisionAllow:
 		v = allowVerdict(decisionModelScanner)
 		v.Reason = fmt.Sprintf("decision-model: confident allow (risk %.2f <= %.2f)", res.risk, routing.allowAt)
 		if decisionRuleFloorFrom(ctx) {
 			v.Reason += "; the rule finding stands"
 		}
 		v.Confidence = 1 - res.risk
-	case res.route == decisionBlock:
+	case decisionBlock:
 		v = confidentBlockVerdict(res, routing.blockAt, routing.blockRiskScore)
 	default:
 		v = decisionUnsureVerdict(res, routing)

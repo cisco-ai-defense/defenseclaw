@@ -19646,7 +19646,10 @@ def _check_connector_inventory(
                     f"defenseclaw guardrail judge add {connector}"
                 )
                 if gate_empty:
-                    detail += "; no hook connector is turned on, so the judge reviews proxy traffic only (all: defenseclaw guardrail judge add all)"
+                    detail += (
+                        "; no hook connector is turned on, so the judge reviews proxy traffic only "
+                        "(all: defenseclaw guardrail judge add all)"
+                    )
         if judge_enabled and judge_failing:
             detail += "; judge failing: all recent calls failed, so only the rules decide"
         by_connector = judge_details.get("judge_fallbacks_by_connector") if isinstance(judge_details, dict) else None

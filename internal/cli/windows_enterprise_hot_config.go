@@ -1573,12 +1573,23 @@ func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installe
 // before its report (the authorization directory resolved to a path that
 // does not exist), so no hook proof could pass (GAP-1418).
 func windowsEnterpriseHotConfigReadinessCommand(ctx context.Context, installedGateway string, layout managed.StandaloneLayout) *exec.Cmd {
+	command := exec.CommandContext(ctx, installedGateway, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
+	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseGuardianRecordPins(layout, managed.StandaloneWindowsGatewaySvc))
+	return command
+}
+
+// windowsEnterpriseGuardianRecordPins are the service pins plus the two the
+// guardian's protected records need: its authorization directory and the
+// gateway service name. A process that reads or writes those records as the
+// services do (readiness, hook-image retire's Codex requirements reconcile
+// and runtime selector step) carries all seven; without the authorization
+// directory the Codex requirements layout refused with "must be an exact
+// absolute protected path" (rel-1-0-10 GAP-0856, GAP-1418).
+func windowsEnterpriseGuardianRecordPins(layout managed.StandaloneLayout, gatewayService string) map[string]string {
 	pins := windowsEnterpriseServicePins(layout)
 	pins[managed.HookGuardianAuthorizationDirEnv] = layout.GuardianAuthDir
-	pins[gwconnector.WindowsGatewayServiceNameEnv] = managed.StandaloneWindowsGatewaySvc
-	command := exec.CommandContext(ctx, installedGateway, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
-	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), pins)
-	return command
+	pins[gwconnector.WindowsGatewayServiceNameEnv] = gatewayService
+	return pins
 }
 
 // windowsHotConfigUnprovenTargets returns each of targets whose readiness row is
