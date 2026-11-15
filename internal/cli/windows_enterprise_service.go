@@ -32,7 +32,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -283,8 +285,8 @@ var (
 	windowsEnterprisePayloadStager           = stageWindowsEnterprisePayload
 	windowsEnterpriseTrustValidator          = validateWindowsEnterpriseInstallerTrust
 	windowsEnterpriseExecutableResolver      = os.Executable
-	windowsEnterpriseProgramFilesResolver    = trustedWindowsEnterpriseProgramFiles
-	windowsEnterpriseProgramDataResolver     = trustedWindowsEnterpriseProgramData
+	windowsEnterpriseProgramFilesResolver    = hookcli.TrustedWindowsEnterpriseProgramFiles
+	windowsEnterpriseProgramDataResolver     = hookcli.TrustedWindowsEnterpriseProgramData
 	windowsEnterpriseMachineRootsResolver    = resolveWindowsEnterpriseMachineRoots
 	windowsEnterpriseProviderLibraryResolver = managed.DiscoverCMIDLibrary
 	windowsEnterpriseStandaloneHostValidator = validateWindowsEnterpriseStandaloneHost
@@ -365,7 +367,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 		Short:        windowsEnterpriseLifecycleSummary(action),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return withExitCode(
+			return cliusage.WithExitCode(
 				runWindowsEnterpriseLifecycle(cmd.Context(), cmd, action, opts),
 				windowsEnterpriseFailureExitCode,
 			)
@@ -456,7 +458,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	if action == "ensure" {
 		flagError = windowsAnchorsArgumentRefusal
 		cmd.Args = func(c *cobra.Command, args []string) error {
-			if err := strayArgumentError(c, args); err != nil {
+			if err := cliusage.StrayArgumentError(c, args); err != nil {
 				return lifecycleArgumentError(c, action, opts.jsonOutput, flagError(c, err))
 			}
 			return nil

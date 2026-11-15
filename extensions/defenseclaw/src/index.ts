@@ -77,6 +77,7 @@ import type {
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
+import { fitInspectBody } from "./inspect-body-limit.js";
 import {
   configureSidecarConnection,
   getRuntimeSettings,
@@ -636,7 +637,13 @@ export default function (api: DefenseClawPluginHost) {
     // The check goes over a connection that proved it reaches this account's
     // gateway, and its verdict comes back on that connection (GAP-0594). The
     // budget counts from the proven connection, so the proof does not use it.
-    const res = await daemonClient.postRaw("/api/v1/inspect/tool", bodyPayload, {
+    // A message over the gateway body limit sends its attachments as their
+    // size, hash and text, and the request says it is partial (GAP-0356). Its
+    // text is never cut: a message whose text is over the limit is blocked
+    // here, as the gateway's refusal of it was.
+    const fitted = fitInspectBody(bodyPayload);
+    if (fitted.refused) return failClosedVerdict(fitted.refused);
+    const res = await daemonClient.postRaw("/api/v1/inspect/tool", fitted.payload, {
       timeoutMs: inspectTimeoutMs(),
       correlation: { runId: toolCtx?.runId, sessionId },
     });
@@ -701,16 +708,17 @@ export default function (api: DefenseClawPluginHost) {
     // every guardrail-* audit row in SQLite ends up NULL on those columns.
     trackToolContext(ctx);
 
-    if (event.toolName === "message") {
-      const content =
-        (event.params?.content as string) || (event.params?.body as string) || "";
-      if (!content) return;
-
+    // GAP-0177: a message call keeps its text in any string field of the
+    // params (message, text, caption, nested blocks, ...). The plugin sends
+    // the params as they are and the gateway reads them: the text, the
+    // recipients and the attachments (GAP-0436). Nothing is read or copied
+    // here; only the attachments of a call over the gateway's request limit
+    // are replaced, and a call whose text is over it is blocked (fitInspectBody).
+    if (event.toolName.toLowerCase() === "message") {
       const verdict = await inspectTool(
         {
           tool: "message",
           args: event.params,
-          content,
           direction: "outbound",
           ...toolCallIdOf(event),
         },

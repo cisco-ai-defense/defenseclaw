@@ -139,8 +139,9 @@ respecting wall-clock and event-count windows.
 
 The 26 ordered chains are a fixed compiled catalog; CEL/YAML rule authoring
 does not define new sequences. Custom CEL rules remain single-action matchers.
-Twenty-two chains are alert-only. Four can contribute enforcement-safe proof:
-reverse-shell payload persistence, AD CS certificate-to-PFX authentication,
+Twenty-one chains are alert-only. Five can contribute enforcement-safe proof:
+secret read followed by an upload of the same artifact (the default and
+permissive packs alert; the strict pack blocks), reverse-shell payload persistence, AD CS certificate-to-PFX authentication,
 S4U ticket-to-Kerberos credential extraction, and same-table sensitive SQLite
 read followed by an unbounded delete. The SQLite chain additionally requires
 the explicit database-destruction protection pack. Connector capability,

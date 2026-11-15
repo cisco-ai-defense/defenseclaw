@@ -1,0 +1,475 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package actionfacts
+
+import (
+	"path"
+	"slices"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/syntax"
+)
+
+// The analysis of a POSIX call stops at a word over maxScalarBytes (4 KiB)
+// with no command: the call is TRUNCATED in the sense of the bound rule
+// (ShellInputPastByteBound). That is right for a word the local shell runs as
+// code, and wrong for a word it only passes on: a big quoted script handed to
+// a program that runs it somewhere else (dcx, ssh, docker exec, a
+// deployment tool) is DATA to the local shell, whose hook never sees what it
+// runs there. SplitOverLimitWords tells the two apart by position in the
+// grammar of the call (rel-1-0-10:GAP-0382, the second round):
+//
+//   - CODE position, which stays truncated: the command name; the operand of
+//     a shell, of eval, source or ., of a wrapper that starts the next word as
+//     a command (the transparent wrappers, sudo, xargs, find, watch, ...);
+//     the code operand of an interpreter, read from the interpreter's own
+//     option table (inlineCapabilityTable) and, for an interpreter the table
+//     lacks, every operand; a word before the destination of a remote
+//     program (an ssh option such as ProxyCommand runs locally); and any word
+//     that is not the plain operand of a simple command (a redirect target, a
+//     here-document body, a loop or case word, an expansion default).
+//   - DATA position, the plain operand of any other program, which includes a
+//     word after the destination of ssh: classifySSH reads the options and
+//     the destination of ssh and never the remote command, so there is no
+//     remote-exec reading of the text to defer to, and the local analysis
+//     treats it as the operand it is.
+//
+// No program is named for being data: a program is data unless the analysis
+// or one of its readers already reads its operands as code (posixShellProgram,
+// the wrappers of the layout reading, simpleShellTextRunner, the inline
+// interpreter table). A call whose every over-limit word is data is judged as
+// its twin: the same call with each such word replaced by a short stand-in of
+// the same quoting, so every other statement is read in full; the dispatcher
+// adds a detection-only record of the unread word.
+
+// stubKeepBytes is the length up to which a part of an over-limit word is
+// kept as it is in the twin (a quoted prefix such as --data= stays).
+const stubKeepBytes = 64
+
+// OverLimitWordSplit is the reading of a POSIX call whose analysis stops at
+// a word over the string bound. Twin is the call with each DATA word
+// shortened; Data and Code count the over-limit words in each position.
+type OverLimitWordSplit struct {
+	Twin string
+	Data int
+	Code int
+	// Why is the reason the text could not be split, "" when it could.
+	Why string
+}
+
+// SplitOverLimitWords reads a POSIX command text that is within the text
+// bound and holds over-limit words. false when the text cannot be read with
+// certainty (it does not parse, a word part has a shape the twin cannot
+// shorten, or the twin is itself over a bound): the caller then keeps the
+// call truncated.
+func SplitOverLimitWords(command string) (OverLimitWordSplit, bool) {
+	if len(command) > maxCommandBytes {
+		return OverLimitWordSplit{Why: "text over the bound"}, false
+	}
+	file, ok := shellparse.Parse(command)
+	if !ok {
+		return OverLimitWordSplit{Why: "does not parse"}, false
+	}
+	dataWords := map[*syntax.Word]bool{}
+	bindings := literalBindings(file)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if call, isCall := node.(*syntax.CallExpr); isCall {
+			markDataWords(call, bindings, dataWords)
+		}
+		return true
+	})
+	var split OverLimitWordSplit
+	type replacement struct {
+		start, end int
+		text       string
+	}
+	var replacements []replacement
+	valid := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		word, isWord := node.(*syntax.Word)
+		if !isWord || !valid {
+			return valid
+		}
+		if !overLimitWord(word) {
+			return true
+		}
+		if !dataWords[word] {
+			split.Code++
+			return true
+		}
+		split.Data++
+		for _, part := range word.Parts {
+			start, end := int(part.Pos().Offset()), int(part.End().Offset())
+			if end-start <= stubKeepBytes {
+				continue
+			}
+			text, shortened := shortenedWordPart(part)
+			if !shortened || start < 0 || end > len(command) || start >= end {
+				valid = false
+				return false
+			}
+			replacements = append(replacements, replacement{start, end, text})
+		}
+		return true
+	})
+	if !valid {
+		split.Why = "a word part cannot be shortened"
+		return split, false
+	}
+	if split.Data == 0 {
+		split.Why = "no data word"
+		return split, false
+	}
+	slices.SortFunc(replacements, func(a, b replacement) int { return a.start - b.start })
+	var twin strings.Builder
+	last := 0
+	for _, r := range replacements {
+		if r.start < last {
+			split.Why = "overlapping parts"
+			return split, false
+		}
+		twin.WriteString(command[last:r.start])
+		twin.WriteString(r.text)
+		last = r.end
+	}
+	twin.WriteString(command[last:])
+	split.Twin = twin.String()
+	return split, true
+}
+
+// OverLimitTwinWithinBounds reports a twin of SplitOverLimitWords that the
+// analysis reads to the end: its own analysis is not limit-exceeded.
+func OverLimitTwinWithinBounds(input Input, twin string) bool {
+	probe := input
+	probe.Command, probe.Args, probe.Argv = twin, nil, nil
+	return Analyze(probe).Parse.Status != StatusLimitExceeded
+}
+
+// overLimitWord reports a word the analysis refuses: a literal over the
+// string bound that holds no expansion (as projectPOSIXStatement counts it).
+func overLimitWord(word *syntax.Word) bool {
+	value := projectPOSIXWord(word)
+	return !value.Expands && len(value.Value) > maxScalarBytes
+}
+
+// shortenedWordPart is the stand-in of one part of an over-limit word, with
+// the quoting of the part: a literal stays a bare literal, a single or double
+// quoted string stays quoted. false for a part with an expansion.
+func shortenedWordPart(part syntax.WordPart) (string, bool) {
+	switch part := part.(type) {
+	case *syntax.Lit:
+		return "x", true
+	case *syntax.SglQuoted:
+		if part.Dollar {
+			return "$'x'", true
+		}
+		return "'x'", true
+	case *syntax.DblQuoted:
+		for _, nested := range part.Parts {
+			if _, literal := nested.(*syntax.Lit); !literal {
+				return "", false
+			}
+		}
+		if part.Dollar {
+			return `$"x"`, true
+		}
+		return `"x"`, true
+	}
+	return "", false
+}
+
+// markDataWords records, in dataWords, each over-limit operand of call that
+// is in DATA position.
+func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords map[*syntax.Word]bool) {
+	if len(call.Args) < 2 {
+		return
+	}
+	argv := make([]string, len(call.Args))
+	big := make([]bool, len(call.Args))
+	any := false
+	for index, word := range call.Args {
+		value := projectPOSIXWord(word)
+		switch {
+		case value.Expands:
+			argv[index] = staticWordTailName(word)
+			if argv[index] == "" {
+				argv[index] = boundVariableValue(word, bindings, call.Pos().Offset())
+			}
+		case len(value.Value) > maxScalarBytes:
+			// A stand-in with no dash and no space: it is an operand, never an
+			// option, wherever the grammar of the program puts it.
+			argv[index] = "\x01"
+			big[index] = true
+			any = true
+		default:
+			argv[index] = value.Value
+		}
+	}
+	if !any {
+		return
+	}
+	for index, isBig := range big {
+		if isBig && overLimitOperandIsData(argv, index) {
+			dataWords[call.Args[index]] = true
+		}
+	}
+}
+
+// overLimitOperandIsData reports the over-limit word argv[at] as the plain
+// operand of a program that does not run it as local code. argv holds "" for
+// an expansion and "\x01" for an over-limit word.
+func overLimitOperandIsData(argv []string, at int) bool {
+	start := 0
+	for range maxWrapperDepth + 1 {
+		if at <= start || argv[start] == "" || argv[start] == "\x01" {
+			return false
+		}
+		program := overLimitProgram(argv[start])
+		switch {
+		case overLimitRemoteProgram(program):
+			// classifySSH reads the options and the destination; the words
+			// after the destination are the command the remote host runs.
+			return overLimitAfterDestination(argv[start:], at-start, program)
+		case overLimitTransparentWrapper(program):
+			rest := transparentWrapperTarget(argv[start:])
+			next := len(argv) - len(rest)
+			if len(rest) == 0 || next <= start || at < next {
+				return false
+			}
+			start = next
+		case overLimitInterpreterRow(program) != nil:
+			return overLimitInterpreterOperandIsData(argv, start, at)
+		case overLimitCodeProgram(program):
+			return false
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// overLimitProgram is the lower-case base name of a program word, with a
+// .exe suffix removed. It does not ask for a trusted path (commandProgram
+// does): a shell at an unusual path is still a shell here.
+func overLimitProgram(word string) string {
+	if strings.TrimSpace(word) == "" {
+		return ""
+	}
+	base := strings.ToLower(path.Base(strings.ReplaceAll(word, `\`, "/")))
+	return strings.TrimSuffix(base, ".exe")
+}
+
+// overLimitRemoteProgram is the family classifySSH reads (ssh, autossh,
+// sftp): the program starts a session on another host.
+func overLimitRemoteProgram(program string) bool {
+	return program == "ssh" || program == "autossh" || program == "sftp"
+}
+
+// overLimitTransparentWrapper is a program that starts a following word as
+// the command and changes nothing about it (transparentWrapperTarget).
+func overLimitTransparentWrapper(program string) bool {
+	if program == "env" || program == "command" {
+		return true
+	}
+	_, ok := transparentWrappers[program]
+	return ok
+}
+
+// overLimitCodeProgram is a program whose operands the analysis or one of its
+// readers already reads as code the local machine runs: the shells, eval,
+// source and the dot, the wrappers of the layout reading, the programs that
+// run argument words as shell text, and find.
+func overLimitCodeProgram(program string) bool {
+	return posixShellProgram(program) || layoutShells[program] || layoutWrappers[program] ||
+		layoutInShell[program] || simpleShellTextRunner(program) || program == "find" ||
+		program == "powershell" || program == "pwsh" || program == "cmd" || program == "nsenter"
+}
+
+// overLimitInterpreterRow is the row of the inline interpreter table for a
+// program, nil when the program is not in it.
+func overLimitInterpreterRow(program string) *inlineCapabilityRow {
+	row, ok := inlineInterpreterRow(program)
+	if !ok {
+		return nil
+	}
+	return &row
+}
+
+// overLimitInterpreterOperandIsData reports an over-limit operand of an
+// interpreter of the table that is neither its code (the word after a dash
+// option, which may be the code option or take it) nor its script (the first
+// operand): an argument of the script.
+func overLimitInterpreterOperandIsData(argv []string, start, at int) bool {
+	return at-1 > start && !strings.HasPrefix(argv[at-1], "-")
+}
+
+// overLimitAfterDestination reports whether argv[at] lies after the
+// destination of a remote program called with argv.
+//
+// An -o option the egress reading does not model (BatchMode=yes) makes its
+// scan invalid; here that only means the destination is unknown. A connection
+// setting that runs nothing locally and names no path is dropped before the
+// scan, so the remote command after the destination stays DATA (ssh -o
+// BatchMode=yes host '<script>': the lead ruling on GAP-0382 and GAP-0760 for
+// TestWindowsLauncherSpellingsPastTheBoundAreNeverACleanAllow). Any other -o
+// (ProxyCommand, LocalCommand, KnownHostsCommand, Match, a path) keeps the
+// scan invalid, and the word is CODE.
+func overLimitAfterDestination(argv []string, at int, program string) bool {
+	kept := make([]string, 0, len(argv))
+	keptAt := -1
+	for i := 0; i < len(argv); i++ {
+		if i > 0 && i < at {
+			if argv[i] == "-o" && i+1 < at && overLimitInertSSHOption(argv[i+1]) {
+				i++
+				continue
+			}
+			if len(argv[i]) > 2 && strings.HasPrefix(argv[i], "-o") && overLimitInertSSHOption(argv[i][2:]) {
+				continue
+			}
+		}
+		if i == at {
+			keptAt = len(kept)
+		}
+		kept = append(kept, argv[i])
+	}
+	out := newParseOutput(DialectPOSIX, 1)
+	command := CommandFact{ID: 1, Argv: kept}
+	scan := classifySSHOptionPaths(&out, &command, program)
+	return keptAt >= 0 && scan.valid && scan.destinationIndex > 0 && keptAt > scan.destinationIndex
+}
+
+// overLimitInertSSHOption reports an ssh -o setting that runs no local
+// command and names no local path: a connection, keep-alive, host-key check
+// or authentication-method setting with a plain value.
+func overLimitInertSSHOption(value string) bool {
+	key, optionValue, ok := splitSSHConfigOption(value)
+	if !ok || strings.ContainsAny(optionValue, "\x00\x01/\\%$`;|&<>(){} \t") {
+		return false
+	}
+	switch strings.ToLower(key) {
+	case "batchmode", "connecttimeout", "connectionattempts", "stricthostkeychecking",
+		"serveraliveinterval", "serveralivecountmax", "tcpkeepalive", "loglevel",
+		"compression", "port", "user", "identitiesonly", "requesttty", "addressfamily",
+		"checkhostip", "preferredauthentications", "passwordauthentication",
+		"pubkeyauthentication", "kbdinteractiveauthentication", "numberofpasswordprompts":
+		return true
+	}
+	return false
+}
+
+// staticWordTailName is the file name a word ends with when the word is a
+// path whose directory expands ($K/dcx, "$HOME"/bin/ssh) and whose last
+// component is literal: the program is named by that last component wherever
+// the directory is, so it is read as that name (a shell called through a
+// variable directory is still a shell here). "" for a word with no literal
+// last component ($CMD, $K/$NAME), whose program is unknown.
+func staticWordTailName(word *syntax.Word) string {
+	var leaves []syntax.WordPart
+	for _, part := range word.Parts {
+		if quoted, ok := part.(*syntax.DblQuoted); ok {
+			leaves = append(leaves, quoted.Parts...)
+			continue
+		}
+		leaves = append(leaves, part)
+	}
+	tail := ""
+	for index := len(leaves) - 1; index >= 0; index-- {
+		value, _, expands := projectPOSIXWordPart(leaves[index])
+		if expands {
+			break
+		}
+		tail = value + tail
+	}
+	slash := strings.LastIndexByte(tail, '/')
+	if slash < 0 || slash == len(tail)-1 {
+		return ""
+	}
+	return tail[slash+1:]
+}
+
+// literalBindings are the variables the text sets once, at the top level, to
+// a literal (K=/path/dcx; "$K" ...): name to value. A name that is set
+// anywhere else (a second assignment, a prefix assignment, a declaration, a
+// loop variable, an assigning expansion) is left out, and so is every name
+// when the text holds a builtin that binds a name from data or code (read,
+// eval, source, ...), which could rebind any of them.
+func literalBindings(file *syntax.File) map[string]string {
+	count := map[string]int{}
+	rebinds := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Assign:
+			count[node.Name.Value]++
+		case *syntax.ForClause:
+			if loop, ok := node.Loop.(*syntax.WordIter); ok {
+				count[loop.Name.Value] += 2
+			} else {
+				rebinds = true
+			}
+		case *syntax.ParamExp:
+			if node.Exp != nil && (node.Exp.Op == syntax.AssignUnset || node.Exp.Op == syntax.AssignUnsetOrNull) {
+				rebinds = true
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) > 0 && bindsFromCommand(node.Args) {
+				rebinds = true
+			}
+		case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause, *syntax.CoprocClause:
+			rebinds = true
+		}
+		return !rebinds
+	})
+	if rebinds {
+		return nil
+	}
+	bindings := map[string]string{}
+	for _, stmt := range file.Stmts {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) != 0 {
+			continue
+		}
+		for _, assign := range call.Assigns {
+			if assign.Append || assign.Array != nil || assign.Index != nil || assign.Value == nil || count[assign.Name.Value] != 1 {
+				continue
+			}
+			if value := projectPOSIXWord(assign.Value); !value.Expands && value.Value != "" {
+				bindings[assign.Name.Value] = value.Value
+			}
+		}
+	}
+	return bindings
+}
+
+// bindsFromCommand is a call to a builtin that gives a name a value from data
+// or code the text does not show: read, getopts, mapfile, readarray, eval,
+// source, the dot, and printf -v.
+func bindsFromCommand(args []*syntax.Word) bool {
+	switch overLimitProgram(projectPOSIXWord(args[0]).Value) {
+	case "read", "getopts", "mapfile", "readarray", "eval", "source", ".":
+		return true
+	case "printf":
+		return len(args) > 1 && projectPOSIXWord(args[1]).Value == "-v"
+	}
+	return false
+}
+
+// boundVariableValue is the literal value of a word that is one plain
+// variable ($D, "$D", ${D}) set once to a literal before the call at offset
+// (see literalBindings); "" for any other word.
+func boundVariableValue(word *syntax.Word, bindings map[string]string, offset uint) string {
+	if len(bindings) == 0 || len(word.Parts) != 1 {
+		return ""
+	}
+	part := word.Parts[0]
+	if quoted, ok := part.(*syntax.DblQuoted); ok && len(quoted.Parts) == 1 {
+		part = quoted.Parts[0]
+	}
+	expansion, ok := part.(*syntax.ParamExp)
+	if !ok || expansion.Param == nil || expansion.Exp != nil || expansion.Slice != nil || expansion.Repl != nil ||
+		expansion.Index != nil || expansion.Length || expansion.Width || expansion.IsSet || expansion.Excl || expansion.Names != 0 {
+		return ""
+	}
+	return bindings[expansion.Param.Value]
+}

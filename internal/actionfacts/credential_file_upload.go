@@ -27,11 +27,18 @@ func projectCredentialFileUploads(facts Facts) []CredentialFileUploadFact {
 	result := make([]CredentialFileUploadFact, 0, 1)
 	for _, command := range facts.Commands {
 		if command.Dialect != DialectPOSIX || command.Effect != EffectExecute ||
-			command.ControlFlowUncertain || command.Program != "curl" {
+			command.ControlFlowUncertain {
 			continue
 		}
-		for _, source := range StaticCurlDirectUploadFileSources(command) {
-			class := credentialFileUploadClass(source.Path)
+		// Every upload client the projection reads counts, by the same
+		// closed shapes: a project .env is a credentials file whichever
+		// option sends it (GAP-0768, GAP-0770).
+		sources := uploadedFileSources(facts, command)
+		for _, source := range sources {
+			class := credentialFileUploadClass(source)
+			if class == "" {
+				class = credentialFileBroadClass(source)
+			}
 			if class == "" {
 				continue
 			}
@@ -44,6 +51,69 @@ func projectCredentialFileUploads(facts Facts) []CredentialFileUploadFact {
 		}
 	}
 	return result
+}
+
+// uploadedFileSources is the local files a projected upload sends. curl names
+// them by its option table (the TLS and config files it reads are not sent);
+// any other upload client sends the files it reads: the local operands of
+// scp and rsync, the --post-file or --body-file of wget (GAP-0595).
+func uploadedFileSources(facts Facts, command CommandFact) []string {
+	if isCurlProgram(command.Program) {
+		var sources []string
+		for _, source := range StaticCurlDirectUploadFileSources(command) {
+			sources = append(sources, source.Path)
+		}
+		return sources
+	}
+	return uploadedReadPaths(facts, command)
+}
+
+// uploadedReadPaths is the read paths of a command that has an upload
+// network fact: none for a command that does not upload.
+func uploadedReadPaths(facts Facts, command CommandFact) []string {
+	if !hasFactOperation(command, OperationUpload) {
+		return nil
+	}
+	upload := false
+	for _, network := range facts.Network {
+		if network.CommandID == command.ID && network.Action == NetworkUpload {
+			upload = true
+			break
+		}
+	}
+	if !upload {
+		return nil
+	}
+	var paths []string
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != command.ID || candidate.Access != PathAccessRead {
+			continue
+		}
+		value := candidate.Resolved
+		if value == "" {
+			value = candidate.Value
+		}
+		paths = append(paths, value)
+	}
+	return paths
+}
+
+// credentialFileBroadClass is the strong class for a file of any
+// credentials-file shape (templates and public keys excluded). A relative
+// name is judged by its shape, rooted at /: the hook path often has no
+// working directory.
+func credentialFileBroadClass(value string) string {
+	if value == "" || len(value) > 4096 || strings.ContainsRune(value, 0) ||
+		hasUnresolvedPathSyntax(value) {
+		return ""
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = path.Join("/", value)
+	}
+	if _, ok := MatchCredentialFileShape(value); ok {
+		return CredentialFileUploadStrong
+	}
+	return ""
 }
 
 func credentialFileUploadClass(value string) string {

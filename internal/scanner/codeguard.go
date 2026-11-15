@@ -291,7 +291,7 @@ type rule struct {
 	id          string
 	severity    Severity
 	title       string
-	pattern     *regexp.Regexp
+	pattern     *lazyregexp.Regexp
 	remediation string
 	extensions  []string
 	provenance  codeGuardFindingProvenance
@@ -342,21 +342,21 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-CRED-002",
 		severity:    SeverityHigh,
 		title:       "AWS access key ID",
-		pattern:     regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
+		pattern:     lazyregexp.New(`AKIA[0-9A-Z]{16}`),
 		remediation: "Rotate the key and store in AWS Secrets Manager or environment variables",
 	},
 	{
 		id:          "CG-CRED-003",
 		severity:    SeverityCritical,
 		title:       "Private key embedded in source",
-		pattern:     regexp.MustCompile(`-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`),
+		pattern:     lazyregexp.New(`-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`),
 		remediation: "Remove the private key from source code; use a certificate store or secrets manager",
 	},
 	{
 		id:          "CG-EXEC-001",
 		severity:    SeverityHigh,
 		title:       "Unsafe command execution",
-		pattern:     regexp.MustCompile(`(?i)(os\.system|subprocess\.call|exec\(|child_process\.exec|eval\(|system\()`),
+		pattern:     lazyregexp.New(`(?i)(os\.system|subprocess\.call|exec\(|child_process\.exec|eval\(|system\()`),
 		remediation: "Use parameterized execution or an allowlist of commands",
 		extensions:  []string{".py", ".js", ".ts", ".rb", ".php"},
 	},
@@ -364,7 +364,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-EXEC-002",
 		severity:    SeverityMedium,
 		title:       "Shell=True in subprocess",
-		pattern:     regexp.MustCompile(`subprocess\.\w+\(.*shell\s*=\s*True`),
+		pattern:     lazyregexp.New(`subprocess\.\w+\(.*shell\s*=\s*True`),
 		remediation: "Avoid shell=True; pass arguments as a list",
 		extensions:  []string{".py"},
 	},
@@ -372,7 +372,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-NET-001",
 		severity:    SeverityMedium,
 		title:       "Outbound HTTP request to variable URL",
-		pattern:     regexp.MustCompile(`(?i)(requests\.(get|post|put|delete)|urllib\.request\.urlopen|fetch\(|http\.Get)\s*\(`),
+		pattern:     lazyregexp.New(`(?i)(requests\.(get|post|put|delete)|urllib\.request\.urlopen|fetch\(|http\.Get)\s*\(`),
 		remediation: "Validate and allowlist outbound URLs",
 		extensions:  []string{".py", ".js", ".ts", ".go"},
 	},
@@ -380,7 +380,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-DESER-001",
 		severity:    SeverityHigh,
 		title:       "Unsafe deserialization (pickle/yaml.load)",
-		pattern:     regexp.MustCompile(`(?i)(pickle\.loads?|yaml\.load\(|yaml\.unsafe_load)`),
+		pattern:     lazyregexp.New(`(?i)(pickle\.loads?|yaml\.load\(|yaml\.unsafe_load)`),
 		remediation: "Use yaml.safe_load or json for deserialization; never unpickle untrusted data",
 		extensions:  []string{".py"},
 	},
@@ -388,7 +388,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-SQL-001",
 		severity:    SeverityHigh,
 		title:       "Potential SQL injection (string formatting in query)",
-		pattern:     regexp.MustCompile(`(?i)(execute|cursor\.execute|query)\s*\(\s*(f["']|["'].*%s|["'].*\+)`),
+		pattern:     lazyregexp.New(`(?i)(execute|cursor\.execute|query)\s*\(\s*(f["']|["'].*%s|["'].*\+)`),
 		remediation: "Use parameterized queries with bind variables",
 		extensions:  []string{".py", ".js", ".ts", ".rb", ".php", ".java"},
 	},
@@ -396,7 +396,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-CRYPTO-001",
 		severity:    SeverityMedium,
 		title:       "Weak cryptographic algorithm (MD5/SHA1)",
-		pattern:     regexp.MustCompile(`(?i)(hashlib\.md5|hashlib\.sha1|MD5\.Create|SHA1\.Create|crypto\.createHash\(['"]md5|crypto\.createHash\(['"]sha1)`),
+		pattern:     lazyregexp.New(`(?i)(hashlib\.md5|hashlib\.sha1|MD5\.Create|SHA1\.Create|crypto\.createHash\(['"]md5|crypto\.createHash\(['"]sha1)`),
 		remediation: "Use SHA-256 or stronger; see codeguard-0-additional-cryptography",
 		extensions:  []string{".py", ".js", ".ts", ".java", ".go", ".rb"},
 	},
@@ -404,7 +404,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-PATH-001",
 		severity:    SeverityMedium,
 		title:       "Potential path traversal",
-		pattern:     regexp.MustCompile(`(?i)(\.\.\/|\.\.\\|path\.join\(.*\.\.|os\.path\.join\(.*\.\.|filepath\.Join\(.*\.\.)`),
+		pattern:     lazyregexp.New(`(?i)(\.\.\/|\.\.\\|path\.join\(.*\.\.|os\.path\.join\(.*\.\.|filepath\.Join\(.*\.\.)`),
 		remediation: "Canonicalize paths and validate against an allowed root directory",
 		view:        pathTraversalView,
 	},
@@ -585,7 +585,7 @@ func compileCustomRules(files []customRuleFile) []rule {
 				id:          cr.ID,
 				severity:    sev,
 				title:       cr.Title,
-				pattern:     compiled,
+				pattern:     lazyregexp.Of(compiled),
 				remediation: cr.Remediation,
 				extensions:  cr.Extensions,
 			})

@@ -67,10 +67,91 @@ type SimpleCommand struct {
 	// any other (rel-1-0-6:GAP-0630 review 5).
 	AbsoluteOnly bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
-	// view can be produced, and EvaluationFailureInternal when the reader
-	// itself failed. A parse gap is not an action refusal.
+	// view can be produced, EvaluationFailureInternal when the reader
+	// itself failed, and EvaluationFailureSyntax when a text with a syntax
+	// error was read only in part. A parse gap is not an action refusal.
 	EvaluationFailure string
 }
+
+// EvaluationFailureSyntax is the EvaluationFailure that closes the readings
+// of a text the shell parser rejects with a syntax error, at the top level or
+// in a static eval or shell -c body (shellparse.ReadSyntaxTail): its
+// readable statements come before it, each judged as any other command, and
+// what was not read is recorded by the gateway as an unread part, which
+// does not raise the verdict (rel-1-0-10:GAP-0526).
+const EvaluationFailureSyntax = "syntax"
+
+// EvaluationFailureUnresolvedBody is the EvaluationFailure of a call that
+// starts a nested shell body the walk cannot resolve statically (a shell
+// option word that may be -c, a dynamic -c body, trap handler or su
+// command): what runs is not known; the gateway records it as an unread part
+// (rel-1-0-10:GAP-0535).
+const EvaluationFailureUnresolvedBody = "unresolved-body"
+
+func isSyntaxTailUnread(simple SimpleCommand) bool {
+	return simple.EvaluationFailure == EvaluationFailureSyntax
+}
+
+// syntaxTailCommands is the per-command reading of a text with a syntax
+// error (tail): each readable statement, as a command of its own and with
+// its own commands, in the directory the text starts in, then the
+// EvaluationFailureSyntax marker for the part that was not read. A statement
+// keeps the readings it has alone, a limit included.
+func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
+	result := make([]SimpleCommand, 0, len(tail.Statements)+2)
+	emitted := make(map[SimpleCommand]bool, len(tail.Statements))
+	capped := tail.Truncated.Any()
+	add := func(command SimpleCommand) bool {
+		if len(result) >= maxSimpleEvaluations {
+			capped = true
+			return false
+		}
+		if !emitted[command] {
+			emitted[command] = true
+			result = append(result, command)
+		}
+		return true
+	}
+read:
+	for _, statement := range tail.Statements {
+		piece := input
+		piece.Command, piece.Args, piece.Argv = statement, nil, nil
+		// The statement as written is judged whatever its own reading
+		// finds: its raw-text and whole-call readers run on it.
+		if !add(SimpleCommand{Text: statement, CWD: input.CWD}) {
+			break
+		}
+		for _, command := range simpleCommands(piece, Analyze(piece), depth+1, interpreter, inherited, guess, nil) {
+			if command.EvaluationFailure == "limit" {
+				// A statement whose own reading is past the statement
+				// budget is a capped reading of the text, not a refusal of
+				// the call: what was read is judged and the cap adds the
+				// evaluation-limit finding (the bound rule,
+				// rel-1-0-10:GAP-0744).
+				capped = true
+				continue
+			}
+			if !add(command) {
+				break read
+			}
+		}
+	}
+	result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntax})
+	if capped {
+		// The reading stopped at a cap: the call is at least the unknown
+		// tier of the pack, and the statements read before the cap are
+		// still judged (the bound rule).
+		result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntaxCap})
+	}
+	return result
+}
+
+// EvaluationFailureSyntaxCap follows EvaluationFailureSyntax when the reading
+// of a text with a syntax error stopped at a cap of shellparse.ReadSyntaxTail:
+// the gateway adds the evaluation-limit finding (the unknown tier of the
+// pack) and still judges every statement read before the cap. It is not the
+// statement-budget refusal ("limit"), which judges none of them.
+const EvaluationFailureSyntaxCap = "syntax-cap"
 
 // EvaluationFailureInternal is the EvaluationFailure of a call whose
 // per-command reading stopped on an internal reader error (a recovered
@@ -159,6 +240,11 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 		pieces = new(simplePieces)
 	}
 	result := simpleCommandsOfCall(input, facts, pieces)
+	if argsOnly && slices.ContainsFunc(result, isSyntaxTailUnread) {
+		// A text with a syntax error (syntaxTailCommands): its readings are
+		// all of the call that was read, a cap they stopped at included.
+		return result
+	}
 	if argsOnly {
 		// The POSIX reader rejected the call (a construct only Bash has) and
 		// the shell parse reads it only to add readings (simpleCommands): a
@@ -236,6 +322,13 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	}
 	if source == "" {
 		return nil
+	}
+	// Only a text the analysis already rejected with a syntax error is read
+	// for its tail, so a call that parses pays no second parse.
+	if facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) {
+		if tail, ok := shellparse.ReadSyntaxTail(source); ok {
+			return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess)
+		}
 	}
 	if !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&
 		!strings.Contains(source, "eval") && !strings.Contains(source, "trap") &&
@@ -328,6 +421,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	result := make([]SimpleCommand, 0, len(parts))
 	changed := reduced || len(parts) != 1
 	unproven := false
+	// syntaxUnread: a nested body with a syntax error was read only in part
+	// (syntaxTailCommands).
+	syntaxUnread := false
 	previousScope := "0"
 	unreadLoops := make(map[string]bool)
 	var plainWords simplePlainWords
@@ -537,7 +633,20 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				var innerInterpreter string
 				script, shared, nested, static := simpleNestedScript(call, effective, &innerCWDUnknown, &innerInterpreter)
 				if nested {
-					if !static || len(script) > maxCommandBytes {
+					if !static {
+						if simplePotentialShellScript(call.Args, effective) && simpleRuntimeWords(call.Args) {
+							// A shell -c body, or a word that may be the -c
+							// option, whose text is made at run time: what runs
+							// is not known (rel-1-0-10:GAP-0535). Static text the
+							// walk does not model (a quoted pattern, an option
+							// it does not read) stays a parse gap, as on rel.
+							return []SimpleCommand{{EvaluationFailure: EvaluationFailureUnresolvedBody}}
+						}
+						// A wrapper option the walk does not model, a trap
+						// handler: a parse gap, judged as the whole action.
+						return []SimpleCommand{{EvaluationFailure: "parse"}}
+					}
+					if len(script) > maxCommandBytes {
 						return []SimpleCommand{{EvaluationFailure: "parse"}}
 					}
 					innerInput := input
@@ -551,9 +660,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 							innerInput.Command = resolved
 						}
 					}
-					if _, ok := shellparse.Parse(innerInput.Command); !ok {
-						return []SimpleCommand{{EvaluationFailure: "parse"}}
-					}
+					// A body with a syntax error is read as far as it parses
+					// (syntaxTailCommands, rel-1-0-10:GAP-0526); a body the
+					// parser cannot read at all stays a parse gap.
+					_, bodyParsed := shellparse.Parse(innerInput.Command)
 					innerFacts := Analyze(innerInput)
 					if innerInterpreter == "" {
 						innerInterpreter = interpreter
@@ -566,6 +676,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					}
 					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter,
 						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, innerPieces)
+					if !bodyParsed && !slices.ContainsFunc(inner, isSyntaxTailUnread) {
+						return []SimpleCommand{{EvaluationFailure: "parse"}}
+					}
 					if len(inner) == 0 && strings.TrimSpace(innerInput.Command) != "" {
 						zshHistory := innerInterpreter == "zsh" && len(innerFacts.Commands) == 1 &&
 							innerFacts.Commands[0].Executable == "history"
@@ -577,6 +690,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					}
 					changed = changed || len(inner) != 0
 					for _, child := range inner {
+						if isSyntaxTailUnread(child) {
+							syntaxUnread = true
+							continue
+						}
 						if child.EvaluationFailure != "" {
 							unproven = true
 							continue
@@ -588,6 +705,12 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						if len(result) > maxSimpleEvaluations {
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
 						}
+					}
+					if shared && !bodyParsed {
+						// The directory a shared body leaves is not known
+						// past its unread part.
+						state.cwd, state.cwdUnknown = "", true
+						delete(state.vars, "PWD")
 					}
 					if shared {
 						for _, innerCommand := range innerFacts.Commands {
@@ -657,6 +780,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	result, fits := simpleExpandPlainWords(result, &plainWords)
 	if !fits {
 		return []SimpleCommand{{EvaluationFailure: "limit"}}
+	}
+	if syntaxUnread {
+		result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntax})
 	}
 	if unproven {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})
@@ -1938,7 +2064,7 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		value, known := simpleStaticScriptWord(args[index], vars)
 		return value, true, true, known
 	}
-	if program == "su" && simplePotentialShellScript(args) {
+	if program == "su" && simplePotentialShellScript(args, vars) {
 		// The target account can change both startup files and directory.
 		return "", false, true, false
 	}
@@ -1948,7 +2074,7 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		for index, arg := range args {
 			value, known := simpleStaticScriptWord(arg, vars)
 			if !known {
-				if simplePotentialShellScript(args) {
+				if simplePotentialShellScript(args, vars) {
 					return "", false, true, false
 				}
 				return "", false, false, false
@@ -1964,6 +2090,8 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 			}
 		case "timeout":
 			childIndex = simpleTimeoutChildIndex(argv)
+		case "nice":
+			childIndex = simpleNiceChildIndex(argv)
 		case "env":
 			if split, ok := simpleEnvSplitString(argv); ok {
 				return split, false, true, true
@@ -1972,7 +2100,7 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		default:
 			child, found, uncertain := staticPOSIXWrapperArgv(argv, wrapper)
 			if uncertain {
-				if simplePotentialShellScript(args) {
+				if simplePotentialShellScript(args, vars) {
 					return "", false, true, false
 				}
 				return "", false, false, false
@@ -2002,7 +2130,18 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		return "", false, false, false
 	}
 	for index := 1; index < len(args); index++ {
-		option := args[index].Lit()
+		// The option is the word the shell sees, after quote removal and
+		// escapes ('-c', "-c", $'-c', -'c', \-c read as -c), not its
+		// spelling (rel-1-0-10:GAP-0535).
+		option, known := simpleStaticWord(args[index], vars)
+		if !known {
+			if index+1 < len(args) {
+				// A word the walk cannot resolve may be -c, with a body
+				// after it: the call is not known.
+				return "", false, true, false
+			}
+			return "", false, false, false
+		}
 		if option == "--" {
 			continue
 		}
@@ -2018,7 +2157,7 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 			continue
 		}
 		if !simpleShellSafeOption(option) {
-			if simplePotentialShellScript(args) {
+			if simplePotentialShellScript(args, vars) {
 				return "", false, true, false
 			}
 			return "", false, false, false
@@ -2056,7 +2195,7 @@ func simpleShellNoExec(args []*syntax.Word, vars map[string]string, program stri
 
 func simpleNestedWrapper(program string) bool {
 	switch program {
-	case "env", "sudo", "exec", "command", "nohup", "timeout", "nsenter", "chroot":
+	case "env", "sudo", "exec", "command", "nohup", "timeout", "nice", "nsenter", "chroot":
 		return true
 	default:
 		return false
@@ -2211,15 +2350,78 @@ func simpleQuotedArgv(argv []string) (string, bool) {
 	return strings.Join(words, " "), true
 }
 
-func simplePotentialShellScript(args []*syntax.Word) bool {
+// simpleRuntimeWords reports a word of args whose text the shell makes at run
+// time: a parameter, command, arithmetic or process substitution, or a
+// pattern outside quotes.
+func simpleRuntimeWords(args []*syntax.Word) bool {
+	runtime := false
 	for _, arg := range args {
-		option := arg.Lit()
-		if option == "-c" || len(option) > 2 && strings.HasPrefix(option, "-") && option[1] != '-' &&
-			strings.ContainsRune(option[1:], 'c') {
+		for _, part := range arg.Parts {
+			if lit, ok := part.(*syntax.Lit); ok && strings.ContainsAny(lit.Value, "*?[") {
+				runtime = true
+			}
+		}
+		syntax.Walk(arg, func(node syntax.Node) bool {
+			switch node.(type) {
+			case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ProcSubst:
+				runtime = true
+			}
+			return !runtime
+		})
+		if runtime {
 			return true
 		}
 	}
 	return false
+}
+
+// simplePotentialShellScript reports an argument that is a shell's -c
+// option, alone or among combined short options, as the shell sees the word
+// (quotes and escapes removed, rel-1-0-10:GAP-0535). A word the walk cannot
+// resolve is judged where the shell itself reads its options
+// (simpleNestedScriptArgs).
+func simplePotentialShellScript(args []*syntax.Word, vars map[string]string) bool {
+	shell := false
+	for index, arg := range args {
+		option, known := simpleStaticWord(arg, vars)
+		if option == "-c" || len(option) > 2 && strings.HasPrefix(option, "-") && option[1] != '-' &&
+			strings.ContainsRune(option[1:], 'c') {
+			return true
+		}
+		if !known && shell && index+1 < len(args) {
+			// A word after a shell program that the walk cannot resolve may
+			// be its -c, with the body after it.
+			return true
+		}
+		switch filepath.Base(option) {
+		case "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash":
+			shell = shell || known
+		}
+	}
+	return false
+}
+
+// simpleNiceChildIndex is the index of the command nice runs: after -n N,
+// -N, --adjustment=N or --adjustment N, and an optional --; -1 for any other
+// option.
+func simpleNiceChildIndex(argv []string) int {
+	index := 1
+	for index < len(argv) && strings.HasPrefix(argv[index], "-") {
+		arg := argv[index]
+		switch {
+		case arg == "--":
+			return index + 1
+		case arg == "-n" || arg == "--adjustment":
+			index += 2
+		case strings.HasPrefix(arg, "--adjustment=") ||
+			strings.HasPrefix(arg, "-n") && strings.Trim(arg[2:], "0123456789") == "" ||
+			len(arg) > 1 && strings.Trim(arg[1:], "0123456789") == "":
+			index++
+		default:
+			return -1
+		}
+	}
+	return index
 }
 
 func simpleTimeoutChildIndex(argv []string) int {

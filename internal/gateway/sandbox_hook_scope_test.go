@@ -887,7 +887,7 @@ func TestSandboxInMemorySessionStateIsPerBinding(t *testing.T) {
 	if sample := judge.toolJudgeContextSample(ctxA, "Bash", `{"command":"ls"}`); strings.Contains(sample, "HOST-INTENT-MARKER") {
 		t.Fatal("sandbox judge sample carries the host session's intent")
 	}
-	judge.ResetToolJudgeSession(sandboxSessionStateKey(ctxA, session))
+	judge.ResetToolJudgeSession(context.Background(), sandboxSessionStateKey(ctxA, session))
 	if sample := judge.toolJudgeContextSample(host, "Bash", `{"command":"ls"}`); !strings.Contains(sample, "HOST-INTENT-MARKER") {
 		t.Fatal("a sandbox reset cleared the host session's judge context")
 	}

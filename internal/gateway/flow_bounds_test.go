@@ -77,11 +77,17 @@ func TestFlowLaneBoundSlotCap(t *testing.T) {
 
 // TestFlowLaneBoundDeadline: a run that misses its deadline does not step the
 // state and counts the time cap.
+//
+// The cap is negative, so the deadline is already behind the run's start and
+// no clock reading taken after it can be before it. A positive cap, even one
+// nanosecond, is not deterministic: on a coarse clock (hosted Windows ticks of
+// 0.5 to 15.6 ms) the whole run can finish inside one tick, read the start
+// time again and never pass the deadline (PR #1457 Windows Native gw9).
 func TestFlowLaneBoundDeadline(t *testing.T) {
 	withSecretFlowGeneration(t, "shadow", "shadow")
 	resetFlowLaneBoundStats()
 	before := flowLaneTimeCap
-	flowLaneTimeCap = time.Nanosecond
+	flowLaneTimeCap = -time.Second
 	defer func() { flowLaneTimeCap = before }()
 	ctx := ContextWithSessionID(context.Background(), "bounds-time")
 	if got := runSecretFlowShadow(ctx, flowBoundsRequest("cat .env > /tmp/x", false)); got != nil {

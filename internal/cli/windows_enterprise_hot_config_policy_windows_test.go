@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -39,9 +40,9 @@ func windowsHotConfigHealthFixture(t *testing.T, handler http.HandlerFunc) (mana
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN=fixture-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	priorHost, priorLayout := managedHostWindowsStandalone, managedScanWindowsLayout
-	t.Cleanup(func() { managedHostWindowsStandalone, managedScanWindowsLayout = priorHost, priorLayout })
-	managedHostWindowsStandalone = func() (string, bool) { return "managed", true }
+	priorHost, priorLayout := hookcli.ManagedHostWindowsStandalone, managedScanWindowsLayout
+	t.Cleanup(func() { hookcli.ManagedHostWindowsStandalone, managedScanWindowsLayout = priorHost, priorLayout })
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "managed", true }
 	managedScanWindowsLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
 	return layout, "127.0.0.1:" + port
 }

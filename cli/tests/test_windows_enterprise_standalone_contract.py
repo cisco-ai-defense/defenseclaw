@@ -3353,3 +3353,31 @@ def test_codex_vendor_folder_adoption_runs_before_the_snapshot_and_tolerates_def
         assert f"'{name}'" in names
     assert "'requirements.toml'" not in names
     assert r"'^\.defenseclaw-managed-hooks\.state\.[1-9][0-9]{0,7}$'" in names
+
+
+def test_ensure_verify_accepts_only_guardian_reported_target_failures() -> None:
+    """GAP-0601: the Verify an ensure runs before it plans a repair accepts a
+    complete reconcile whose only failures are user targets the guardian
+    reported, so a rerun over a signed-out account is a no-op instead of a
+    repair that stops the services. The CLI asks through the strict
+    environment, only a standalone Verify takes it, and the administrator's
+    verify (no variable) stays strict."""
+
+    installer = _text(INSTALLER)
+    standalone = installer[installer.index("if ($EnterpriseProfile -ceq 'Standalone') {") :]
+    standalone = standalone[: standalone.index("Invoke-DefenseClawEnterpriseLifecycle @arguments")]
+    variable = "DEFENSECLAW_STANDALONE_ENSURE_VERIFY_DEGRADED"
+    assert f"[Environment]::SetEnvironmentVariable('{variable}', $null, 'Process')" in standalone
+    assert "if ($Action -eq 'Verify' -and $degradedRequest -ceq '1') {" in standalone
+    assert "$arguments['AcceptDegradedTargets'] = $true" in standalone
+
+    module = _text(MODULE)
+    lifecycle = _function_body(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    assert "throw '-AcceptDegradedTargets is valid only with a standalone Verify'" in lifecycle
+    verify = lifecycle[lifecycle.index("if ($Action -eq 'Verify') {") :]
+    verify = verify[: verify.index("Assert-DefenseClawAdministrator")]
+    assert verify.count("-AcceptDegradedTargets:$AcceptDegradedTargets") == 2
+
+    go = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
+    assert f'windowsEnterpriseEnsureVerifyDegradedVariable = "{variable}"' in go
+    assert go.count("windowsEnterpriseEnsureVerifyDegradedKey{}, true)") == 2

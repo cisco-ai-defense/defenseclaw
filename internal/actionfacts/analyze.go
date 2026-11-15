@@ -374,8 +374,74 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 		projectPOSIXNonRootUIDZeroAccountWrites(input)
 	facts.POSIXUnrestrictedSudoersGrantWrites =
 		projectPOSIXUnrestrictedSudoersGrantWrites(input, facts)
+	if facts.Parse.Status != StatusComplete && facts.Parse.Status != StatusNotApplicable {
+		facts.sendSources = senderSourcesOf(input, extracted, argv)
+	}
 	return facts
 }
+
+// senderSourcesOf is every shell value and argv of a call, for the sender
+// reader: the command text read (or refused), the values a conflict left
+// out, the argv, and a one-word command with its args read as one argv.
+func senderSourcesOf(input Input, extracted extractedInput, argv []string) []sendSource {
+	var sources []sendSource
+	seen := map[string]bool{}
+	addText := func(text string) {
+		if text == "" || seen[text] || len(sources) >= maxSendSources {
+			return
+		}
+		dialect, _ := chooseRawCommandDialect(input.Tool, input.DialectHint, text)
+		switch dialect {
+		case DialectPOSIX, DialectPowerShell, DialectCMD:
+		default:
+			return
+		}
+		seen[text] = true
+		sources = append(sources, sendSource{text: text, dialect: dialect})
+	}
+	addArgv := func(words []string) {
+		if len(words) == 0 || len(sources) >= maxSendSources {
+			return
+		}
+		sources = append(sources, sendSource{argv: cloneSlice(words)})
+	}
+	addText(input.Command)
+	addText(extracted.command)
+	for _, text := range extracted.unreadCommands {
+		addText(text)
+	}
+	argvs := [][]string{argv}
+	if len(extracted.argv) > 0 && !equalStrings(extracted.argv, argv) {
+		argvs = append(argvs, extracted.argv)
+	}
+	argvs = append(argvs, extracted.unreadArgvs...)
+	for _, words := range argvs {
+		addArgv(words)
+	}
+	// A program named on its own (a one-word command, or a one-element
+	// argv) beside its args: the tool runs them as one argv.
+	var programs []string
+	if word := extracted.command; word != "" && !strings.ContainsAny(word, " \t\r\n") {
+		programs = append(programs, word)
+	}
+	for _, words := range argvs {
+		if len(words) == 1 {
+			programs = append(programs, words[0])
+		}
+	}
+	for _, program := range programs {
+		for _, words := range argvs {
+			if len(words) > 1 || len(words) == 1 && words[0] != program {
+				if words[0] != program {
+					addArgv(append([]string{program}, words...))
+				}
+			}
+		}
+	}
+	return sources
+}
+
+const maxSendSources = 8
 
 func equivalentExtractedCommand(tool, direct, extracted string) bool {
 	if direct == extracted {
@@ -1491,6 +1557,16 @@ type toolArgumentSemantics struct {
 func PathTool(tool string) bool {
 	semantics, known := lookupToolArgumentSemantics(tool)
 	return known && semantics.acceptsPaths
+}
+
+// KnownTool reports a tool name actionfacts reads with its own argument
+// semantics or runs as a command (a reviewed file, network or shell tool).
+// A name outside it, such as an MCP tool, is read by internal/toolshape.
+func KnownTool(tool string) bool {
+	if _, known := lookupToolArgumentSemantics(tool); known {
+		return true
+	}
+	return argsExecutionTool(tool)
 }
 
 func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {

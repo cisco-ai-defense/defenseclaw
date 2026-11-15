@@ -17,14 +17,15 @@
 package scanner
 
 import (
-	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
 // hardcodedCredentialAssignment is a credential-named assignment of a quoted
 // value of 16 or more characters. Group 2 is the value.
-var hardcodedCredentialAssignment = regexp.MustCompile(`(?i)(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key)\s*[:=]\s*["']([^\s"']{16,})["']`)
+var hardcodedCredentialAssignment = lazyregexp.New(`(?i)(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key)\s*[:=]\s*["']([^\s"']{16,})["']`)
 
 // placeholderCredentialValue reports a value that is plainly not a secret by
 // its shape. A secret is one random string; a stand-in a test fixture or a

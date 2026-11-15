@@ -38,6 +38,10 @@ type semanticOwner struct {
 	suppressFallback       semanticOwnerPrerequisite
 	detectionOnly          bool
 	alertOnly              bool
+	// strictEnforced is alertOnly outside the strict tier: a proven finding
+	// blocks in strict (managed strict included) and alerts in default and
+	// permissive (managed default included).
+	strictEnforced bool
 }
 
 func (o semanticOwner) eligible(facts actionfacts.Facts) bool {
@@ -237,10 +241,11 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 			)
 		},
 		suppressFallback: authoritativeSemanticSafeNegative,
-		// The exact file grammar proves credential material is being uploaded,
-		// but an unknown external host may still be an authorized destination.
-		// Keep the global signal nonblocking and let deployment policy promote it.
-		detectionOnly: true,
+		// The exact file grammar proves credential material is being uploaded
+		// (curl, scp, rsync, wget). An unknown external host may still be an
+		// authorized destination, so default and permissive alert; strict
+		// blocks the proven upload (lead decision, GAP-0595).
+		strictEnforced: true,
 	},
 	"exfil.source_archive_external_transfer": {
 		prerequisite: func(facts actionfacts.Facts) bool {

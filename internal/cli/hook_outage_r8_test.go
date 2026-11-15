@@ -10,13 +10,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 func TestOpenClawOutageKnownWriteTargets(t *testing.T) {
 	home := t.TempDir()
-	previous := outageAccountHome
-	outageAccountHome = func() string { return home }
-	t.Cleanup(func() { outageAccountHome = previous })
+	previous := hookcli.OutageAccountHome
+	hookcli.OutageAccountHome = func() string { return home }
+	t.Cleanup(func() { hookcli.OutageAccountHome = previous })
 	root := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)
@@ -70,9 +72,9 @@ func TestOpenClawOutageKnownWriteTargets(t *testing.T) {
 // ordinary work remains open.
 func TestOpenClawOutageKnownAndNamedTargetBoundary(t *testing.T) {
 	home := t.TempDir()
-	prior := outageAccountHome
-	outageAccountHome = func() string { return home }
-	t.Cleanup(func() { outageAccountHome = prior })
+	prior := hookcli.OutageAccountHome
+	hookcli.OutageAccountHome = func() string { return home }
+	t.Cleanup(func() { hookcli.OutageAccountHome = prior })
 	root := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)

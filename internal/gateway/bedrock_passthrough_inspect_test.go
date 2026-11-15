@@ -58,9 +58,9 @@ func bedrockInvokeStreamFrames(t *testing.T, texts ...string) []byte {
 func TestBedrockEventStreamTextIsIncremental(t *testing.T) {
 	frames := bedrockInvokeStreamFrames(t, "hello ", "world")
 	s := newBedrockEventStreamText()
-	var got strings.Builder
+	var got responseText
 	for i := range frames { // one byte at a time
-		got.WriteString(s.Feed(frames[i : i+1]))
+		got.AddAll(s.Feed(frames[i : i+1]))
 	}
 	if got.String() != "hello world" || s.Model() != "claude-haiku-4-5-20251001" || s.Broken() {
 		t.Fatalf("text %q model %q broken %v", got.String(), s.Model(), s.Broken())
@@ -71,7 +71,7 @@ func TestBedrockEventStreamTextIsIncremental(t *testing.T) {
 		{Name: ":message-type", Value: eventstream.StringValue("event")},
 		{Name: ":event-type", Value: eventstream.StringValue("contentBlockDelta")},
 	}, Payload: []byte(`{"contentBlockIndex":0,"delta":{"text":"conv"}}`)})
-	if got := newBedrockEventStreamText().Feed(buf.Bytes()); got != "conv" {
+	if got := responsePiecesText(newBedrockEventStreamText().Feed(buf.Bytes())); got != "conv" {
 		t.Fatalf("converse stream %q", got)
 	}
 	bad := newBedrockEventStreamText()

@@ -124,13 +124,15 @@ func TestAdvisoryEvaluatorPanicAuditMatchesNativeControl(t *testing.T) {
 		{"antigravity", "PreInvocation", false},
 		{"cursor", "afterFileEdit", false},
 		{"cursor", "afterShellExecution", false},
-		{"claudecode", "PostToolUse", false},
+		{"claudecode", "PostToolUseFailure", false},
 		{"claudecode", "Notification", false},
 		{"copilot", "postToolUse", false},
 		{"devin", "PostToolUse", false},
 		{"antigravity", "PreToolUse", true},
 		{"cursor", "beforeShellExecution", true},
 		{"claudecode", "PreToolUse", true},
+		// Claude Code PostToolUse answers decision block (GAP-0605).
+		{"claudecode", "PostToolUse", true},
 	} {
 		for _, deployment := range []struct{ name, mode, profile string }{
 			{"per-user", "", ""},

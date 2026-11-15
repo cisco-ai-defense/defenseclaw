@@ -66,7 +66,9 @@ func TestCodexWindowsActionBlocksCompleteArgvMarker(t *testing.T) {
 		{"benign", `Set-Content -Path codex-action-allowed.txt -Value hi`, false},
 		{"benign cmd.exe /d /c", `cmd.exe /d /c echo hello > codex-allowed.txt`, false},
 		{"PowerShell call operator without Windows home", `& cmd.exe /c echo hello > codex-allowed.txt`, false},
-		{"cmd.exe /k stays partial", `cmd.exe /k echo dccert-block-marker > codex-allowed.txt`, false},
+		// /k runs the body as /c does and then stays open: its script is read
+		// (rel-1-0-10:GAP-0711).
+		{"cmd.exe /k body is read", `cmd.exe /k echo dccert-block-marker > codex-blocked2.txt`, true},
 		{"cmd.exe /x stays partial", `cmd.exe /x /c echo dccert-block-marker > codex-allowed.txt`, false},
 		{"cmd.exe /e:maybe stays partial", `cmd.exe /e:maybe /c echo dccert-block-marker > codex-allowed.txt`, false},
 	} {
@@ -80,7 +82,10 @@ func TestCodexWindowsActionBlocksCompleteArgvMarker(t *testing.T) {
 					!strings.Contains(strings.ToLower(string(mustJSONMarshal(resp.CodexOutput))), "deny") {
 					t.Fatalf("%s: action=%s raw=%s rules=%v output=%v reason=%s", tc.command, resp.Action, resp.RawAction, resp.RuleIDs, resp.CodexOutput, resp.Reason)
 				}
-			} else if resp.Action != "allow" || containsString(resp.RuleIDs, ruleID) {
+			} else if resp.Action != "allow" || (containsString(resp.RuleIDs, ruleID) && !strings.HasPrefix(resp.Reason, "detection-only")) {
+				// The rule may be named as detection-only telemetry (a partial
+				// cmd parse); it must not drive the verdict. The answer names
+				// its rule ids with or without an audit logger (GAP-0353).
 				t.Fatalf("benign command: action=%s rules=%v reason=%s", resp.Action, resp.RuleIDs, resp.Reason)
 			}
 		})

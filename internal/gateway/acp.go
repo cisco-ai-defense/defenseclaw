@@ -312,6 +312,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ACP inspection unavailable"})
 		return
 	}
+	verdict = a.applyCascadeFinal(ctx, agent.ConnectorID, "acp", direction, "", verdict)
 	// As on the hook path, an action finding the code proves (a change to
 	// DefenseClaw's own state, or one a possible account assignment would
 	// enforce) is enforced in observe mode too, and the observe guard is

@@ -6,6 +6,8 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -168,7 +170,7 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 	if shed {
 		extra = map[string]string{"hook_shed": "admission_refused"}
 	}
-	shedKey := ""
+	shedKey, capacityKey := "", ""
 	if id := hookCallerGoneString(payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"); id != "" {
 		if shed {
 			// The hook retries a refused call: one row names the call. The
@@ -180,6 +182,7 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 			if !a.hookShed.first(shedKey) {
 				return
 			}
+			capacityKey = shedKey
 		}
 		extra["tool_use_id"] = id
 		// The row is found by its tool id like every other row of the call.
@@ -187,7 +190,18 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 			env.ToolID = id
 		}
 	}
+	if shed && capacityKey == "" {
+		// A refused call without a tool id writes a row on every resend; the
+		// capacity counter takes it once, by the bytes it resends.
+		capacityKey = hookShedCapacityKey(ctx, env.SessionID, event, payload)
+		if !a.hookShed.first(capacityKey) {
+			capacityKey = ""
+		}
+	}
 	ctx = audit.ContextWithEnvelope(ctx, env)
+	if !shed {
+		a.noteHookCallerGoneCapacity(connectorName, false)
+	}
 	if err := a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
 		Connector: connectorName,
 		Event:     event,
@@ -201,9 +215,29 @@ func (a *APIServer) recordHookCallerGone(w http.ResponseWriter, r *http.Request)
 		if shedKey != "" {
 			a.hookShed.forget(shedKey)
 		}
+		if capacityKey != "" && capacityKey != shedKey {
+			a.hookShed.forget(capacityKey)
+		}
 		fmt.Fprintf(os.Stderr, "[gateway] hook call whose client left before admission not audited connector=%s: %v\n",
 			connectorName, err)
+		return
 	}
+	if shed && capacityKey != "" {
+		// Counted once per call, after its row persisted (a failed write
+		// leaves the next resend to count it).
+		a.noteHookCallerGoneCapacity(connectorName, true)
+	}
+}
+
+// hookShedCapacityKey names a refused call that carries no tool id by the
+// verified caller, its session and event and a digest of the payload its
+// hook resends unchanged. Two calls with the same bytes in one session are
+// counted once: the bound is the ledger, never more than one per resend.
+func hookShedCapacityKey(ctx context.Context, session, event string, payload map[string]interface{}) string {
+	caller, _ := verifiedAuditCaller(ctx)
+	encoded, _ := json.Marshal(payload)
+	sum := sha256.Sum256(encoded)
+	return "capacity\x00" + caller.IDKind + "\x00" + caller.ID + "\x00" + session + "\x00" + event + "\x00" + hex.EncodeToString(sum[:])
 }
 
 // hookShedLedger remembers the calls a shed row was written for, so the
