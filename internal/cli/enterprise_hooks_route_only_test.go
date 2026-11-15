@@ -125,8 +125,10 @@ func TestEnterpriseHookRouteOnlyRenderMintsTheMissingKeyAndVerifyDoesNot(t *test
 		"codex":      {BaseURL: "https://api.openai.com/v1", API: "responses"},
 	}}
 
-	if r := enterpriseHookVerifyRouteOnly("codex", "alice", "1001", "127.0.0.1:18970"); r != nil {
-		t.Fatalf("verify without a key rendered %+v", r)
+	// Verify expects the route and reports why it cannot be derived
+	// (route_config_drift with the cause, rel-1-0-10:GAP-0800).
+	if r := enterpriseHookVerifyRouteOnly("codex", "alice", "1001", "127.0.0.1:18970"); r == nil || r.Token != "" || !strings.Contains(r.Unavailable, "per-user credential key is missing") {
+		t.Fatalf("verify without a key = %+v", r)
 	}
 	if !strings.Contains(log.String(), "per-user credential key is missing") {
 		t.Fatalf("verify without a key logged %q", log.String())
@@ -153,5 +155,39 @@ func TestEnterpriseHookRouteOnlyRenderMintsTheMissingKeyAndVerifyDoesNot(t *test
 	}
 	if claude := enterpriseHookRouteOnly("claudecode", "alice", "1001", "127.0.0.1:18970"); claude == nil || claude.Token == rendered.Token {
 		t.Fatalf("claudecode render = %+v", claude)
+	}
+}
+
+// rel-1-0-10:GAP-0800: a routed connector whose route credential cannot be
+// derived is drift on verify (the guardian repairs it, status says why);
+// the render paths still write nothing and keep the hooks.
+func TestEnterpriseHookVerifyRouteOnlyReportsAnUnderivableRouteAsDrift(t *testing.T) {
+	prevCfg, prevToken, prevLog := cfg, enterpriseHookRouteToken, enterpriseHookRouteOnlyLog
+	t.Cleanup(func() { cfg, enterpriseHookRouteToken, enterpriseHookRouteOnlyLog = prevCfg, prevToken, prevLog })
+	enterpriseHookRouteOnlyLog = io.Discard
+	cfg = &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.Routing.Enabled = true
+	cfg.Routing.RouteOnly = config.RoutingRouteOnlyConfig{Connectors: []string{"claudecode"}, Upstreams: map[string]config.RoutingUpstreamConfig{"claudecode": {BaseURL: "https://api.anthropic.com", API: "messages"}}}
+	enterpriseHookRouteToken = func(string, string, string, bool) (string, error) {
+		return "", errors.New("the gateway has not published its route epoch yet")
+	}
+	if r := enterpriseHookRouteOnly("claudecode", "alice", "1001", "127.0.0.1:18970"); r != nil {
+		t.Fatalf("a render without a credential wrote %+v", r)
+	}
+	expected := enterpriseHookVerifyRouteOnly("claudecode", "alice", "1001", "127.0.0.1:18970")
+	if expected == nil || expected.Unavailable == "" {
+		t.Fatalf("verify = %+v", expected)
+	}
+	err := connector.RouteOnlyDrift(connector.NewClaudeCodeConnector(), connector.SetupOpts{DataDir: cfg.DataDir}, expected)
+	if !errors.Is(err, connector.ErrRouteConfigDrift) || !strings.Contains(err.Error(), "route epoch") {
+		t.Fatalf("drift = %v", err)
+	}
+	// Not routed, root and exempt accounts still expect nothing.
+	if r := enterpriseHookVerifyRouteOnly("codex", "alice", "1001", "127.0.0.1:18970"); r != nil {
+		t.Fatalf("an unrouted connector expects %+v", r)
+	}
+	if r := enterpriseHookVerifyRouteOnly("claudecode", "root", "0", "127.0.0.1:18970"); r != nil {
+		t.Fatalf("root expects %+v", r)
 	}
 }
