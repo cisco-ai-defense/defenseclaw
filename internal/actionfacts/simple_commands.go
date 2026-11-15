@@ -61,6 +61,10 @@ type SimpleCommand struct {
 	// through a link on disk is not a file the command names
 	// (rel-1-0-6:GAP-0601 review 5).
 	UnboundUser bool
+	// UnresolvedFolder means the directory of the command is unknown and an
+	// operand of Text depends on it: the gateway reads it in each folder
+	// that holds a protected file (rel-1-0-10:GAP-0871).
+	UnresolvedFolder bool
 	// AbsoluteOnly means the directory of the command is unknown (an eval,
 	// an unreadable cd) and no operand of Text depends on it: CWD is empty,
 	// and the directory the action starts in judges the command as well as
@@ -601,7 +605,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				ResolvedVariable:        resolvedVariable,
 				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
-				AbsoluteOnly:            state.cwdUnknown && !relative}
+				AbsoluteOnly:            state.cwdUnknown && !relative,
+				UnresolvedFolder:        relative}
 			if text == part.text {
 				pieces.add(command)
 			}

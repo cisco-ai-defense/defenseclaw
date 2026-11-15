@@ -153,6 +153,15 @@ func cdFirstFixture(t *testing.T) (home, project string) {
 
 var cdFirstRank = map[string]int{"A": 0, "L": 1, "B": 2}
 
+// cdFirstNamedFileTargets are the targets that are files of a known name in
+// their folder (credentials, keys, the shell profile, the account files),
+// which an unresolved folder may hold; in the other targets' folders every
+// file is protected, and an unresolved folder is not read as one of them.
+var cdFirstNamedFileTargets = map[string]bool{
+	"shell profile": true, "authorized_keys": true, "ssh key read": true, "aws credentials read": true,
+	"aws credentials copy": true, "kube config read": true, "sudoers": true, "shadow read": true,
+}
+
 // cdFirstVerdict is the verdict letter (A allow, L alert, B block) of a Bash
 // call through the Claude Code hook handler.
 func cdFirstVerdict(t *testing.T, a *APIServer, session, cwd, command string) string {
@@ -201,6 +210,72 @@ func TestCDThatMayNotRunKeepsTheHookFolderReading(t *testing.T) {
 				if got := cdFirstVerdict(t, a, "td-mnr-"+p.name, dir, prefix+tg.inner); cdFirstRank[got] < cdFirstRank[oracle] {
 					t.Errorf("%s %s (%s): %q in the target folder is %s, the form alone is %s", p.name, tg.name, name, prefix+tg.inner, got, oracle)
 				}
+			}
+		}
+	}
+}
+
+// TestUnresolvedFolderIsTheUnknownTier is rel-1-0-10:GAP-0871: a relative
+// operand in a folder the call does not give (cd to an unset variable, to a
+// command substitution, no folder from the agent) that is a protected file
+// in one of the folders it may be in gets the unknown tier of the one bound
+// rule: an alert in default, permissive and managed default, a block in
+// strict and managed-strict; never a clean allow and never the confident
+// verdict of the file alone. A target whose in-folder form is allowed in a
+// tier may still get the unknown tier there (another folder may hold a
+// protected file of that name); no verdict is above the in-folder one or the
+// unknown tier. The controls name no protected file and stay allowed.
+func TestUnresolvedFolderIsTheUnknownTier(t *testing.T) {
+	home, project := cdFirstFixture(t)
+	for _, p := range gap0437Packs {
+		a := gap0437Server(t, p, "claudecode", "action")
+		strict := strings.Contains(p.name, "strict")
+		for _, tg := range cdFirstTargets {
+			dir := strings.ReplaceAll(tg.dir, "~", home)
+			if !strings.HasPrefix(dir, "/") {
+				dir = project + "/" + dir
+			}
+			oracle := cdFirstVerdict(t, a, "td-unk-"+p.name, dir, tg.inner)
+			tier := "L"
+			if strict {
+				tier = "B"
+			}
+			want := tier
+			if oracle == "A" || !cdFirstNamedFileTargets[tg.name] {
+				want = "A"
+			}
+			// The ceiling: the verdict of the file in its folder, or the
+			// unknown tier when that is higher (the folder is not known).
+			ceiling := oracle
+			if cdFirstRank[tier] > cdFirstRank[ceiling] {
+				ceiling = tier
+			}
+			forms := map[string][2]string{
+				"unset-var":   {project, "cd \"$TD327_UNSET\" && " + tg.inner},
+				"cmd-subst":   {project, "cd \"$(cat /nonexistent-td327)\" && " + tg.inner},
+				"unset-semi":  {project, "cd \"$TD327_UNSET\"; " + tg.inner},
+				"in-hook-dir": {dir, "cd \"$TD327_UNSET\" && " + tg.inner},
+			}
+			for name, form := range forms {
+				got := cdFirstVerdict(t, a, "td-unk-"+p.name, form[0], form[1])
+				if name == "in-hook-dir" || name == "unset-semi" {
+					// The hook folder reading still decides as well.
+					if cdFirstRank[got] < cdFirstRank[want] {
+						t.Errorf("%s %s (%s): %q is %s, want at least %s", p.name, tg.name, name, form[1], got, want)
+					}
+					continue
+				}
+				if cdFirstRank[got] < cdFirstRank[want] || cdFirstRank[got] > cdFirstRank[ceiling] {
+					t.Errorf("%s %s (%s): %q is %s, want %s to %s (the in-folder form is %s)", p.name, tg.name, name, form[1], got, want, ceiling, oracle)
+				}
+			}
+		}
+		for _, control := range []string{
+			"cd \"$TD327_UNSET\" && echo ok > out.txt", "cd \"$(git rev-parse --show-toplevel)\" && cat README.md",
+			"cd \"$TD327_UNSET\" && ls",
+		} {
+			if got := cdFirstVerdict(t, a, "td-unk-"+p.name, project, control); got != "A" {
+				t.Errorf("%s control %q is %s, want allow", p.name, control, got)
 			}
 		}
 	}

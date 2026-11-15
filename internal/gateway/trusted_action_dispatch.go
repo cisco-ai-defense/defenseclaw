@@ -869,6 +869,11 @@ func dispatchTrustedAction(
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// An operand in a folder the call does not give: the unknown tier when
+	// it may be a protected file there (rel-1-0-10:GAP-0871).
+	defer func() {
+		findings = withUnresolvedFolderTier(findings, request, facts, false)
+	}()
 	if twin, ok := overLimitCommandBoundedTwinRequest(request, facts); ok {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
@@ -1096,6 +1101,13 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
+				if simple.UnresolvedFolder {
+					// The walk does not know the folder this statement runs
+					// in (cd "$X", cd "$(...)"): the unknown tier when an
+					// operand may be a named protected file there
+					// (rel-1-0-10:GAP-0871).
+					childFindings = withUnresolvedFolderTier(childFindings, child, actionfacts.Analyze(child.Input), true)
+				}
 				if simple.LoginGuess {
 					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
 						return !loginGuessProvedFinding(f)

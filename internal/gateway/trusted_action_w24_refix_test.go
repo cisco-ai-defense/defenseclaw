@@ -57,7 +57,12 @@ func TestTrustedActionW24Continuation(t *testing.T) {
 		{"ash nested list", "ash -c 'true && rm -rf /'", "/repo", "/home/alice", "CMD-RM-RF", actionfacts.DialectPOSIX, true},
 		{"builtin cd", "builtin cd /home/alice && cat .ssh/id_rsa", "/repo", "/home/alice", "PATH-SSH-KEY", actionfacts.DialectPOSIX, true},
 		{"command cd", "command cd /home/alice && cat .ssh/id_rsa", "/repo", "/home/alice", "PATH-SSH-KEY", actionfacts.DialectPOSIX, true},
-		{"unmodeled directory change", "source ./env.sh; cat .ssh/id_rsa", "/repo", "/home/alice", "", actionfacts.DialectPOSIX, false},
+		// The sourced file may move the folder anywhere, and .ssh/id_rsa
+		// is a private key in a home: the unknown tier of an unresolved
+		// folder (rel-1-0-10:GAP-0871 ruling, td327rev review; this raw
+		// verdict is a block, the profile maps it to an alert in default).
+		{"unmodeled directory change", "source ./env.sh; cat .ssh/id_rsa", "/repo", "/home/alice", "ACTION-COMPOUND-LIMIT", actionfacts.DialectPOSIX, true},
+		{"unmodeled directory change, no protected name", "source ./env.sh; cat notes.txt", "/repo", "/home/alice", "", actionfacts.DialectPOSIX, false},
 		{"PowerShell Set-Location", `Set-Location C:\Users\alice; Get-Content .ssh\id_rsa`, `C:\repo`, `C:\Users\alice`, "PATH-SSH-KEY", actionfacts.DialectPowerShell, true},
 		{"PowerShell push location", `Push-Location C:\Users\alice; Get-Content .ssh\id_rsa`, `C:\repo`, `C:\Users\alice`, "PATH-SSH-KEY", actionfacts.DialectPowerShell, true},
 		{"PowerShell unknown location", `Set-Location $target; Get-Content .ssh\id_rsa`, `C:\repo`, `C:\Users\alice`, "", actionfacts.DialectPowerShell, false},
