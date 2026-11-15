@@ -84,7 +84,7 @@ func validateOpenCodeWindowsSetupAdmission(opts SetupOpts) error {
 		return fmt.Errorf("OpenCode executable admission: %w", err)
 	}
 	if opts.AgentVersion != authority.rawVersion {
-		return errors.New("OpenCode executable admission: selected raw version does not match protected evidence")
+		return fmt.Errorf("OpenCode executable admission: selected raw version does not match protected evidence (%w)", errOpenCodeExecutableChanged)
 	}
 	if opts.HookContractID != "" && opts.HookContractID != authority.contractID {
 		return errors.New("OpenCode executable admission: selected hook contract does not match protected evidence")
@@ -119,7 +119,7 @@ func validateOpenCodeWindowsLockPublication(dataDir string, entry HookContractLo
 		return errors.New("OpenCode contract publication does not match protected executable evidence")
 	}
 	if err := validateOpenCodeExecutableEvidence(entry.AgentExecutable, authority); err != nil {
-		return fmt.Errorf("OpenCode contract publication: %w", err)
+		return contractPublicationEvidenceError("OpenCode", err)
 	}
 	return nil
 }
@@ -188,7 +188,7 @@ func validateOpenCodeExecutableEvidence(selected string, authority openCodeExecu
 		return agentInstallNotTrusted(fmt.Errorf("revalidate selected executable custody: %w", err))
 	}
 	if !strings.EqualFold(digest, authority.digest) {
-		return errors.New("selected executable digest does not match protected evidence")
+		return fmt.Errorf("selected executable digest does not match protected evidence (%w)", errOpenCodeExecutableChanged)
 	}
 	return nil
 }

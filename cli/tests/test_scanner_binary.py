@@ -93,6 +93,9 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
             },
         )
 
+    # These tests cover the skill-scanner launcher row; the MCP scanner import
+    # check (GAP-0006) is its own child process, tested in test_venv_integrity.py.
+    @patch("defenseclaw.venv_integrity.import_error", new=lambda *_args, **_kwargs: "")
     @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
     @patch("defenseclaw.commands.cmd_doctor.os.path.lexists", return_value=False)
     @patch("defenseclaw.commands.cmd_doctor.resolve_scanner_binary", side_effect=_resolve)
@@ -132,6 +135,9 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
         self.assertEqual(litellm_row["status"], "pass")
         self.assertRegex(litellm_row["detail"], r"^litellm \d")
 
+    # These tests cover the skill-scanner launcher row; the MCP scanner import
+    # check (GAP-0006) is its own child process, tested in test_venv_integrity.py.
+    @patch("defenseclaw.venv_integrity.import_error", new=lambda *_args, **_kwargs: "")
     @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
     @patch("defenseclaw.commands.cmd_doctor.os.path.expanduser", return_value="/Users/test/.local/bin/skill-scanner")
     @patch("defenseclaw.commands.cmd_doctor.os.path.lexists", return_value=True)

@@ -815,10 +815,13 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	judge := judgeOf(g, r.judge)
 	start := time.Now()
 
-	verdict := scanLocalPatternsWithActivation("prompt", content, ruleGenerationOf(g, ""), localPatternsOf(g))
+	verdict := sessionPromptLocalVerdict(content, ruleGenerationOf(g, ""), localPatternsOf(g))
 	if judge != nil {
 		// A prompt the local scan blocks is not a task; an OpenClaw chat
 		// message is not known to be the owner's, so it names no scope target.
+		// verdict is the joined-parts verdict (content and, for a block array,
+		// its parts view), so a prompt whose joined parts the scan blocks is
+		// not recorded as a task either.
 		task := content
 		if verdict != nil && normalizedGuardrailAction(verdict.Action) == guardrailActionBlock {
 			task = ""

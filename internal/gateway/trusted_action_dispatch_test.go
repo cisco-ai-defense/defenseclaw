@@ -1134,6 +1134,11 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 		name        string
 		command     string
 		wantFinding bool
+		// enforced marks an awk call whose literal commands are judged as the
+		// hook running them directly (s7/awk-command, rel-1-0-10:GAP-0499): the
+		// finding is the one of the direct command and enforces, whatever
+		// else the outer call holds. Every other carrier stays shadow-only.
+		enforced bool
 	}{
 		{
 			name:    "benign ripgrep pattern",
@@ -1178,16 +1183,19 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 			name:        "awk system call",
 			command:     `awk 'BEGIN { system("` + dangerous + `") }' input.txt`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:        "awk command to getline",
 			command:     `awk 'BEGIN { "` + dangerous + `" | getline line }' input.txt`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:        "awk print to command",
 			command:     `awk 'BEGIN { print "data" | "` + dangerous + `" }' input.txt`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:    "awk data literal is not executable system argument",
@@ -1205,11 +1213,13 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 			name:        "awk regex hash does not hide later system call",
 			command:     `awk 'BEGIN { if ("#" ~ /#/) print 1; system("` + dangerous + `") }'`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:        "awk operator regex does not hide later system call",
 			command:     `awk 'BEGIN { if (1 && /#/) print 1; system("` + dangerous + `") }'`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:    "benign sed replacement",
@@ -1283,8 +1293,8 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 					}),
 				)
 			}
-			if matched != nil && matched.contributesToEnforcement() {
-				t.Fatalf("partial outer carrier became enforceable: %+v", *matched)
+			if matched != nil && matched.contributesToEnforcement() != test.enforced {
+				t.Fatalf("partial outer carrier enforceable=%t, want %t: %+v", matched.contributesToEnforcement(), test.enforced, *matched)
 			}
 		})
 	}
@@ -2350,6 +2360,10 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 		name    string
 		command string
 		ruleID  string
+		// enforced: an awk call's literal command is judged as the hook
+		// running it directly (s7/awk-command, rel-1-0-10:GAP-0499), so its
+		// finding enforces; the other carriers stay shadow-only.
+		enforced bool
 	}{
 		{
 			name:    "find later exec exact action",
@@ -2362,9 +2376,10 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 			ruleID:  "C2-WEBHOOK-SITE",
 		},
 		{
-			name:    "awk system network action",
-			command: `awk 'BEGIN { system("curl ` + webhook + `") }' input.txt`,
-			ruleID:  "C2-WEBHOOK-SITE",
+			name:     "awk system network action",
+			command:  `awk 'BEGIN { system("curl ` + webhook + `") }' input.txt`,
+			ruleID:   "C2-WEBHOOK-SITE",
+			enforced: true,
 		},
 		{
 			name:    "eval sensitive read",
@@ -2396,9 +2411,11 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 					trustedNestedExecutionActions(input, facts),
 				)
 			}
-			if matched.contributesToEnforcement() {
+			if matched.contributesToEnforcement() != test.enforced {
 				t.Fatalf(
-					"partial outer execution became enforceable: %+v facts=%+v",
+					"partial outer execution enforceable=%t, want %t: %+v facts=%+v",
+					matched.contributesToEnforcement(),
+					test.enforced,
 					*matched,
 					facts,
 				)

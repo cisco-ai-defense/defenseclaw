@@ -939,8 +939,10 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		LegacyText:         string(req.Args),
 		Connector:          req.Connector,
 		EnforcementCapable: true,
+		sessionID:          req.SessionID,
 		sendDestination:    req.sendDestination,
 	}
+	dialectHint := a.agentHookWindowsDialectHint(ctx)
 	if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, req.Args); ok {
 		// OpenClaw's exec tool sends execution controls (yieldMs, timeout,
 		// workdir, ...) next to the command. Left in the arguments they made
@@ -960,10 +962,17 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 				if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, raw); ok {
 					candidate.Args, candidate.CWD = args, inspectToolTrustedShellCWD(dir)
 				}
+				if dialectHint {
+					candidate.DialectHint = agentHookWindowsShellDialect(candidate)
+				}
 				return candidate
 			},
 		}
 	}
+	// A shell call is read in the Windows hook's dialect on a Windows host,
+	// as on the hook routes (rel-1-0-10:GAP-0784: OpenClaw exec read
+	// PowerShell text as POSIX).
+	withWindowsShellDialect(&action, dialectHint)
 	ctx = a.withInstructionStartup(ctx, req.Connector, req.SessionID,
 		a.applyInstructionInspectStartup(ctx, req.Connector, req.SessionID, action.Input.CWD))
 	if trustedShimArgvTool(req.Tool) {
@@ -1106,6 +1115,30 @@ func (a *APIServer) toolBlockListVerdict(ctx context.Context, req *ToolInspectRe
 	return nil
 }
 
+// trustedToolCallFindings is every rule reading of one trusted tool call:
+// the rule packs, proved high-severity writes, outbound PII, the agent hook
+// configuration targets, the MCP/app tool effects, the shell tool effects and
+// the DefenseClaw control guard. The hook routes, /inspect/tool and the LLM
+// proxy's tool-call route all judge a call through it, so one tool meaning
+// gets one set of findings whichever route carries it (rel-1-0-10:GAP-0782:
+// the proxy ran the rule packs alone). secureClient is a Secure Client
+// install, which keeps its own tool policy (GAP-0048 adds no finding there).
+func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
+	findings := inspectDispatchTrustedAction(ctx, action)
+	findings = provedHighWriteFindings(ctx, action, findings)
+	findings = outboundPIIFindings(action, findings)
+	if !secureClient {
+		findings = agentHookConfigFindings(ctx, action, findings)
+	}
+	// An MCP or app tool is read as effects (internal/toolshape): the path it
+	// names, its SQL, code, settings and send destinations (rel-1-0-10:GAP-0016).
+	findings = nonShellToolFindings(ctx, action, findings, mcpServer)
+	findings = shellToolFindings(ctx, action, findings)
+	// The DefenseClaw CLI, gateway and services are not an agent's to stop
+	// (GAP-0596): the rule holds on every install, Secure Client included.
+	return defenseClawControlFindings(ctx, action, findings)
+}
+
 func (a *APIServer) inspectTrustedToolPolicyCtx(
 	ctx context.Context,
 	req *ToolInspectRequest,
@@ -1209,21 +1242,8 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	if isWriteTool {
 		waitCodeGuard = a.startCodeGuardOnArgs(ctx, req)
 	}
-	ruleFindings := inspectDispatchTrustedAction(ctx, action)
-	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
-	ruleFindings = outboundPIIFindings(action, ruleFindings)
-	// A Secure Client install keeps its own tool policy (GAP-0048 adds no
-	// finding there).
-	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-		ruleFindings = agentHookConfigFindings(ctx, action, ruleFindings)
-	}
-	// An MCP or app tool is read as effects (internal/toolshape): the path it
-	// names, its SQL, code, settings and send destinations (rel-1-0-10:GAP-0016).
-	ruleFindings = nonShellToolFindings(ctx, action, ruleFindings, req.MCPServerName)
-	ruleFindings = shellToolFindings(ctx, action, ruleFindings)
-	// The DefenseClaw CLI, gateway and services are not an agent's to stop
-	// (GAP-0596): the rule holds on every install, Secure Client included.
-	ruleFindings = defenseClawControlFindings(ctx, action, ruleFindings)
+	cfg := a.decisionConfig(ctx)
+	ruleFindings := trustedToolCallFindings(ctx, action, req.MCPServerName, cfg != nil && cfg.SecureClientIntegration())
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
 		cgScan = waitCodeGuard()
@@ -1695,14 +1715,13 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// its own rule pack (empty ⇒ process-global default set).
 	// Prompts and tool results can contain invisible separators or letters
 	// that resemble Latin script. Keep this extra view confined to trust rules.
-	secureClient := false
-	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
-		secureClient = true
-	}
+	cfg := a.decisionConfig(ctx)
+	secureClient := cfg != nil && cfg.SecureClientIntegration()
+	generation := snapshotRulePackGenerationFor(ctx, req.Connector)
 	var ruleFindings []RuleFinding
 	if isToolResultDirection(req.Direction) && !secureClient {
 		// One tool-result path for every connector (tool_result_inspect.go).
-		ruleFindings = toolResultRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, req.contentScope, !ManagedEnterpriseActive())
+		ruleFindings = toolResultRuleFindings(generation, content, req.contentScope, !ManagedEnterpriseActive())
 	} else {
 		folded := ""
 		if !secureClient {
@@ -1710,7 +1729,37 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 				folded = view
 			}
 		}
-		ruleFindings = messageRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, folded, req.contentScope, !ManagedEnterpriseActive())
+		ruleFindings = messageRuleFindings(generation, content, folded, req.contentScope, !ManagedEnterpriseActive())
+	}
+	// A prompt whose content is a JSON block array is also read as the model
+	// reads its text parts, with no separator (GAP-0465). So are the text
+	// blocks of a tool result, for the trust rules only (GAP-0528): the joined
+	// text exists to find an instruction split across blocks, and a secret or
+	// PII rule on it would read the digits and keys the blocks end and begin
+	// with as one token, and the unescaped text of a JSON item as a new
+	// plain-text string, which is not what the tool returned.
+	if joined := messagePartsJoinedText(req.Direction, content); joined != "" {
+		joinedFolded := ""
+		if !secureClient {
+			if view := trustPatternText(joined); view != joined {
+				joinedFolded = view
+			}
+		}
+		if isToolResultDirection(req.Direction) {
+			joinedFindings := messageRuleFindings(generation, "", joined, req.contentScope, false)
+			if joinedFolded != "" {
+				joinedFindings = unionRuleFindings(joinedFindings,
+					messageRuleFindings(generation, "", joinedFolded, req.contentScope, false))
+			}
+			if !secureClient {
+				// The tool-result disposition: HIGH at most (tool_result_inspect.go).
+				capToolResultSeverity(joinedFindings)
+			}
+			ruleFindings = unionRuleFindings(ruleFindings, joinedFindings)
+		} else {
+			ruleFindings = unionRuleFindings(ruleFindings,
+				messageRuleFindings(generation, joined, joinedFolded, req.contentScope, !ManagedEnterpriseActive()))
+		}
 	}
 
 	var verdict *ToolInspectVerdict
@@ -3002,7 +3051,8 @@ func (a *APIServer) emitCodeGuardTelemetry(
 // generation: every rule on content (scanRaw; scope as for
 // scanContentRuleCategoryWithGeneration), then the trust rules on folded
 // ("" for none), the same content with invisible separators and look-alike
-// letters folded, for a rule the first pass did not find. A strictest
+// letters folded, merged per rule ID keeping the stronger finding
+// (unionRuleFindings, rel-1-0-10:GAP-0527). A strictest
 // combination of profiles runs it with each member's own rules and keeps
 // every member's finding, so even distinct definitions of one rule ID keep
 // their separate audit provenance.
@@ -3031,17 +3081,7 @@ func messageRuleFindings(generation *compiledRulePackCategories, content, folded
 	if folded == "" {
 		return findings
 	}
-	seen := make(map[string]bool, len(findings))
-	for _, finding := range findings {
-		seen[finding.RuleID] = true
-	}
-	for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
+	return unionRuleFindings(findings, scanRuleGeneration(generation, folded, "message", ruleScanOptions{
 		contentScope: scope, onlyCategory: "trust-exploit",
-	}) {
-		if !seen[finding.RuleID] {
-			findings = append(findings, finding)
-			seen[finding.RuleID] = true
-		}
-	}
-	return findings
+	}))
 }

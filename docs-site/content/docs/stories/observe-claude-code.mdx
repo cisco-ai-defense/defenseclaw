@@ -10,7 +10,7 @@ keywords:
 
 > I want to observe Claude Code and block recursive force deletion against critical system paths.
 
-Run Claude Code under observe mode first, then switch to action mode so the bundled `CMD-RM-RF` rule (CRITICAL) blocks a recursive force delete of `/` or a top-level directory such as `/etc`, `/var`, `/home`, `/usr` or `/opt`. The rule does not flag every `rm -rf`: a path below those directories (`/var/tmp/build`), a relative path or a home subdirectory is not matched.
+Run Claude Code under observe mode first, then switch to action mode so the bundled `CMD-RM-RF` rule (CRITICAL) blocks a recursive force delete of `/`, of a top-level directory such as `/etc`, `/var`, `/home`, `/usr` or `/opt`, of your home, of a direct child of a system folder such as `/usr/lib`, and of the whole contents of any of them (`/etc/*`, `~/*`, `$HOME/.[!.]*`). The rule does not flag every `rm -rf`: a deeper path (`/var/tmp/build`, `/var/lib/apt/lists/*`), a relative path or a home subdirectory such as `~/proj/node_modules` is not matched.
 
 ## Before you start
 

@@ -93,12 +93,6 @@ func S7NewEngineMulti(cfg *config.Config, connectorName string, more []string) (
 	if g := currentGeneration(); g != nil {
 		api.SetHookDecisionJudge(g.decisionJudge)
 	}
-	hooks := map[string]http.HandlerFunc{connectorName: api.handleUnifiedConnectorHook(connectorName)}
-	for _, name := range more {
-		if _, ok := hooks[name]; !ok {
-			hooks[name] = api.handleUnifiedConnectorHook(name)
-		}
-	}
 	// The harness has no real user home to follow links through, so the
 	// effect lane uses a lexical resolver: a path resolves to itself. Member
 	// names are still matched lexically (writing ~/.ssh/authorized_keys is
@@ -108,6 +102,12 @@ func S7NewEngineMulti(cfg *config.Config, connectorName string, more []string) (
 	// The harness reads the effect verdict per case from Deterministic (the
 	// same effectShadowRun core); the hook's async live run is not needed.
 	effectShadowLiveOff = true
+	hooks := map[string]http.HandlerFunc{connectorName: api.handleUnifiedConnectorHook(connectorName)}
+	for _, name := range more {
+		if _, ok := hooks[name]; !ok {
+			hooks[name] = api.handleUnifiedConnectorHook(name)
+		}
+	}
 	e := &S7Engine{
 		sc: sc, api: api, connector: connectorName,
 		hook:    hooks[connectorName],
@@ -145,7 +145,12 @@ func (e *S7Engine) Hook(ctx context.Context, body []byte, headers ...string) (co
 }
 
 // HookFor answers one hook payload through the named connector's handler.
-func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byte, headers ...string) (int, []byte) {
+func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byte, headers ...string) (code int, out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			code, out = 500, []byte(`{"action":"allow","reason":"panic"}`)
+		}
+	}()
 	h, ok := e.hooks[connectorName]
 	if !ok {
 		h, connectorName = e.hook, e.connector
@@ -210,7 +215,8 @@ func (e *S7Engine) Deterministic(ctx context.Context, toolName string, args json
 	return e.DeterministicFor(ctx, e.connector, toolName, args, cwd)
 }
 
-// DeterministicFor is Deterministic for the named connector. A panic of the evaluation is a parse status "panic", never a crashed run.
+// DeterministicFor is Deterministic for the named connector. It recovers per
+// case so one parser panic cannot abort a run.
 func (e *S7Engine) DeterministicFor(ctx context.Context, connectorName, toolName string, args json.RawMessage, cwd string) (det S7Det) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -325,7 +331,7 @@ func (e *S7Engine) Layers(ctx context.Context, sessionID, toolName, args string,
 
 // startWALGuard runs the product's own audit WAL guard pass (auditWALGuardPass, the one runAuditWALGuard calls every 2 s in a running
 // gateway) in a goroutine. The harness never calls Sidecar.Run, so without this nothing checkpoints and the audit WAL grows without
-// bound under a sustained hook load (7-24 GB per run seen on lab-host). The pass runs every 500 ms here because the harness
+// bound under a sustained hook load (7-24 GB per run seen on the build box). The pass runs every 500 ms here because the harness
 // drives far more calls per second than a host does.
 func (e *S7Engine) startWALGuard() {
 	ctx, cancel := context.WithCancel(context.Background())
