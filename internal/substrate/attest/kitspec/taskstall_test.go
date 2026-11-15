@@ -1,6 +1,10 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+// Spec renders the sandbox artifacts of an image, which OpenShell does not do
+// on Windows hosts (as kitspec_test.go).
+//go:build !windows
+
 package kitspec
 
 import (
