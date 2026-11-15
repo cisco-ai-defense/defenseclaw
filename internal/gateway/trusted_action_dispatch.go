@@ -3913,7 +3913,7 @@ func provenStateCandidateMatches(
 			// the user can make; the hook placed the entry as the user
 			// and lists it only when it is in the state tree (GAP-2549).
 			for _, spelling := range spellings {
-				if placed := request.ResolvedWriteTargets[spelling]; filepath.IsAbs(placed) {
+				if placed, _ := clientWriteTarget(request.ResolvedWriteTargets, spelling); filepath.IsAbs(placed) {
 					candidate.Resolved = placed
 					if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 						return true
@@ -3925,7 +3925,7 @@ func provenStateCandidateMatches(
 	}
 	physical := ""
 	for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
-		if value, found := request.ResolvedWriteTargets[spelling]; found {
+		if value, found := clientWriteTarget(request.ResolvedWriteTargets, spelling); found {
 			physical = value
 			break
 		}
