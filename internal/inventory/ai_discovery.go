@@ -404,6 +404,7 @@ type AISignal struct {
 	Basenames          []string        `json:"basenames,omitempty"`
 	WorkspaceHash      string          `json:"workspace_hash,omitempty"`
 	Version            string          `json:"version,omitempty"`
+	Location           string          `json:"location,omitempty"` // of a binary install (ai_agent_installs.go)
 	Component          *AIComponent    `json:"component,omitempty"`
 	Model              *LocalModelInfo `json:"model,omitempty"`
 	Runtime            *ProcessRuntime `json:"runtime,omitempty"`
@@ -3067,8 +3068,16 @@ func (s *ContinuousDiscoveryService) detectBinaries() []AISignal {
 	var out []AISignal
 	for _, sig := range s.catalog {
 		for _, bin := range sig.BinaryNames {
+			seen := map[string]bool{}
 			if path, err := s.lookPath(bin); err == nil && path != "" {
+				seen[filepath.Clean(path)] = true
 				out = append(out, s.signalFromPath(sig, SignalAICLI, "binary", path))
+			}
+			for _, path := range s.agentInstalls(bin) {
+				if !seen[path] {
+					seen[path] = true
+					out = append(out, s.signalFromPath(sig, SignalAICLI, "binary", path))
+				}
 			}
 		}
 	}
@@ -4142,6 +4151,9 @@ func (s *ContinuousDiscoveryService) signalFromPath(sig AISignature, category, d
 		ev.RawPath = path
 	}
 	out := s.signalFromEvidence(sig, category, detector, []AIEvidence{ev})
+	if detector == "binary" && s.sandbox == nil {
+		out.Location = s.installLocation(path)
+	}
 	s.stampHomeOwner(&out, path)
 	// "Last active" for path-evidence detectors (config / binary /
 	// MCP / extension) defaults to the file's modification time when
