@@ -440,10 +440,20 @@ func tokenPieces(text string) (pieces []tokenPiece, ok bool) {
 	return tokenScan(text, nil)
 }
 
+// The quote states of tokenScan beside ' and ": an ANSI-C string ($'...',
+// whose backslash escapes a quote) and a comment (# at the start of a word,
+// to the end of its line).
+const (
+	ansiQuote    byte = 'A'
+	commentQuote byte = '#'
+)
+
 // tokenScan is tokenPieces; visit, when set, is called with the offset and
-// the quote the shell is in there (', " or 0) for each byte the split reads:
-// not the byte after a backslash, not a here-document body, and nothing past
-// maxSyntaxTailPieces.
+// the quote the shell is in there (', ", ansiQuote, commentQuote or 0) for
+// each byte the split reads: not the byte after a backslash, not a
+// here-document body, and nothing past maxSyntaxTailPieces. It follows the
+// shell's quotes, $'...' escapes and # comments, so a here-document opener
+// in a comment or a string is text (rel-1-0-10:GAP-0890, GAP-0903).
 func tokenScan(text string, visit func(at int, quote byte)) (pieces []tokenPiece, ok bool) {
 	from := 0
 	var quote byte
@@ -454,6 +464,14 @@ func tokenScan(text string, visit func(at int, quote byte)) (pieces []tokenPiece
 			visit(i, quote)
 		}
 		switch {
+		case quote == ansiQuote:
+			// $'...': a backslash escapes the next byte, a quote closes it.
+			if c == '\\' {
+				i++
+			} else if c == '\'' {
+				quote = 0
+			}
+			continue
 		case quote == '\'':
 			if c == '\'' {
 				quote = 0
@@ -465,6 +483,23 @@ func tokenScan(text string, visit func(at int, quote byte)) (pieces []tokenPiece
 		case quote == '"':
 			if c == '"' {
 				quote = 0
+			}
+			continue
+		case c == '$' && i+1 < len(text) && text[i+1] == '\'':
+			quote = ansiQuote
+			i++
+			if visit != nil {
+				visit(i, quote)
+			}
+			continue
+		case c == '#' && (i == 0 || strings.IndexByte(" \t\n;&|()", text[i-1]) >= 0):
+			// A comment runs to the end of its line; an opener or a quote in
+			// it is text (rel-1-0-10:GAP-0903).
+			for i+1 < len(text) && text[i+1] != '\n' {
+				i++
+				if visit != nil {
+					visit(i, commentQuote)
+				}
 			}
 			continue
 		case c == '\'' || c == '"':
