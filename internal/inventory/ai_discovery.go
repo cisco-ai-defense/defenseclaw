@@ -3015,7 +3015,7 @@ func (s *ContinuousDiscoveryService) isCodexBundledSkillContainer(path string) b
 		return sameInventoryPath(path, filepath.Join(configured, "skills", enforce.BundledSkillContainer))
 	}
 	for _, home := range s.homesToScan() {
-		if sameInventoryPath(path, filepath.Join(home, ".codex", "skills", enforce.BundledSkillContainer)) {
+		if sameInventoryPath(path, filepath.Join(s.agentHome(home, "CODEX_HOME"), "skills", enforce.BundledSkillContainer)) {
 			return true
 		}
 	}
@@ -4306,6 +4306,16 @@ func (s *ContinuousDiscoveryService) expandCandidatePattern(candidate string) []
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
 		return nil
+	}
+	// A managed scan reads each user's saved CODEX_HOME and the like.
+	if name, rest, ok := agentHomeCandidate(candidate); ok && s.opts.ManagedEnterprise {
+		var out []string
+		for _, home := range s.homesToScan() {
+			if dir := s.savedAgentHome(home, name); dir != "" {
+				out = append(out, filepath.Join(dir, rest))
+			}
+		}
+		return out
 	}
 	if rewritten, ok := s.profileRelativeCandidate(candidate); ok {
 		candidate = rewritten
