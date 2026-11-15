@@ -2028,13 +2028,26 @@ func fileRunByCall(file *syntax.File, self *syntax.Stmt, target string) bool {
 			return true
 		}
 		for index, arg := range call.Args {
-			if strings.TrimPrefix(partialWordText(arg), "./") == target && (index == 0 || stdinMayBeScript(other)) {
+			if strings.TrimPrefix(partialWordText(arg), "./") == target && (index == 0 || runsFileOperand(call)) {
 				runs = true
 			}
 		}
 		return !runs
 	})
 	return runs
+}
+
+// runsFileOperand reports a statement whose program runs a file named as an
+// operand as a script: a shell, source or `.`. A program the parse could not
+// resolve, or one that only carries the file (a copy, an upload, an editor), is
+// not read as running it: the file is then a file the call wrote, not a
+// command of the call (GAP-0788).
+func runsFileOperand(call *syntax.CallExpr) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	name := commandBaseName(literalWordText(call.Args[0]))
+	return shellProgram(name) || name == "source" || name == "."
 }
 
 // runLocationDirs are the folders whose files a scheduler, a service manager
