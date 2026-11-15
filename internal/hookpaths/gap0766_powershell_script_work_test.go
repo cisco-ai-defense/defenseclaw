@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -52,5 +53,44 @@ func TestPowerShellScriptReachScansWalkEachWordOnce(t *testing.T) {
 	// walks: never four times (it was 21,100 walks for 100 lines).
 	if w100 > 8*100 || w100 > 2*w50+50 {
 		t.Errorf("%d walks for 50 lines and %d for 100: want linear, a few for each line", w50, w100)
+	}
+}
+
+// TestHookCallRemembersItsFileSystemReads: inside one hook call a resolved
+// write target and the protected set of a home are read once, however many
+// statements ask (rel-1-0-10:GAP-0766: on Windows each read is a pinned file
+// open, 0.5 ms); outside a hook call every ask reads again, as before.
+func TestHookCallRemembersItsFileSystemReads(t *testing.T) {
+	home := t.TempDir()
+	path := home + string(os.PathSeparator) + "work" + string(os.PathSeparator) + "out.txt"
+	ask := func() {
+		if _, ok := ResolveWriteTarget(path); !ok {
+			t.Fatal("path not resolved")
+		}
+		newProtectedFiles(home)
+	}
+	// Outside a hook call no memory is kept: every ask resolves again.
+	before := writeTargetWalks.Load()
+	for range 50 {
+		ask()
+	}
+	if outside := writeTargetWalks.Load() - before; outside < 50 {
+		t.Fatalf("outside a hook call: %d walks for 50 asks, want one for each", outside)
+	}
+	end := HookCall()
+	defer end()
+	ask()
+	memo := currentHookCall().targets()
+	first := memo.Work()
+	if first == 0 {
+		t.Fatal("the first ask walked nothing")
+	}
+	for range 49 {
+		ask()
+	}
+	// The path components walked (the memo's own measure of file system
+	// work) do not grow with the asks.
+	if again := memo.Work(); again != first {
+		t.Fatalf("inside a hook call: %d components walked after 50 asks, %d after the first", again, first)
 	}
 }
