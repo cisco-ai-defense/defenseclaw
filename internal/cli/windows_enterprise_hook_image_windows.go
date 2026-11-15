@@ -497,8 +497,12 @@ func applyWindowsEnterpriseHookImage(result *enterprisestatus.Result) {
 		// A profile the administrator skipped (--skip-profile) stays
 		// listed until none of its configs names a launch folder.
 		if marker, err := os.ReadFile(filepath.Join(winpath.EnterpriseHookImagesRoot(bin), winpath.EnterpriseHookImagesRetiredMarker)); err == nil {
-			for _, line := range windowsHookImageSkippedProfilesNotRetired(marker, bin, readWindowsHookImageConfigFile) {
+			notRetired := windowsHookImageSkippedProfilesNotRetired(marker, bin, readWindowsHookImageConfigFile)
+			for _, line := range notRetired {
 				result.AddWarning("hook_image_profile_not_retired", line)
+			}
+			if line := windowsHookImageRetirePartialLine(marker, len(notRetired)); line != "" {
+				result.AddWarning(windowsHookImageRetirePartial, line)
 			}
 		}
 		return

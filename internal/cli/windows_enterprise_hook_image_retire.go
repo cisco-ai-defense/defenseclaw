@@ -51,6 +51,12 @@ const (
 	// still names a launch folder; run retire again once the guardian could
 	// reach it (for example after the account signs in).
 	windowsHookImageRetirePending = "hook_image_retire_pending"
+	// windowsHookImageRetirePartial: every file names the transition image
+	// except the own configs of profiles the administrator skipped
+	// (--skip-profile). A partial retire is never ready for an older
+	// release's Setup: its guardian fails those accounts, and that Setup can
+	// stop with 1603 and leave every service stopped (GAP-0794).
+	windowsHookImageRetirePartial = "hook_image_retire_partial"
 )
 
 // windowsHookImageRetireWait bounds the wait for the guardian's rewrite.
@@ -68,13 +74,16 @@ type windowsHookImageNamedFile struct {
 }
 
 type windowsHookImageRetireReport struct {
-	SchemaVersion int                         `json:"schema_version"`
-	OK            bool                        `json:"ok"`
-	Reason        string                      `json:"reason"`
-	Error         string                      `json:"error"`
-	Marker        string                      `json:"marker"`
-	Rewritten     []string                    `json:"rewritten"`
-	StillNamed    []windowsHookImageNamedFile `json:"still_named"`
+	SchemaVersion int  `json:"schema_version"`
+	OK            bool `json:"ok"`
+	// DowngradeReady is true only for a complete retire: an older release's
+	// Setup may run now. A partial or pending retire is not ready.
+	DowngradeReady bool                        `json:"downgrade_ready"`
+	Reason         string                      `json:"reason"`
+	Error          string                      `json:"error"`
+	Marker         string                      `json:"marker"`
+	Rewritten      []string                    `json:"rewritten"`
+	StillNamed     []windowsHookImageNamedFile `json:"still_named"`
 	// SkippedProfiles are the enrolled profiles the administrator skipped
 	// (--skip-profile) whose own configs still name a launch folder; each
 	// is audited and recorded in the marker.
@@ -103,8 +112,14 @@ type windowsHookImageSkippedProfile struct {
 // and verify read SkippedProfiles (windowsHookImageSkippedProfilesNotRetired);
 // the next stage of this release removes the marker.
 type windowsHookImageRetireMarker struct {
-	SchemaVersion   int                              `json:"schema_version"`
-	RetiredAt       string                           `json:"retired_at"`
+	SchemaVersion int    `json:"schema_version"`
+	RetiredAt     string `json:"retired_at"`
+	// Partial records that the last retire skipped profiles: no older
+	// Setup may run until a retire without skips ends ok and clears it.
+	// The marker itself stays for a partial retire: this release's writers
+	// read it to name the transition image for every other account, and a
+	// release before 1.0.10 never reads bin\hooks (tag 1.0.9 psm1).
+	Partial         bool                             `json:"partial,omitempty"`
 	SkippedProfiles []windowsHookImageSkippedProfile `json:"skipped_profiles,omitempty"`
 }
 
@@ -175,6 +190,7 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 	info, err := steps.FS.Lstat(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		report.OK = true
+		report.DowngradeReady = true
 		report.Notes = append(report.Notes, "no launch folders under "+root+": every config already names the transition image")
 		return report
 	}
@@ -333,12 +349,43 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 				"then run retire again", accountFiles, steps.Wait))
 		}
 		if accountFiles > 0 {
-			parts[len(parts)-1] += "; an administrator who accepts that a profile stays unconverted can name it with --skip-profile <SID> (audited, and listed by enterprise windows status and verify until it is converted)"
+			parts[len(parts)-1] += "; --skip-profile <SID> can leave a profile unconverted (audited), but that retire is partial and no older Setup may run until the profile is converted or removed"
 		}
 		parts = append(parts, auditErrors...)
 		return fail(windowsHookImageRetirePending, "%s", withWriterErrors(strings.Join(parts, "; ")+"; run the older Setup only after retire ends ok"))
 	}
+	if len(report.SkippedProfiles) > 0 {
+		names := make([]string, 0, len(report.SkippedProfiles))
+		for _, profile := range report.SkippedProfiles {
+			label := profile.SID
+			if profile.Account != "" {
+				label = profile.Account + " (" + profile.SID + ")"
+			}
+			names = append(names, label)
+		}
+		return fail(windowsHookImageRetirePartial, "%s", withWriterErrors(fmt.Sprintf(
+			"the retire is partial: every other config names the transition image, but the skipped profile(s) %s still name a launch folder. "+
+				"An older release's Setup must not run until each is converted (the account signs in and the guardian rewrites its configs) "+
+				"or removed with its profile, and retire run again without --skip-profile ends ok with downgrade_ready true",
+			strings.Join(names, ", "))))
+	}
+	// A complete retire clears an earlier partial one: every profile it
+	// skipped is converted now (otherwise it would still block).
+	if steps.ReadMarker != nil {
+		if body, err := steps.ReadMarker(marker); err == nil {
+			var recorded windowsHookImageRetireMarker
+			if json.Unmarshal(body, &recorded) == nil && (recorded.Partial || len(recorded.SkippedProfiles) > 0) {
+				recorded.Partial, recorded.SkippedProfiles = false, nil
+				data, _ := json.Marshal(recorded)
+				if err := steps.WriteMarker(marker, append(data, '\n')); err != nil {
+					return fail(windowsHookImageRetirePending, "every config names the transition image, but %s still records the earlier partial retire and could not be rewritten: %v; run retire again", marker, err)
+				}
+				report.Notes = append(report.Notes, "partial_cleared: the profiles an earlier retire skipped are converted; the retire is complete")
+			}
+		}
+	}
 	report.OK = true
+	report.DowngradeReady = true
 	report.Error = strings.Join(writerErrors, "; ")
 	return report
 }
@@ -453,6 +500,7 @@ func windowsHookImageRecordSkips(
 			}
 		}
 		body.SkippedProfiles = append(kept, profile)
+		body.Partial = true
 		recorded = append(recorded, profile)
 	}
 	if len(recorded) == 0 {
@@ -504,4 +552,21 @@ func windowsHookImageSkippedProfilesNotRetired(marker []byte, bin string, read f
 			account, profile.SID, profile.SkippedBy, profile.SkippedAt, strings.Join(still, ", ")))
 	}
 	return lines
+}
+
+// windowsHookImageRetirePartialLine is the status and verify line of a
+// partial retire marker: notRetired is how many skipped profiles still name
+// a launch folder (windowsHookImageSkippedProfilesNotRetired). "" for a
+// complete retire.
+func windowsHookImageRetirePartialLine(marker []byte, notRetired int) string {
+	var body windowsHookImageRetireMarker
+	if err := json.Unmarshal(marker, &body); err != nil || !body.Partial {
+		return ""
+	}
+	if notRetired > 0 {
+		return fmt.Sprintf("the launch folder retire is partial (%d skipped profile(s) still name a launch folder): an older release's Setup must not run "+
+			"until they are converted or removed and hook-image retire, run again without --skip-profile, ends ok", notRetired)
+	}
+	return "the launch folder retire is partial, but every profile it skipped is converted now: run retire again without --skip-profile; " +
+		"an older release's Setup may run only after it ends ok with downgrade_ready true"
 }
