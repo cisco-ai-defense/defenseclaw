@@ -3,7 +3,10 @@
 
 package shellparse
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
 
 // MaxBraceFields and MaxBraceBytes bound the words, and the bytes, that the
 // brace expansions of one command produce. A shell reader that expands a
@@ -25,9 +28,77 @@ const (
 // length. Quoted and escaped braces do not expand; a brace that cannot
 // expand counts once. The estimate never undercounts a word the shell
 // expands, so a command it passes cannot blow up a reader.
+//
+// ONE BOUND RULE: the one text this pass leaves uncounted is the body of a
+// quoted here-document whose command is data-only (see braceScan); a comment
+// never hides text, and a body that a shell may run is counted like code.
 func BraceExpansionTooLarge(command string) bool {
+	if !strings.Contains(command, "<<") {
+		over, _ := braceScan(command, false)
+		return over
+	}
+	over, shellFed := braceScan(command, true)
+	if over || !shellFed {
+		return over
+	}
+	over, _ = braceScan(command, false)
+	return over
+}
+
+// braceScan is the counting pass. With skipBodies it leaves out the bodies of
+// quoted here-documents (rel-1-0-10:GAP-0018), and reports in shellFed
+// whether some word of the text outside those bodies and the comments could
+// hand a body to a shell reader (braceStatement.feed): the caller then counts
+// again with no body left out.
+func braceScan(command string, skipBodies bool) (over, shellFed bool) {
 	var fields, bytes float64
+	var heredocs []heredocDelimiter
+	var statement braceStatement
 	for start := 0; start < len(command); {
+		// A here-document body is data the shell does not brace-expand: a
+		// script or JSON text sent to python3 - <<'PY' held thousands of
+		// comma lists that made the whole call "over the reading bound" and
+		// every such call an ACTION-COMPOUND-LIMIT alert (rel-1-0-10:GAP-0018).
+		// The operator is found outside quotes and comments (words are
+		// consumed whole), and the bodies begin at the next newline.
+		if command[start] == '<' && strings.HasPrefix(command[start:], "<<") && !strings.HasPrefix(command[start:], "<<<") {
+			if delimiter, next, ok := heredocOperator(command, start); ok {
+				if skipBodies {
+					heredocs = append(heredocs, delimiter)
+				}
+				statement.redirected = false
+				start = next
+				continue
+			}
+		}
+		if command[start] == '\n' && len(heredocs) > 0 {
+			start = skipHeredocBodies(command, start+1, heredocs)
+			heredocs = heredocs[:0]
+			statement.reset()
+			continue
+		}
+		// A comment runs to the end of the line, whatever quotes it holds
+		// (an apostrophe in a comment must not swallow the next lines), and
+		// its text still counts: a comment never stops the counting.
+		if command[start] == '#' {
+			end := len(command)
+			if i := strings.IndexByte(command[start:], '\n'); i >= 0 {
+				end = start + i
+			}
+			for _, word := range strings.FieldsFunc(command[start:end], func(r rune) bool {
+				return r == ' ' || r == '\t' || r == '\r' || r == ';' || r == '&' || r == '|' ||
+					r == '<' || r == '>' || r == '(' || r == ')'
+			}) {
+				n := wordBraceFields(word)
+				fields += n
+				bytes += n * float64(len(word))
+			}
+			if fields > MaxBraceFields || bytes > MaxBraceBytes {
+				return true, shellFed
+			}
+			start = end
+			continue
+		}
 		end := wordEnd(command, start)
 		if end > start {
 			word := command[start:end]
@@ -35,14 +106,166 @@ func BraceExpansionTooLarge(command string) bool {
 			fields += n
 			bytes += n * float64(len(word))
 			if fields > MaxBraceFields || bytes > MaxBraceBytes {
-				return true
+				return true, shellFed
+			}
+			if end < len(command) && (command[end] == '<' || command[end] == '>') && allDigits(word) {
+				// 2>file: a descriptor, not a word of the command.
+			} else if statement.feed(word) {
+				shellFed = true
 			}
 			start = end
 			continue
 		}
+		switch command[start] {
+		case ';', '&', '|', '(', ')', '\n':
+			statement.reset()
+		case '<', '>':
+			statement.redirected = true
+		}
 		start++
 	}
+	return false, shellFed
+}
+
+func allDigits(word string) bool {
+	for i := 0; i < len(word); i++ {
+		if word[i] < '0' || word[i] > '9' {
+			return false
+		}
+	}
+	return word != ""
+}
+
+// braceStatement follows the simple command the scan is in, so a word that
+// could make a shell run a here-document is known: a program that reads its
+// standard input as shell text, or a program word the text does not name.
+type braceStatement struct {
+	// command is false once the first word of the statement has been read.
+	started bool
+	// wrapped: the statement began with a word that runs another command (a
+	// wrapper or a reserved word), so every later word may be the program.
+	wrapped bool
+	// redirected: the next word is the target of a redirect, not a word of
+	// the command.
+	redirected bool
+}
+
+func (s *braceStatement) reset() { *s = braceStatement{} }
+
+// feed reads one word and reports whether it could hand a here-document to a
+// shell. It is true when the word (or one blank-separated field of its
+// quoted text) is a program that runs its input as shell text, or a program
+// word whose value is not in the text ($VAR, command substitution) at a
+// position where a program may stand. It over-reports on purpose: a false
+// answer leaves a body uncounted, a true one only counts it.
+func (s *braceStatement) feed(word string) bool {
+	if s.redirected {
+		s.redirected = false
+		return false
+	}
+	value, dynamic := unquoteBraceWord(word)
+	programPosition := !s.started || s.wrapped
+	if !s.started && braceAssignment(word) {
+		return false
+	}
+	s.started = true
+	hit := false
+	for _, field := range strings.Fields(value) {
+		base := field
+		if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+			base = base[i+1:]
+		}
+		base = strings.TrimSuffix(strings.ToLower(base), ".exe")
+		if shellStdinProgram(base) || programPosition && (base == "." || base == "source") {
+			hit = true
+		}
+		if programPosition && braceWrapper(base) {
+			s.wrapped = true
+		}
+	}
+	if programPosition && dynamic {
+		hit = true
+	}
+	return hit
+}
+
+// shellStdinProgram: the programs that run text on their standard input as a
+// shell program, or hand it to a shell: the shells, the evaluators, and the
+// programs that start one for the text they read (xargs, ssh, su, at, chroot).
+func shellStdinProgram(base string) bool {
+	switch base {
+	case "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "csh", "tcsh", "fish", "rbash", "busybox",
+		"eval", "exec", "xargs", "ssh", "su", "at", "batch", "chroot", "nsenter", "script", "sg", "runuser":
+		return true
+	}
 	return false
+}
+
+// braceWrapper: the words after which the program of a command may follow.
+func braceWrapper(base string) bool {
+	switch base {
+	case "sudo", "doas", "env", "command", "nohup", "time", "nice", "ionice", "timeout", "stdbuf", "setsid", "builtin",
+		"if", "then", "else", "elif", "while", "until", "do", "!", "{":
+		return true
+	}
+	return false
+}
+
+// braceAssignment reports a leading NAME=value word.
+func braceAssignment(word string) bool {
+	eq := strings.IndexByte(word, '=')
+	if eq <= 0 {
+		return false
+	}
+	for i := 0; i < eq; i++ {
+		c := word[i]
+		if c != '_' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (i == 0 || c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// unquoteBraceWord removes the quotes and escapes of a word and reports
+// whether it holds a parameter or a command substitution outside single
+// quotes (a value the text does not spell).
+func unquoteBraceWord(word string) (string, bool) {
+	var out strings.Builder
+	var quote byte
+	dynamic := false
+	for i := 0; i < len(word); i++ {
+		c := word[i]
+		switch {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			} else {
+				out.WriteByte(c)
+			}
+		case c == '\\':
+			if i+1 < len(word) {
+				i++
+				out.WriteByte(word[i])
+			}
+		case quote == '"':
+			if c == '"' {
+				quote = 0
+			} else {
+				if c == '$' || c == '`' {
+					dynamic = true
+				}
+				out.WriteByte(c)
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		default:
+			if c == '$' || c == '`' {
+				dynamic = true
+			}
+			out.WriteByte(c)
+		}
+	}
+	return out.String(), dynamic
 }
 
 // wordEnd returns the end of the shell word that starts at i: the first
@@ -225,4 +448,86 @@ func skipGroup(word string, i int) int {
 		}
 	}
 	return i
+}
+
+// heredocDelimiter is the end marker of a here-document and whether leading
+// tabs of its lines are ignored (<<-).
+type heredocDelimiter struct {
+	word    string
+	dashTab bool
+	// quoted: the delimiter is quoted or escaped, so the body is literal text.
+	// An unquoted body expands dollar-paren and backticks, which run commands.
+	quoted bool
+}
+
+// heredocOperator reads the << or <<- at i and the delimiter word after it.
+// It returns the position after the delimiter word.
+func heredocOperator(command string, i int) (heredocDelimiter, int, bool) {
+	j := i + 2
+	var delimiter heredocDelimiter
+	if j < len(command) && command[j] == '-' {
+		delimiter.dashTab = true
+		j++
+	}
+	for j < len(command) && (command[j] == ' ' || command[j] == '\t') {
+		j++
+	}
+	end := wordEnd(command, j)
+	if end <= j {
+		return delimiter, 0, false
+	}
+	var word strings.Builder
+	for k := j; k < end; k++ {
+		switch c := command[k]; c {
+		case '\'', '"':
+			delimiter.quoted = true
+		case '\\':
+			delimiter.quoted = true
+			if k+1 < end {
+				k++
+				word.WriteByte(command[k])
+			}
+		default:
+			word.WriteByte(c)
+		}
+	}
+	if word.Len() == 0 {
+		return delimiter, 0, false
+	}
+	delimiter.word = word.String()
+	return delimiter, end, true
+}
+
+// skipHeredocBodies returns the position after the bodies of delimiters,
+// which start at from (the line after the operators). A body ends at a line
+// equal to its delimiter; an unterminated body runs to the end of the text,
+// as the shell reads it.
+func skipHeredocBodies(command string, from int, delimiters []heredocDelimiter) int {
+	for _, delimiter := range delimiters {
+		if !delimiter.quoted {
+			// An unquoted body runs $( ) and backticks: it is counted as code.
+			return from
+		}
+	}
+	pos := from
+	for _, delimiter := range delimiters {
+		for pos < len(command) {
+			lineEnd := strings.IndexByte(command[pos:], '\n')
+			line := command[pos:]
+			next := len(command)
+			if lineEnd >= 0 {
+				line = command[pos : pos+lineEnd]
+				next = pos + lineEnd + 1
+			}
+			if delimiter.dashTab {
+				line = strings.TrimLeft(line, "\t")
+			}
+			line = strings.TrimSuffix(line, "\r")
+			pos = next
+			if line == delimiter.word {
+				break
+			}
+		}
+	}
+	return pos
 }

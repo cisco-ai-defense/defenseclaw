@@ -14,9 +14,13 @@
 // SeDebugPrivilege and has no in-process fallback.
 //
 // The pipe name is new on every guardian start (a random suffix) and is
-// published in a file only LocalSystem and Administrators can write, so no
-// account can create the pipe before the guardian does (REVIEW-code-winroute
-// P2-1).
+// published in a file only LocalSystem and Administrators can read or
+// write; the first instance exists before the name is published, so no
+// account can create the pipe first (REVIEW-code-winroute P2-1). Pipe names
+// can be listed by any account, so the boundary is the gateway's check of
+// the server: it sends its request only to the publishing process, running
+// as LocalSystem with the guardian service SID; anything else fails closed
+// (rel-1-0-10:GAP-0106).
 package peerbroker
 
 import (

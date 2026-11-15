@@ -5,6 +5,7 @@ package modelusage
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 )
@@ -165,6 +166,12 @@ type Recorder interface {
 
 // Call is one in-flight model call. Methods never block, never return an
 // error and are safe on the no-op call.
+// ErrClientGone is the error of a call whose caller closed the connection
+// before the answer was written: the agent aborted the request (Claude Code
+// does it for requests it no longer needs). The upstream did not fail, so the
+// record is cancelled, not failed (GAP-0631).
+var ErrClientGone = errors.New("client closed the connection")
+
 type Call interface {
 	UpstreamHeader(status int, h http.Header)
 	Chunk(p []byte) // streaming: response bytes exactly as forwarded; not retained

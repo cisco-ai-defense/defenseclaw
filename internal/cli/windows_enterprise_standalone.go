@@ -33,12 +33,14 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
@@ -255,7 +257,7 @@ var windowsEnterpriseRepairDataDirBeforePlan = func() (change, problem string) {
 	if !windowsEnterpriseIsElevated() {
 		return "", ""
 	}
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil || strings.TrimSpace(layout.DataDir) == "" {
 		return "", ""
 	}
@@ -276,7 +278,7 @@ var windowsEnterpriseRuntimeFolderState = func() (dataDir, drift string, canonic
 	if !windowsEnterpriseIsElevated() {
 		return "", "", false
 	}
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil || strings.TrimSpace(layout.DataDir) == "" {
 		return "", "", false
 	}
@@ -369,7 +371,7 @@ var windowsEnterpriseRuntimeFolderRefusal = func() string {
 	if !windowsEnterpriseIsElevated() {
 		return ""
 	}
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil || strings.TrimSpace(layout.DataDir) == "" {
 		return ""
 	}
@@ -399,7 +401,7 @@ var windowsEnterpriseGuardianRepairsSinceLastRun = func() []string {
 	if err != nil {
 		return nil
 	}
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return nil
 	}
@@ -458,7 +460,7 @@ func noteWindowsEnterpriseEnsureDriftRepairs(result *enterprisestatus.Result, re
 // windowsEnterpriseRemoveReplacementCopies removes the unused replacement
 // copies in the production bin folder; replaceable in tests.
 var windowsEnterpriseRemoveReplacementCopies = func() []string {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return nil
 	}
@@ -1174,7 +1176,7 @@ func appendWindowsEnterpriseStatusAdvisories(ctx context.Context, result *enterp
 	appendWindowsOpenCodePortWarnings(result)
 	// Only an elevated caller can read the descriptor of a kept copy; a
 	// standard account is refused before this runs, and says nothing here.
-	if layout, err := windowsManagedLayout.standalone(); err == nil && strings.TrimSpace(layout.DataDir) != "" && windowsEnterpriseIsElevated() {
+	if layout, err := hookcli.WindowsManagedLayout.Standalone(); err == nil && strings.TrimSpace(layout.DataDir) != "" && windowsEnterpriseIsElevated() {
 		addWindowsEnterpriseKeptRecordWarnings(result, filepath.Join(filepath.Dir(layout.DataDir), "install"))
 	}
 	if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
@@ -1352,7 +1354,7 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 			if err != nil {
 				// A custody refusal names the account and the icacls
 				// command that clears it, as the folder case does (GAP-0594).
-				cause = windowsEnterpriseNamePrincipals(err.Error())
+				cause = hookcli.WindowsEnterpriseNamePrincipals(err.Error())
 			}
 			message := "the effective policy the gateway enforces could not be checked: " + cause
 			if result.Action == "verify" {
@@ -1996,8 +1998,17 @@ func applyWindowsEnterpriseInstallerReport(
 	if report.CursorTargetEnabled {
 		result.MachinePolicy["cursor"] = windowsEnterpriseMachinePolicy(report.GuardianReady)
 	}
-	result.CoverageComplete = report.Installed && report.GuardianReady && !report.TransactionPending
+	// Every input that leaves coverage incomplete names itself (GAP-0812).
+	result.ResetCompleteness()
 	result.SecurityComplete = report.SecurityComplete
+	if !report.Installed {
+		result.MarkCoverageIncomplete("DefenseClaw is not installed")
+	} else if !report.GuardianReady {
+		result.MarkCoverageIncomplete("the hook guardian is not ready")
+	}
+	if report.TransactionPending {
+		result.MarkCoverageIncomplete("a lifecycle transaction is pending")
+	}
 	if report.Installed && result.Action == "status" {
 		result.Destinations = readWindowsEnterpriseStandaloneDestinations()
 	}
@@ -2008,7 +2019,7 @@ func applyWindowsEnterpriseInstallerReport(
 			if enrollment.Failed > 0 {
 				// A degraded activation (GAP-0601) leaves the guardian ready;
 				// the failed targets still mean not every target is covered.
-				result.MarkCoverageIncomplete("enrollment_failed")
+				result.MarkCoverageIncomplete(fmt.Sprintf("%d per-user enrollment(s) failed (each account's line in enrollment.accounts says why)", enrollment.Failed))
 			}
 			if result.Action == "status" || result.Action == "verify" || result.Action == "ensure" {
 				appendWindowsClaudeUserSettingsWarnings(result, enrollment.Accounts)
@@ -2062,7 +2073,7 @@ func applyWindowsEnterpriseInstallerReport(
 			message, enumeratorCode = text, specific
 		}
 		message = windowsEnterpriseNameServiceRights(message, result.Action == "status" || result.Action == "verify")
-		message = windowsEnterpriseNamePrincipals(message)
+		message = hookcli.WindowsEnterpriseNamePrincipals(message)
 		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
 		if enumeratorCode != "" {
 			code = enumeratorCode
@@ -2776,7 +2787,7 @@ func windowsEnterpriseBoundedDiagnostic(message string) string {
 // (GAP-1049).
 func addWindowsEnterpriseRestoredPolicyChanges(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	for _, note := range report.RestoredPolicySources {
-		line := windowsEnterpriseBoundedDiagnostic(windowsEnterpriseNamePrincipals(note))
+		line := windowsEnterpriseBoundedDiagnostic(hookcli.WindowsEnterpriseNamePrincipals(note))
 		if !slices.Contains(result.Changes, line) {
 			result.Changes = append(result.Changes, line)
 		}
@@ -2952,7 +2963,7 @@ func windowsEnterpriseBoundedLabels(items []string) string {
 // windowsEnterpriseUnprotectedAgentsReader reads the enumerator's
 // unprotected-agents record; tests replace it.
 var windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.UnprotectedAgent, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return nil, err
 	}
@@ -2977,7 +2988,7 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 		}
 		result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age,
 			"Restart-Service DefenseClawHookEnumerator (from an elevated prompt)"))
-		result.CoverageComplete, result.SecurityComplete = false, false
+		result.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 		// Only the pending scan is a warning. A stale record still names the agents its last scan found; they
 		// are reported below, so verify keeps failing on a known gap.
 		err = nil
@@ -2992,7 +3003,7 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 		} else {
 			result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
-		result.CoverageComplete, result.SecurityComplete = false, false
+		result.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 		return
 	}
 	// One machine-wide OpenCode V1 copy is one warning with the user count
@@ -3001,12 +3012,19 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 	for _, line := range sharedLines {
 		result.AddWarning(line.Code, line.Message())
 	}
+	hookVerified := windowsEnterpriseEnrolledHookVerified(result.Enrollment.Accounts)
 	for _, agent := range agents {
+		if enterprisehooks.InstallScanGapCovered(agent, hookVerified) {
+			// The guardian verified this account's managed hook: a scan gap
+			// is a warning that names it, not a coverage gap (GAP-0802).
+			result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanPartial, agent.InstallScanPartialMessage())
+			continue
+		}
 		if enterprisehooks.UnprotectedCodeLeavesCoverageIncomplete(agent.Code) {
 			// The deployment does not cover it: no contract, an incomplete
 			// install scan, a CLI path or IDE without hooks (GAP-0151), or
 			// OpenCode V1 (rel-1-0-6 GAP-0037).
-			result.CoverageComplete = false
+			result.MarkCoverageIncomplete(agent.Code)
 		}
 		// unverified_versions: refuse that nothing enforces fails verify.
 		if result.Action == "verify" && (agent.Refusal == enterprisehooks.RefusalMissing ||
@@ -3022,6 +3040,29 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 				result.AddWarning(windowsManagedLaunchAuditUnavailable, "could not audit the unprotected "+agent.Connector+" install: "+err.Error())
 			}
 		}
+	}
+}
+
+// windowsEnterpriseEnrolledHookVerified reports, for an unprotected-agents
+// entry, whether the hook guardian's last reconcile verified the managed
+// hook of its account and connector: the account's enrollment state for the
+// connector is enrolled (the row is ok, or guarded by the hooks of an
+// earlier release). A pending, failed or unlisted account is not verified.
+func windowsEnterpriseEnrolledHookVerified(accounts []enterprisestatus.EnrollmentAccount) func(enterprisehooks.UnprotectedAgent) bool {
+	verified := map[string]bool{}
+	for _, account := range accounts {
+		sid := strings.ToUpper(strings.TrimSpace(account.SID))
+		if sid == "" {
+			continue
+		}
+		for connector, state := range account.Connectors {
+			if state == "enrolled" {
+				verified[sid+"\x00"+strings.ToLower(strings.TrimSpace(connector))] = true
+			}
+		}
+	}
+	return func(agent enterprisehooks.UnprotectedAgent) bool {
+		return verified[strings.ToUpper(strings.TrimSpace(agent.SID))+"\x00"+strings.ToLower(strings.TrimSpace(agent.Connector))]
 	}
 }
 
@@ -3044,7 +3085,7 @@ var windowsEnterpriseGatewayStartFailure = readWindowsEnterpriseGatewayStartFail
 const windowsEnterpriseGatewayLogTailBytes = 64 << 10
 
 func readWindowsEnterpriseGatewayStartFailure() (string, string) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil || strings.TrimSpace(layout.LogDir) == "" {
 		return "", ""
 	}
@@ -3175,7 +3216,7 @@ var (
 )
 
 func readWindowsEnterpriseManifestAccounts() ([]windowsEnterpriseManifestAccount, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return nil, err
 	}
@@ -3273,7 +3314,7 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 // windowsEnterpriseDiscoveryHomeDirs reads ai_discovery.home_dirs of the
 // installed config; tests replace it.
 var windowsEnterpriseDiscoveryHomeDirs = func() ([]string, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return nil, err
 	}
@@ -3358,7 +3399,7 @@ func windowsEnterpriseConfigConnectors(path string) ([]string, error) {
 // loadWindowsEnterpriseStandaloneConfig loads path (the installed config
 // when empty) the way the guardian loads the installed one.
 func loadWindowsEnterpriseStandaloneConfig(path string) (*config.Config, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return nil, err
 	}
@@ -3656,7 +3697,7 @@ func applyWindowsEnterpriseVendorFolders(result *enterprisestatus.Result) {
 		} else {
 			result.AddWarning(code, message)
 		}
-		result.CoverageComplete, result.SecurityComplete = false, false
+		result.MarkCoverageIncomplete(code)
 	}
 }
 
@@ -3900,7 +3941,7 @@ func finishWindowsEnterpriseStandalone(
 		len(result.Errors) != 0 && result.Errors[0].Code == "elevation_required")
 	if opts.jsonOutput {
 		if err := newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
-			return withExitCode(fmt.Errorf("encode the standalone lifecycle result: %w", err), enterprisestatus.WindowsExitFailure)
+			return cliusage.WithExitCode(fmt.Errorf("encode the standalone lifecycle result: %w", err), enterprisestatus.WindowsExitFailure)
 		}
 		// The JSON result carries every error in errors[] (GAP-2445).
 		cmd.SilenceErrors = true
@@ -3911,7 +3952,7 @@ func finishWindowsEnterpriseStandalone(
 		// An unknown --profile selected no profile: one error line, not a
 		// "(standalone): FAILED" summary or "the standalone enterprise ...
 		// failed" of a profile never chosen (GAP-2040, GAP-2113).
-		return withExitCode(errors.New(result.Errors[0].Message), exitCode)
+		return cliusage.WithExitCode(errors.New(result.Errors[0].Message), exitCode)
 	}
 	if exitCode == 0 {
 		return nil
@@ -3925,7 +3966,7 @@ func finishWindowsEnterpriseStandalone(
 			summary += ": " + result.Errors[0].Code
 		}
 	}
-	return withExitCode(errors.New(summary), exitCode)
+	return cliusage.WithExitCode(errors.New(summary), exitCode)
 }
 
 func addWindowsEnterprisePipeWaitWarning(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
@@ -3957,6 +3998,9 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 			fmt.Fprintf(output, "  %s\n", line)
 		}
 		for _, line := range enterprisestatus.CoworkLines(result.Cowork) {
+			fmt.Fprintf(output, "  %s\n", line)
+		}
+		for _, line := range enterprisestatus.RoutingLines(result.Routing) {
 			fmt.Fprintf(output, "  %s\n", line)
 		}
 		enterprisestatus.WriteCoworkVMSensor(output, result.CoworkVMSensor)
@@ -4252,7 +4296,7 @@ func windowsEnterpriseLiveStandaloneServices() []enterprisestatus.Service {
 // owned by SYSTEM, Administrators, or TrustedInstaller) is not a DefenseClaw
 // footprint: no lifecycle ever wrote it.
 func windowsEnterpriseStandaloneFootprintPresent() (bool, error) {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return false, err
 	}
@@ -4316,7 +4360,7 @@ var windowsEnterpriseFootprintOwner = func(path string) (*windows.SID, error) {
 // and is not an administrator. An unreadable owner counts as a footprint.
 func windowsEnterpriseFootprintUserCreated(path string) bool {
 	owner, err := windowsEnterpriseFootprintOwner(path)
-	return err == nil && owner != nil && !windowsEnterpriseAdminSID(owner)
+	return err == nil && owner != nil && !hookcli.WindowsEnterpriseAdminSID(owner)
 }
 
 // readWindowsEnterpriseStandaloneDestinations lists, for status, the
@@ -4325,7 +4369,7 @@ func windowsEnterpriseFootprintUserCreated(path string) bool {
 // per-user command managed Windows does not offer (GAP-1105). A config that
 // does not compile leaves the list out.
 func readWindowsEnterpriseStandaloneDestinations() []enterprisestatus.Destination {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return nil
 	}
@@ -4353,7 +4397,7 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 	}
 	// The accounts the config holds out get no manifest rows: name them
 	// (GAP-1243). An unreadable config leaves the lists out.
-	if standaloneLayout, layoutErr := windowsManagedLayout.standalone(); layoutErr == nil {
+	if standaloneLayout, layoutErr := hookcli.WindowsManagedLayout.Standalone(); layoutErr == nil {
 		if body, readErr := readWindowsEnterpriseBoundedFile(standaloneLayout.ConfigPath, windowsEnterpriseConfigProfileLimit); readErr == nil {
 			enrollment.ExcludedUsers, enrollment.ExcludedGroups, _ = windowsEnterpriseEnrollmentExclusions(body)
 		}
@@ -4445,7 +4489,7 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 // readWindowsEnterpriseStandaloneAIDefense reports whether the installed
 // config enables the optional AI Defense augmentation.
 func readWindowsEnterpriseStandaloneAIDefense() (bool, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return false, err
 	}
@@ -5219,7 +5263,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	// the gateway recovery ran.
 	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
 	if plan.Reason == "untrusted_record" && report != nil && report.OK {
-		if layout, layoutErr := windowsManagedLayout.standalone(); layoutErr == nil && strings.TrimSpace(layout.DataDir) != "" {
+		if layout, layoutErr := hookcli.WindowsManagedLayout.Standalone(); layoutErr == nil && strings.TrimSpace(layout.DataDir) != "" {
 			result.Changes = append(result.Changes,
 				windowsEnterpriseKeptRecordChanges(filepath.Join(filepath.Dir(layout.DataDir), "install"), opts.activationStartedAt)...)
 		}
@@ -5517,7 +5561,7 @@ func windowsEnterpriseEnsureProbeFailure(status *windowsEnterpriseInstallerRepor
 		return fmt.Errorf("ensure_refused: %s", message)
 	}
 	message += windowsEnterpriseRecordOwnerMismatchNextStep(message)
-	message = windowsEnterpriseNamePrincipals(message)
+	message = hookcli.WindowsEnterpriseNamePrincipals(message)
 	return fmt.Errorf("status_failed: ensure could not read the deployment state: %s", message)
 }
 
@@ -5629,11 +5673,11 @@ func defaultWindowsEnterpriseEnsurePayload(opts *windowsEnterpriseLifecycleOptio
 // windowsEnterpriseEnsureDrift compares the supplied sources with the
 // installed deployment's recorded digests and config.
 func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, script string) (string, error) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return "", err
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return "", err
 	}
@@ -5744,7 +5788,7 @@ func confirmedWindowsBundleCompilerDrift(run *windowsBundleRun) (bool, error) {
 	if sha256HexBytes(run.prepared.Config) != run.prepared.ConfigSHA256 {
 		return false, errors.New("confirmed bundle config hash is invalid")
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return false, err
 	}

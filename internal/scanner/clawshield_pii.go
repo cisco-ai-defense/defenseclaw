@@ -20,10 +20,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/paymentcard"
 )
 
@@ -40,17 +40,17 @@ func (s *ClawShieldPIIScanner) SupportedTargets() []string { return []string{"sk
 type csPIIRule struct {
 	id       string
 	category string
-	pattern  *regexp.Regexp
+	pattern  *lazyregexp.Regexp
 	severity Severity
 	// validator, when set, must accept text[start:end] for a match to count.
 	validator  func(text string, start, end int) bool
-	contextPat *regexp.Regexp
+	contextPat *lazyregexp.Regexp
 	// once reports at most one finding per file for this rule.
 	once        bool
 	remediation string
 }
 
-var csEmailPattern = regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`)
+var csEmailPattern = lazyregexp.New(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`)
 
 const (
 	csEmailListMinDistinct = 5
@@ -74,15 +74,15 @@ func csEmailListAt(text string, start, _ int) bool {
 var csPIIRules = []csPIIRule{
 	// Credit cards: the shared paymentcard rules (Luhn, scheme prefix and
 	// length, card layout, not inside a UUID/hash/id token).
-	{id: "CS-PII-CC-VISA", category: "credit_card", pattern: regexp.MustCompile(`\b4[0-9]{12}(?:[0-9]{3})?\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-MC", category: "credit_card", pattern: regexp.MustCompile(`\b5[1-5][0-9]{14}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-AMEX", category: "credit_card", pattern: regexp.MustCompile(`\b3[47][0-9]{13}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-DISC", category: "credit_card", pattern: regexp.MustCompile(`\b(?:6011|65[0-9]{2}|64[4-9][0-9])[0-9]{12}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-FMT", category: "credit_card", pattern: regexp.MustCompile(`\b[0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-VISA", category: "credit_card", pattern: lazyregexp.New(`\b4[0-9]{12}(?:[0-9]{3})?\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-MC", category: "credit_card", pattern: lazyregexp.New(`\b5[1-5][0-9]{14}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-AMEX", category: "credit_card", pattern: lazyregexp.New(`\b3[47][0-9]{13}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-DISC", category: "credit_card", pattern: lazyregexp.New(`\b(?:6011|65[0-9]{2}|64[4-9][0-9])[0-9]{12}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-FMT", category: "credit_card", pattern: lazyregexp.New(`\b[0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
 
 	// SSN
-	{id: "CS-PII-SSN-DASH", category: "ssn", pattern: regexp.MustCompile(`\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b`), severity: SeverityCritical, remediation: "Remove SSNs; never store or transmit in plaintext"},
-	{id: "CS-PII-SSN-SPACE", category: "ssn", pattern: regexp.MustCompile(`\b[0-9]{3}\s[0-9]{2}\s[0-9]{4}\b`), severity: SeverityCritical, remediation: "Remove SSNs; never store or transmit in plaintext"},
+	{id: "CS-PII-SSN-DASH", category: "ssn", pattern: lazyregexp.New(`\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b`), severity: SeverityCritical, remediation: "Remove SSNs; never store or transmit in plaintext"},
+	{id: "CS-PII-SSN-SPACE", category: "ssn", pattern: lazyregexp.New(`\b[0-9]{3}\s[0-9]{2}\s[0-9]{4}\b`), severity: SeverityCritical, remediation: "Remove SSNs; never store or transmit in plaintext"},
 
 	// Email
 	// Email: one address is LOW (an author or vendor contact); five or more
@@ -92,28 +92,28 @@ var csPIIRules = []csPIIRule{
 	{id: "CS-PII-EMAIL-LIST", category: "email", pattern: csEmailPattern, severity: SeverityMedium, validator: csEmailListAt, once: true, remediation: "Remove lists of email addresses; load contact data from a protected store"},
 
 	// Phone (US — requires separator to avoid false positives on timestamps)
-	{id: "CS-PII-PHONE-1", category: "phone", pattern: regexp.MustCompile(`\b(?:\+1[\s.-]?)?\(?[0-9]{3}\)[\s.-]?[0-9]{3}[\s.-][0-9]{4}\b`), severity: SeverityMedium, remediation: "Remove phone numbers from code and logs"},
-	{id: "CS-PII-PHONE-2", category: "phone", pattern: regexp.MustCompile(`\b(?:\+1[\s.-]?)?[0-9]{3}[\s.-][0-9]{3}[\s.-][0-9]{4}\b`), severity: SeverityMedium, remediation: "Remove phone numbers from code and logs"},
+	{id: "CS-PII-PHONE-1", category: "phone", pattern: lazyregexp.New(`\b(?:\+1[\s.-]?)?\(?[0-9]{3}\)[\s.-]?[0-9]{3}[\s.-][0-9]{4}\b`), severity: SeverityMedium, remediation: "Remove phone numbers from code and logs"},
+	{id: "CS-PII-PHONE-2", category: "phone", pattern: lazyregexp.New(`\b(?:\+1[\s.-]?)?[0-9]{3}[\s.-][0-9]{3}[\s.-][0-9]{4}\b`), severity: SeverityMedium, remediation: "Remove phone numbers from code and logs"},
 
 	// IPv4
-	{id: "CS-PII-IP", category: "ip_address", pattern: regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b`), severity: SeverityLow, remediation: "Avoid hardcoding IP addresses; use configuration"},
+	{id: "CS-PII-IP", category: "ip_address", pattern: lazyregexp.New(`\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b`), severity: SeverityLow, remediation: "Avoid hardcoding IP addresses; use configuration"},
 
 	// Date of birth (context-gated)
-	{id: "CS-PII-DOB-MDY", category: "dob", pattern: regexp.MustCompile(`\b(?:0[1-9]|1[0-2])/(?:0[1-9]|[12][0-9]|3[01])/(?:19|20)[0-9]{2}\b`), severity: SeverityMedium, contextPat: regexp.MustCompile(`(?i)born|dob|birth|date\s+of\s+birth|birthday`), remediation: "Remove date of birth data from code"},
-	{id: "CS-PII-DOB-ISO", category: "dob", pattern: regexp.MustCompile(`\b(?:19|20)[0-9]{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])\b`), severity: SeverityMedium, contextPat: regexp.MustCompile(`(?i)born|dob|birth|date\s+of\s+birth|birthday`), remediation: "Remove date of birth data from code"},
+	{id: "CS-PII-DOB-MDY", category: "dob", pattern: lazyregexp.New(`\b(?:0[1-9]|1[0-2])/(?:0[1-9]|[12][0-9]|3[01])/(?:19|20)[0-9]{2}\b`), severity: SeverityMedium, contextPat: lazyregexp.New(`(?i)born|dob|birth|date\s+of\s+birth|birthday`), remediation: "Remove date of birth data from code"},
+	{id: "CS-PII-DOB-ISO", category: "dob", pattern: lazyregexp.New(`\b(?:19|20)[0-9]{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])\b`), severity: SeverityMedium, contextPat: lazyregexp.New(`(?i)born|dob|birth|date\s+of\s+birth|birthday`), remediation: "Remove date of birth data from code"},
 
 	// Passport (context-gated)
-	{id: "CS-PII-PASSPORT", category: "passport", pattern: regexp.MustCompile(`\b[A-Z][0-9]{8}\b`), severity: SeverityHigh, contextPat: regexp.MustCompile(`(?i)passport`), remediation: "Remove passport numbers from code"},
+	{id: "CS-PII-PASSPORT", category: "passport", pattern: lazyregexp.New(`\b[A-Z][0-9]{8}\b`), severity: SeverityHigh, contextPat: lazyregexp.New(`(?i)passport`), remediation: "Remove passport numbers from code"},
 
 	// Driver's license (context-gated)
-	{id: "CS-PII-DL-1", category: "drivers_license", pattern: regexp.MustCompile(`\b[A-Z][0-9]{7,8}\b`), severity: SeverityHigh, contextPat: regexp.MustCompile(`(?i)driver|license|licence|DL|DMV`), remediation: "Remove driver's license numbers from code"},
-	{id: "CS-PII-DL-2", category: "drivers_license", pattern: regexp.MustCompile(`\b[A-Z]{2}[0-9]{6,8}\b`), severity: SeverityHigh, contextPat: regexp.MustCompile(`(?i)driver|license|licence|DL|DMV`), remediation: "Remove driver's license numbers from code"},
+	{id: "CS-PII-DL-1", category: "drivers_license", pattern: lazyregexp.New(`\b[A-Z][0-9]{7,8}\b`), severity: SeverityHigh, contextPat: lazyregexp.New(`(?i)driver|license|licence|DL|DMV`), remediation: "Remove driver's license numbers from code"},
+	{id: "CS-PII-DL-2", category: "drivers_license", pattern: lazyregexp.New(`\b[A-Z]{2}[0-9]{6,8}\b`), severity: SeverityHigh, contextPat: lazyregexp.New(`(?i)driver|license|licence|DL|DMV`), remediation: "Remove driver's license numbers from code"},
 
 	// Bank account (context-gated)
-	{id: "CS-PII-BANK", category: "bank_account", pattern: regexp.MustCompile(`\b[0-9]{8,17}\b`), severity: SeverityHigh, contextPat: regexp.MustCompile(`(?i)account|routing|iban|swift|bank|acct`), remediation: "Remove bank account numbers from code"},
+	{id: "CS-PII-BANK", category: "bank_account", pattern: lazyregexp.New(`\b[0-9]{8,17}\b`), severity: SeverityHigh, contextPat: lazyregexp.New(`(?i)account|routing|iban|swift|bank|acct`), remediation: "Remove bank account numbers from code"},
 
 	// Medical ID (context-gated)
-	{id: "CS-PII-MED", category: "medical_id", pattern: regexp.MustCompile(`\b[A-Z]{2,3}[0-9]{6,10}\b`), severity: SeverityHigh, contextPat: regexp.MustCompile(`(?i)medical|patient|health|insurance|medicare|medicaid|npi|mrn`), remediation: "Remove medical IDs from code"},
+	{id: "CS-PII-MED", category: "medical_id", pattern: lazyregexp.New(`\b[A-Z]{2,3}[0-9]{6,10}\b`), severity: SeverityHigh, contextPat: lazyregexp.New(`(?i)medical|patient|health|insurance|medicare|medicaid|npi|mrn`), remediation: "Remove medical IDs from code"},
 }
 
 func (s *ClawShieldPIIScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {

@@ -119,7 +119,9 @@ func TestCodexRollbackConvertsDirectHooksToEarlierBridgeAndBack(t *testing.T) {
 	for _, event := range []string{"PreToolUse", "SessionStart"} {
 		group := got[event].([]interface{})[0].(map[string]interface{})
 		h := group["hooks"].([]interface{})[0].(map[string]interface{})
-		want := windowsNativePowerShellHookCommandForCodexEvent(event, contract, launcher)
+		// No target release named: the bridge with the earlier fallback end,
+		// the form every release owns (rel-1-0-10:GAP-0759).
+		want := legacyCodexBridgeForTest(t, event, contract, launcher)
 		if h["command"] != want || h["command_windows"] != want {
 			t.Fatalf("%s handler = %v; want the 1.0.4 bridge", event, h)
 		}
@@ -173,4 +175,15 @@ func TestCodexRollbackConvertsDirectHooksToEarlierBridgeAndBack(t *testing.T) {
 	if !bytes.Equal(restored, original) {
 		t.Fatalf("restore changed the layout:\n%s", restored)
 	}
+}
+
+// legacyCodexBridgeForTest is the Codex bridge of 1.0.0 to 1.0.4, the form
+// every release owns: the bridge with the earlier fallback end.
+func legacyCodexBridgeForTest(t *testing.T, event, contract, launcher string) string {
+	t.Helper()
+	legacy, ok := legacyWindowsAwaitedHookCommand(windowsNativePowerShellHookCommandForCodexEvent(event, contract, launcher))
+	if !ok {
+		t.Fatalf("%s: no earlier fallback end in the bridge", event)
+	}
+	return legacy
 }

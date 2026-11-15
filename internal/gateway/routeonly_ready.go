@@ -213,7 +213,7 @@ func (s *Sidecar) runRouteOnlyReadiness(ctx context.Context, ro *routeOnlyServer
 	defer tick.Stop()
 	for {
 		if cfg := s.currentConfig(); cfg != last || time.Since(lastAt) >= routeOnlyReadinessEvery {
-			s.health.SetRouteOnlyReadiness(routeOnlyReadinessFor(cfg, ro.goos, &ro.signers, ro.enrolledRouteUsers))
+			s.health.SetRouteOnlyReadiness(withRouteEpochReadiness(routeOnlyReadinessFor(cfg, ro.goos, &ro.signers, ro.enrolledRouteUsers), ro.routeEpochUnpublished()))
 			last, lastAt = cfg, time.Now()
 		}
 		select {
@@ -222,4 +222,22 @@ func (s *Sidecar) runRouteOnlyReadiness(ctx context.Context, ro *routeOnlyServer
 		case <-tick.C:
 		}
 	}
+}
+
+// withRouteEpochReadiness marks every route-only connector not ready while
+// the managed Windows route epoch is not published: the guardian derives
+// each account's route credential from it, so nothing can be rendered
+// (rel-1-0-10:GAP-0800). problem "" changes nothing.
+func withRouteEpochReadiness(out []routeOnlyReadiness, problem string) []routeOnlyReadiness {
+	if problem == "" {
+		return out
+	}
+	for i := range out {
+		if out[i].Problem == "" {
+			out[i].Problem = problem + ", so the hook guardian cannot render route-only for any account"
+			out[i].Fix = "check gateway.log for 'route epoch not published' (the machine data dir hooks folder must be writable by the gateway service), then restart DefenseClawGateway"
+		}
+		out[i].Ready = false
+	}
+	return out
 }

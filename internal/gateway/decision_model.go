@@ -83,6 +83,15 @@ var decisionModelQuestions = map[string]any{
 	},
 }
 
+// decisionBench holds bench-only switches (s7/sysone-bench only; set by
+// S7SetDecisionRouting under -tags s7bench, never in the product).
+//   - noBreaker: an offline replay counts each cache miss once.
+//   - mediumAlerts: a judge lone MEDIUM review finding on a call the
+//     decision model escalated is not made audit-only (variant b).
+//   - allowRiskVeto: a risk score at or above block_risk_score turns a
+//     confident allow into an escalation.
+var decisionBench struct{ noBreaker, mediumAlerts, allowRiskVeto bool }
+
 // decisionRoute is what the guardrail does with one decision-model answer.
 type decisionRoute int
 
@@ -280,6 +289,9 @@ func (d *decisionModel) budget(ctx context.Context) time.Duration {
 func (d *decisionModel) breakerOpen(now time.Time) bool {
 	d.breakerMu.Lock()
 	defer d.breakerMu.Unlock()
+	if decisionBench.noBreaker {
+		return false
+	}
 	if now.Before(d.openUntil) {
 		d.skippedWhileOpen++
 		return true
@@ -386,7 +398,7 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 		// finding is refused under a closed hook fail mode (the strict
 		// pack, a managed install, hook_fail_mode closed).
 		res.flowGuarded = true
-	case choice == "allow" && res.risk <= routing.allowAt:
+	case choice == "allow" && res.risk <= routing.allowAt && !(decisionBench.allowRiskVeto && score >= routing.blockRiskScore):
 		res.route = decisionAllow
 	case choice == "block" && res.risk >= routing.blockAt && score >= routing.blockRiskScore && !routing.ruleFlagEscalates(ctx):
 		// A confident block needs the disposition AND the risk score (R4),
@@ -736,7 +748,13 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 			emitDecisionModel(ctx, dm.model, toolName, args, res, nil)
 		}
 		recordCascadeSystemOne(ctx, res, nil)
-		return j.runToolJudgeLLM(ctx, toolName, args, sample)
+		judged := j.runToolJudgeLLM(ctx, toolName, args, sample)
+		if decisionBench.mediumAlerts && judged != nil && judged.reviewOnly && !res.skipped && res.failure == "" {
+			c := *judged
+			c.reviewOnly = false
+			return &c
+		}
+		return judged
 	}
 }
 

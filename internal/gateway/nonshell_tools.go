@@ -65,6 +65,9 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 		return findings
 	}
 	mapping, err := toolshape.Map(request.Input.Tool, request.Input.Args, mcpServer)
+	if err == nil && (mapping.PageURL != "" || mapping.PageLeaves) {
+		notePageNavigation(request, mapping)
+	}
 	if err != nil || (len(mapping.Effects) == 0 && !mapping.Truncated.Any()) {
 		return findings
 	}
@@ -160,9 +163,22 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 					add(mcpSQLCredentialRuleID, "SQL sets a credential column", false)
 				}
 			}
-		case toolshape.KindExec:
+		case toolshape.KindExec, toolshape.KindPageScript:
 			if toolshape.DecodeExec(e.Code) {
 				add(mcpCodeDecodeExecRuleID, "decoded text is run", false)
+			}
+			if e.Kind == toolshape.KindPageScript {
+				// A script bound (bytes, tokens, sends, definitions, depth) is a
+				// bound of this call: judged unknown at least, never clean.
+				// 1.0.10 ships the check as an alert in every pack: a proven flow
+				// (a literal host that is not the page host, the page known) is not
+				// promoted to a block in strict or managed until a corpus that
+				// navigates before a script measures it (GAP-0560).
+				proven, uncertain, host, caps := pageScriptEgress(request, mapping, e.Code)
+				trunc.Merge(caps)
+				if proven || uncertain {
+					add(pageScriptSessionEgressRuleID, pageScriptNote(proven, host), true)
+				}
 			}
 		case toolshape.KindSetting:
 			add(mcpSettingDowngradeID, e.Setting, false)
@@ -386,6 +402,36 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 		for _, id := range toolshape.PathRules(string(p.Access), path, text) {
 			add(id, "")
 		}
+		// The developer-token files of an account's home (the credentials
+		// table's class of PATH-GIT-CREDS) are read by the native file tools as
+		// the shell and MCP lanes read them (rel-1-0-10:GAP-0816). The class
+		// comes from the one table, so each branch's table decides which names
+		// are in it; the home is found by position.
+		if p.Access == actionfacts.PathAccessRead && developerTokenFileOfAccountHome(path) {
+			add("PATH-GIT-CREDS", "")
+		}
 	}
 	return out
+}
+
+// developerTokenFileOfAccountHome reports an absolute path that is a file of
+// the developer-token class directly in an account home, found by its position
+// (isRecognizedHomeRoot: /root, /home/<acct>, /Users/<acct>, <drive>:/Users/<acct>)
+// and never by the name of a folder deeper in the path: a project folder that
+// is only called home, homes or users, and a fixture tree, hold no account home
+// (rel-1-0-10:GAP-0836).
+func developerTokenFileOfAccountHome(value string) bool {
+	value = canonicalSemanticPath(value)
+	if !isAbsoluteSemanticPath(value) || integrityPathHasFixtureSegment(value) {
+		return false
+	}
+	for dir := path.Dir(value); dir != "/" && dir != "." && dir != ""; dir = path.Dir(dir) {
+		if !isRecognizedHomeRoot(dir) {
+			continue
+		}
+		relative := strings.TrimPrefix(value, dir+"/")
+		shape, ok := actionfacts.MatchCredentialFileShape(relative)
+		return ok && shape.Class == actionfacts.CredentialFileDeveloperToken && shape.Relative == relative
+	}
+	return false
 }

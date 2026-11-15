@@ -183,6 +183,9 @@ func (r *RoutingConfig) Validate() error {
 			}
 		}
 	}
+	if err := r.validateContext(); err != nil {
+		return err
+	}
 	return r.validatePolicyKeys(providers)
 }
 

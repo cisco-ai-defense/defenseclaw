@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/cli"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 const preMainHelperEnv = "DEFENSECLAW_HOOK_PREMAIN_HELPER"
@@ -36,7 +36,7 @@ func TestPreMainHelper(t *testing.T) {
 	switch os.Getenv(preMainHelperEnv) {
 	case "1":
 	case "panic":
-		defer cli.RecoverHookPanic()
+		defer hookcli.RecoverHookPanic()
 		panic("hook-panic-marker")
 	default:
 		t.Skip("helper process only")

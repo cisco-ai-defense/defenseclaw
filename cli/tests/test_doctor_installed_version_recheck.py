@@ -24,6 +24,7 @@ printed that value as ``installed`` and judged compatibility on it.
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 from unittest import mock
 
@@ -60,9 +61,9 @@ def _discovery(version: str = "codex-cli 0.160.0", binary: str = _BINARY) -> Age
     return AgentDiscovery(scanned_at="2026-11-06T00:00:00Z", agents=agents, cache_hit=True)
 
 
-def _row(discovery, probe_result, data_dir: str = "") -> tuple[dict, mock.Mock]:
+def _row(discovery, probe_result, data_dir: str = "", connector: str = "codex") -> tuple[dict, mock.Mock]:
     r = _DoctorResult()
-    probe = mock.Mock(return_value=probe_result)
+    probe = probe_result if isinstance(probe_result, mock.Mock) else mock.Mock(return_value=probe_result)
     with (
         mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=discovery),
         mock.patch.object(agent_discovery, "_version_for_agent_binary", probe),
@@ -70,8 +71,8 @@ def _row(discovery, probe_result, data_dir: str = "") -> tuple[dict, mock.Mock]:
         mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
         mock.patch.object(cmd_doctor, "_unverified_executable_note", return_value=("", "")),
     ):
-        cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=data_dir), ["codex"], r)
-    return next(c for c in r.checks if c["label"] == "Connector compatibility: codex"), probe
+        cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=data_dir), [connector], r)
+    return next(c for c in r.checks if c["label"] == f"Connector compatibility: {connector}"), probe
 
 
 def test_an_updated_agent_is_reported_at_the_version_it_has_now() -> None:
@@ -770,3 +771,93 @@ def test_an_unversioned_agent_nobody_set_up_is_not_run() -> None:
     result = doctor_health.recheck_installed_versions(_unversioned(), ["claudecode"], "")
     assert result.discovery.agents["codex"].version == ""
     assert not result.changed
+
+
+# GAP-0164: an agent updated in place in a folder setup trusts (~/.local/bin,
+# the npm global prefix) kept its old version in doctor, because the passive
+# probe refuses every executable the account itself can replace. Setup admits
+# exactly those, and doctor already runs the Codex setup admitted, so doctor
+# reads the version of an executable setup would admit, owned by this account.
+
+
+def _probe_refusing_passive_trust(found: str) -> mock.Mock:
+    def probe(name, path, args, *, require_trusted_binary_paths=True, data_dir=None, timeout_override=None):
+        if require_trusted_binary_paths:
+            return "", agent_discovery.UNTRUSTED_PREFIX_ERROR
+        return found, ""
+
+    return mock.Mock(side_effect=probe)
+
+
+def _user_binary(tmp_path, name: str = "codex") -> str:
+    binary = tmp_path / name
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o700)
+    return str(binary)
+
+
+def test_an_agent_updated_in_a_folder_setup_trusts_is_read_now(tmp_path) -> None:
+    binary = _user_binary(tmp_path)
+    probe = _probe_refusing_passive_trust("codex-cli 0.168.0")
+    with mock.patch("defenseclaw.agent_selection.setup_binary_trust_problem", return_value=""):
+        row, _ = _row(_discovery(binary=binary), probe)
+    assert "installed=0.168.0" in row["detail"]
+    assert "recorded as 0.160.0 before the agent updated" in row["detail"]
+    assert "not re-checked now" not in row["detail"]
+    assert probe.call_args.kwargs["require_trusted_binary_paths"] is False
+
+
+def test_an_executable_setup_does_not_admit_is_still_not_run(tmp_path) -> None:
+    # Benign twin of the refusal: setup refuses it, so doctor never runs it.
+    binary = _user_binary(tmp_path)
+    probe = _probe_refusing_passive_trust("codex-cli 0.168.0")
+    with mock.patch(
+        "defenseclaw.agent_selection.setup_binary_trust_problem", return_value="it is not in a trusted install location"
+    ):
+        row, _ = _row(_discovery(binary=binary), probe)
+    assert "recorded=0.160.0 (not re-checked now: its executable is not in a trusted install location)" in row["detail"]
+    assert all(call.kwargs.get("require_trusted_binary_paths", True) for call in probe.call_args_list)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX owner check; Windows admission checks the ACL chain")
+def test_an_executable_another_account_owns_is_not_run_by_doctor(tmp_path) -> None:
+    # An administrator running doctor never runs a binary of another account.
+    binary = _user_binary(tmp_path)
+    probe = _probe_refusing_passive_trust("codex-cli 0.168.0")
+    other = os.geteuid() + 1
+    with (
+        mock.patch("defenseclaw.agent_selection.setup_binary_trust_problem", return_value=""),
+        mock.patch("defenseclaw.doctor_health.os.geteuid", return_value=other),
+    ):
+        row, _ = _row(_discovery(binary=binary), probe)
+    assert "not re-checked now" in row["detail"]
+    assert all(call.kwargs.get("require_trusted_binary_paths", True) for call in probe.call_args_list)
+
+
+def test_an_update_to_another_contract_names_the_setup_that_records_it(tmp_path) -> None:
+    # Hermes 0.20.0 recorded (hermes-hooks-v1), 0.21.5 installed (hermes-hooks-v2):
+    # the gateway and the hook events keep the recorded version and contract
+    # until setup runs, so the row warns and names it.
+    binary = _user_binary(tmp_path, "hermes")
+    discovery = _proxy_discovery("hermes", "Hermes Agent v0.20.0 (2026.8.3)", binary)
+    probe = _probe_refusing_passive_trust("Hermes Agent v0.21.5 (2026.10.1)")
+    with mock.patch("defenseclaw.agent_selection.setup_binary_trust_problem", return_value=""):
+        row, _ = _row(discovery, probe, connector="hermes")
+    assert "installed=0.21.5" in row["detail"]
+    assert "recorded as 0.20.0 before the agent updated" in row["detail"]
+    assert "still use the recorded version 0.20.0" in row["detail"]
+    assert row["status"] == "warn"
+    assert "defenseclaw setup hermes --yes" in row["remediation"]
+
+
+def test_an_update_within_the_recorded_contract_stays_a_pass_without_a_setup_step(tmp_path) -> None:
+    # Benign twin: an agent that updates daily inside its contract (Hermes
+    # 0.21.5 to 0.23.1, both hermes-hooks-v2) is not a warning on every run.
+    binary = _user_binary(tmp_path, "hermes")
+    discovery = _proxy_discovery("hermes", "Hermes Agent v0.21.5 (2026.10.1)", binary)
+    probe = _probe_refusing_passive_trust("Hermes Agent v0.23.1 (2026.11.1)")
+    with mock.patch("defenseclaw.agent_selection.setup_binary_trust_problem", return_value=""):
+        row, _ = _row(discovery, probe, connector="hermes")
+    assert "installed=0.23.1" in row["detail"]
+    assert row["status"] == "pass"
+    assert "defenseclaw setup hermes" not in (row.get("remediation") or "")

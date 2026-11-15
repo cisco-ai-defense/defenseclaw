@@ -32,7 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
-	"github.com/defenseclaw/defenseclaw/policies"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 const rulePackWireVersion = 1
@@ -87,6 +87,8 @@ var shippedToolCallRegexIDs = map[string]bool{
 	"PATH-CRED-STORE":             true,
 	"PATH-CRED-STORE-USER":        true,
 	"PATH-K8S-CLUSTER-CRED":       true,
+	// Page-script reader (s7/browserjs, GAP-0560): the finding is code-owned (pageScriptEgress), alert only in every pack, regex inert.
+	"PAGE-SCRIPT-SESSION-EGRESS": true,
 }
 
 type rulePackWireDiagnostic struct {

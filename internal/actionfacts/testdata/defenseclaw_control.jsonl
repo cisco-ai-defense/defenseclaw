@@ -357,7 +357,7 @@
 {"id": "g596r2-k260", "dialect": "", "command": "~/.local/bin/defenseclaw guardrail disable", "want": "disable"}
 {"id": "g596r2-k261", "dialect": "", "command": "~/bin/defenseclaw-gateway stop", "want": "stop"}
 {"id": "g596r2-k262", "dialect": "", "command": "/opt/defenseclaw/bin/defenseclaw-gateway stop", "want": "stop"}
-{"id": "g596r2-k263", "dialect": "", "command": "nohup ~/.local/bin/defenseclaw-gateway stop &", "want": "unproven"}
+{"id": "g596r2-k263", "dialect": "", "command": "nohup ~/.local/bin/defenseclaw-gateway stop &", "want": "stop"}
 {"id": "g596r2-k264", "dialect": "", "command": "systemctl --user --no-block stop defenseclaw-gateway", "want": "stop"}
 {"id": "g596r2-k265", "dialect": "", "command": "systemctl -q stop defenseclaw-gateway", "want": "stop"}
 {"id": "g596r2-k266", "dialect": "", "command": "sudo systemctl --now disable defenseclaw-gateway", "want": "stop"}
@@ -389,3 +389,92 @@
 {"id": "g596r2-y16", "dialect": "", "command": "kill $(cat \"$home/.defenseclaw/gateway.pid\")", "want": ""}
 {"id": "g596r2-y17", "dialect": "", "command": "kill $(cat /tmp/x/.defenseclaw/gateway.pid)", "want": ""}
 {"id": "g596r2-y18", "dialect": "", "command": "kill $(cat $HOME/.defenseclaw/gateway.pid)", "want": "stop"}
+{"id": "g596b-x053", "dialect": "", "command": "busybox sh -c 'defenseclaw-gateway stop'", "want": "stop"}
+{"id": "g596b-x061", "dialect": "", "command": "sudo -i bash -c 'defenseclaw-gateway stop'", "want": "stop"}
+{"id": "g596b-x085", "dialect": "", "command": "sg wheel -c 'defenseclaw-gateway stop'", "want": "stop"}
+{"id": "g596b-x086", "dialect": "", "command": "newgrp wheel -c 'defenseclaw-gateway stop'", "want": "stop"}
+{"id": "g596b-x068", "dialect": "", "command": "nsenter -t 1 -m sh -c 'defenseclaw-gateway stop'", "want": "unproven"}
+{"id": "g596b-x079", "dialect": "", "command": "strace -f sh -c 'defenseclaw-gateway stop'", "want": "unproven"}
+{"id": "g596b-x082", "dialect": "", "command": "unshare -m sh -c 'defenseclaw-gateway stop'", "want": "unproven"}
+{"id": "g596b-x083", "dialect": "", "command": "chroot / sh -c 'defenseclaw-gateway stop'", "want": "unproven"}
+{"id": "g596b-x084", "dialect": "", "command": "firejail sh -c 'defenseclaw-gateway stop'", "want": "unproven"}
+{"id": "g596b-x103", "dialect": "", "command": "printf '%s\\n' 'defenseclaw-gateway stop' | zsh", "want": "stop"}
+{"id": "g596b-x104", "dialect": "", "command": "bash <(echo 'defenseclaw-gateway stop')", "want": "stop"}
+{"id": "g596b-x108", "dialect": "", "command": "source <(echo 'defenseclaw-gateway stop')", "want": "stop"}
+{"id": "g596b-x112", "dialect": "", "command": "echo 'defenseclaw-gateway stop' | at now", "want": "stop"}
+{"id": "g596b-x116", "dialect": "", "command": "echo '* * * * * defenseclaw-gateway stop' | crontab -", "want": "stop"}
+{"id": "g596b-x006", "dialect": "", "command": "sudo ~/.local/bin/defenseclaw-gateway stop", "want": "stop"}
+{"id": "g596b-x007", "dialect": "", "command": "command ~/.local/bin/defenseclaw-gateway stop", "want": "stop"}
+{"id": "g596b-x027", "dialect": "", "command": "sudo -u bob ~/.local/bin/defenseclaw-gateway stop", "want": "stop"}
+{"id": "g596b-k263", "dialect": "", "command": "nohup ~/.local/bin/defenseclaw-gateway stop &", "want": "stop"}
+{"id": "g596b-x020", "dialect": "", "command": "~bob/.local/bin/defenseclaw-gateway stop", "want": "unproven"}
+{"id": "g596b-x021", "dialect": "", "command": "$USER_HOME/.local/bin/defenseclaw-gateway stop", "want": "unproven"}
+{"id": "g596b-x218", "dialect": "", "command": "defenseclaw config set observability.enabled false", "want": ""}
+{"id": "g596b-x219", "dialect": "", "command": "defenseclaw config set routing.enabled false", "want": ""}
+{"id": "g596b-x220", "dialect": "", "command": "defenseclaw config set skills.foo.enabled false", "want": ""}
+{"id": "g596b-x222", "dialect": "", "command": "defenseclaw plugin uninstall foo", "want": ""}
+{"id": "g596b-x107", "dialect": "", "command": "cat <<'X' | sh\ndefenseclaw-gateway stop\nX", "want": "stop"}
+{"id": "g596b-x109", "dialect": "", "command": ". /dev/stdin <<< 'defenseclaw-gateway stop'", "want": "stop"}
+{"id": "g596b-t01", "dialect": "", "command": "sudo -i bash -c 'defenseclaw status'", "want": ""}
+{"id": "g596b-t02", "dialect": "", "command": "busybox sh -c 'defenseclaw-gateway status'", "want": ""}
+{"id": "g596b-t03", "dialect": "", "command": "bash <(echo 'defenseclaw doctor')", "want": ""}
+{"id": "g596b-t04", "dialect": "", "command": "echo 'defenseclaw-gateway status' | at now", "want": ""}
+{"id": "g596b-t05", "dialect": "", "command": "crontab -l", "want": ""}
+{"id": "g596b-t06", "dialect": "", "command": "printf '%s\\n' 'defenseclaw status' | zsh", "want": ""}
+{"id": "g596b-t07", "dialect": "", "command": "echo '0 3 * * * defenseclaw-gateway status' | crontab -", "want": ""}
+{"id": "g596b-t08", "dialect": "", "command": "sg wheel -c 'defenseclaw doctor'", "want": ""}
+{"id": "g596b-t09", "dialect": "", "command": "defenseclaw config set 'observability.destinations[0].enabled' false", "want": ""}
+{"id": "g596b-t10", "dialect": "", "command": "defenseclaw config unset routing.enabled", "want": ""}
+{"id": "g596b-t11", "dialect": "", "command": "defenseclaw config set guardrail.block_at HIGH", "want": "config"}
+{"id": "g596b-t12", "dialect": "", "command": "defenseclaw config set $KEY false", "want": "unproven"}
+{"id": "g596b-t13", "dialect": "", "command": "defenseclaw config set 'asset_policy.skill.denied[0].name' x", "want": "config"}
+{"id": "g596b-t14", "dialect": "", "command": "defenseclaw plugin uninstall foo", "want": ""}
+{"id": "g596b-t15", "dialect": "", "command": "defenseclaw skill uninstall foo", "want": ""}
+{"id": "g596b-t16", "dialect": "", "command": "defenseclaw mcp uninstall foo", "want": ""}
+{"id": "g596b-t17", "dialect": "", "command": "defenseclaw guardrail uninstall", "want": "uninstall"}
+{"id": "g596b-t18", "dialect": "", "command": "cat > runbook.md <<'EOF'\nTo stop the gateway run:\ndefenseclaw-gateway stop\nEOF", "want": ""}
+{"id": "g596b-t20", "dialect": "", "command": "bash <<'EOF'\ndefenseclaw-gateway status\nEOF", "want": ""}
+{"id": "g596b-t21", "dialect": "", "command": "sudo ~/.local/bin/defenseclaw-gateway status", "want": ""}
+{"id": "g596b-t22", "dialect": "", "command": "strace -f sh -c 'defenseclaw status'", "want": ""}
+{"id": "g596b-t23", "dialect": "", "command": "tail -10 out.log ssh -n host sudo -iu u bash -lc 'defenseclaw-gateway stop'", "want": ""}
+{"id": "g596b-t24", "dialect": "", "command": "strace -f -o out.txt sh -c 'defenseclaw-gateway stop'", "want": "unproven"}
+{"id": "g596c-e01", "dialect": "", "command": "defenseclaw config set --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 guardrail.enabled false", "want": "config"}
+{"id": "g596c-e02", "dialect": "", "command": "defenseclaw config set --json guardrail.enabled false", "want": "config"}
+{"id": "g596c-e03", "dialect": "", "command": "defenseclaw config set --expect-sha256=0000000000000000000000000000000000000000000000000000000000000000 guardrail.enabled false", "want": "config"}
+{"id": "g596c-e41", "dialect": "", "command": "defenseclaw config set guardrail.enabled false --json", "want": "config"}
+{"id": "g596c-e42", "dialect": "", "command": "defenseclaw config unset --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 guardrail.enabled", "want": "config"}
+{"id": "g596c-e43", "dialect": "", "command": "defenseclaw config unset observability.sinks guardrail.enabled", "want": "config"}
+{"id": "g596c-e44", "dialect": "", "command": "defenseclaw config set --json --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 llm.model x", "want": "config"}
+{"id": "g596c-e45", "dialect": "", "command": "defenseclaw config set --new-option v guardrail.enabled false", "want": "unproven"}
+{"id": "g596c-e46", "dialect": "", "command": "defenseclaw config set --new-option v observability.sinks.x true", "want": "unproven"}
+{"id": "g596c-b01", "dialect": "", "command": "defenseclaw config set --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 observability.sinks.x true", "want": ""}
+{"id": "g596c-b02", "dialect": "", "command": "defenseclaw config set routing.mode auto --json", "want": ""}
+{"id": "g596c-b03", "dialect": "", "command": "defenseclaw config unset --json observability.sinks", "want": ""}
+{"id": "g596c-b04", "dialect": "", "command": "defenseclaw config set notifications.enabled -1", "want": ""}
+{"id": "g596c-e04", "dialect": "", "command": "bash -c \"$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\"", "want": "stop"}
+{"id": "g596c-e05", "dialect": "", "command": "eval \"$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\"", "want": "stop"}
+{"id": "g596c-e24", "dialect": "", "command": "( cat <<'EOF'\ndefenseclaw stop\nEOF\n) | sh", "want": "stop"}
+{"id": "g596c-e29", "dialect": "", "command": "tee -a ~/.bashrc <<< 'defenseclaw stop'", "want": "stop"}
+{"id": "g596c-e32", "dialect": "", "command": "exec 3<<'EOF'\ndefenseclaw stop\nEOF\nbash <&3", "want": "stop"}
+{"id": "g596c-e37", "dialect": "", "command": "tee /etc/cron.d/x <<< '* * * * * root defenseclaw stop'", "want": "unproven"}
+{"id": "g596c-e39", "dialect": "", "command": "sh < <(cat <<'EOF'\ndefenseclaw stop\nEOF\n)", "want": "stop"}
+{"id": "g596c-x118", "dialect": "", "command": "sudo tee /etc/cron.d/x <<< '* * * * * root defenseclaw-gateway stop'", "want": "unproven"}
+{"id": "g596c-e50", "dialect": "", "command": "X=$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\nbash -c \"$X\"", "want": "stop"}
+{"id": "g596c-e51", "dialect": "", "command": "export X=$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\neval \"$X\"", "want": "stop"}
+{"id": "g596c-b17", "dialect": "", "command": "cat > ~/run.sh <<'EOF'\ndefenseclaw stop\nEOF\n", "want": ""}
+{"id": "g596c-e53", "dialect": "", "command": "cat > prog <<'EOF'\ndefenseclaw stop\nEOF\nchmod +x prog\n./prog", "want": "stop"}
+{"id": "g596c-e54", "dialect": "", "command": "cat <<'EOF' > prog\ndefenseclaw stop\nEOF\nsh prog", "want": "stop"}
+{"id": "g596c-e55", "dialect": "", "command": "{ cat <<'EOF'\ndefenseclaw stop\nEOF\n} | bash", "want": "stop"}
+{"id": "g596c-b10", "dialect": "", "command": "git commit -m \"$(cat <<'EOF'\nfix: the note says defenseclaw stop is not allowed here\nEOF\n)\"", "want": ""}
+{"id": "g596c-b11", "dialect": "", "command": "cat > notes.md <<'EOF'\nDo not run defenseclaw stop in the sandbox.\nEOF\ncat notes.md", "want": ""}
+{"id": "g596c-b12", "dialect": "", "command": "tee notes.txt <<< 'Do not run defenseclaw stop here'", "want": ""}
+{"id": "g596c-b13", "dialect": "", "command": "MSG=$(cat <<'EOF'\nRelease note: defenseclaw stop was removed from the doc\nEOF\n)\ngit commit -m \"$MSG\"", "want": ""}
+{"id": "g596c-b14", "dialect": "", "command": "cat <<'EOF'\nOperators run defenseclaw stop from the runbook\nEOF", "want": ""}
+{"id": "g596c-b15", "dialect": "", "command": "echo \"$(cat <<'EOF'\nThe runbook step is defenseclaw stop\nEOF\n)\" > summary.md", "want": ""}
+{"id": "g596c-b16", "dialect": "", "command": "diff <(cat <<'EOF'\nstep: defenseclaw stop\nEOF\n) old.txt", "want": ""}
+{"id": "g596d3-c01", "dialect": "", "command": "defenseclaw guardrail cascade explain", "want": ""}
+{"id": "g596d3-c02", "dialect": "", "command": "defenseclaw guardrail cascade explain --json --last 5", "want": ""}
+{"id": "g596c-b18", "dialect": "", "command": "cat > /tmp/w1.sh <<'EOF'\ndefenseclaw-gateway stop\nEOF\n\"/dcx-put\" /tmp/w1.sh /tmp/w1.sh", "want": ""}
+{"id": "g596c-b19", "dialect": "", "command": "cat > job.sh <<'EOF'\ndefenseclaw stop\nEOF\nscp job.sh host:/tmp/job.sh", "want": ""}
+{"id": "g596c-e56", "dialect": "", "command": "cat > job.sh <<'EOF'\ndefenseclaw stop\nEOF\nsource job.sh", "want": "stop"}
+{"id": "g596c-e57", "dialect": "", "command": "cat > job.sh <<'EOF'\ndefenseclaw stop\nEOF\nbash ./job.sh", "want": "stop"}

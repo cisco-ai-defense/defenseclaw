@@ -687,8 +687,18 @@ func (l *lifecycle) packageVersionDrift(ctx context.Context, record *Deployment)
 		return ""
 	}
 	cause := ""
-	if failure := env.lastPackageInstallFailure(); failure != "" {
+	last, haveLast := env.readLastPackageResult()
+	if haveLast && last.ProductVersion != "" && last.ProductVersion != version {
+		// The package's own run wrote no result (a full lifecycle
+		// filesystem refused even the file it writes first): the kept result
+		// is an older package's, ok:true or not, and says nothing about
+		// this one (GAP-0057).
+		cause = " (" + lastPackageResultFile + " is from the " + last.ProductVersion + " run, so the package's own run left no result)"
+	} else if failure := last.failure(); failure != "" {
 		cause = " (" + failure + ")"
+	}
+	if full := l.lifecycleDirFull(); full != "" {
+		cause += "; " + full
 	}
 	if duplicates := env.rpmDuplicateRecords(ctx); len(duplicates) > 1 {
 		// A power loss in the middle of an rpm upgrade leaves both versions
@@ -922,16 +932,35 @@ func (l *lifecycle) clearSupersededFailures() {
 // printed only "run verify", and verify then said not_installed without the
 // cause (a missing protected credential) that the result names (GAP-1744).
 func (e *Env) lastPackageInstallFailure() string {
+	last, _ := e.readLastPackageResult()
+	return last.failure()
+}
+
+// packageResult is what the lifecycle reads of last-package-result.json.
+type packageResult struct {
+	OK     bool                       `json:"ok"`
+	Action string                     `json:"action"`
+	Errors []enterprisestatus.Message `json:"errors"`
+	// ProductVersion is the release of the gateway that ran, which tells a
+	// result an older package left from this package's (GAP-0057).
+	ProductVersion string `json:"product_version"`
+}
+
+// readLastPackageResult reads last-package-result.json; false when it is
+// missing or not a JSON result.
+func (e *Env) readLastPackageResult() (packageResult, bool) {
+	var last packageResult
 	raw, err := readBounded(e.P(filepath.Join(e.Layout.LifecycleDir, lastPackageResultFile)), maxInputBytes)
-	if err != nil {
-		return ""
+	if err != nil || json.Unmarshal(raw, &last) != nil {
+		return packageResult{}, false
 	}
-	var last struct {
-		OK     bool                       `json:"ok"`
-		Action string                     `json:"action"`
-		Errors []enterprisestatus.Message `json:"errors"`
-	}
-	if json.Unmarshal(raw, &last) != nil || last.OK || len(last.Errors) == 0 {
+	return last, true
+}
+
+// failure is "code: message" of the first error of a failed install run, or
+// "" when the run succeeded or was not an install run.
+func (last packageResult) failure() string {
+	if last.OK || len(last.Errors) == 0 {
 		return ""
 	}
 	switch last.Action {
@@ -1231,7 +1260,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.MarkSecurityIncomplete("the gateway does not report the installed policy as applied")
 	}
 	l.describeHookContracts(ctx)
-	l.describeUnprotectedAgents()
+	l.describeUnprotectedAgents(record)
 	l.describeChangedGuardianFiles()
 	l.describeGuardianCleanups(ctx)
 	l.describeUnavailableEnrolledHomes()
@@ -1441,6 +1470,9 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		l.result.AddWarning(codeProfileAssignment, fmt.Sprintf("%d guardrail profile assignment warning(s) are not listed: the gateway "+
 			"lists them only to root on its hook socket, because they name the configured groups and accounts; `%s` shows them",
 			withheld, l.env.lifecycleCommand("profile-explain --user <account>")))
+	}
+	if message, over := enterprisestatus.HookCapacityWarning(body); over {
+		l.result.AddWarning(enterprisestatus.CodeHookOverCapacity, message)
 	}
 	if health.Telemetry.Details.OptionalState == "degraded" {
 		l.result.AddWarning(codeOptionalDestination, "optional telemetry destination failing: "+health.Telemetry.Details.FailureSummary+

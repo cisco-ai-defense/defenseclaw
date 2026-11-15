@@ -24,6 +24,7 @@ build
 bundle
 capabilities
 carry-state
+cascade
 catalog
 check-agent-settings
 check-api-port

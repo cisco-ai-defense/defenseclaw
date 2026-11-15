@@ -125,6 +125,15 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 		}
 		calls, prose, read := acpToolCallUpdateCalls(update2, goos, false, merged)
 		if len(calls) == 0 {
+			// An agent that shows its command only as text (Hermes) names its
+			// action in no input: the report is still the shell call it shows,
+			// judged as one and, as every report, never refused
+			// (rel-1-0-10:GAP-0619).
+			if agent, err := acp.LookupAgent(req.AgentID); err == nil {
+				if call, shown := acpDisplayedShellCall(agent.ConnectorID, params.Update); shown {
+					return acpFrameAction{calls: []acpToolCall{call}, prose: prose, trunc: merged.Union(read)}, true
+				}
+			}
 			// A status or output report names no action: its text is agent
 			// output, judged as before.
 			return acpFrameAction{}, false
@@ -685,7 +694,13 @@ func (a *APIServer) inspectACPFrameAction(
 			// refused. The report of a tool the agent already ran is then
 			// capped below: an alert that would have blocked, as for a hook
 			// event outside a connector's block events.
-			judged = a.inspectAgentHookToolCall(ctx, agentHookRequest{
+			// A frame cut at a bound is judged in full: the judge's
+			// proven-read skip reads only what was kept.
+			callCtx := ctx
+			if trunc.Any() {
+				callCtx = withJudgeInputCut(ctx)
+			}
+			judged = a.inspectAgentHookToolCall(callCtx, agentHookRequest{
 				ConnectorName: connectorName,
 				HookEventName: req.Method,
 				SessionID:     session,

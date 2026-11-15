@@ -1209,6 +1209,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// No answer leaves this process unjournaled. The 503
 				// closes the managed hook before the proposal is offered.
 				resp = pendingFailureHookDecision(resp)
+				// A journal failure is a store problem, not load: no
+				// capacity outcome.
 				persistCtx := telemetryPersistenceCtx
 				var cancelPersist context.CancelFunc
 				if persistCtx == nil {
@@ -1220,7 +1222,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 						cancelFinalPersistence = cancelPersist
 					}
 				}
-				finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
+				finalization := a.finalizeAgentHookAnswer(
+					context.WithValue(a.pendingHookDecidedContext(persistCtx, pending, resp), hookCapacityExcludedContextKey{}, true),
 					connectorName, req, resp, rawEventIDs, b, time.Since(t0), panicked, auditExtra, false)
 				a.settlePendingHook(persistCtx, pending, finalization)
 				if cancelPersist != nil && finalPersistenceCtx == nil {
@@ -1267,6 +1270,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 			return a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
 		}
+		var capacityReceipt *hookCapacityReceipt
 		if delivery != nil {
 			preKey, preNoted = a.notePreToolDecision(ctx, req, wireResp)
 			body := a.hookAnswerBody(ctx, profile, connectorName, req,
@@ -1283,6 +1287,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				resp = unreceipted(resp)
 			} else {
 				resp = a.deliveredHookDecision(connectorName, resp, receipt)
+				capacityReceipt = &hookCapacityReceipt{line: receipt}
 			}
 			delivered := resp
 			answered = &delivered
@@ -1316,6 +1321,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// The receipt decided what the agent got (delivered or
 			// unconfirmed); a hang-up after it is not a missed answer.
 			persistCtx = context.WithValue(persistCtx, hookDeliveryReceiptContextKey{}, true)
+		}
+		if capacityReceipt != nil {
+			// What the receipt said is the deadline evidence of the call.
+			persistCtx = context.WithValue(persistCtx, hookCapacityReceiptContextKey{}, *capacityReceipt)
 		}
 		// A managed answer offered on the receipt channel is already on the
 		// wire: finalization records it as delivered and cannot replace it.
@@ -1591,6 +1600,11 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// acknowledgement is a live answer even though it reuses the pending
 	// occurrence IDs to deduplicate audit writes.
 	live := !req.pendingRecovery || req.sandboxReceiptAcknowledgment
+	if live {
+		// The overload signal (DESIGN 18); recovers its own panics, so it
+		// never changes this answer.
+		a.noteHookCallCapacity(ctx, connectorName, resp, clientLeft)
+	}
 	safeSection := func(section string, fn func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -3689,7 +3703,18 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			a.observeUserTurn(ctx, req.Content, scopeText, req.CWD, verdict)
 		}
 	case isResultLikeEvent(req.HookEventName):
-		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
+		// The tool-result judges get the call this output answers (judge_packet.go):
+		// a placeholder tool name or the whole hook envelope is no call.
+		var callTool string
+		var callArgs json.RawMessage
+		if !req.ToolNameIsLabel {
+			callTool = req.ToolName
+		}
+		if !req.ToolArgsAreHookEnvelope && !req.ToolArgsProjectionUncertain {
+			callArgs = req.ToolArgs
+		}
+		resultCtx := withToolResultCall(ctx, callTool, callArgs)
+		verdict = a.inspectMessageContent(resultCtx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a
 		// PostToolUse referencing an unregistered MCP server gets
 		// captured in audit / would-block telemetry. mergeAssetDecision
@@ -4053,13 +4078,52 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 // PowerShell reading the selection made of a call it placed in no dialect
 // (selectWindowsShellDialectReading).
 func agentHookWindowsShellDialectReading(input actionfacts.Input) (actionfacts.Dialect, *windowsHintedReading) {
-	var args struct {
-		Command string `json:"command"`
-	}
-	if json.Unmarshal(input.Args, &args) != nil {
+	command, ok := trustedShellCommandArgument(input.Args)
+	if !ok {
 		return "", nil
 	}
-	return selectWindowsShellDialectReading(input.Tool, args.Command, input)
+	return selectWindowsShellDialectReading(input.Tool, command, input)
+}
+
+// trustedShellCommandArgument is the command text of projected shell
+// arguments under any key the trusted-action parser reads as the command
+// (command, cmd, script, CommandLine, ...: conflictingToolArgumentField).
+// The dialect selection read only "command", so agy run_command
+// ({"CommandLine": ...}) was never offered the PowerShell reading on a
+// Windows host and its PowerShell text was judged as POSIX
+// (rel-1-0-10:GAP-0784). Keys that disagree name no command: the conflicting
+// keys check judges that call.
+func trustedShellCommandArgument(raw json.RawMessage) (string, bool) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil {
+		return "", false
+	}
+	command, found := "", false
+	for key, value := range object {
+		if field, _ := conflictingToolArgumentField(key); field != "command" {
+			continue
+		}
+		var text string
+		if json.Unmarshal(value, &text) != nil || (found && text != command) {
+			return "", false
+		}
+		command, found = text, true
+	}
+	return command, found
+}
+
+// withWindowsShellDialect gives a structured shell call the Windows hook's
+// dialect reading when enabled (a Windows host, outside a sandbox and Secure
+// Client): its dialect is inferred from its command, PowerShell when the
+// PowerShell reading holds, never POSIX by default. The hook routes,
+// /inspect/tool and the LLM proxy's tool-call route all use it, so the same
+// PowerShell text is read as PowerShell on every route (rel-1-0-10:GAP-0784).
+func withWindowsShellDialect(action *trustedActionRequest, enabled bool) {
+	if !enabled {
+		return
+	}
+	action.Input.DialectHint, action.windowsPowerShellReading = agentHookWindowsShellDialectReading(action.Input)
+	action.windowsShellDialect, action.windowsDialectReadings = true, true
 }
 
 // inspectAgentHookToolCall judges one structured tool call as the trusted
@@ -4143,35 +4207,30 @@ func (a *APIServer) inspectAgentHookToolCall(
 		CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 	}
 	dialectHint := a.agentHookWindowsDialectHint(ctx)
-	var windowsPowerShellReading *windowsHintedReading
-	if dialectHint {
-		actionInput.DialectHint, windowsPowerShellReading = agentHookWindowsShellDialectReading(actionInput)
-	}
 	var conflictSource *conflictingToolArgumentSource
 	if bytes.Equal(trustedArgs, shellProjectedArgs) {
 		// The conflicting-keys check reads the arguments as the call
 		// carried them and projects each candidate as above (GAP-0678).
 		conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
 	}
-	return a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-		Input:                    actionInput,
-		LegacyText:               string(req.ToolArgs),
-		conflictSource:           conflictSource,
-		Connector:                req.ConnectorName,
-		CopilotSharedLocalFile:   copilotSharedLocalFileCall(ctx, req),
-		EnforcementCapable:       enforcementCapable,
-		StrictPolicy:             a.strictPolicyTierForHook(ctx, req.ConnectorName),
-		ManagedInstall:           a.managedInstallForHook(ctx),
-		ManagedHookOverflowHold:  managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
-		ResolvedWriteTargets:     resolvedWritesFromContext(ctx),
-		patchTarget:              hermesV4APatch,
-		strictPatchLinks:         hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
-		SandboxGuestCWD:          sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
-		windowsShellDialect:      dialectHint,
-		windowsDialectReadings:   dialectHint,
-		windowsPowerShellReading: windowsPowerShellReading,
-		record:                   toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
-	}, command, commandTool, hermesWriteViews)
+	action := trustedActionRequest{
+		Input:                   actionInput,
+		LegacyText:              string(req.ToolArgs),
+		conflictSource:          conflictSource,
+		Connector:               req.ConnectorName,
+		CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
+		EnforcementCapable:      enforcementCapable,
+		StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		ManagedInstall:          a.managedInstallForHook(ctx),
+		ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
+		ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
+		patchTarget:             hermesV4APatch,
+		strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
+		record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
+	}
+	withWindowsShellDialect(&action, dialectHint)
+	return a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, action, command, commandTool, hermesWriteViews)
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for

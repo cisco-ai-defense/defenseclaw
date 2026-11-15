@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -217,8 +218,13 @@ func enterpriseHookUnixBindingsPath() string {
 }
 
 func loadEnterpriseHookUnixBindings() enterpriseHookUnixBindings {
+	return loadEnterpriseHookUnixBindingsFile(enterpriseHookUnixBindingsPath())
+}
+
+// loadEnterpriseHookUnixBindingsFile reads the bindings at path; a missing,
+// oversized or unreadable file is no bindings.
+func loadEnterpriseHookUnixBindingsFile(path string) enterpriseHookUnixBindings {
 	empty := enterpriseHookUnixBindings{Version: enterpriseHookUnixBindingsVersion, Bindings: map[string]enterpriseHookUnixBinding{}}
-	path := enterpriseHookUnixBindingsPath()
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > enterpriseHookUnixBindingsMaxBytes {
 		return empty
@@ -1800,7 +1806,7 @@ var enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} {
 // DefenseClaw entries of connector machine policy are in place. Replaced
 // in tests.
 var enterpriseHookStandaloneMachinePolicyCovered = func(connectorName string) (bool, error) {
-	opts, ok := standaloneMachinePolicyOptions(runtime.GOOS)
+	opts, ok := hookcli.StandaloneMachinePolicyOptions(runtime.GOOS)
 	if !ok {
 		return false, errors.New("no standalone layout for this platform")
 	}

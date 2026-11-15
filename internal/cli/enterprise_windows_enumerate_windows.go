@@ -27,6 +27,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -153,7 +154,7 @@ nothing about this subcommand is invoked on non-Windows OSes.
 `,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return withExitCode(
+			return cliusage.WithExitCode(
 				runEnterpriseWindowsEnumerate(cmd.Context(), cmd, opts),
 				windowsEnterpriseFailureExitCode,
 			)

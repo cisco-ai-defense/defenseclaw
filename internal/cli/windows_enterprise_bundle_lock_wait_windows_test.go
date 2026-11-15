@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -57,8 +58,8 @@ func prepareWithHeldBundleLock(t *testing.T, wait, holdFor time.Duration) (*wind
 func TestWindowsBundleApplyWithoutLockWaitFailsAtOnce(t *testing.T) {
 	start := time.Now()
 	_, out, done, err := prepareWithHeldBundleLock(t, 0, 0)
-	if !done || commandExitCode(err) != enterprisestatus.WindowsExitBusy || !strings.Contains(out, `"lifecycle_busy"`) {
-		t.Fatalf("held lock without --lock-wait: done=%v exit=%d out=%s", done, commandExitCode(err), out)
+	if !done || cliusage.ExitCode(err) != enterprisestatus.WindowsExitBusy || !strings.Contains(out, `"lifecycle_busy"`) {
+		t.Fatalf("held lock without --lock-wait: done=%v exit=%d out=%s", done, cliusage.ExitCode(err), out)
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("a run without --lock-wait waited %s", elapsed)
@@ -90,7 +91,7 @@ func TestWindowsBundleApplyLockWaitRefusesAfterAnUninstall(t *testing.T) {
 	opts, out, done, err := prepareWithHeldBundleLock(t, 30*time.Second, 300*time.Millisecond)
 	if !done || opts.bundle != nil || !strings.Contains(out, `"not_managed"`) ||
 		!strings.Contains(out, "uninstalled while this run waited for the policy bundle lock") {
-		t.Fatalf("waited out an uninstall: done=%v err=%v exit=%d out=%s", done, err, commandExitCode(err), out)
+		t.Fatalf("waited out an uninstall: done=%v err=%v exit=%d out=%s", done, err, cliusage.ExitCode(err), out)
 	}
 	// The uninstall commits long before it frees the lock: the wait ends
 	// at the commit, not at the release, so this process (the installed
@@ -130,9 +131,9 @@ func TestWindowsBundleApplyLockWaitExpiresBusy(t *testing.T) {
 	t.Cleanup(func() { windowsBundleDeploymentInstalled = saved })
 	windowsBundleDeploymentInstalled = func() bool { return true }
 	_, out, done, err := prepareWithHeldBundleLock(t, 300*time.Millisecond, 0)
-	if !done || commandExitCode(err) != enterprisestatus.WindowsExitBusy || !strings.Contains(out, `"lifecycle_busy"`) ||
+	if !done || cliusage.ExitCode(err) != enterprisestatus.WindowsExitBusy || !strings.Contains(out, `"lifecycle_busy"`) ||
 		!strings.Contains(out, "still held after --lock-wait 300ms") {
-		t.Fatalf("expired --lock-wait: done=%v exit=%d out=%s", done, commandExitCode(err), out)
+		t.Fatalf("expired --lock-wait: done=%v exit=%d out=%s", done, cliusage.ExitCode(err), out)
 	}
 }
 
@@ -153,9 +154,9 @@ func TestWindowsBundleApplyForwardsLockWaitOnly(t *testing.T) {
 	if err := over.Flags().Parse([]string{"--lock-wait", "16m"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := windowsBundleApplyLifecycleOptions(over, opts); commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs ||
+	if _, err := windowsBundleApplyLifecycleOptions(over, opts); cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs ||
 		!strings.Contains(err.Error(), "--lock-wait takes at most 15m, not 16m") {
-		t.Fatalf("--lock-wait 16m: %v (exit %d)", err, commandExitCode(err))
+		t.Fatalf("--lock-wait 16m: %v (exit %d)", err, cliusage.ExitCode(err))
 	}
 }
 
@@ -176,8 +177,8 @@ func TestWindowsBundleApplyForwardsDeliveryID(t *testing.T) {
 	}
 	for _, bad := range []string{"", "agent 7", strings.Repeat("a", 129), "agent\x1b7", `agent\7`} {
 		_, err := windowsBundleApplyLifecycleOptions(parsed(t, bad), &bundleApplyOptions{bundle: `C:\x.dcbundle`, deliveryID: bad})
-		if commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(err.Error(), "--delivery-id") {
-			t.Fatalf("--delivery-id %q: %v (exit %d)", bad, err, commandExitCode(err))
+		if cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(err.Error(), "--delivery-id") {
+			t.Fatalf("--delivery-id %q: %v (exit %d)", bad, err, cliusage.ExitCode(err))
 		}
 	}
 }

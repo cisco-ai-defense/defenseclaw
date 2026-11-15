@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 // oss-outage-open review (round g, loop round 2): install.sh found the
@@ -77,13 +79,13 @@ func TestHookDataDirNowNamesTheRuntimesDataDirInEveryYAMLForm(t *testing.T) {
 			t.Setenv("HOME", filepath.Join(base, "agent-home"))
 			t.Setenv("USERPROFILE", filepath.Join(base, "agent-home"))
 			hooks := filepath.Join(data, "hooks")
-			if mode := hookOutageFailModeNow("opencode", hooks); mode != "open" {
+			if mode := hookcli.HookOutageFailModeNow("opencode", hooks); mode != "open" {
 				t.Fatalf("hook-outage-mode without a lock = %q; the runtime does not take this form, so the case proves nothing", mode)
 			}
 			if err := os.MkdirAll(filepath.Join(got, ".install.lock"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if mode := hookOutageFailModeNow("opencode", hooks); mode != "closed" {
+			if mode := hookcli.HookOutageFailModeNow("opencode", hooks); mode != "closed" {
 				t.Fatalf("hook-outage-mode with the lock install.sh holds = %q, want closed", mode)
 			}
 		})
