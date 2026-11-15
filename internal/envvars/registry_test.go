@@ -308,7 +308,7 @@ func TestManagedIgnoredOptOutsAreReadThroughLookup(t *testing.T) {
 				for _, match := range direct.FindAllStringSubmatch(string(raw), -1) {
 					// These readers are restricted to per-user hooks or skip the
 					// value in managed mode, as checked by the hook policy test.
-					if match[2] == "DEFENSECLAW_HOOK_MAX_BODY" && rel == "internal/cli/hook.go" {
+					if match[2] == "DEFENSECLAW_HOOK_MAX_BODY" && rel == "internal/hookcli/hook.go" {
 						continue
 					}
 					t.Errorf("%s reads managed-ignored %s directly", path, match[2])
@@ -377,7 +377,7 @@ func TestGAP0674ManagedHookEnvironmentPoliciesMatchReaders(t *testing.T) {
 		}
 		return string(b)
 	}
-	native := read("internal/cli/hook.go")
+	native := read("internal/hookcli/hook.go")
 	if !strings.Contains(native, `if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" && !opts.ManagedEnterprise {`) ||
 		strings.Count(native, `os.Getenv("DEFENSECLAW_HOOK_MAX_BODY")`) != 1 {
 		t.Error("native managed hook body-cap guard changed")

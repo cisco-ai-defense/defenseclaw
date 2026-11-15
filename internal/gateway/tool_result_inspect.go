@@ -153,12 +153,18 @@ func toolResultChecks(generation *compiledRulePackCategories, content, toolName 
 		// what was read before the cap (rel-1-0-10:GAP-0639).
 		out = append(out, boundedTruncatedFinding(cut, true))
 	}
-	for i := range out {
-		if strings.EqualFold(out[i].Severity, "CRITICAL") {
-			out[i].Severity = "HIGH"
+	capToolResultSeverity(out)
+	return out
+}
+
+// capToolResultSeverity lowers every CRITICAL finding of a tool output to HIGH
+// (the disposition above: no result-side block in the default pack).
+func capToolResultSeverity(findings []RuleFinding) {
+	for i := range findings {
+		if strings.EqualFold(findings[i].Severity, "CRITICAL") {
+			findings[i].Severity = "HIGH"
 		}
 	}
-	return out
 }
 
 // capToolResultJudgeVerdict applies the tool-result disposition to a judge

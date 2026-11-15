@@ -23,6 +23,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -218,7 +219,7 @@ func TestWindowsEnterpriseMarkerRequiresAdministratorKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A key the current user can write, as a planted marker would be.
-	if windowsEnterpriseMarkerStandalone(key) {
+	if hookcli.WindowsEnterpriseMarkerStandalone(key) {
 		t.Fatal("a user-writable marker key was honored")
 	}
 	if !windows.GetCurrentProcessToken().IsElevated() {
@@ -246,7 +247,7 @@ func TestWindowsEnterpriseMarkerRequiresAdministratorKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer protected.Close()
-	if !windowsEnterpriseMarkerStandalone(protected) {
-		t.Fatalf("an administrator-owned marker key was refused: %v", validateWindowsEnterpriseAdminRegistryKey(protected))
+	if !hookcli.WindowsEnterpriseMarkerStandalone(protected) {
+		t.Fatalf("an administrator-owned marker key was refused: %v", hookcli.ValidateWindowsEnterpriseAdminRegistryKey(protected))
 	}
 }

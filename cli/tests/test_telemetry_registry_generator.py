@@ -894,7 +894,7 @@ def _fixture_inbound_bindings() -> dict[str, Any]:
             ["claudecode"],
             "import",
             {"kind": "singleton", "primary_family": "fixture.log.0"},
-            [predicate("leaf_attribute", "event.name", "equals", values=["claude_code.user_prompt"])],
+            [predicate("leaf_attribute", "event.name", "equals", values=["user_prompt"])],
             aliases=["conversation-id-v1", "input-content-v1"],
         ),
         binding(

@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -44,32 +45,32 @@ func (s *ClawShieldInjectionScanner) SupportedTargets() []string { return []stri
 
 // Tier 1 — compiled regex patterns.
 var (
-	csRoleOverridePatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)ignore\s+(all\s+)?previous\s+(instructions|prompts|rules)`),
-		regexp.MustCompile(`(?i)you\s+are\s+now\s+(a|an|the)`),
-		regexp.MustCompile(`(?im)^system\s*:\s*(?:you\s+are|ignore|forget|override|disregard|from\s+now\s+on)`),
-		regexp.MustCompile(`(?i)forget\s+(all\s+)?(your\s+)?(instructions|rules|training|guidelines)`),
-		regexp.MustCompile(`(?i)new\s+instructions?\s*:`),
-		regexp.MustCompile(`(?i)override\s*:`),
-		regexp.MustCompile(`(?i)disregard\s+(all\s+)?(above|previous|prior)`),
+	csRoleOverridePatterns = []*lazyregexp.Regexp{
+		lazyregexp.New(`(?i)ignore\s+(all\s+)?previous\s+(instructions|prompts|rules)`),
+		lazyregexp.New(`(?i)you\s+are\s+now\s+(a|an|the)`),
+		lazyregexp.New(`(?im)^system\s*:\s*(?:you\s+are|ignore|forget|override|disregard|from\s+now\s+on)`),
+		lazyregexp.New(`(?i)forget\s+(all\s+)?(your\s+)?(instructions|rules|training|guidelines)`),
+		lazyregexp.New(`(?i)new\s+instructions?\s*:`),
+		lazyregexp.New(`(?i)override\s*:`),
+		lazyregexp.New(`(?i)disregard\s+(all\s+)?(above|previous|prior)`),
 	}
 
-	csInstructionPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)do\s+not\s+follow\s+(the\s+)?(previous|above|prior)`),
-		regexp.MustCompile(`(?i)instead\s+(you\s+should|please|do|just)\s+`),
-		regexp.MustCompile(`(?i)^actually\s*,`),
-		regexp.MustCompile(`(?i)^correction\s*:`),
-		regexp.MustCompile(`(?i)update\s+your\s+(behavior|instructions|rules)`),
+	csInstructionPatterns = []*lazyregexp.Regexp{
+		lazyregexp.New(`(?i)do\s+not\s+follow\s+(the\s+)?(previous|above|prior)`),
+		lazyregexp.New(`(?i)instead\s+(you\s+should|please|do|just)\s+`),
+		lazyregexp.New(`(?i)^actually\s*,`),
+		lazyregexp.New(`(?i)^correction\s*:`),
+		lazyregexp.New(`(?i)update\s+your\s+(behavior|instructions|rules)`),
 	}
 
-	csDelimiterPatterns = []*regexp.Regexp{
-		regexp.MustCompile("(?i)```system"),
-		regexp.MustCompile(`(?i)---\s*\n\s*system\s*:`),
-		regexp.MustCompile(`<<SYS>>`),
-		regexp.MustCompile(`\[INST\]`),
-		regexp.MustCompile(`</s>`),
-		regexp.MustCompile(`<\|im_start\|>`),
-		regexp.MustCompile(`<\|endoftext\|>`),
+	csDelimiterPatterns = []*lazyregexp.Regexp{
+		lazyregexp.New("(?i)```system"),
+		lazyregexp.New(`(?i)---\s*\n\s*system\s*:`),
+		lazyregexp.New(`<<SYS>>`),
+		lazyregexp.New(`\[INST\]`),
+		lazyregexp.New(`</s>`),
+		lazyregexp.New(`<\|im_start\|>`),
+		lazyregexp.New(`<\|endoftext\|>`),
 	}
 )
 

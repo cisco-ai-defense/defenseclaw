@@ -107,7 +107,7 @@ func exactEndpointSecurityArgvStep(command CommandFact) (string, bool) {
 			return endpointStepSentinelDisable, true
 		}
 	case "sc", "sc.exe":
-		if command.Dialect != DialectCMD && command.Dialect != DialectArgv {
+		if !windowsNativeExecutableDialect(command.Dialect) && command.Dialect != DialectArgv {
 			return "", false
 		}
 		if len(command.Argv) < 3 || !strings.EqualFold(command.Argv[2], "WinDefend") {

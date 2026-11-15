@@ -342,7 +342,10 @@ func (s *Store) Emit(_ context.Context, rec Record) {
 func addRecord(a *usageAgg, rec Record) {
 	u, c := rec.Usage, rec.Cost
 	a.calls++
-	if rec.Outcome != "completed" {
+	// errors counts failed calls (an upstream error or an HTTP status of 400
+	// or more). A call the client cancelled is a call without usage, not an
+	// error: Claude Code aborts requests it no longer needs (GAP-0631).
+	if rec.Outcome == "failed" {
 		a.errors++
 	}
 	if u.Has != 0 {

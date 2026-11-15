@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -47,13 +48,13 @@ func TestManagementContractWindowsSecretCheck(t *testing.T) {
 		{name: "not elevated, managed",
 			setup: func(*string, *error) {
 				windowsSecretIsElevated = func() bool { return false }
-				managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
+				hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + hookcli.WindowsEnterpriseMarkerKey, true }
 			},
 			code: "elevation_required", exit: enterprisestatus.WindowsExitAccessDenied},
 		{name: "not elevated, unmanaged",
 			setup: func(*string, *error) {
 				windowsSecretIsElevated = func() bool { return false }
-				managedHostWindowsStandalone = func() (string, bool) { return "", false }
+				hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 			},
 			code: "elevation_required", exit: windowsSecretExitFailure},
 		{name: "bad name", args: []string{"--name", "BAD", "--json"}, code: "invalid_arguments", exit: windowsSecretExitInvalid},

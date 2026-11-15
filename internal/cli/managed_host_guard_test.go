@@ -24,18 +24,20 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestRefusePerUserGatewayOnManagedHost(t *testing.T) {
 	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
-	restore, restoreWindows, restoreTrust := managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted
-	managedHostDescriptorPath = func() string { return descriptor }
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
-	managedHostRecordTrusted = func(string) error { return nil }
+	restore, restoreWindows, restoreTrust := hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone, hookcli.ManagedHostRecordTrusted
+	hookcli.ManagedHostDescriptorPath = func() string { return descriptor }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.ManagedHostRecordTrusted = func(string) error { return nil }
 	defer func() {
-		managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted = restore, restoreWindows, restoreTrust
+		hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone, hookcli.ManagedHostRecordTrusted = restore, restoreWindows, restoreTrust
 	}()
 	t.Setenv(managed.DeploymentModeEnv, "")
 
@@ -56,16 +58,18 @@ func TestRefusePerUserGatewayOnManagedHost(t *testing.T) {
 }
 
 func TestRefusePerUserGatewayOnWindowsStandaloneHost(t *testing.T) {
-	restore, restoreWindows := managedHostDescriptorPath, managedHostWindowsStandalone
-	managedHostDescriptorPath = func() string { return "" }
-	defer func() { managedHostDescriptorPath, managedHostWindowsStandalone = restore, restoreWindows }()
+	restore, restoreWindows := hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone
+	hookcli.ManagedHostDescriptorPath = func() string { return "" }
+	defer func() {
+		hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone = restore, restoreWindows
+	}()
 	t.Setenv(managed.DeploymentModeEnv, "")
 
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	if err := refusePerUserGatewayOnManagedHost(); err != nil {
 		t.Fatalf("a host without a standalone deployment refused: %v", err)
 	}
-	managedHostWindowsStandalone = func() (string, bool) {
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) {
 		return `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json`, true
 	}
 	err := refusePerUserGatewayOnManagedHost()
@@ -81,16 +85,16 @@ func TestRefusePerUserGatewayOnWindowsStandaloneHost(t *testing.T) {
 // On a Windows standalone computer `defenseclaw setup rotate-token` was an
 // unknown command; other hosts get no setup command.
 func TestManagedWindowsSetupAnswer(t *testing.T) {
-	restore := managedHostWindowsStandalone
-	defer func() { managedHostWindowsStandalone = restore }()
+	restore := hookcli.ManagedHostWindowsStandalone
+	defer func() { hookcli.ManagedHostWindowsStandalone = restore }()
 	// The real root pre-run: the answer must not need a per-user config.
 	root := &cobra.Command{Use: "defenseclaw", PersistentPreRunE: rootPersistentPreRunE}
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	addManagedWindowsSetupAnswer(root)
 	if len(root.Commands()) != 0 {
 		t.Fatalf("a host without a standalone deployment got %v", root.Commands())
 	}
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	// GAP-2639: a refused writer is reported for the managed audit log; a
 	// reader, a scan and help are not.
 	var reported []string
@@ -119,7 +123,7 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 			t.Fatalf("managed command %s not registered: %v", tc.name, err)
 		}
 		err = child.RunE(child, tc.args)
-		if commandExitCode(err) != 3 || !strings.Contains(err.Error(), tc.detail) {
+		if cliusage.ExitCode(err) != 3 || !strings.Contains(err.Error(), tc.detail) {
 			t.Fatalf("managed %s refusal = %v", tc.name, err)
 		}
 	}
@@ -177,7 +181,7 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	} {
 		root.SetArgs(args)
 		err := root.Execute()
-		if args[0] == "guardrail" && (commandExitCode(err) != 3 || !strings.Contains(err.Error(), "This device is managed")) {
+		if args[0] == "guardrail" && (cliusage.ExitCode(err) != 3 || !strings.Contains(err.Error(), "This device is managed")) {
 			t.Fatalf("%v on a managed Windows computer: %v", args, err)
 		}
 	}
@@ -212,12 +216,12 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 // gave the raw "read v8 config ... no such file" error.
 func TestManagedUnixConfigLoadErrorNamesTheManagedDeployment(t *testing.T) {
 	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
-	restore, restoreWindows, restoreTrust := managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted
-	managedHostDescriptorPath = func() string { return descriptor }
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
-	managedHostRecordTrusted = func(string) error { return nil }
+	restore, restoreWindows, restoreTrust := hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone, hookcli.ManagedHostRecordTrusted
+	hookcli.ManagedHostDescriptorPath = func() string { return descriptor }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
+	hookcli.ManagedHostRecordTrusted = func(string) error { return nil }
 	defer func() {
-		managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted = restore, restoreWindows, restoreTrust
+		hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone, hookcli.ManagedHostRecordTrusted = restore, restoreWindows, restoreTrust
 	}()
 	t.Setenv(managed.DeploymentModeEnv, "")
 	t.Setenv(managed.ConfigPathEnv, "")
@@ -255,16 +259,16 @@ func TestRefusePerUserGatewayIgnoresAnUntrustedDescriptor(t *testing.T) {
 	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	restore, restoreWindows, restoreTrust := managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted
-	managedHostDescriptorPath = func() string { return descriptor }
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	restore, restoreWindows, restoreTrust := hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone, hookcli.ManagedHostRecordTrusted
+	hookcli.ManagedHostDescriptorPath = func() string { return descriptor }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	var checked string
-	managedHostRecordTrusted = func(path string) error {
+	hookcli.ManagedHostRecordTrusted = func(path string) error {
 		checked = path
 		return errors.New("owner is a standard user")
 	}
 	defer func() {
-		managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted = restore, restoreWindows, restoreTrust
+		hookcli.ManagedHostDescriptorPath, hookcli.ManagedHostWindowsStandalone, hookcli.ManagedHostRecordTrusted = restore, restoreWindows, restoreTrust
 	}()
 	t.Setenv(managed.DeploymentModeEnv, "")
 
@@ -316,7 +320,7 @@ func TestManagedRecordTrustedNeedsAnAdministratorOnlyDirectory(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var visited []string
-			err := managedRecordTrusted(record, root,
+			err := hookcli.ManagedRecordTrusted(record, root,
 				func(path string) error {
 					if path != record {
 						t.Fatalf("file validator got %q", path)
@@ -364,7 +368,7 @@ func newStandaloneGuardFixture() standaloneGuardFixture {
 func (f standaloneGuardFixture) standardUserTrust(vendorErr error) func(string) error {
 	denied := &fs.PathError{Op: "inspect", Path: f.record, Err: fs.ErrPermission}
 	return func(path string) error {
-		return managedRecordTrusted(path, f.root,
+		return hookcli.ManagedRecordTrusted(path, f.root,
 			func(string) error { return denied },
 			func(dir string) error {
 				if dir == f.vendor {
@@ -381,7 +385,7 @@ func (f standaloneGuardFixture) service(image string, registerErr error) func() 
 		if registerErr != nil {
 			return "", registerErr
 		}
-		if err := standaloneGatewayServiceImageMatches(image, f.gatewayPath); err != nil {
+		if err := hookcli.StandaloneGatewayServiceImageMatches(image, f.gatewayPath); err != nil {
 			return "", err
 		}
 		return "service DefenseClawGateway runs " + f.gatewayPath, nil
@@ -437,7 +441,7 @@ func TestManagedStandaloneRecordCountsFallsBackToTheGatewayService(t *testing.T)
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			where, err := managedStandaloneRecordCounts(f.record, test.trust, test.service)
+			where, err := hookcli.ManagedStandaloneRecordCounts(f.record, test.trust, test.service)
 			if (err == nil) != test.counts {
 				t.Fatalf("managedStandaloneRecordCounts = %q, %v; want counts=%t", where, err, test.counts)
 			}
@@ -461,11 +465,11 @@ func TestStandaloneGatewayServiceImageMatches(t *testing.T) {
 		secureClientGatewayImage: false,
 		``:                       false,
 	} {
-		if got := standaloneGatewayServiceImageMatches(image, gateway) == nil; got != want {
+		if got := hookcli.StandaloneGatewayServiceImageMatches(image, gateway) == nil; got != want {
 			t.Errorf("standaloneGatewayServiceImageMatches(%q) matched=%t, want %t", image, got, want)
 		}
 	}
-	if standaloneGatewayServiceImageMatches(standaloneGatewayImage, "") == nil {
+	if hookcli.StandaloneGatewayServiceImageMatches(standaloneGatewayImage, "") == nil {
 		t.Error("an empty gateway path must never match")
 	}
 }
@@ -473,9 +477,9 @@ func TestStandaloneGatewayServiceImageMatches(t *testing.T) {
 // status and enterprise hooks status load the config without the root pre-run,
 // and the managed Windows answer said "`this command`" instead of naming them.
 func TestManagedWindowsConfigOnlyAnswerNamesTheCommand(t *testing.T) {
-	restore, restoreAccount := managedHostWindowsStandalone, managedHostCurrentAccount
-	t.Cleanup(func() { managedHostWindowsStandalone, managedHostCurrentAccount = restore, restoreAccount })
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	restore, restoreAccount := hookcli.ManagedHostWindowsStandalone, managedHostCurrentAccount
+	t.Cleanup(func() { hookcli.ManagedHostWindowsStandalone, managedHostCurrentAccount = restore, restoreAccount })
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	managedHostCurrentAccount = func() string { return `HOST\std1` }
 	t.Setenv(managed.DeploymentModeEnv, "")
 	t.Setenv(managed.ConfigPathEnv, "")
@@ -585,11 +589,11 @@ var managedWindowsVerbOnlyRun = regexp.MustCompile("(?i)(\\b(?:re)?run:?\\s+[`'\
 // are listed in noCommand.
 func TestManagedWindowsRefusalsNameRunnableCommands(t *testing.T) {
 	where := `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`
-	restore, restoreAccount, restoreReport := managedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal
+	restore, restoreAccount, restoreReport := hookcli.ManagedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal
 	t.Cleanup(func() {
-		managedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal = restore, restoreAccount, restoreReport
+		hookcli.ManagedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal = restore, restoreAccount, restoreReport
 	})
-	managedHostWindowsStandalone = func() (string, bool) { return where, true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return where, true }
 	managedHostCurrentAccount = func() string { return `HOST\dcadmin` }
 	reportManagedCommandRefusal = func(string, string) {}
 	t.Setenv(managed.DeploymentModeEnv, "")
@@ -698,11 +702,11 @@ func TestManagedWindowsRefusalsNameRunnableCommands(t *testing.T) {
 // PowerShell prompt, on a copy outside the user profiles, and names an MCP
 // server as one.
 func TestManagedWindowsScanAnswerNamesTheElevatedPowerShellPrompt(t *testing.T) {
-	restore, restoreAccount, restoreReport := managedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal
+	restore, restoreAccount, restoreReport := hookcli.ManagedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal
 	t.Cleanup(func() {
-		managedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal = restore, restoreAccount, restoreReport
+		hookcli.ManagedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal = restore, restoreAccount, restoreReport
 	})
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	reportManagedCommandRefusal = func(string, string) {}
 	t.Setenv(managed.DeploymentModeEnv, "")
 	t.Setenv(managed.ConfigPathEnv, "")
@@ -728,7 +732,7 @@ func TestManagedWindowsScanAnswerNamesTheElevatedPowerShellPrompt(t *testing.T) 
 		} {
 			root.SetArgs(row.args)
 			err := root.Execute()
-			if err == nil || commandExitCode(err) != 3 {
+			if err == nil || cliusage.ExitCode(err) != 3 {
 				t.Fatalf("%s: %v gave %v, want the exit 3 answer", account, row.args, err)
 			}
 			for _, want := range row.want {
@@ -776,8 +780,8 @@ func TestManagedWindowsAnswersQuoteTheAccount(t *testing.T) {
 // GAP-1182, GAP-1192: --help on a managed computer describes the managed
 // gateway and hides the per-user daemon commands it refuses.
 func TestManagedHostHelpDescribesTheManagedGateway(t *testing.T) {
-	restore := managedHostWindowsStandalone
-	t.Cleanup(func() { managedHostWindowsStandalone = restore })
+	restore := hookcli.ManagedHostWindowsStandalone
+	t.Cleanup(func() { hookcli.ManagedHostWindowsStandalone = restore })
 	t.Setenv(managed.DeploymentModeEnv, "")
 	newRoot := func() *cobra.Command {
 		root := &cobra.Command{Use: "defenseclaw-gateway", Long: "per-user sidecar"}
@@ -797,16 +801,16 @@ func TestManagedHostHelpDescribesTheManagedGateway(t *testing.T) {
 		return root
 	}
 
-	managedHostWindowsStandalone = func() (string, bool) { return "", false }
-	restoreDescriptor := managedHostDescriptorPath
-	t.Cleanup(func() { managedHostDescriptorPath = restoreDescriptor })
-	managedHostDescriptorPath = func() string { return filepath.Join(t.TempDir(), "absent.json") }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
+	restoreDescriptor := hookcli.ManagedHostDescriptorPath
+	t.Cleanup(func() { hookcli.ManagedHostDescriptorPath = restoreDescriptor })
+	hookcli.ManagedHostDescriptorPath = func() string { return filepath.Join(t.TempDir(), "absent.json") }
 	plain := newRoot()
 	if applyManagedHostHelp(plain) || plain.Long != "per-user sidecar" {
 		t.Fatalf("an unmanaged host changed the help: %q", plain.Long)
 	}
 
-	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	root := newRoot()
 	if !applyManagedHostHelp(root) {
 		t.Fatal("a managed host kept the per-user help")

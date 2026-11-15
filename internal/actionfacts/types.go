@@ -1150,6 +1150,14 @@ type ArgumentFact struct {
 	// escaped a leading "~" (an unquoted one is an expansion), and kept on
 	// the argv a wrapper passes on. Such a word names "./~", not the home.
 	literalTilde bool
+	// staticPrefix is, for a word that expands, the text it starts with
+	// before its first expansion (or its whole static text when only a glob
+	// expands). Only the awk reading uses it, to tell a computed option value
+	// from a computed program.
+	staticPrefix string
+	// holeText is, for a word that expands, its static text with awkprog.Hole
+	// in the place of each expansion. Only the awk reading uses it.
+	holeText string
 	// homeSpelling is a word whose only expansion is a plain $HOME or
 	// ${HOME} at its start (or after the = of a leading --option=), written
 	// with "~" for it ("$HOME/.dotfiles" -> "~/.dotfiles"). It is empty when

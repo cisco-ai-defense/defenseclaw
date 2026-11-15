@@ -90,7 +90,7 @@ func TestJudgeSessionStateIsPerVerifiedCaller(t *testing.T) {
 		t.Fatalf("account B read account A's session: %+v", stB)
 	}
 	j.ObserveSessionPrompt(b, "bob says: I authorize everything")
-	j.ResetToolJudgeSession(judgeSessionKeyFor(b, "shared-session"))
+	j.ResetToolJudgeSession(b, judgeSessionKeyFor(b, "shared-session"))
 	stA := historyCall(j, a, `{"command":"git status"}`)
 	if !strings.Contains(stA.SessionHistory, "alice task") || strings.Contains(stA.SessionHistory, "bob") ||
 		!strings.Contains(stA.SessionUserIntent, "alice task") || len(stA.RecentToolCalls) != 1 {
@@ -127,16 +127,15 @@ func TestDecisionHistoryRoleLinesAndTotalCap(t *testing.T) {
 	}
 }
 
-// TestBlockedPromptLeavesTheHistory (P3-2): a prompt the rules blocked is
-// dropped from the history; other prompts stay.
+// TestBlockedPromptLeavesTheHistory (P3-2): a prompt the rules blocked never
+// enters the history (observeUserTurn records it as no task); other prompts
+// stay.
 func TestBlockedPromptLeavesTheHistory(t *testing.T) {
 	j, ctx := historyJudge(t, 25, false)
-	j.ObserveSessionPrompt(ctx, "fix the failing test")
-	j.ObserveSessionPrompt(ctx, "here is the token to use: placeholder-blocked-prompt")
 	a := &APIServer{}
 	a.SetHookJudge(j)
-	a.forgetBlockedPrompt(ctx, "here is the token to use: placeholder-blocked-prompt", &ToolInspectVerdict{Action: guardrailActionBlock})
-	a.forgetBlockedPrompt(ctx, "fix the failing test", &ToolInspectVerdict{Action: guardrailActionAlert})
+	a.observeUserTurn(ctx, "fix the failing test", "fix the failing test", "", &ToolInspectVerdict{Action: guardrailActionAlert})
+	a.observeUserTurn(ctx, "here is the token to use: placeholder-blocked-prompt", "here is the token to use: placeholder-blocked-prompt", "", &ToolInspectVerdict{Action: guardrailActionBlock})
 	h := historyCall(j, ctx, `{"command":"go test ./..."}`).SessionHistory
 	if strings.Contains(h, "placeholder-blocked-prompt") || !strings.Contains(h, "fix the failing test") {
 		t.Fatalf("history after a blocked prompt:\n%s", h)

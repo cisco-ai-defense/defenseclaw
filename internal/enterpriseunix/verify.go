@@ -1471,6 +1471,9 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			"lists them only to root on its hook socket, because they name the configured groups and accounts; `%s` shows them",
 			withheld, l.env.lifecycleCommand("profile-explain --user <account>")))
 	}
+	if message, over := enterprisestatus.HookCapacityWarning(body); over {
+		l.result.AddWarning(enterprisestatus.CodeHookOverCapacity, message)
+	}
 	if health.Telemetry.Details.OptionalState == "degraded" {
 		l.result.AddWarning(codeOptionalDestination, "optional telemetry destination failing: "+health.Telemetry.Details.FailureSummary+
 			"; inspect `"+l.env.gatewayCommand("status")+"` or the gateway /health telemetry details")

@@ -624,3 +624,45 @@ func TestWindowsEnterpriseStatusNamesTheLinkOfAPendingTransaction(t *testing.T) 
 		t.Fatalf("no link, but a pending-link warning: %+v", result.Warnings)
 	}
 }
+
+// GAP-0574: the Windows status builder reports the routing block (counts,
+// route-only connectors, the gateway readiness check) and it names no model,
+// rule, budget id or account.
+func TestWindowsStatusV2ReportsRouting(t *testing.T) {
+	cfg := windowsStatusV2Config()
+	cfg.Routing.Enabled = true
+	cfg.Routing.Classifier = "rules"
+	cfg.Routing.Models = []config.RoutingModelBackend{{Name: "fast-secret-alias", Provider: "openai", Model: "m"}}
+	cfg.Routing.Admin = &config.RoutingAdminConfig{Budgets: []config.RoutingBudget{{ID: "team-secret-budget"}}}
+	cfg.Routing.RouteOnly = config.RoutingRouteOnlyConfig{Connectors: []string{"claudecode", "codex"}}
+	fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
+		cfg:           cfg,
+		guardianKnown: true,
+		gatewayHealth: func() ([]byte, error) {
+			return []byte(`{"routing":{"details":{"route_only":[{"connector":"claudecode","ready":true,"problem":"p"},{"connector":"codex","ready":false}]}}}`), nil
+		},
+	})
+	result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.10")
+	result.Installed, result.InstalledVersion = true, "1.0.10"
+	result.Readiness.Gateway = true
+	applyWindowsEnterpriseStatusV2(result)
+	result.Finish("windows", 0)
+
+	document, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracttest.Compile(t).Validate(t, "lifecycle-result.schema.json", document)
+	for _, leak := range []string{"fast-secret-alias", "team-secret-budget"} {
+		if strings.Contains(string(document), leak) {
+			t.Fatalf("status names %q:\n%s", leak, document)
+		}
+	}
+	r := result.Routing
+	if r == nil || !r.Enabled || r.Classifier != "rules" || r.Models != 1 || r.Budgets != 1 || len(r.RouteOnly) != 2 {
+		t.Fatalf("routing = %+v", r)
+	}
+	if r.RouteOnly[0].Ready == nil || !*r.RouteOnly[0].Ready || r.RouteOnly[1].Ready == nil || *r.RouteOnly[1].Ready {
+		t.Fatalf("route_only = %+v", r.RouteOnly)
+	}
+}
