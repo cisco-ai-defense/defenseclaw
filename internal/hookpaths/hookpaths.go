@@ -4683,7 +4683,6 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				placedLinkCalls[call] = true
 			}
 		case slices.Contains(copyPrograms, program):
-			words, static := copyGlobOperandsAsNames(args, words, static)
 			_, topLevelPlaced := linkDirs[call]
 			_, nestedPlaced := nestedCopyDirs[call]
 			var globDestinations []string
