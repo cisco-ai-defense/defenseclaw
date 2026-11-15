@@ -69,6 +69,7 @@ from defenseclaw import (
     legacy_connector,
     rulepack_validation,
     ux,
+    venv_integrity,
 )
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.audit_time_order import audit_time_order
@@ -5100,28 +5101,8 @@ def _check_component_connector_compatibility(
         )
 
 
-_DOCS_URL = "https://cisco-ai-defense.github.io/defenseclaw/docs"
-
-
-def _install_repair_hint(what: str) -> str:
-    """The command that repairs *what* (a part of this install).
-
-    On macOS and Linux the release upgrade resolver reinstalls the release at
-    the installed version too (the built-in ``defenseclaw upgrade`` stops early
-    when the version is already current, so it cannot repair a missing part);
-    on Windows, running the install command again does (from 1.0 the 0.8.x
-    Setup package and its ``/repair`` are retired).
-    """
-
-    if os.name == "nt":
-        return (
-            "repair the install by running the install command again "
-            f"({_DOCS_URL}/get-started/windows/install-lifecycle/#repair)"
-        )
-    return (
-        f"repair {what} with the release upgrade resolver, `bash defenseclaw-upgrade.sh --yes` "
-        f"(get and verify it as {_DOCS_URL}/get-started/upgrade/ shows)"
-    )
+_DOCS_URL = venv_integrity.DOCS_URL
+_install_repair_hint = venv_integrity.install_repair_hint
 
 
 def _scanner_repair_hint() -> str:
@@ -5141,6 +5122,45 @@ def _scanner_version_note(dist: str, expected: str) -> tuple[str, str]:
     if installed != expected:
         return "warn", f"{dist} {installed} (this release pins {expected}); {_scanner_repair_hint()}"
     return "pass", f"{dist} {installed}"
+
+
+def _mcp_scanner_import_note(status: str, note: str, dist: str) -> tuple[str, str, str]:
+    """``(status, note, remediation)`` once the MCP scanner SDK imports.
+
+    The installed metadata said cisco-ai-mcp-scanner was there while the SDK
+    failed to import (an upgrade had left files of an older LiteLLM wheel), so
+    doctor passed and `defenseclaw mcp scan` failed (GAP-0006). The import runs
+    in a child interpreter, as `defenseclaw mcp scan` would, so a damaged
+    package cannot break this run; a failure names the files that differ from
+    their wheels and the repair, which rebuilds the environment.
+    """
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-I", "-c", "from mcpscanner import Config, Scanner"],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=trusted_system_subprocess_env(),
+            # The first import after an install compiles and scans LiteLLM.
+            timeout=60.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        slow = "its import did not finish within 60 s (a first start after an install can take longer)"
+        return "warn", f"{note}; {slow}, so run `defenseclaw doctor` again", ""
+    except OSError as exc:
+        return "warn", f"{note}; could not start {sys.executable} to import it: {exc}", ""
+    if probe.returncode == 0:
+        return status, f"{note}, imports", ""
+    lines = [line.strip() for line in (probe.stderr or "").splitlines() if line.strip()]
+    error = lines[-1][:300] if lines else f"exit {probe.returncode}"
+    detail = f"{dist} is installed but does not import ({error})"
+    damaged = venv_integrity.damaged_files(venv_integrity.site_packages())
+    if damaged:
+        detail += "; files that differ from their wheels: " + venv_integrity.describe(damaged)
+    repair = _install_repair_hint("the Python environment")
+    return "fail", f"{detail}; {repair}", repair
 
 
 def _litellm_version_note() -> tuple[str, str]:
@@ -5179,7 +5199,10 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
     # The gateway scans MCP servers with `defenseclaw mcp scan`, the SDK in
     # this environment, not a standalone mcp-scanner launcher.
     status, note = _scanner_version_note(scanner_settings.MCP_SCANNER_DIST, scanner_settings.MCP_SCANNER_VERSION)
-    _emit(status, "Scanner: mcp-scanner", note, r=r)
+    remediation = ""
+    if status != "fail":
+        status, note, remediation = _mcp_scanner_import_note(status, note, scanner_settings.MCP_SCANNER_DIST)
+    _emit(status, "Scanner: mcp-scanner", note, r=r, remediation=remediation)
     status, note = _litellm_version_note()
     _emit(status, "Scanner: litellm", note, r=r)
 
