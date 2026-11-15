@@ -10,6 +10,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // maxArgvDecodeBytes is the largest tool-argument object whose command array
@@ -162,7 +163,7 @@ func powerShellWord(word string) string {
 	if plain {
 		return word
 	}
-	return "'" + strings.ReplaceAll(word, "'", "''") + "'"
+	return managed.PowerShellLiteral(word)
 }
 
 // trustedArgvReadingCut is the cap at which the reading of an argv command
