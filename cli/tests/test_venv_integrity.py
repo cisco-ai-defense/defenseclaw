@@ -152,6 +152,13 @@ def test_install_sh_heals_an_environment_built_from_a_changed_uv_cache(tmp_path:
         "UV_LINK_MODE": "hardlink",
         "UV_OFFLINE": "1",
     }
+    # Offline, uv finds an interpreter only on PATH or among its managed
+    # installations. A runner whose system Python is outside >=3.11,<3.14
+    # (setup-uv on ubuntu-26.04 puts the managed 3.13 in UV_PYTHON_INSTALL_DIR)
+    # needs those installations visible, as install.sh sees them on a user host.
+    for name in ("UV_PYTHON_INSTALL_DIR", "UV_PYTHON"):
+        if os.environ.get(name):
+            env[name] = os.environ[name]
 
     def make(venv: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run([BASH, str(script), str(venv)], capture_output=True, text=True, env=env, timeout=300)

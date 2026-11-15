@@ -4958,13 +4958,15 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 	}
 	facts, request = protectedHomePlacedReading(facts, request)
 	home := facts.EnforcementProjection().ActiveHome
-	if home == "" {
+	// The parsed program words decide, never the raw text (GAP-0737): a call
+	// with no word that may be sed or perl skips the link reading, and the
+	// placing and analysis of each statement below (GAP-0901).
+	if home == "" || !hookpaths.MayEditInPlace(text, home) {
 		return false
 	}
 	links := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, home)
 	for _, statement := range hookpaths.PlacedOrWhole(text, request.Input.CWD, home) {
-		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home, statement.User)
-		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, statement.User)
+		entries, operands := hookpaths.InPlaceEdits(statement.Command, statement.Dir, home, statement.User)
 		if len(operands) == 0 && len(entries) == 0 {
 			continue
 		}

@@ -6,7 +6,6 @@
 package actionfacts
 
 import (
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -30,17 +29,14 @@ var defenseClawNeutralConfigRoots = map[string]bool{
 func TestDefenseClawConfigRootsAreClassified(t *testing.T) {
 	root := filepath.Join("..", "..")
 	skipWithoutRepo(t, root)
-	data, err := os.ReadFile(filepath.Join(root, "internal", "config", "config.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	block := regexp.MustCompile(`(?s)\ntype Config struct \{.*?\n\}\n`).Find(data)
-	if block == nil {
+	source := readRepoSource(t, filepath.Join(root, "internal", "config", "config.go"))
+	block := regexp.MustCompile(`(?s)\ntype Config struct \{.*?\n\}\n`).FindString(source)
+	if block == "" {
 		t.Fatal("the Config struct moved; update this test")
 	}
 	roots := map[string]bool{}
-	for _, match := range regexp.MustCompile("yaml:\"([a-z][a-z0-9_]*)").FindAllSubmatch(block, -1) {
-		roots[string(match[1])] = true
+	for _, match := range regexp.MustCompile("yaml:\"([a-z][a-z0-9_]*)").FindAllStringSubmatch(block, -1) {
+		roots[match[1]] = true
 	}
 	if len(roots) < 30 {
 		t.Fatalf("only %d config sections found; the schema layout moved", len(roots))
