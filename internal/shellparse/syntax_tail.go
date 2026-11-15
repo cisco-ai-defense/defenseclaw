@@ -132,14 +132,11 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	}
 	// The error is inside the statement after the complete ones: the text
 	// up to it, cut back word by word, is the longest prefix that parses.
-	// Past the tries the cut stops and the reading says so
-	// (rel-1-0-10:GAP-0745).
-	cutCapped := false
-	for at, tries := errorAt, 0; at > end; tries++ {
-		if tries >= maxSyntaxTailRun*2 {
-			cutCapped = true
-			break
-		}
+	// Past the tries the cut stops; the part not read stays the call's
+	// detection-only ACTION-PARSE-FAILURE record (lead ruling (a) on
+	// rel-1-0-10:GAP-0745: a TRUNCATED report here added 82 strict owner-trace
+	// blocks, over the 0.1% bar).
+	for at, tries := errorAt, 0; at > end && tries < maxSyntaxTailRun*2; tries++ {
 		if prefix := trimSeparators(command[:at]); prefix != "" && parsesAlone(prefix, &budget) {
 			end = at
 			break
@@ -154,11 +151,12 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	if !split {
 		trunc.Hit(bounded.Items)
 	}
-	runCapped := false
+	// A statement longer than maxSyntaxTailRun pieces is not read; like the
+	// cut-back tries above, that is the detection-only record, not a cap
+	// (lead ruling (a) on GAP-0745).
 	for start := 0; start < len(pieces) && !trunc.Set().Any(); {
 		next := start + 1
-		stop := start
-		for ; stop < len(pieces) && stop < start+maxSyntaxTailRun; stop++ {
+		for stop := start; stop < len(pieces) && stop < start+maxSyntaxTailRun; stop++ {
 			run := trimSeparators(rest[pieces[start].from:pieces[stop].to])
 			if run == "" {
 				break
@@ -169,15 +167,7 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 				break
 			}
 		}
-		if next == start+1 && stop == start+maxSyntaxTailRun && stop < len(pieces) {
-			// No run of up to maxSyntaxTailRun pieces from here parses: a
-			// statement longer than that is not read (GAP-0745).
-			runCapped = true
-		}
 		start = next
-	}
-	if cutCapped || runCapped {
-		trunc.Hit(bounded.Items)
 	}
 	tail.Truncated = trunc.Set(&budget, &statements)
 	return tail, true
@@ -244,10 +234,9 @@ func parsesAlone(statement string, budget *bounded.Counter) bool {
 type tokenPiece struct{ from, to int }
 
 // tokenPieces splits text at newlines and at the ; & | operators outside
-// single quotes, double quotes and backslash escapes. A comment runs to the
-// end of its line (a quote in it opens nothing), and a here-document body
+// single quotes, double quotes and backslash escapes. A here-document body
 // stays in the piece of the statement that opens it, through its delimiter
-// line: its lines are data (rel-1-0-10:GAP-0745, GAP-0746). ok is false past
+// line: its lines are data (rel-1-0-10:GAP-0746). ok is false past
 // maxSyntaxTailPieces (the pieces before the cap are returned).
 func tokenPieces(text string) (pieces []tokenPiece, ok bool) {
 	from := 0
@@ -271,11 +260,6 @@ func tokenPieces(text string) (pieces []tokenPiece, ok bool) {
 			continue
 		case c == '\'' || c == '"':
 			quote = c
-			continue
-		case c == '#' && (i == from || strings.IndexByte(" \t\n;&|(", text[i-1]) >= 0):
-			for i+1 < len(text) && text[i+1] != '\n' {
-				i++
-			}
 			continue
 		case c == '<' && strings.HasPrefix(text[i:], "<<") && !strings.HasPrefix(text[i:], "<<<"):
 			if mark, next, found := heredocMarkAt(text, i+2); found {
