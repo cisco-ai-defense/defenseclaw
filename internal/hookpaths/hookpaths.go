@@ -1438,7 +1438,7 @@ func ResolveWriteTarget(path string) (string, bool) {
 	// The reach scans of a shell call ask for every word of it again for each
 	// statement, 446,000 file system reads for 100 PowerShell lines, 27 s on a
 	// Windows host (rel-1-0-10:GAP-0766).
-	if call := currentHookCall(); call != nil {
+	if call := memoHookCall(); call != nil {
 		return call.targets().resolveWriteTarget(path)
 	}
 	return resolveWritePath(path, 0)
@@ -1505,7 +1505,7 @@ func newProtectedFiles(home string) protectedFiles {
 	// shell call ask for it for every statement, and each read walks every key
 	// file path and reads each file (rel-1-0-10:GAP-0766). The files are the
 	// same files for the whole decision.
-	if call := currentHookCall(); call != nil {
+	if call := memoHookCall(); call != nil {
 		return call.targets().protectedFiles(home)
 	}
 	return newProtectedFilesWith(home, nil)
