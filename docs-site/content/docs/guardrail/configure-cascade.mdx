@@ -28,7 +28,7 @@ With no `guardrail.cascade` block, every decision is the same as before: the def
 ## The order of a decision
 
 1. **Rules.** The rule pack and your `block_at`, `alert_at` and `hilt` settings decide. An input DefenseClaw could not read in full (too long, too deep, too many paths) is judged at least at the **unknown tier**.
-2. **System One** (if on). A confident allow lets the call through, unless the rules flagged it. A confident block needs both the block probability and the risk score, and never lands on a call the rules flagged. With the judge, a confident block always goes to the judge (it is never final). Without the judge, it blocks, and an unsure answer asks.
+2. **System One** (if on). A confident allow lets the call through, unless the rules flagged it. A confident block needs both the block probability and the risk score, and never lands on a call the rules flagged. A confident block blocks, with or without the judge: the judge still runs on it and can only add. Without the judge, an unsure answer asks; with the judge, the judge answers it.
 3. **LLM judge** (if on). It runs on the calls the rules could not settle (`regex_judge`) or on every call (`judge_first`). Its role is set by `guardrail.cascade.judge`.
 4. **Rego policy** (if set). It sees the findings and every layer's answer, and may set the final action between `policy.lowest` and `policy.highest`.
 5. **The CRITICAL floor.** A proven CRITICAL finding never ends below `admin.critical_floor` (alert by default), whatever the layers or the policy decided.
