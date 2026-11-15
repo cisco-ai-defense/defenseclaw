@@ -52,11 +52,8 @@ func TestDefenseClawServiceNamesFollowTheInstallers(t *testing.T) {
 		"internal/enterpriseunix/services.go", "internal/winpath/enterprise_layout.go",
 		"internal/managed/standalone_layout.go", "internal/openshell/launchagent_label.go",
 	} {
-		data, err := os.ReadFile(filepath.Join(root, file))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, match := range literal.FindAllStringSubmatch(string(data), -1) {
+		source := readRepoSource(t, filepath.Join(root, file))
+		for _, match := range literal.FindAllStringSubmatch(source, -1) {
 			name := match[1]
 			// A program or a base label is checked as a service prefix.
 			if strings.HasSuffix(name, ".") || strings.Contains(name, "_") && !strings.HasPrefix(name, "DefenseClaw") {
@@ -99,7 +96,7 @@ func registeredCLICommands(t *testing.T, root string) (names map[string]bool, di
 				return nil
 			}
 			for _, pattern := range patterns {
-				for _, match := range pattern.FindAllStringSubmatch(string(data), -1) {
+				for _, match := range pattern.FindAllStringSubmatch(normalizeSourceLF(data), -1) {
 					name := strings.ReplaceAll(match[1], "_", "-")
 					if pattern == bare {
 						for _, suffix := range []string{"-command", "-cmd", "-group", "-grp"} {
@@ -188,11 +185,7 @@ func TestDefenseClawStopVerbsFollowTheCLI(t *testing.T) {
 		}
 		return
 	}
-	data, err := os.ReadFile(snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range strings.Fields(string(data)) {
+	for _, name := range strings.Fields(readRepoSource(t, snapshot)) {
 		known[name] = true
 	}
 	var unclassified []string
@@ -205,6 +198,25 @@ func TestDefenseClawStopVerbsFollowTheCLI(t *testing.T) {
 	if len(unclassified) > 0 {
 		t.Errorf("registered command names the control rules have not classified (add a stop verb to defenseClawStopVerbs, a read verb to defenseClawReadVerbs, or the name to testdata/defenseclaw_cli_commands.txt after review): %v", unclassified)
 	}
+}
+
+// normalizeSourceLF turns CRLF into LF. A Windows checkout with
+// core.autocrlf=true stores every source file with CRLF, and the source-reading
+// tests match LF-anchored patterns (GAP-0936).
+func normalizeSourceLF(data []byte) string {
+	return strings.ReplaceAll(string(data), "\r\n", "\n")
+}
+
+// readRepoSource reads a repository file for a source-reading test with CRLF
+// normalised to LF. Every test in this package that reads repository source
+// goes through it, so a CRLF checkout cannot break a pattern.
+func readRepoSource(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return normalizeSourceLF(data)
 }
 
 // skipWithoutRepo skips a test that walks the repository when it runs from a
