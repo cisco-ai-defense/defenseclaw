@@ -35,7 +35,7 @@ func useEffectsRulesMode(t *testing.T, mode string) {
 	t.Helper()
 	previous := liveGeneration.Load()
 	cfg := &config.Config{}
-	cfg.Guardrail.Cascade.Lanes.Effects = mode
+	cfg.Guardrail.Cascade.SetLane(config.CascadeLaneEffects, mode)
 	cfg.Guardrail.EffectsRulesTier = string(tierRestricted)
 	liveGeneration.Store(&Generation{Config: cfg})
 	prevResolver := effectResolverOverride

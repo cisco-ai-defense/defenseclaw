@@ -532,6 +532,31 @@
                     "cognitive-tampering",
                     "tampering"
                   ]
+                },
+                {
+                  "id": "tamper.defenseclaw_control_disable",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Stop or disable DefenseClaw",
+                  "severity": "CRITICAL",
+                  "confidence": 0.98,
+                  "tags": [
+                    "cognitive-tampering",
+                    "tampering",
+                    "security-state"
+                  ]
+                },
+                {
+                  "id": "tamper.defenseclaw_control_unproven",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Change or stop DefenseClaw (unproven)",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "cognitive-tampering",
+                    "tampering"
+                  ]
                 }
               ]
             },
@@ -4655,6 +4680,31 @@
                   "tool_call_only": true,
                   "pattern": "a^",
                   "title": "Shell write to an agent hook config",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "cognitive-tampering",
+                    "tampering"
+                  ]
+                },
+                {
+                  "id": "tamper.defenseclaw_control_disable",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Stop or disable DefenseClaw",
+                  "severity": "CRITICAL",
+                  "confidence": 0.98,
+                  "tags": [
+                    "cognitive-tampering",
+                    "tampering",
+                    "security-state"
+                  ]
+                },
+                {
+                  "id": "tamper.defenseclaw_control_unproven",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Change or stop DefenseClaw (unproven)",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -8880,6 +8930,31 @@
                   "tool_call_only": true,
                   "pattern": "a^",
                   "title": "Shell write to an agent hook config",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "cognitive-tampering",
+                    "tampering"
+                  ]
+                },
+                {
+                  "id": "tamper.defenseclaw_control_disable",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Stop or disable DefenseClaw",
+                  "severity": "CRITICAL",
+                  "confidence": 0.98,
+                  "tags": [
+                    "cognitive-tampering",
+                    "tampering",
+                    "security-state"
+                  ]
+                },
+                {
+                  "id": "tamper.defenseclaw_control_unproven",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Change or stop DefenseClaw (unproven)",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [

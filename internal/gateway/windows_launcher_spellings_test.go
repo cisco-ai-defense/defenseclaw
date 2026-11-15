@@ -114,10 +114,20 @@ func TestWindowsLauncherSpellingsPastTheBoundAreNeverACleanAllow(t *testing.T) {
 		if findings := run(tr, text(func(string) string { return big })("")); windowsBoundsAllowed(findings) {
 			t.Errorf("%s big-bash-bashc: a clean allow: %v", tr.name, FindingStrings(findings))
 		}
-		// A long benign call that names no launcher stays as the readers left it.
+		// A long benign call that names no launcher stays as the readers left
+		// it: the launcher screen adds nothing. The call is past the input
+		// bound, so the byte floor TRUNCATES it at cap=bytes, the unknown tier
+		// of its pack (rel-1-0-10:GAP-0611, GAP-0748; an allow before the
+		// floor): the only limit finding it may carry is that one, and the
+		// pack maps it (the five-tier rows are TestGAP0611OverInputBoundFiveTiers
+		// and TestGAP0748POSIXShellOverTheInputBoundIsTruncatedFiveTiers).
 		benign := "echo " + strings.Repeat("a", 100000) + "; ls cmd"
-		if findings := run(tr, text(func(string) string { return benign })("")); windowsBoundsHasLimit(findings) && !windowsBoundsAllowed(findings) && tr.pack == "default" && !tr.strict && !tr.managed {
-			t.Errorf("%s: a long ordinary statement is blocked: %v", tr.name, FindingStrings(findings))
+		if findings := run(tr, text(func(string) string { return benign })("")); tr.pack == "default" && !tr.strict && !tr.managed {
+			for _, finding := range FindingStrings(findings) {
+				if strings.HasPrefix(finding, evaluationLimitRuleID) && !strings.Contains(finding, "cap=bytes") {
+					t.Errorf("%s: a long ordinary statement carries a limit finding other than the byte floor: %v", tr.name, FindingStrings(findings))
+				}
+			}
 		}
 	}
 }

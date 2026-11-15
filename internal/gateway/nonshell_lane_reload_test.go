@@ -43,8 +43,8 @@ func TestNS7LaneUpgradeAndReload(t *testing.T) {
 	if _, err := config.LoadFromFile(path); err != nil {
 		t.Fatalf("LoadFromFile old config: %v", err)
 	}
-	// Start in Shadow, then hot-reload a bad value: refused, Shadow kept.
-	write(" Shadow ")
+	// Start in shadow, then hot-reload a bad value: refused, shadow kept.
+	write("shadow")
 	initial, err := config.LoadRuntimeV8File(path)
 	if err != nil {
 		t.Fatalf("initial: %v", err)
@@ -54,7 +54,7 @@ func TestNS7LaneUpgradeAndReload(t *testing.T) {
 		applied++
 		return nil
 	})
-	for _, bad := range []string{"enabled", "true", "''", "onn"} {
+	for _, bad := range []string{"enabled", "true", "''", "onn", " Shadow ", "OFF", "On"} {
 		write(bad)
 		if err := mgr.Reload(context.Background(), "test"); err == nil {
 			t.Errorf("%s: reload accepted", bad)
@@ -66,11 +66,11 @@ func TestNS7LaneUpgradeAndReload(t *testing.T) {
 	if applied != 0 {
 		t.Errorf("apply ran %d times for refused configs", applied)
 	}
-	write("OFF")
+	write("off")
 	if err := mgr.Reload(context.Background(), "test"); err != nil {
-		t.Fatalf("reload OFF: %v", err)
+		t.Fatalf("reload off: %v", err)
 	}
 	if got := mode(mgr.Current()); got != "off" {
-		t.Errorf("after OFF reload lane = %q, want off", got)
+		t.Errorf("after off reload lane = %q, want off", got)
 	}
 }

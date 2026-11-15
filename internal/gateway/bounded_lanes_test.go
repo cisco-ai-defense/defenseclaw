@@ -144,18 +144,17 @@ var boundedLanes []boundedLaneCap
 
 func registerBoundedLane(caps ...boundedLaneCap) { boundedLanes = append(boundedLanes, caps...) }
 
-// The shell reading bounds on rel/1.0.10. Nesting and statements (lane
-// s7/parselimits) still take the evaluation-limit path
-// (trustedActionLimitFindings); the operand bound goes through
-// withBoundedTruncation (rel-1-0-10:GAP-0313).
+// The shell reading bounds on rel/1.0.10. Nesting and statements still take
+// the evaluation-limit path (trustedActionLimitFindings), and the cap floor
+// (withCapFloor) keeps a write proven before or after the cap a block
+// (rel-1-0-10:GAP-0312); the operand bound goes through withBoundedTruncation
+// (rel-1-0-10:GAP-0313).
 func init() {
 	registerBoundedLane(
 		boundedLaneCap{lane: "shell-parse nesting", cap: bounded.Depth, limit: shellparse.MaxNestingDepth,
-			gen:  boundedShellLane(boundedNestedSubshells, boundedNestedAssignments),
+			gen:  boundedShellLane(boundedNestedBrackets, boundedNestedAssignments),
 			seen: boundedShellSeenCall,
-			path: boundedLegacyShellReading,
-			open: map[string]string{"default/seen": "rel-1-0-10:GAP-0312", "permissive/seen": "rel-1-0-10:GAP-0312",
-				"managed/seen": "rel-1-0-10:GAP-0312"}},
+			path: boundedLegacyShellReading},
 		boundedLaneCap{lane: "shell-parse statements", cap: bounded.Items, limit: boundedShellStatements,
 			gen:  boundedShellLane(gap0568Assignments, boundedListStatements),
 			seen: boundedShellSeenCall,
@@ -206,6 +205,14 @@ func boundedShellLane(fill, multi func(size int) string) func(int, boundedShape)
 // boundedNestedSubshells is a true command nested in size subshells.
 func boundedNestedSubshells(size int) string {
 	return strings.Repeat("(", size) + "true" + strings.Repeat(")", size)
+}
+
+// boundedNestedBrackets is a word of size nested brackets: nesting the
+// shell reading budget counts that the action analysis reads in full (size
+// nested subshells meet its syntax depth bound first, the lane "shell
+// analysis depth", rel-1-0-10:GAP-0547).
+func boundedNestedBrackets(size int) string {
+	return "echo " + strings.Repeat("[", size) + "true" + strings.Repeat("]", size)
 }
 
 // boundedNestedAssignments nests past the statement budget too (depth and
@@ -546,6 +553,9 @@ func boundedCheckLanes(t *testing.T, lanes []boundedLaneCap) {
 	if t.Failed() {
 		return
 	}
+	// A lane that ships in shadow does not decide: it has its own contract
+	// (bounded_shadow_lanes_test.go).
+	t.Run("shadow lanes", func(t *testing.T) { boundedCheckShadowLanes(t) })
 	for _, tier := range boundedTestTiers {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		floor := bounded.Unknown(tier.tier)
