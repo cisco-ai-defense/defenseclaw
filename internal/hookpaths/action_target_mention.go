@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"maps"
 	"math"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -315,6 +316,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			if !ok {
 				return true
 			}
+			if call, isCall := stmt.Cmd.(*syntax.CallExpr); isCall && !stateOnly && actionSSHCopyIDToThisHost(call, home) {
+				// ssh-copy-id to this host adds the key to an authorized_keys
+				// file of the machine the agent runs on, which the call never
+				// names (rel-1-0-10:GAP-0791).
+				found = true
+				return false
+			}
 			values["PWD"] = effectiveCWD
 			// The shell expands and opens a statement's redirects before the
 			// command runs, so what the command itself binds (printf -v and
@@ -484,6 +492,56 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		if check(token, !literalTilde, cwd) {
 			return true
 		}
+	}
+	return false
+}
+
+// actionSSHCopyIDToThisHost reports an ssh-copy-id call whose destination is
+// this machine: a loopback name or address, or the machine's own host name,
+// with any user. The command appends the key to that account's
+// ~/.ssh/authorized_keys over a login, the same write as typing the path
+// (rel-1-0-10:GAP-0791). A destination that is a dynamic word is not read
+// here (the call is not proven local), so it keeps the rel verdict.
+func actionSSHCopyIDToThisHost(call *syntax.CallExpr, home string) bool {
+	if len(call.Args) < 2 {
+		return false
+	}
+	if program, known := staticProgramWord(call.Args[0], home); !known || programBase(program) != "ssh-copy-id" {
+		return false
+	}
+	valueOptions := map[string]bool{"-i": true, "-p": true, "-o": true, "-F": true, "-t": true, "-J": true}
+	var operands []string
+	for index := 1; index < len(call.Args); index++ {
+		word, known := StaticWord(call.Args[index], home)
+		if !known {
+			return false
+		}
+		switch {
+		case valueOptions[word]:
+			index++
+		case strings.HasPrefix(word, "-") && len(word) > 1:
+		default:
+			operands = append(operands, word)
+		}
+	}
+	if len(operands) != 1 {
+		return false
+	}
+	host := operands[0]
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		host = host[at+1:]
+	}
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	switch host {
+	case "localhost", "localhost.localdomain", "ip6-localhost", "::1", "0:0:0:0:0:0:0:1":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	if name, err := os.Hostname(); err == nil && name != "" {
+		name = strings.ToLower(name)
+		return host == name || host == strings.SplitN(name, ".", 2)[0]
 	}
 	return false
 }
