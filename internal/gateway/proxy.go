@@ -1605,6 +1605,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		p.auditHistoryRedactions(r, redactions)
 	}
 
+	// --- Tool results the request carries for the first time (GAP-0171) ---
+	if p.enforceProxyToolResults(r.Context(), trailingToolResults(partial.Messages, partial.Input, partial.Contents), label, mode, customBlockMsg, func(msg string) {
+		p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
+	}) {
+		return
+	}
+
 	// --- Launder prior DefenseClaw-generated assistant turns ---
 	//
 	// When a previous turn was blocked, we returned a synthetic
@@ -2875,6 +2882,18 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 	p.auditHistoryRedactions(r, redactions)
 
+	// --- Tool results the request carries for the first time (GAP-0171) ---
+	if p.enforceProxyToolResults(agentCtx, trailingToolResults(req.Messages, nil, nil), req.Model, mode, customBlockMsg, func(msg string) {
+		traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
+		if req.Stream {
+			p.writeBlockedStream(w, req.Model, msg)
+		} else {
+			p.writeBlockedResponse(w, req.Model, msg)
+		}
+	}) {
+		return
+	}
+
 	// --- Semantic Model Router ---
 	// When an embedded model router is configured, evaluate signals and
 	// potentially override the target URL, model, or serve from cache.
@@ -3394,8 +3413,45 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	}
 	var initialChunkBuf [][]byte
 	initialBufFlushed := mode != "action"
+	// In action mode the chunks after the initial buffer wait in hold until
+	// a check has read their text (rel-1-0-10:GAP-0212, proxy_stream_tail.go).
+	holding := mode == "action"
+	var hold streamHold
+	var holdTimer streamHoldTimer
+	defer holdTimer.stop()
+	const midStreamScanInterval = 500
+	// scanMid runs the mid-stream check over the text so far. False: it
+	// blocked; the stream is cut.
+	scanMid := func() bool {
+		midVerdict := p.inspector.InspectMidStream(llmCtx, "completion", accumulated.String(),
+			[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
+		p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
+		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
+			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (%d bytes held back)\n",
+				midVerdict.Severity, logDisplayReason(midVerdict.Reason), len(hold.buf))
+			overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, midVerdict, 0, mode, true)
+			modelTrace.AddGuardrailOverlay(overlay)
+			p.enqueueBlockNotification(midVerdict, "completion", aliasModel)
+			streamBlocked = true
+			streamCancel()
+			return false
+		}
+		lastScanLen = accumulated.Len()
+		return true
+	}
+	// releaseHeld sends the held chunks after a check has read their text.
+	releaseHeld := func() bool {
+		if accumulated.Len() > lastScanLen && !scanMid() {
+			return false
+		}
+		if b := hold.take(len(hold.buf), time.Now()); len(b) > 0 {
+			_, _ = w.Write(b)
+			flusher.Flush()
+		}
+		return true
+	}
 
-	usage, err := upstream.ChatCompletionStream(streamCtx, req, func(chunk StreamChunk) {
+	handleChunk := func(chunk StreamChunk) {
 		if streamBlocked {
 			return
 		}
@@ -3421,22 +3477,10 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			}
 		}
 
-		const midStreamScanInterval = 500
 		if accumulated.Len()-lastScanLen >= midStreamScanInterval && mode == "action" {
-			midVerdict := p.inspector.InspectMidStream(llmCtx, "completion", accumulated.String(),
-				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
-			p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
-			if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
-				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s\n",
-					midVerdict.Severity, logDisplayReason(midVerdict.Reason))
-				overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, midVerdict, 0, mode, true)
-				modelTrace.AddGuardrailOverlay(overlay)
-				p.enqueueBlockNotification(midVerdict, "completion", aliasModel)
-				streamBlocked = true
-				streamCancel()
+			if !scanMid() {
 				return
 			}
-			lastScanLen = accumulated.Len()
 		}
 
 		data, _ := json.Marshal(chunk)
@@ -3458,6 +3502,10 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		if !initialBufFlushed {
 			initialChunkBuf = append(initialChunkBuf, data)
 			if accumulated.Len() >= streamBufSize {
+				// The initial buffer is sent after a check has read it.
+				if accumulated.Len() > lastScanLen && !scanMid() {
+					return
+				}
 				for _, buffered := range initialChunkBuf {
 					fmt.Fprintf(w, "data: %s\n\n", buffered)
 				}
@@ -3468,15 +3516,62 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			return
 		}
 
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
-	})
+		if !holding {
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+			return
+		}
+		now := time.Now()
+		hold.add([]byte("data: "+string(data)+"\n\n"), now)
+		if accumulated.Len() == lastScanLen || len(hold.buf) >= streamHoldMaxBytes || hold.due(now) {
+			releaseHeld()
+		}
+	}
+
+	// The provider stream runs on its own goroutine so that a held chunk is
+	// checked and sent on time while the upstream is quiet.
+	var usage *ChatUsage
+	var err error
+	var streamPanic any
+	chunks := make(chan StreamChunk)
+	go func() {
+		defer close(chunks)
+		defer func() { streamPanic = recover() }()
+		usage, err = upstream.ChatCompletionStream(streamCtx, req, func(chunk StreamChunk) {
+			select {
+			case chunks <- chunk:
+			case <-streamCtx.Done():
+			}
+		})
+	}()
+	for open := true; open; {
+		var deadline time.Time
+		if holding && !streamBlocked && len(hold.buf) > 0 {
+			deadline = hold.since.Add(streamHoldMaxAge)
+		}
+		due := holdTimer.wait(deadline, time.Now())
+		select {
+		case chunk, ok := <-chunks:
+			if !ok {
+				open = false
+				break
+			}
+			handleChunk(chunk)
+		case <-due:
+			if !streamBlocked {
+				releaseHeld()
+			}
+		}
+	}
+	if streamPanic != nil {
+		panic(streamPanic)
+	}
 	// Bifrost parsed the usage (it always asks for include_usage): hand it
 	// to the usage record of this call.
 	recordChatUsage(w, usage)
 	upstreamDuration := time.Since(llmStartTime)
-	// Flush any remaining initial buffer (short streams that completed
-	// before reaching the buffer threshold). Run a guardrail check first.
+	// The rest of the initial buffer (short streams that completed before
+	// reaching the buffer threshold) joins the hold after a guardrail check.
 	if !initialBufFlushed && !streamBlocked && len(initialChunkBuf) > 0 {
 		if accumulated.Len() > 0 && mode == "action" {
 			initVerdict := p.inspector.InspectMidStream(llmCtx, "completion", accumulated.String(),
@@ -3493,10 +3588,54 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		}
 		if !streamBlocked {
 			for _, buffered := range initialChunkBuf {
-				fmt.Fprintf(w, "data: %s\n\n", buffered)
+				hold.add([]byte("data: "+string(buffered)+"\n\n"), time.Now())
 			}
-			flusher.Flush()
 			initialBufFlushed = true
+		}
+	}
+
+	// The tail gets the mid-stream check every chunk before it got, then the
+	// final check.
+	if holding && !streamBlocked && accumulated.Len() > lastScanLen {
+		scanMid()
+	}
+
+	// Final post-stream inspection (apply_guardrail output), enforced in
+	// action mode: a block withholds the chunks still held and ends the
+	// stream as a mid-stream block does (GAP-0212).
+	if !streamBlocked && accumulated.Len() > 0 {
+		content := accumulated.String()
+		t0 := time.Now()
+
+		postCtx, postCancel := p.postCallContext(llmCtx)
+		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
+		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
+		postCancel()
+		p.resolveConfirm(r.Context(), r, verdict, "completion", aliasModel, mode)
+		elapsed := time.Since(t0)
+
+		var tokIn, tokOut *int64
+		if usage != nil {
+			tokIn = &usage.PromptTokens
+			tokOut = &usage.CompletionTokens
+		}
+		p.logPostCall(aliasModel, content, verdict, elapsed, &ChatUsage{
+			PromptTokens: ptrOr(tokIn, 0), CompletionTokens: ptrOr(tokOut, 0),
+		})
+		enforced := holding && verdict.Action == "block"
+		overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, verdict, elapsed, mode, enforced)
+		modelTrace.AddGuardrailOverlay(overlay)
+		if enforced {
+			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (final check, %d bytes held back)\n",
+				verdict.Severity, logDisplayReason(verdict.Reason), len(hold.buf))
+			p.enqueueBlockNotification(verdict, "completion", aliasModel)
+			streamBlocked = true
+		}
+	}
+	if !streamBlocked {
+		if b := hold.take(len(hold.buf), time.Now()); len(b) > 0 {
+			_, _ = w.Write(b)
+			flusher.Flush()
 		}
 	}
 	streamFailed := err != nil && !streamBlocked
@@ -3554,32 +3693,6 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()
 		return
-	}
-
-	// Final post-stream inspection (apply_guardrail output).
-	if accumulated.Len() > 0 {
-		content := accumulated.String()
-		t0 := time.Now()
-
-		postCtx, postCancel := p.postCallContext(llmCtx)
-		postCtx = proxyGuardrailWithoutEnforcement(postCtx)
-		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
-		postCancel()
-		p.resolveConfirm(r.Context(), r, verdict, "completion", aliasModel, mode)
-		elapsed := time.Since(t0)
-
-		var tokIn, tokOut *int64
-		if usage != nil {
-			tokIn = &usage.PromptTokens
-			tokOut = &usage.CompletionTokens
-		}
-		p.logPostCall(aliasModel, content, verdict, elapsed, &ChatUsage{
-			PromptTokens: ptrOr(tokIn, 0), CompletionTokens: ptrOr(tokOut, 0),
-		})
-		overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, verdict, elapsed, mode, false)
-		modelTrace.AddGuardrailOverlay(overlay)
-
 	}
 
 	// Final post-stream inspection: tool calls (fully reassembled).
@@ -5845,7 +5958,6 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		finalTextInspected = true
 		content := accumulated.String()
 		postCtx, postCancel := p.postCallContext(llmCtx)
-		postCtx = proxyGuardrailWithoutEnforcement(postCtx)
 		verdict := p.inspector.Inspect(postCtx, "completion", content,
 			[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
 		postCancel()

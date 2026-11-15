@@ -931,6 +931,22 @@ def pack_pin_repair(message: str, *, files_digest: str = "<files digest>") -> st
     )
 
 
+_CASCADE_LANE_KEY = re.compile(r"^guardrail\.cascade\.lanes\.(effects|secret_flow|nonshell)$")
+
+
+def _cascade_lane_refusal(name: str, lane: str, value: Any) -> str:
+    """Why a cascade lane value is refused, as the gateway words it (GAP-0546).
+
+    The effects and secret_flow lanes ship shadow-only in 1.0.10, so "on" is a
+    valid spelling that this release does not offer: say that, not "not in the
+    expected format". Mirrors internal/config/cascade_lanes.go Validate.
+    """
+    allowed = "on, shadow, off" if lane == "nonshell" else "off, shadow"
+    if lane != "nonshell" and isinstance(value, str) and value.strip().lower() == "on":
+        return f'{name} "{value}" is not available in 1.0.10; allowed: {allowed}.'
+    return f"{name} must be one of {allowed}."
+
+
 def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -> str:
     """:func:`_plain_error_text` plus the advice the gateway check attached (GAP-0099)."""
     text = _plain_error_text(exc, value=value, directory=directory)
@@ -1008,6 +1024,9 @@ def _plain_error_text(exc: BaseException, *, value: Any = None, directory: str =
                 f"{name} must be an https:// URL (for example, https://mirror.example.com/defenseclaw), "
                 "or empty for the official releases."
             )
+        lane = _CASCADE_LANE_KEY.match(name)
+        if lane:
+            return _cascade_lane_refusal(name, lane.group(1), value)
         hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
         # A pattern of plain words (block_at) names them in the corrective action.
         allowed = text if text.startswith("use one of ") else ""

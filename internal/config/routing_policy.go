@@ -5,6 +5,7 @@ package config
 
 import (
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -221,6 +222,12 @@ func (r RoutingRouteOnlyConfig) IsZero() bool {
 // RouteOnlyCapableConnectors are the connectors with routing capability
 // base_url in 1.0.10.
 var RouteOnlyCapableConnectors = []string{"claudecode", "codex"}
+
+// RouteOnlyRouted reports whether routing routes connectorName through the
+// route-only listener (routing on and the connector listed).
+func (c *Config) RouteOnlyRouted(connectorName string) bool {
+	return c != nil && c.Routing.Enabled && slices.Contains(c.Routing.RouteOnly.Connectors, strings.ToLower(strings.TrimSpace(connectorName)))
+}
 
 // RoutingCredential returns the value of the protected credential name on a
 // standalone managed host ("" elsewhere, when unset or unreadable).

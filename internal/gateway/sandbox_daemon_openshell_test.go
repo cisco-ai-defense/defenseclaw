@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // openShellRig is an accountOpenShell whose host the test plays.
@@ -1308,7 +1309,14 @@ func TestSandboxDaemonReadyReadiesForAnyAllowedAgent(t *testing.T) {
 				return sandboxapi.ManagedExplain{Allowed: tc.allowed[req.Connector]}, nil
 			}
 			f.run(t)
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			// The daemon bounds each agent's view itself (managedViewTimeout, 5 s),
+			// so this window only says the daemon answered at all. It is 30 s
+			// on an idle host and stretches with the host's slowdown, floored
+			// at 90 s: a box starved of CPU held this test for 54 s in a run
+			// that took 6 s alone (GAP-0558). What a ready must answer is
+			// asserted below, unchanged.
+			ctx, cancel := context.WithTimeout(context.Background(),
+				max(90*time.Second, testenv.Scale(30*time.Second, 3*testenv.HostSlowdown())))
 			defer cancel()
 			_, err := sandboxapi.NewUnixClient(f.socket).Ready(ctx, sandboxapi.ReadyRequest{})
 			mu.Lock()

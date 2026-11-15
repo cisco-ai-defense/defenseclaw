@@ -3838,9 +3838,71 @@ func classifyRsync(out *parseOutput, command *CommandFact) {
 			appendCommandPath(out, command, PathAccessDelete, source)
 		}
 	}
-	if destination := parsed.positionals[len(parsed.positionals)-1]; !rsyncRemoteOperand(destination) {
+	destination := parsed.positionals[len(parsed.positionals)-1]
+	if !rsyncRemoteOperand(destination) {
 		appendCommandPath(out, command, PathAccessWrite, destination)
+		return
 	}
+	// A remote destination with local sources sends their contents to that
+	// host, as scp does (classifySCP): the shared sender reader and the
+	// upload rules read it as an upload (GAP-0595). A remote source as well
+	// is a transfer between hosts, not read here.
+	host, ok := rsyncRemoteHost(destination)
+	if !ok {
+		return
+	}
+	for _, source := range parsed.positionals[:len(parsed.positionals)-1] {
+		if rsyncRemoteOperand(source) {
+			return
+		}
+	}
+	addOperation(command, OperationConnect)
+	addOperation(command, OperationUpload)
+	scheme := "ssh"
+	if strings.HasPrefix(destination, "rsync://") || strings.Contains(destination, "::") {
+		scheme = "rsync"
+	}
+	out.appendNetwork(NetworkFact{
+		CommandID: command.ID,
+		Action:    NetworkUpload,
+		Scheme:    scheme,
+		Host:      strings.ToLower(host),
+	})
+	out.appendDataFlow(DataFlowFact{ToCommandID: command.ID, From: DataFile, To: DataProcess})
+	out.appendDataFlow(DataFlowFact{FromCommandID: command.ID, From: DataProcess, To: DataNetwork})
+}
+
+// rsyncRemoteHost is the host of a remote rsync operand: [user@]host:path,
+// [user@]host::module or rsync://[user@]host[:port]/module.
+func rsyncRemoteHost(operand string) (string, bool) {
+	if rest, ok := strings.CutPrefix(operand, "rsync://"); ok {
+		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+			rest = rest[:slash]
+		}
+		if at := strings.LastIndex(rest, "@"); at >= 0 {
+			rest = rest[at+1:]
+		}
+		if colon := strings.LastIndexByte(rest, ':'); colon >= 0 && !strings.Contains(rest, "]") {
+			rest = rest[:colon]
+		}
+		rest = strings.Trim(rest, "[]")
+		if !validNetworkHost(rest) {
+			return "", false
+		}
+		return rest, true
+	}
+	colon := strings.IndexByte(operand, ':')
+	if colon <= 0 {
+		return "", false
+	}
+	host := operand[:colon]
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		host = host[at+1:]
+	}
+	if !validNetworkHost(host) {
+		return "", false
+	}
+	return host, true
 }
 
 // rsyncRemoteOperand reports host:path, host::module and rsync:// operands.

@@ -5,7 +5,11 @@
 
 package actionfacts
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+)
 
 // PowerShellReadableStatementsTwin returns the input of a partial PowerShell
 // action reduced to the top-level statements that each parse complete on their
@@ -20,7 +24,13 @@ import "strings"
 // It is not offered when a left-out statement may change what the others do
 // (a location, alias, environment or evaluation statement, an exit), when no
 // statement is left out, or when none is readable. facts must be Analyze(input).
-func PowerShellReadableStatementsTwin(input Input, facts Facts) (twin Input, ok bool) {
+//
+// Its statements and pipeline stages are counted against the reading's own
+// command bound (maxCommands) through trunc, the call's bounded.Truncated (the one bound
+// rule, internal/guardrail/bounded): past it no twin is offered and the cap is
+// recorded there, so the caller floors the call at the unknown tier of its
+// pack instead of reading the statements before the cap as a smaller call.
+func PowerShellReadableStatementsTwin(input Input, facts Facts, trunc *bounded.Truncated) (twin Input, ok bool) {
 	defer func() {
 		if recover() != nil {
 			twin, ok = Input{}, false
@@ -38,8 +48,9 @@ func PowerShellReadableStatementsTwin(input Input, facts Facts) (twin Input, ok 
 		}
 		source = extracted.command
 	}
-	segments, scanned := scanPowerShellSegments(source, 0, true)
-	if !scanned || len(segments) == 0 {
+	segmentBound := bounded.NewCounter(trunc, bounded.Items, maxCommands)
+	segments, scanned := scanPowerShellSegments(source, 0, true, &segmentBound)
+	if trunc.Any() || !scanned || len(segments) == 0 {
 		return Input{}, false
 	}
 	var statements []string
@@ -50,7 +61,7 @@ func PowerShellReadableStatementsTwin(input Input, facts Facts) (twin Input, ok 
 		}
 		statements = append(statements, segment.text)
 	}
-	if len(statements) < 2 || len(statements) > maxCommands {
+	if len(statements) < 2 {
 		return Input{}, false
 	}
 	var kept []string

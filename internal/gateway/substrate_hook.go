@@ -49,14 +49,14 @@ import (
 // (GAP-0138). The old spelling is gone; no released kit sent it.
 const substrateEnvelopeVersion = kit.EnvelopeVersion
 
-const (
-	// substrateEnvelopeMaxBytes bounds a whole envelope: a payload of at
-	// most apiRequestBodyMaxBytes plus at most substrateAttachedMaxBytes of
-	// attached file content (base64 in JSON) and path facts.
-	substrateEnvelopeMaxBytes = apiRequestBodyMaxBytes + 2*substrateAttachedMaxBytes + 256<<10
-	// substrateAttachedMaxBytes caps attached file content (D9's 1 MiB).
-	substrateAttachedMaxBytes = 1 << 20
-)
+// substrateAttachedMaxBytes caps attached file content (D9's 1 MiB).
+const substrateAttachedMaxBytes = 1 << 20
+
+// substrateEnvelopeMaxBytes bounds a whole envelope: a payload of at most
+// apiRequestBodyMaxBytes plus at most substrateAttachedMaxBytes of attached
+// file content (base64 in JSON) and path facts. A variable because rel reads
+// apiRequestBodyMaxBytes from the embedded limits file (OpenClaw, 86f19772d3).
+var substrateEnvelopeMaxBytes = apiRequestBodyMaxBytes + 2*substrateAttachedMaxBytes + 256<<10
 
 // substrateEnvelope is the kit's hook envelope.
 type substrateEnvelope struct {

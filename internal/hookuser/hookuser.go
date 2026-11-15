@@ -95,8 +95,11 @@ func Run(native, home, addr string, stdin io.Reader, stdout, stderr io.Writer, s
 	}
 	// DEFENSECLAW_HOOK_MAX_BODY can only lower the body cap, as in the shell
 	// hook this command replaces: a call over a cap lowered under the
-	// per-user transport's 900 KiB is refused (rel-1-0-6:GAP-0578).
-	if maxBody, ok := hookexec.LoweredMaxBody(os.Getenv("DEFENSECLAW_HOOK_MAX_BODY")); ok {
+	// per-user transport's 900 KiB is refused (rel-1-0-6:GAP-0578). It is a
+	// per-user setting the managed policy ignores (GAP-0674): the managed
+	// guard above has already refused a managed host, and the read goes
+	// through the shared lookup like every other managed-ignored opt-out.
+	if maxBody, ok := hookexec.LoweredMaxBody(envvars.Getenv("DEFENSECLAW_HOOK_MAX_BODY")); ok {
 		opts.MaxBody, opts.MaxBodyLowered = maxBody, maxBody < hookexec.DefaultMaxBody
 	}
 	if gateway != "" {
