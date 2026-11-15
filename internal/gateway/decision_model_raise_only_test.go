@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -26,9 +27,13 @@ import (
 //   - rules + System One vs rules + System One + judge (cascade 3), the judge
 //     answering clean;
 //   - cascade 3 with the judge unreachable, and timed out, vs cascade 2.
-// Cascade 2's unsure answer (a confirm) is a stand-in for the judge: in
-// cascade 3 the judge answers it, so that one answer is compared with the
-// rules only (cascade 1), never below them.
+// Two rules (1.0.10 lead, rel-1-0-10:GAP-0868):
+//  1. a judge that does not answer (unreachable, timed out) never lowers
+//     anything: cascade 3 then gives exactly cascade 2's verdict, an unsure
+//     System One ask or alert included;
+//  2. an unsure System One answer has no verdict of its own, so a clean judge
+//     answer may resolve it, never below the rules (cascade 1); a confident
+//     System One block is never lowered (GAP-0867).
 
 // stalledLLMProvider never answers before the call's deadline.
 type stalledLLMProvider struct{}
@@ -148,12 +153,20 @@ func TestRaiseOnlyAcrossLayers(t *testing.T) {
 					c3 := verdicts(3, judge)
 					for i := range calls {
 						floor, layer := c2[i], "rules+S1"
-						if name == "confirm" {
+						if name == "confirm" && jname == "clean" {
 							floor, layer = c1[i], "rules"
 						}
 						if raiseOnlyActionRank(c3[i].Action) < raiseOnlyActionRank(floor.Action) {
 							t.Errorf("%s/%s/S1 %s/judge %s call %d: rules+S1+judge %s lowered %s %s (%s)",
 								tier.name, connector, name, jname, i, c3[i].Action, layer, floor.Action, c3[i].Reason)
+						}
+						// Rule 1: no judge answer, exactly cascade 2 (the hook
+						// fail mode's refusal of an escalated CRITICAL finding
+						// is the only raise a missing judge makes).
+						refused := slices.Contains(c3[i].Findings, escalatedJudgeUnavailableFinding)
+						if jname != "clean" && !refused && (c3[i].Action != c2[i].Action || c3[i].Severity != c2[i].Severity) {
+							t.Errorf("%s/%s/S1 %s/judge %s call %d: no judge answer gave %s %s, want cascade 2's %s %s",
+								tier.name, connector, name, jname, i, c3[i].Action, c3[i].Severity, c2[i].Action, c2[i].Severity)
 						}
 					}
 				}

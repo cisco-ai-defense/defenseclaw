@@ -173,7 +173,9 @@ func cascadeUnsureVerdict(onUnsure, reason string, risk float64) *ScanVerdict {
 // the judge on never lowers what System One gives on its own (raise-only
 // across layers, rel-1-0-10:GAP-0867).
 func applyCascadeJudgeRole(cfg *config.Config, connector string, decisionOnly bool, v *ScanVerdict) *ScanVerdict {
-	if v == nil || decisionOnly || cfg == nil || cfg.SecureClientIntegration() || v.JudgeFailed {
+	if v == nil || decisionOnly || cfg == nil || cfg.SecureClientIntegration() || v.JudgeFailed || v.decisionFloorOnly {
+		// decisionFloorOnly: the judge gave no verdict and the answer is
+		// System One's own (GAP-0867, GAP-0868); the judge role caps nothing.
 		return v
 	}
 	e := cfg.ResolveCascade(connector)

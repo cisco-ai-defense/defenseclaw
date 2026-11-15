@@ -36,6 +36,11 @@ With no `guardrail.cascade` block, every decision is the same as before: the def
 
 System One and the judge only ever **raise** the rules' verdict. The Rego policy is the only step that can lower it, and only within your limits.
 
+Turning on a later layer never lowers what an earlier layer gives on its own:
+
+- **A judge that does not answer changes nothing.** A timeout, an error, a late answer, no free judge slot or the judge turned off: the call keeps exactly what rules and System One give without the judge, a System One ask or alert included.
+- **An unsure System One answer has no verdict of its own.** When the judge does answer, its answer settles the call, but never below the rules' verdict. A confident System One block is never lowered: it blocks with the judge on as it does without it, and the judge can only add.
+
 ## Settings
 
 The released keys keep their meaning: `guardrail.mode`, `block_at`, `alert_at`, `hilt`, `rule_pack`, `rules`, `guardrail.judge.*`, `guardrail.detection_strategy*` and `decision_model.*`. `guardrail.cascade` holds the rest.

@@ -714,6 +714,9 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 	if res.failure == "" && res.logLine != "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", res.logLine)
 	}
+	// What System One gives on its own for an unsure answer (cascade 2), read
+	// before a rule-flagged allow is escalated below.
+	unsure := decisionUnsureVerdict(res, dm.routingFor(ctx))
 	if res.route == decisionAllow && decisionRuleFloorFrom(ctx) {
 		// The rules flagged this call: their finding is a floor and the
 		// judge still runs (the benchmark's escalate-on-confirm).
@@ -748,7 +751,18 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 			emitDecisionModel(ctx, dm.model, toolName, args, res, nil)
 		}
 		recordCascadeSystemOne(ctx, res, nil)
+		if unsure != nil {
+			// A judge that does not answer (an error, a timeout, a late
+			// answer, no slot) never lowers what System One gives on its
+			// own: the hook keeps cascade 2's ask or alert (GAP-0868).
+			decisionFloorSlotFrom(ctx).set(unsure)
+		}
 		judged := j.runToolJudgeLLM(ctx, toolName, args, sample)
+		if unsure != nil && (judged == nil || judged.JudgeFailed) {
+			out := *unsure
+			out.decisionFloorOnly = true
+			return &out
+		}
 		if decisionBench.mediumAlerts && judged != nil && judged.reviewOnly && !res.skipped && res.failure == "" {
 			c := *judged
 			c.reviewOnly = false
@@ -826,6 +840,25 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 		v.Confidence = 1 - res.risk
 	case res.route == decisionBlock:
 		v = confidentBlockVerdict(res, routing.blockAt, routing.blockRiskScore)
+	default:
+		v = decisionUnsureVerdict(res, routing)
+	}
+	emitDecisionModel(ctx, dm.model, toolName, args, res, v)
+	return v
+}
+
+// decisionUnsureVerdict is cascade 2's verdict on an unsure System One answer
+// (a refusal, a confirm, or an allow or block short of its threshold): the
+// ask, or what guardrail.cascade.system_one.on_unsure sets. nil for a
+// confident allow or block, a flow-guarded allow (an abstention) and a model
+// that gave no answer. Cascade 3 keeps it when the judge does not answer
+// (raise-only across layers, rel-1-0-10:GAP-0868); a judge answer may
+// resolve it.
+func decisionUnsureVerdict(res decisionResult, routing cascadeSystemOneRouting) *ScanVerdict {
+	var v *ScanVerdict
+	switch {
+	case res.flowGuarded, res.failure != "" && res.refusal == "", res.route == decisionAllow, res.route == decisionBlock:
+		return nil
 	case res.refusal != "" && cascadeUnsureVerdict(routing.onUnsure, "", 0) != nil:
 		v = cascadeUnsureVerdict(routing.onUnsure, fmt.Sprintf("decision-model: declined (%s)", res.refusal), 0)
 	case res.refusal != "":
@@ -852,7 +885,6 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 			decisionConfirm: true,
 		}
 	}
-	emitDecisionModel(ctx, dm.model, toolName, args, res, v)
 	return v
 }
 
