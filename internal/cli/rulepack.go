@@ -77,7 +77,6 @@ var shippedToolCallRegexIDs = map[string]bool{
 	"CMD-PERSIST-SYSTEM-SCHEDULE": true,
 	"CMD-PRIV-PATH-HIJACK":        true,
 	"CMD-PRIV-SETUID":             true,
-	"CMD-RM-RF-GLOB":              true,
 	"CMD-SECRET-LOOKUP":           true,
 	"CMD-SECRET-REVEAL":           true,
 	"MCP-CODE-DECODE-EXEC":        true,

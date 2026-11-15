@@ -1490,13 +1490,6 @@ rules:
     severity: HIGH
     confidence: 0.85
     tags: [persistence, privilege-escalation]
-  - id: CMD-RM-RF-GLOB
-    tool_call_only: true
-    pattern: 'a^'
-    title: "Recursive force delete of everything in a critical folder"
-    severity: CRITICAL
-    confidence: 0.9
-    tags: [destructive]
   - id: CMD-ACCOUNT-CREATE
     tool_call_only: true
     pattern: 'a^'
