@@ -122,7 +122,8 @@ type windowsHookImagePruneReport struct {
 
 // windowsHookImageRetained is a launch folder prune left although it is
 // neither current nor kept: Why is named_by:<file>,
-// superseded_recently:<RFC3339 time it was superseded> or scan_incomplete.
+// superseded_recently:<RFC3339 time it was superseded>, scan_incomplete or
+// unverified_account_file:<file>.
 type windowsHookImageRetained struct {
 	Folder string `json:"folder"`
 	Why    string `json:"why"`
@@ -718,6 +719,10 @@ func pruneWindowsHookImages(fsys windowsHookImageFS, bin string, keep []string, 
 	}
 	for _, file := range policy.Scan.Unverified {
 		report.Notes = append(report.Notes, "skipped_unsafe: "+file.Line())
+	}
+	if len(policy.Scan.Unverified) > 0 {
+		report.Notes = append(report.Notes, fmt.Sprintf("unverified_account_files: %d account file(s) could not be read or verified and may name any launch folder; "+
+			"every superseded launch folder is kept until they can be", len(policy.Scan.Unverified)))
 	}
 	for _, entry := range entries {
 		name := entry.Name()

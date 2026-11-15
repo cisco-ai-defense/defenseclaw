@@ -121,7 +121,7 @@ func windowsHookImageAccountView(view func(home, path string) (fs.FileInfo, []fs
 // so a path held with an oplock, or one that does not answer, cannot keep
 // retire or prune (which hold the lifecycle lock) waiting. A call still
 // blocked at the timeout is given up on; its goroutine ends with the process.
-var windowsHookImageScanTimeout = 5 * time.Second
+const windowsHookImageScanTimeout = 5 * time.Second
 
 var errWindowsHookImageScanTimeout = errors.New("did not answer in time (an oplock, or a path that does not answer); not read")
 
@@ -174,8 +174,9 @@ type windowsHookImageVendorFS struct {
 // owned by SYSTEM or Administrators; from the first element that is not, the
 // rest is account files read below ProgramData (Note not_admin_owned:
 // <element>), so one the user made unreadable, or a link the user made, is
-// unverified and never voids the scan (prune would keep every folder; retire
-// names it and stays pending until it is readable or its profile skipped). A link owned by SYSTEM or Administrators is not followed
+// unverified and never voids the scan (prune keeps every superseded folder
+// while one is left; retire names it and stays pending until it is readable
+// or its profile skipped). A link owned by SYSTEM or Administrators is not followed
 // either: it makes the scan incomplete (link_at_machine_folder), since only
 // an administrator can make it and what it points to is not known. A folder
 // SYSTEM cannot list is a problem (the scan is incomplete) when it is a
@@ -209,6 +210,9 @@ func windowsHookImageVendorFiles(programData, dir string, depth int, vfs windows
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			return "", "", true
+		case errors.Is(err, errWindowsHookImageScanTimeout):
+			// Not known to be an account's: the scan is incomplete.
+			return "", fmt.Sprintf("%s: %v", path, err), false
 		case err != nil:
 			// SYSTEM is not the owner of an object a standard user made and
 			// does not get READ_CONTROL on one whose ACL the user set, so an
@@ -304,10 +308,10 @@ type windowsHookImageConfigScan struct {
 	Incomplete []string
 	// Unverified are the account files that were a link, had a link at or
 	// below their account home (link_in_account_path), were not a regular
-	// file, too large, unreadable or did not answer in time. They do not
-	// void the scan: prune notes them (skipped_unsafe) and still keeps a
-	// folder they might name while it is current, the replaced one or
-	// replaced less than hookImageRetainAfterSupersede ago. Retire cannot
+	// file, too large, unreadable, did not answer in time, or that the list
+	// could not locate for certain (a signed-out Hermes account, a moved
+	// agent home). Prune notes them (skipped_unsafe) and keeps every
+	// superseded folder while one is left (unverified_account_file). Retire cannot
 	// tell whether they name a launch folder, so it names each in
 	// still_named (unreadable) and never ends ok over one (rel-1-0-10
 	// GAP-0882: an Administrator's retire was denied an account's .codex
@@ -734,6 +738,14 @@ func windowsHookImageStageTimes(fsys windowsHookImageFS, root string, entries []
 func windowsHookImageRetainReason(name string, staged map[string]time.Time, policy windowsHookImagePrunePolicy) string {
 	if len(policy.Scan.Incomplete) > 0 {
 		return "scan_incomplete"
+	}
+	// An account file that could not be read or verified (a signed-out
+	// Hermes account, a moved agent home, a link, a timeout) may name any
+	// folder, so no superseded folder goes while one is left (rel-1-0-10
+	// GAP-0891: such an account became one unread entry, and prune removed
+	// the folders its Hermes files still named).
+	if len(policy.Scan.Unverified) > 0 {
+		return "unverified_account_file:" + policy.Scan.Unverified[0].File.Path
 	}
 	if files := policy.Scan.Named[name]; len(files) > 0 {
 		return "named_by:" + files[0]
