@@ -1328,17 +1328,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	//  - OpenAI/Azure Responses API: {"input": [...] | "string", "instructions": "..."}
 	//  - Gemini generateContent: {"contents": [{"role": "user", "parts": [{"text": "..."}]}], "systemInstruction": {...}}
 	//  - Ollama /api/generate: {"prompt": "...", "system": "..."}
-	var partial struct {
-		Model             string          `json:"model"`
-		Messages          []ChatMessage   `json:"messages"`
-		System            string          `json:"system,omitempty"`
-		Instructions      string          `json:"instructions,omitempty"` // Responses API system prompt
-		Input             json.RawMessage `json:"input,omitempty"`        // Responses API
-		Contents          json.RawMessage `json:"contents,omitempty"`     // Gemini native
-		SystemInstruction json.RawMessage `json:"systemInstruction,omitempty"`
-		Prompt            string          `json:"prompt,omitempty"` // Ollama /api/generate + legacy completion APIs
-		Stream            bool            `json:"stream,omitempty"`
-	}
+	var partial passthroughBody
 	_ = json.Unmarshal(body, &partial)
 	if bedrockStreamingPath(r.URL.Path) {
 		// Bedrock names a stream by its path, not a body field (GAP-0098).
@@ -1354,118 +1344,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	provider := inferProviderFromURL(targetForMatch)
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
 
-	userText := lastUserText(partial.Messages)
-	// turnText is the whole user turn of a message list, inspected instead of
-	// userText as on the chat-completions route: OpenClaw 2026.9 appends a
-	// context message after the prompt (GAP-0190, GAP-0243). userText still
-	// drives the heartbeat and session-startup gates.
-	turnText := promptTurnText(partial.Messages)
-	// A coexisting Ollama /api/generate `prompt` is the user generation
-	// input. Do not let top-level `system` replace it (#718). Anthropic
-	// and other system-only native shapes still fall through here when
-	// prompt is empty.
-	// System must be non-blank, not merely non-empty: a whitespace-only value
-	// would otherwise become the inspected text and produce an empty-content
-	// inspection instead of falling through to the other native shapes.
-	if userText == "" && strings.TrimSpace(partial.System) != "" && strings.TrimSpace(partial.Prompt) == "" {
-		userText = partial.System
-	}
-	// Responses API: input can be a string or array of message/item objects.
-	if userText == "" && len(partial.Input) > 0 {
-		switch partial.Input[0] {
-		case '"':
-			// Plain string input
-			_ = json.Unmarshal(partial.Input, &userText)
-		case '[':
-			// Array of items. The Responses API wraps each turn in an outer
-			// object with "type":"message"; extract the inner content directly.
-			var rawItems []json.RawMessage
-			if json.Unmarshal(partial.Input, &rawItems) == nil {
-				var inputMsgs []ChatMessage
-				for _, raw := range rawItems {
-					var wrapper struct {
-						Type    string          `json:"type"`
-						Role    string          `json:"role"`
-						Content json.RawMessage `json:"content"`
-					}
-					if json.Unmarshal(raw, &wrapper) == nil {
-						// Both bare messages and "type":"message" wrapped items.
-						if wrapper.Role != "" {
-							msg := ChatMessage{Role: wrapper.Role, RawContent: wrapper.Content}
-							// Re-unmarshal to populate msg.Content via ChatMessage logic.
-							_ = json.Unmarshal(raw, &msg)
-							inputMsgs = append(inputMsgs, msg)
-						}
-					}
-				}
-				userText = lastUserText(inputMsgs)
-				turnText = promptTurnText(inputMsgs)
-				if len(partial.Messages) == 0 {
-					partial.Messages = inputMsgs
-				}
-			}
-		}
-	}
-	// Gemini native (generateContent / streamGenerateContent): top-level
-	// `contents[]` is an array of turns, each with `parts[]` holding the
-	// actual text. Prior to this, Gemini-shaped bodies reached
-	// handlePassthrough with userText == "" and bypassed pre-call
-	// inspection entirely — a full policy bypass on Gemini's wire format.
-	// Also pull systemInstruction as a fallback so Vertex flows that
-	// only set a system prompt are still inspected.
-	if userText == "" && len(partial.Contents) > 0 {
-		if turns := extractGeminiContentsText(partial.Contents); len(turns) > 0 {
-			// Build synthetic ChatMessages so downstream scanners
-			// (Cisco AI Defense, judge) see realistic conversation
-			// shape instead of a single blob.
-			geminiMsgs := make([]ChatMessage, 0, len(turns))
-			for _, t := range turns {
-				role := t.Role
-				if role == "model" {
-					role = "assistant"
-				}
-				if role == "" {
-					role = "user"
-				}
-				geminiMsgs = append(geminiMsgs, ChatMessage{Role: role, Content: t.Text})
-			}
-			userText = lastUserText(geminiMsgs)
-			turnText = promptTurnText(geminiMsgs)
-			if len(partial.Messages) == 0 {
-				partial.Messages = geminiMsgs
-			}
-		}
-	}
-	if userText == "" && len(partial.SystemInstruction) > 0 {
-		userText = extractGeminiSystemInstructionText(partial.SystemInstruction)
-	}
-
-	// Ollama /api/generate + legacy completion endpoints: top-level
-	// `prompt` is a single string. Inspect it like any user turn so
-	// direct Ollama clients are not a bypass route. When system and
-	// prompt coexist, keep both in Messages for message-aware inspectors
-	// and join both texts for regex_judge / content scanners, which
-	// inspect the string rather than Messages (#718). One Inspect keeps
-	// managed AID at a single call.
-	ollamaSystemText := ""
-	if userText == "" && strings.TrimSpace(partial.Prompt) != "" {
-		userText = partial.Prompt
-		if strings.TrimSpace(partial.System) != "" {
-			ollamaSystemText = partial.System
-		}
-		if len(partial.Messages) == 0 {
-			if ollamaSystemText != "" {
-				partial.Messages = append(partial.Messages, ChatMessage{Role: "system", Content: ollamaSystemText})
-			}
-			partial.Messages = append(partial.Messages, ChatMessage{Role: "user", Content: partial.Prompt})
-		}
-	}
-
-	// Responses API: fall back to instructions (system-level prompt) if no
-	// user turn was found — still worth inspecting for prompt injection.
-	if userText == "" && partial.Instructions != "" {
-		userText = partial.Instructions
-	}
+	// The message view the inspectors read, and the user and turn text
+	// (passthroughBody.promptView). After a history redaction the view is
+	// read again from the body that goes on (GAP-0284).
+	userText, turnText, ollamaSystemText := "", "", ""
+	partial.Messages, userText, turnText, ollamaSystemText = partial.promptView()
 
 	passthroughPromptID := ""
 	passthroughReqForTelemetry := ChatRequest{Model: partial.Model, RawBody: body}
@@ -1498,21 +1381,39 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// (GAP-0254); a body that cannot be rewritten is refused while it carries
 	// one.
 	historyCaller, historyScope := p.historyScope(r, mode)
-	freshHistory, refusedHistory := p.history.fresh(historyScope, side.History)
+	freshHistory, refusedHistory := p.history.fresh(r.Context(), historyScope, side.History)
+	// The same refused request sent again is inspected whole and refused
+	// again, never redacted (GAP-0244); a session that went on after the
+	// refusal has its refused turns removed (GAP-0300).
+	requestPrint := historyRequestPrint(side.Segments, side.History)
+	if len(refusedHistory) > 0 && p.history.retried(r.Context(), historyScope, requestPrint) {
+		freshHistory, refusedHistory = uniqueSegments(side.History), nil
+	}
 	var redactedBody []byte
 	var redactions []historyRedaction
 	if len(refusedHistory) > 0 {
+		historyKeep := historyHashSet(side.Segments)
 		if !requestBodyIsSigned(r) {
-			redactedBody, redactions, _ = redactRefusedHistory(body, p.maxBodyValues(), refusedHistory)
+			redactedBody, redactions, _ = redactRefusedHistory(body, p.maxBodyValues(), refusedHistory, historyKeep)
 		}
-		if redactions == nil {
+		// A refused text the request sends again in its current scope is not
+		// removed: the inspection below reads it there (GAP-0265).
+		if redactions == nil && !historyAllKept(refusedHistory, historyKeep) {
 			v := refusedHistoryVerdict()
 			fmt.Fprintf(os.Stderr, "[guardrail] request refused %s: %s\n", label, v.Reason)
 			p.recordTelemetry(r.Context(), "prompt", label, v, 0, mode, true)
 			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, blockMessage(customBlockMsg, "prompt", v.Reason))
 			return
 		}
-		partial.Messages = redactHistoryMessages(partial.Messages, refusedHistory)
+		if redactedBody != nil {
+			// The inspectors (AI Defense) read the body that goes on, through
+			// the same reader: the view holds exactly what the upstream gets,
+			// the refused string replaced and every other block and string
+			// kept (GAP-0284).
+			var sent passthroughBody
+			_ = json.Unmarshal(redactedBody, &sent)
+			partial.Messages, _, _, _ = sent.promptView()
+		}
 	}
 	inspectedSegs := promptSegments(side.Segments, freshHistory)
 	inspectRaw = joinPromptSegments(inspectRaw, inspectedSegs)
@@ -1578,8 +1479,8 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			// the client sends them back as history; the new history of a
 			// refused request is inspected again (GAP-0244).
 			// Only what the refusal is attributed to keeps it (GAP-0257).
-			blamed := p.refusedSegments(r.Context(), verdict, side.Segments, side.Turn, label, mode)
-			p.history.record(historyCaller, historyScope, promptSegments(blamed, []string{msg}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
+			blamed := p.refusedSegments(r.Context(), verdict, side.Segments, side.Turn, freshHistory, label, mode)
+			p.history.record(r.Context(), historyCaller, historyScope, promptSegments(blamed, []string{msg, requestPrint}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
 			// Enqueue a notification BEFORE writing the block
 			// response so the next proxy call (this client's retry,
 			// or any other session) carries the authoritative
@@ -1598,7 +1499,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
 			return
 		}
-		p.history.record(historyCaller, historyScope, inspectedSegs, verdict, false, inspectDegraded.degraded(), p.historySeenMax())
+		p.history.record(r.Context(), historyCaller, historyScope, inspectedSegs, verdict, false, inspectDegraded.degraded(), p.historySeenMax())
 	}
 	if redactedBody != nil {
 		body = redactedBody
@@ -2746,17 +2647,29 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// of a request the proxy refused is removed from the body it forwards
 	// (GAP-0254).
 	historyCaller, historyScope := p.historyScope(r, mode)
-	freshHistory, refusedHistory := p.history.fresh(historyScope, chatSide.History)
+	freshHistory, refusedHistory := p.history.fresh(r.Context(), historyScope, chatSide.History)
+	// The same refused request sent again is inspected whole and refused
+	// again, never redacted (GAP-0244); a session that went on after the
+	// refusal has its refused turns removed (GAP-0300).
+	requestPrint := historyRequestPrint(chatSide.Segments, chatSide.History)
+	if len(refusedHistory) > 0 && p.history.retried(r.Context(), historyScope, requestPrint) {
+		freshHistory, refusedHistory = uniqueSegments(chatSide.History), nil
+	}
 	var redactions []historyRedaction
 	if len(refusedHistory) > 0 {
 		var redacted []byte
+		keep := historyHashSet(chatSide.Segments)
 		if len(req.RawBody) > 0 && !requestBodyIsSigned(r) {
-			redacted, redactions, _ = redactRefusedHistory(req.RawBody, p.maxBodyValues(), refusedHistory)
+			redacted, redactions, _ = redactRefusedHistory(req.RawBody, p.maxBodyValues(), refusedHistory, keep)
 		}
 		var rebuilt struct {
 			Messages []ChatMessage `json:"messages"`
 		}
-		if redactions == nil || json.Unmarshal(redacted, &rebuilt) != nil {
+		switch {
+		case redactions == nil && historyAllKept(refusedHistory, keep):
+			// The refused text is sent again in the current scope: the
+			// inspection below reads it there (GAP-0265).
+		case redactions == nil || json.Unmarshal(redacted, &rebuilt) != nil:
 			v := refusedHistoryVerdict()
 			fmt.Fprintf(os.Stderr, "[guardrail] request refused %s: %s\n", req.Model, v.Reason)
 			p.recordTelemetry(r.Context(), "prompt", req.Model, v, 0, mode, true)
@@ -2767,8 +2680,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				p.writeBlockedResponse(w, req.Model, msg)
 			}
 			return
+		default:
+			req.RawBody, req.Messages = redacted, rebuilt.Messages
 		}
-		req.RawBody, req.Messages = redacted, rebuilt.Messages
 	}
 	inspectedSegs := promptSegments(chatSide.Segments, freshHistory)
 	inspectText = joinPromptSegments(inspectText, inspectedSegs)
@@ -2860,8 +2774,8 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		if (verdict.Action == "block" && mode == "action") || auditClosed {
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
-			blamed := p.refusedSegments(r.Context(), verdict, chatSide.Segments, chatSide.Turn, req.Model, mode)
-			p.history.record(historyCaller, historyScope, promptSegments(blamed, []string{msg}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
+			blamed := p.refusedSegments(r.Context(), verdict, chatSide.Segments, chatSide.Turn, freshHistory, req.Model, mode)
+			p.history.record(r.Context(), historyCaller, historyScope, promptSegments(blamed, []string{msg, requestPrint}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
 			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
 			if req.Stream {
@@ -2871,7 +2785,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 			return
 		}
-		p.history.record(historyCaller, historyScope, inspectedSegs, verdict, false, inspectDegraded.degraded(), p.historySeenMax())
+		p.history.record(r.Context(), historyCaller, historyScope, inspectedSegs, verdict, false, inspectDegraded.degraded(), p.historySeenMax())
 	}
 	p.auditHistoryRedactions(r, redactions)
 

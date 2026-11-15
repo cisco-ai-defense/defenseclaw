@@ -38,7 +38,8 @@ import (
 )
 
 // Leader methods this package serves besides leader.MethodChainObserve,
-// leader.MethodIntentGet and leader.MethodIntentPut.
+// leader.MethodIntentGet, leader.MethodIntentPut and the inspect-once record
+// (MethodHistorySeen, MethodHistoryRecord).
 const (
 	MethodChainLifecycle = "ChainLifecycle"
 	MethodChainEgress    = "ChainEgress"

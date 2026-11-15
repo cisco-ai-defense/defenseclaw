@@ -21,6 +21,7 @@ import (
 	"errors"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/historystore"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 )
@@ -89,15 +90,19 @@ func substrateChainActor(ctx context.Context) (chainstate.Actor, bool) {
 	return chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID}, true
 }
 
-// useSubstrateChains points the judges' session intent at the leader (nil
-// restores process-local intent). Each judge role has its own namespace on
+// useSubstrateChains points the judges' session intent and the proxy's
+// inspect-once record at the leader (nil restores the process-local ones). Each judge role has its own namespace on
 // the leader, as each judge has its own store on a host; a call that is not
 // an actor's keeps a process-local store per judge.
 func useSubstrateChains(client *chainstate.Client) {
 	if client == nil {
 		setJudgeIntentStores(nil)
+		setSubstrateHistoryStore(nil)
 		return
 	}
+	// The proxy's inspect-once record of an actor is the leader's, so every
+	// replica knows a turn refused on another one (GAP-0266).
+	setSubstrateHistoryStore(&chainstate.HistoryStore{Client: client, ActorOf: substrateChainActor, Fallback: &historystore.Process{}})
 	setJudgeIntentStores(func(role string) intentstore.Store {
 		return &chainstate.IntentStore{
 			Client:    client,
