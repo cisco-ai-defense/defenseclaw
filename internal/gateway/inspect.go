@@ -1325,13 +1325,16 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// default (regex_only) returns nil and no LLM round-trip happens. Runs
 	// after the regex/AID lanes so regex_judge can skip the round-trip when
 	// the local lanes already condemned the call.
+	// The task-scope floor is read here, before the judge runs and apart from
+	// it: a judge that is late, busy, skipped or failed cannot drop it (GAP-0372).
+	scope := a.hookScopeFloor(ctx, toolName, argsStr, req.callerCWD)
 	if req.skipJudge {
 		// The caller judges this call's content in another lane (the routing
 		// values of a message call, inspectMessageCall).
 	} else if jv := a.runHookJudge(ctx, "tool_call", "prompt", req.Connector, argsStr, toolName, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
-	return verdict
+	return a.applyHookScopeFloor(ctx, req.Connector, scope, toolName, argsStr, verdict)
 }
 
 // highestInspectConfidence keeps verdict confidence aligned with the visible
