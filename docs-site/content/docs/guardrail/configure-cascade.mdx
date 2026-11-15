@@ -28,13 +28,18 @@ With no `guardrail.cascade` block, every decision is the same as before: the def
 ## The order of a decision
 
 1. **Rules.** The rule pack and your `block_at`, `alert_at` and `hilt` settings decide. An input DefenseClaw could not read in full (too long, too deep, too many paths) is judged at least at the **unknown tier**.
-2. **System One** (if on). A confident allow lets the call through, unless the rules flagged it. A confident block needs both the block probability and the risk score, and never lands on a call the rules flagged. With the judge, a confident block always goes to the judge (it is never final). Without the judge, it blocks, and an unsure answer asks.
+2. **System One** (if on). A confident allow lets the call through, unless the rules flagged it. A confident block needs both the block probability and the risk score, and never lands on a call the rules flagged. A confident block blocks, with or without the judge: the judge still runs on it and can only add. Without the judge, an unsure answer asks; with the judge, the judge answers it.
 3. **LLM judge** (if on). It runs on the calls the rules could not settle (`regex_judge`) or on every call (`judge_first`). Its role is set by `guardrail.cascade.judge`.
 4. **Rego policy** (if set). It sees the findings and every layer's answer, and may set the final action between `policy.lowest` and `policy.highest`.
 5. **The CRITICAL floor.** A proven CRITICAL finding never ends below `admin.critical_floor` (alert by default), whatever the layers or the policy decided.
 6. **Mode and the agent.** In `observe` mode nothing is blocked or asked. A confirm becomes the agent's own question where it can ask, and its usual fallback where it cannot.
 
 System One and the judge only ever **raise** the rules' verdict. The Rego policy is the only step that can lower it, and only within your limits.
+
+Turning on a later layer never lowers what an earlier layer gives on its own:
+
+- **A judge that does not answer changes nothing.** A timeout, an error, a late answer, no free judge slot or the judge turned off: the call keeps exactly what rules and System One give without the judge, a System One ask or alert included.
+- **An unsure System One answer has no verdict of its own.** When the judge does answer, its answer settles the call, but never below the rules' verdict. A confident System One block is never lowered: it blocks with the judge on as it does without it, and the judge can only add.
 
 ## Settings
 
@@ -48,7 +53,7 @@ The released keys keep their meaning: `guardrail.mode`, `block_at`, `alert_at`, 
 | `cascade.judge.no_verdict` | `rules`, `unknown` | When the judge (or System One alone) gives no answer: keep the rules' verdict, or judge the call at the unknown tier. |
 | `cascade.system_one.on_unsure` | `confirm`, `alert`, `rules` | System One without the judge, on an unsure answer or a refusal: ask, alert, or add nothing. |
 | `cascade.system_one.allow_threshold`, `.block_threshold`, `.block_risk_score`, `.escalate_rule_flagged` | the `decision_model` values | Per connector or profile only: override [System One's routing](/docs/guardrail/decision-model) for that scope. The global values stay in `decision_model`. |
-| `cascade.lanes.<lane>` | each lane's shipped value | `off`, `shadow` (record the lane's verdict, never change the answer) or `on`. A lane that ships shadow-only in this release accepts `off` and `shadow`. `defenseclaw guardrail cascade explain` lists the lanes. |
+| `cascade.lanes.<lane>` | each lane's shipped value | `off`, `shadow` (record the lane's verdict, never change the answer) or `on`. A lane that ships shadow-only in this release accepts `off` and `shadow`. The [alignment check](/docs/guardrail/alignment-check) lane takes `off` (default), `shadow`, `alert` or `block`. `defenseclaw guardrail cascade explain` lists the lanes. |
 | `cascade.policy.module` | unset | `{path: /absolute/path/cascade.rego, digest: "sha256:<hex>"}`. The Rego policy, pinned by its digest. |
 | `cascade.policy.lowest` | `alert`, `allow`, `log`, `confirm` | The lowest action the policy may set on a call any layer flagged. |
 | `cascade.policy.highest` | `block`, `confirm`, `alert` | The highest action the policy may set. |
@@ -136,7 +141,7 @@ guardrail:
       module: {path: /etc/defenseclaw/cascade.rego, digest: "sha256:<hex of the file>"}
 ```
 
-```rego
+```text
 package defenseclaw.cascade
 import rego.v1
 
@@ -170,7 +175,7 @@ A judge block on a call System One did not confidently block asks the person ins
 
 One module, with a rule per team, keyed on the verified profile:
 
-```rego
+```text
 package defenseclaw.cascade
 import rego.v1
 

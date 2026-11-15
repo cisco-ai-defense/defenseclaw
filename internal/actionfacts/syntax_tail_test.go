@@ -91,3 +91,61 @@ func TestSimpleCommandsReadTheShellOptionAsTheShellSeesIt(t *testing.T) {
 		t.Errorf("a dynamic script path: %+v", simples)
 	}
 }
+
+// rel-1-0-10:GAP-0876: the command of a quoted here-document decides what its
+// body is: shell code only for a command that runs its standard input as
+// code, data for any other, and unknown when the command is not known.
+func TestSyntaxTailHereDocConsumer(t *testing.T) {
+	for consumer, want := range map[string]hereDocConsumer{
+		"cat > notes.txt":  hereDocData,
+		"cat $f":           hereDocData,
+		"tee -a log":       hereDocData,
+		"python3 -":        hereDocData,
+		"bash -c ls":       hereDocData,
+		"bash":             hereDocRunsCode,
+		"sh -s":            hereDocRunsCode,
+		"/bin/zsh":         hereDocRunsCode,
+		"env FOO=1 bash":   hereDocRunsCode,
+		"sudo sh":          hereDocRunsCode,
+		"cat | sh":         hereDocRunsCode,
+		"$P":               hereDocUnknown,
+		"sudo $X":          hereDocUnknown,
+		"":                 hereDocUnknown,
+		"cat > \"unclosed": hereDocUnknown,
+	} {
+		if got := syntaxTailHereDocConsumer(consumer); got != want {
+			t.Errorf("%q: %d, want %d", consumer, got, want)
+		}
+	}
+}
+
+// The body of a quoted here-document after the error is read as statements
+// only when its command is a shell; any other command's body is its input.
+func TestSimpleCommandsReadAHereDocBodyOnlyForAShell(t *testing.T) {
+	script := func(consumer string) string {
+		return "tool '" + consumer + " <<'\"'\"'EOF'\"'\"'\nit's (x)\necho data\nEOF\n'"
+	}
+	read := func(command string) []SimpleCommand {
+		input := Input{Tool: "Bash", Command: command, CWD: "/w"}
+		return SimpleCommands(input, Analyze(input))
+	}
+	reads := func(simples []SimpleCommand) bool {
+		return slices.ContainsFunc(simples, func(simple SimpleCommand) bool {
+			return simple.Text == "echo data" && simple.EvaluationFailure == ""
+		})
+	}
+	unknown := func(simples []SimpleCommand) bool {
+		return slices.ContainsFunc(simples, func(simple SimpleCommand) bool {
+			return simple.EvaluationFailure == EvaluationFailureUnresolvedBody
+		})
+	}
+	if simples := read(script("cat > notes.txt")); reads(simples) || unknown(simples) || !slices.ContainsFunc(simples, isSyntaxTailUnread) {
+		t.Errorf("cat: %+v, want the body unread and only the syntax marker", simples)
+	}
+	if simples := read(script("bash")); !reads(simples) {
+		t.Errorf("bash: %+v, want the body read as statements", simples)
+	}
+	if simples := read(script("$P")); reads(simples) || !unknown(simples) {
+		t.Errorf("$P: %+v, want the body unread and the unknown tier", simples)
+	}
+}

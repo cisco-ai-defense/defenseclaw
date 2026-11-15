@@ -1175,6 +1175,12 @@ func (argument ArgumentFact) HomeSpelling() string {
 	return argument.homeSpelling
 }
 
+// StaticPrefix is, for a word that expands, the text it starts with before its
+// first expansion ("~/backups" for ~/backups, "" for $D/x), else "".
+func (argument ArgumentFact) StaticPrefix() string {
+	return argument.staticPrefix
+}
+
 type QuoteKind string
 
 const (
