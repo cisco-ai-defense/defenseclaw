@@ -70,6 +70,11 @@ func TestWindowsLauncherSpellingsPastTheBoundAreNeverACleanAllow(t *testing.T) {
 		{"wsl-e", text(func(l string) string { return "wsl -e " + l }), false},
 		{"split-quote", text(func(l string) string { return `pow""ershell` + rest(l) }), false},
 		{"cr-lead", text(func(l string) string { return "echo a\r" + l }), false},
+		// An ANSI-C quote with an escaped quote before the launcher: the POSIX
+		// analysis reads the call as invalid syntax, so the syntax-error
+		// reading must hand the statement past the word limit to the bound
+		// check (rel-1-0-10:GAP-0740 residual lead-dollarsq).
+		{"lead-dollarsq", text(func(l string) string { return `echo $'a\'b'; ` + l }), false},
 		{"bash-c-quote", text(func(l string) string { return "bash -lc '" + l + "'" }), false},
 		{"sudo-bash-c-quote", text(func(l string) string { return "sudo -E bash -c \"" + l + "\"" }), false},
 		{"eval-quote", text(func(l string) string { return `eval "` + l + `"` }), false},

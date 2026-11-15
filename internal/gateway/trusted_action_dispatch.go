@@ -768,6 +768,21 @@ func dispatchTrustedAction(
 			findings = withBoundedTruncation(findings, bounded.Of(bounded.Bytes), request)
 		}()
 	}
+	// The POSIX analysis reads a call as invalid syntax when it holds a Bash
+	// spelling it has no grammar for (an ANSI-C quote with an escaped quote
+	// before the launcher, rel-1-0-10:GAP-0740 lead-dollarsq), so it never
+	// stops at the input bound the Bash reading of the same text hits: a
+	// word past the string bound in a call that names a host launcher is
+	// truncated all the same, never a clean allow.
+	if facts.Parse.Status == actionfacts.StatusInvalid && slices.Contains(facts.Parse.Issues, actionfacts.IssueInvalidSyntax) {
+		if command, known := trustedBashCommandInput(request.Input); known &&
+			actionfacts.ShellInputPastByteBound(command, len(request.Input.Args)) &&
+			actionfacts.TruncatedHostCall(request.Input) {
+			defer func() {
+				findings = withBoundedTruncation(findings, bounded.Of(bounded.Bytes), request)
+			}()
+		}
+	}
 	// A download cradle psparse proves on the tree, in a call the tokenizer
 	// cannot prove it in, is judged at the unknown tier of the pack at least
 	// (rel-1-0-10:GAP-0160): an alert outside the strict tier, a block in it.
