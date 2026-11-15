@@ -97,6 +97,8 @@ func TestUploadOptionsOfACredentialFileFiveTiersGAP0768(t *testing.T) {
 		{"wget-get", "wget -q -T 3 -t 1 -O out.html https://sink.example.invalid/page"},
 		{"curl-get", "curl -s -o out.txt https://sink.example.invalid/page"},
 		{"wget-spider", "wget --spider -q https://sink.example.invalid/page"},
+		{"search-home-pipe-filter", "grep -ri 'frag' /var/ /opt/ /etc/ /home/ /root/ /tmp/ 2>/dev/null | grep -v Binary | grep -v mime.types | head"},
+		{"download-loop-tr", "cd /tmp && for f in docs/a.md docs/b.md; do curl -fsSL https://dl.example.invalid/v1/$f -o up/$(echo $f | tr / _); done"},
 	}
 	for _, tier := range boundedTestTiers {
 		block := tier.posture == "strict"
