@@ -2296,7 +2296,7 @@
    "TestSecondaryPanicHasOneResultOnEverySink": 44.8,
    "TestSecretAssignmentAcceptsRandomValuesOfEveryAlphabet": 2.1,
    "TestSecretAssignmentGeneratedValuesWithSeparatorsAreNotNames": 2.1,
-   "TestSecretReadChainJoinsProvenReadsAndUploads": 20.2,
+   "TestSecretReadChainJoinsProvenReadsAndUploads": 50.5,
    "TestSecretReadChainReviewDerivedUploadInTheUploadCall": 14.4,
    "TestSecretReadChainReviewDerivedUploadInTheUploadCallLocalCwd": 15.9,
    "TestSecretReadChainReviewProbes": 24.1,
