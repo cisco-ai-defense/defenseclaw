@@ -113,7 +113,7 @@ func TestDecisionHistorySurvivesPromptsAndResultsAreOptIn(t *testing.T) {
 	if h := historyCall(j0, ctx0, `{"command":"make deploy"}`).SessionHistory; h != "" {
 		t.Fatalf("history_turns 0 sent history: %q", h)
 	}
-	jr.ResetToolJudgeSession(sandboxSessionStateKey(ctxr, SessionIDFromContext(ctxr)))
+	jr.ResetToolJudgeSession(ctxr, sandboxSessionStateKey(ctxr, SessionIDFromContext(ctxr)))
 	if h := jr.renderDecisionHistory(ctxr); h != "" {
 		t.Fatalf("a session reset kept the history: %q", h)
 	}

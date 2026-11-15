@@ -40,6 +40,8 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	actionClientProvedSafeVariableTargetsForHook(command, cwd, home)
 	actionClientVariableWriteCandidate(command, home)
 	ActionCommandDecision(command, cwd, home)
+	actionSedInPlaceWrite(command, cwd, home, nil)
+	SedInPlaceBackupUnresolved(command, cwd, home)
 	actionClientProvedOverwrittenRedirect(command, cwd, home)
 	actionClientLoopCopyDestinationProtected(command, cwd, home)
 	if NoDereferenceTouchShape(command, cwd, home) {
@@ -119,7 +121,7 @@ var gap0749ResolveReaderCalls = []string{
 	"SafeShellRedirectOccurrencesWithFacts", "ShellDirectoryWriteOperands", "ShellWriteOperands",
 	"StateNamingReading", "actionClientLoopCopyDestinationProtected", "actionClientProvedOverwrittenRedirect",
 	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
-	"actionConcreteProtectedWriteOnWithOperands", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
+	"actionConcreteProtectedWriteOnWithOperands", "actionSedInPlaceWrite", "SedInPlaceBackupUnresolved", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
 	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",

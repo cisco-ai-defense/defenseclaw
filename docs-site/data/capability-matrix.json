@@ -23,6 +23,7 @@
           "UserPromptExpansion",
           "PreToolUse",
           "PermissionRequest",
+          "PostToolUse",
           "TaskCreated",
           "TaskCompleted",
           "TeammateIdle",
