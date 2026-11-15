@@ -311,6 +311,53 @@ func TestHookJudge_ToolResultRunsToolResultInjectionJudge(t *testing.T) {
 	}
 }
 
+// A Claude Code PostToolUse hands the tool-result judge (the PII judge, which
+// reads a tool's output only for a tool the pack lists with judge_result,
+// GAP-0171) its tool and call (the hook inspects the output as "message"),
+// and the session's user request from UserPromptSubmit, outside the sample.
+func TestHookJudge_ClaudeCodeToolResultCarriesCallContext(t *testing.T) {
+	mock := injectionHitProvider()
+	a := newHookJudgeAPIServer(t,
+		config.JudgeConfig{Enabled: true, PII: true, PIICompletion: true, HookConnectors: []string{"claudecode"}},
+		"judge_first", mock)
+	a.scannerCfg.Guardrail.Connector = "claudecode"
+	home := t.TempDir()
+	ctx := ContextWithSessionID(t.Context(), "s-trctx")
+	judge := a.hookJudge.Load()
+	judge.rp = &guardrail.RulePack{SensitiveTools: &guardrail.SensitiveToolsConfig{Tools: []guardrail.SensitiveTool{
+		{Name: "mail_search", ResultInspection: true, JudgeResult: true},
+	}}}
+	judge.ObserveSessionPrompt(ctx, "update the parser fixtures")
+	a.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "PostToolUse", SessionID: "s-trctx", CWD: home, ToolName: "mail_search",
+		ToolInput:    map[string]interface{}{"query": "parser fixtures review"},
+		ToolResponse: map[string]interface{}{"content": "{\"case\": 1, \"text\": \"fixture row for the parser tests\"}"},
+	})
+	var system string
+	for _, req := range mock.captured {
+		if strings.Contains(req.Messages[0].Content, "CONTEXT FROM DEFENSECLAW") {
+			system = req.Messages[0].Content
+		}
+	}
+	if system == "" {
+		t.Fatalf("no tool-result judge call with the context block (%d calls)", len(mock.captured))
+	}
+	for _, want := range []string{"\ntool: mail_search\n", "\ncall: arguments ", "parser fixtures review"} {
+		if !strings.Contains(system, want) {
+			t.Errorf("system message lacks %q:\n%s", want, system)
+		}
+	}
+	var user string
+	for _, req := range mock.captured {
+		if strings.Contains(req.Messages[0].Content, "CONTEXT FROM DEFENSECLAW") {
+			user = req.Messages[1].Content
+		}
+	}
+	if !strings.HasPrefix(user, "USER_REQUEST") || !strings.Contains(user, "update the parser fixtures") {
+		t.Errorf("user message lacks the session's request before the sample: %.200q", user)
+	}
+}
+
 // HookConnectorEnabled gating matrix: case-insensitive names, the "*"
 // wildcard, judge.enabled as a hard precondition, and empty-list-off.
 func TestJudgeHookConnectorEnabled(t *testing.T) {

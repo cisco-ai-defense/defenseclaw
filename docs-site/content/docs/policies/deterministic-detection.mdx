@@ -70,12 +70,12 @@ the permissive ones. In every profile,
 `CMD-WRAPPED-DOWNLOAD-EXEC` and `CMD-SUBST-DOWNLOAD-EXEC` keep a `false`
 declaration because only their exact action proof can match them.
 
-The 281 enabled balanced/default rules are generated from
+The 282 enabled balanced/default rules are generated from
 `policies/guardrail/default/rules/*.yaml`:
 
 | Family | Rules | What it detects |
 | --- | ---: | --- |
-| `command` | 150 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
+| `command` | 151 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
 | `sensitive-path` | 29 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
 | `secret` | 26 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and secret assignments (a credential-named key with a random-looking value) |
 | `trust-exploit` | 30 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, role and chat-template spoofing, hidden text, and obfuscation signals |
@@ -502,7 +502,7 @@ The whole lane (these effects and the table rules on shell and native file-tool 
 
 ### Protected SSH keys
 
-In action mode a plain read of the active user's `authorized_keys` is allowed: `cat`, `head`, `tail`, `less`, `ls`, `stat`, `grep`, `egrep`, `fgrep`, `wc` and `ssh-keygen -l` (list mode only), and on Windows `type`, `findstr` and `Select-String`, Git Bash included. A shell wrapper that only reports `$?` after the read does not change that. Any other use is a protected write and is blocked: a redirect, a pipe into a command that writes, an in-place flag, `ssh-keygen -R`, `tee`, or the file as a copy source. Reads through an interpreter, `diff | head` and a nested `sh -c` stay blocked. In observe mode the write raises the CRITICAL would-block alert and runs.
+In action mode a plain read of the active user's `authorized_keys` is allowed: `cat`, `head`, `tail`, `less`, `ls`, `stat`, `grep`, `egrep`, `fgrep`, `wc` and `ssh-keygen -l` (list mode only), and on Windows `type`, `findstr` and `Select-String`, Git Bash included. A shell wrapper that only reports `$?` after the read does not change that. Any other use is a protected write and is blocked: a redirect, a pipe into a command that writes, an in-place flag, `ssh-keygen -R`, `tee`, or the file as a copy source. Reads through an interpreter, `diff | head` and a nested `sh -c` stay blocked. Two cases the scan cannot prove are unknown, not protected writes: the keys file named only as an operand of a program the scan has no model of (a script, an unfamiliar program, a variable program), or named by a statement that only reads it beside other work, and a write whose target the scan cannot resolve and whose command names no protected file or folder, makes no link and builds no name at run time. A per-user install alerts on them in the default and permissive packs; the strict pack and every managed install block them. A write the scan proves, or one whose command spells a protected name, blocks in every pack. In observe mode the write raises the CRITICAL would-block alert and runs.
 
 A read of a private key under `~/.ssh` is blocked in action mode (`PATH-SSH-KEY`) whichever program prints it, not only `cat`. A key read also includes a stdin redirect (`xxd < ~/.ssh/id_ed25519`), a recursive read of the key directory (`grep -r`, `rg`, or `Get-ChildItem` piped into `Select-String`) and `python -c`, `node -e`, `perl -e` or `ruby -e` code that opens the key. A named file that is not a key (`grep -r Host ~/.ssh/config`), a `.pub` file and a listing are not key reads. Everyday key use never puts the key's content in front of the agent and is allowed by the default and strict packs: `ssh-keygen -y`, `ssh-add`, `ssh -i` and a signed `git commit -S`. Observe mode records the read as a would-block alert. On managed Linux with Tetragon, the kernel control `kernel.ssh_private_key_read` also refuses the open once the admin has acknowledged enforce ([Tetragon](/docs/enterprise/tetragon)).
 

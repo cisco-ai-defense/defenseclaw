@@ -1438,7 +1438,7 @@ func ResolveWriteTarget(path string) (string, bool) {
 	// The reach scans of a shell call ask for every word of it again for each
 	// statement, 446,000 file system reads for 100 PowerShell lines, 27 s on a
 	// Windows host (rel-1-0-10:GAP-0766).
-	if call := currentHookCall(); call != nil {
+	if call := memoHookCall(); call != nil {
 		return call.targets().resolveWriteTarget(path)
 	}
 	return resolveWritePath(path, 0)
@@ -1505,7 +1505,7 @@ func newProtectedFiles(home string) protectedFiles {
 	// shell call ask for it for every statement, and each read walks every key
 	// file path and reads each file (rel-1-0-10:GAP-0766). The files are the
 	// same files for the whole decision.
-	if call := currentHookCall(); call != nil {
+	if call := memoHookCall(); call != nil {
 		return call.targets().protectedFiles(home)
 	}
 	return newProtectedFilesWith(home, nil)
@@ -4677,6 +4677,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				placedLinkCalls[call] = true
 			}
 		case slices.Contains(copyPrograms, program):
+			words, static := copyGlobOperandsAsNames(args, words, static)
 			_, topLevelPlaced := linkDirs[call]
 			_, nestedPlaced := nestedCopyDirs[call]
 			var globDestinations []string
@@ -7724,9 +7725,11 @@ func (l *shellLinks) record(source, name string, literal, symbolic bool, cwd str
 			text = relative
 		}
 	}
-	l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	if !linkPointsIntoItself(name, target) {
+		l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	}
 	if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
-		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
+		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name && !linkPointsIntoItself(resolved, target) {
 			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target, text: text})
 		}
 	}

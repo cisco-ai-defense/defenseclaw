@@ -91,7 +91,7 @@ func hookActionFor(t *testing.T, connector string, verdict *ToolInspectVerdict) 
 }
 
 func TestDecisionModelCascades(t *testing.T) {
-	const args = `{"command":"ls -la ./fixtures/reports"}`
+	const args = `{"command":"make -C ./fixtures/reports"}`
 	answers := map[string]struct {
 		choice string
 		pAllow float64
@@ -170,7 +170,7 @@ func TestDecisionModelAloneConfirmBlocksAtStrictLevels(t *testing.T) {
 	for _, connector := range []string{"claudecode", "codex"} {
 		a := cascadeAPIServer(t, 2, connector, srv.URL, "MEDIUM", nil)
 		verdict := a.inspectToolPolicy(&ToolInspectRequest{
-			Tool: "Bash", Args: json.RawMessage(`{"command":"ls -la ./fixtures/reports"}`), Direction: "tool_call", Connector: connector,
+			Tool: "Bash", Args: json.RawMessage(`{"command":"make -C ./fixtures/reports"}`), Direction: "tool_call", Connector: connector,
 		})
 		if verdict.Action != guardrailActionBlock || verdict.Severity != "HIGH" {
 			t.Fatalf("%s: verdict = %+v, want a HIGH block at block_at MEDIUM", connector, verdict)
@@ -184,7 +184,7 @@ func TestDecisionModelAloneOnlyWhereTheJudgeDoesNotRun(t *testing.T) {
 	var calls atomic.Int32
 	srv := countingDecisionModel(t, "block", 0.05, &calls)
 	a := cascadeAPIServer(t, 2, "claudecode", srv.URL, "", nil)
-	v := a.inspectToolPolicy(&ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{"command":"ls -la ./fixtures"}`), Direction: "tool_call", Connector: "codex"})
+	v := a.inspectToolPolicy(&ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{"command":"make -C ./fixtures"}`), Direction: "tool_call", Connector: "codex"})
 	if v.Action != "allow" || calls.Load() != 0 {
 		t.Fatalf("unlisted connector: verdict %+v, %d calls; want rules only", v, calls.Load())
 	}
@@ -193,7 +193,7 @@ func TestDecisionModelAloneOnlyWhereTheJudgeDoesNotRun(t *testing.T) {
 	b := cascadeAPIServer(t, 3, "claudecode", srv.URL, "", judge)
 	b.scannerCfg.DecisionModel.HookConnectors = []string{"*"}
 	b.SetHookDecisionJudge(newDecisionOnlyJudge(b.scannerCfg))
-	v = b.inspectToolPolicy(&ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{"command":"ls -la ./fixtures"}`), Direction: "tool_call", Connector: "claudecode"})
+	v = b.inspectToolPolicy(&ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{"command":"make -C ./fixtures"}`), Direction: "tool_call", Connector: "claudecode"})
 	if len(judge.captured) == 0 || v.Severity != "HIGH" {
 		t.Fatalf("judged connector: verdict %+v, judge calls %d; want cascade 3 (HIGH floor, judge ran)", v, len(judge.captured))
 	}
@@ -241,7 +241,7 @@ func TestDecisionModelAloneFaultsAreNeverAnAllow(t *testing.T) {
 			cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: "fake", BaseURL: srv.URL, Timeout: 0.2,
 				HookConnectors: []string{"claudecode"}}
 			j := newDecisionOnlyJudge(cfg)
-			v := j.RunToolJudge(context.Background(), "Bash", `{"command":"ls -la ./fixtures/reports"}`)
+			v := j.RunToolJudge(context.Background(), "Bash", `{"command":"make -C ./fixtures/reports"}`)
 			if v == nil || !v.JudgeFailed {
 				t.Fatalf("fault %s gave %+v, want a failed verdict (the judge-unavailable path)", name, v)
 			}
@@ -301,7 +301,7 @@ func TestDecisionModelAloneConfirmOnClaudeCodeHook(t *testing.T) {
 		{"acceptEdits", `JUDGE-DECISION-MODEL`, `"permissionDecision":"deny"`},
 	} {
 		body := `{"session_id":"dm-alone-1","hook_event_name":"PreToolUse","cwd":"/tmp","permission_mode":"` + tc.mode +
-			`","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"ls -la ./fixtures/reports"}}`
+			`","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"make -C ./fixtures/reports"}}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -46,14 +47,16 @@ func windowsEnterpriseNoAgentTargetReason() string {
 // GAP-0386) or a sandbox policy note (GAP-0536), not why security is
 // incomplete.
 var enterpriseInformationalWarningCodes = map[string]bool{
-	"cursor_adapter_restored":                  true,
-	"stale_lifecycle_journal_removed":          true,
-	"user_runtime_folder_untrusted":            true,
-	"runtime_generations_not_collected":        true,
-	"rule_pack_readable_by_users":              true,
-	"claude_project_skipped":                   true,
-	enterprisestatus.CodeSandboxDefaultProfile: true,
-	enterprisestatus.CodeSandboxAdvisory:       true,
+	"cursor_adapter_restored":           true,
+	"stale_lifecycle_journal_removed":   true,
+	"user_runtime_folder_untrusted":     true,
+	"runtime_generations_not_collected": true,
+	"rule_pack_readable_by_users":       true,
+	"claude_project_skipped":            true,
+	// A scan gap of an account whose managed hook is verified (GAP-0802).
+	enterprisehooks.UnprotectedCodeInstallScanPartial: true,
+	enterprisestatus.CodeSandboxDefaultProfile:        true,
+	enterprisestatus.CodeSandboxAdvisory:              true,
 }
 
 // enterpriseResidualWarningCodes are warnings a Windows standalone result
