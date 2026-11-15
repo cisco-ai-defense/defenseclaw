@@ -137,6 +137,10 @@ type windowsEnterpriseInstallerReport struct {
 	// stale committed managed-hook lifecycle journal itself (GAP-1322); it
 	// holds the retire failure that made the journal stale.
 	StaleLifecycleJournalRemoved string `json:"stale_lifecycle_journal_removed"`
+	// HookRollbackCopyRederived is set when the installed hook did not have
+	// the digest the deployment records and no protected copy did, so this
+	// run's hook rollback copy is the Setup's own verified hook (GAP-0601).
+	HookRollbackCopyRederived string `json:"hook_rollback_copy_rederived"`
 	// StaleTeardownJournalRemoved names the managed-hook teardown journal the
 	// lifecycle removed because an earlier uninstall that was refused or
 	// rolled back left it (GAP-1041).
@@ -729,6 +733,22 @@ const windowsEnterpriseCollectGenerationsVariable = "DEFENSECLAW_STANDALONE_COLL
 
 type windowsEnterpriseCollectGenerationsKey struct{}
 
+// windowsEnterpriseEnsureVerifyDegradedVariable asks the standalone
+// installer's Verify, run by ensure to decide whether to repair, to accept a
+// fresh, complete reconcile whose only failures are user targets the guardian
+// itself reported failed or pending. A repair re-runs that guardian and cannot
+// fix them (a signed-out account, a hook file DefenseClaw did not write), so
+// every rerun of ensure on such a host repaired and stopped the services for
+// minutes (GAP-0601). The administrator's verify stays strict.
+const windowsEnterpriseEnsureVerifyDegradedVariable = "DEFENSECLAW_STANDALONE_ENSURE_VERIFY_DEGRADED"
+
+type windowsEnterpriseEnsureVerifyDegradedKey struct{}
+
+func windowsEnterpriseEnsureVerifyDegradedRequested(ctx context.Context) bool {
+	requested, _ := ctx.Value(windowsEnterpriseEnsureVerifyDegradedKey{}).(bool)
+	return requested
+}
+
 func windowsEnterpriseCollectGenerationsRequested(ctx context.Context) bool {
 	requested, _ := ctx.Value(windowsEnterpriseCollectGenerationsKey{}).(bool)
 	return requested
@@ -745,6 +765,9 @@ func windowsEnterpriseInstallerRequestEnvironment(ctx context.Context, args []st
 	action := windowsEnterpriseInstallerAction(args)
 	if windowsEnterpriseCollectGenerationsRequested(ctx) && action == "Verify" {
 		env = append(env, windowsEnterpriseCollectGenerationsVariable+"=1")
+	}
+	if windowsEnterpriseEnsureVerifyDegradedRequested(ctx) && action == "Verify" {
+		env = append(env, windowsEnterpriseEnsureVerifyDegradedVariable+"=1")
 	}
 	return env
 }
@@ -1982,6 +2005,11 @@ func applyWindowsEnterpriseInstallerReport(
 		enrollment, err := readWindowsEnterpriseStandaloneEnrollment()
 		if err == nil {
 			result.Enrollment = enrollment
+			if enrollment.Failed > 0 {
+				// A degraded activation (GAP-0601) leaves the guardian ready;
+				// the failed targets still mean not every target is covered.
+				result.MarkCoverageIncomplete("enrollment_failed")
+			}
 			if result.Action == "status" || result.Action == "verify" || result.Action == "ensure" {
 				appendWindowsClaudeUserSettingsWarnings(result, enrollment.Accounts)
 			}
@@ -2525,6 +2553,15 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Message: "Setup skipped native OTLP rollback preimages for these user paths; the machine operation continued, " +
 				"but a rollback cannot restore the skipped paths. Inspect their links or access permissions, " +
 				"then run " + windowsEnterpriseAdminCommand("ensure") + " again from an elevated PowerShell prompt: " + windowsEnterpriseBoundedLabels(skipped),
+		})
+	}
+	if rederived := strings.TrimSpace(report.HookRollbackCopyRederived); rederived != "" {
+		// A recovery or an earlier run left a hook the record does not name;
+		// the run went on with this Setup's hook as the rollback copy
+		// instead of refusing every lifecycle action (GAP-0601).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code:    windowsEnterpriseHookRollbackCopyRederived,
+			Message: windowsEnterpriseBoundedDiagnostic(rederived),
 		})
 	}
 	if removed := strings.TrimSpace(report.StaleLifecycleJournalRemoved); removed != "" {
@@ -4324,6 +4361,25 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 	return enrollment, nil
 }
 
+// windowsEnterpriseEnrollmentRowFailed reports a guardian row that leaves its
+// target unprotected for a reason no sign-in or account clean-up resolves:
+// not ok, not pending, not waiting for the account's sign-in, and not a row
+// of a removed account or an account folder link (the rows status excuses).
+// Since a standalone install or upgrade activates on a complete reconcile
+// with such rows (GAP-0601), they are counted, so coverage_complete is not
+// true while one of them stands.
+func windowsEnterpriseEnrollmentRowFailed(row enterpriseHookReconcileRow) bool {
+	return !row.OK && !row.Pending && !row.Removed &&
+		!enterpriseHookAwaitingSignInError(row) &&
+		!enterpriseHookRemovedAccountRow(row) &&
+		!enterpriseHookAccountLinkRowStandalone(row) &&
+		!enterpriseHookAccountForeignLinkRow(row)
+}
+
+// windowsEnterpriseHookRollbackCopyRederived is the warning code of a run
+// whose hook rollback copy is the Setup's own hook (GAP-0601).
+const windowsEnterpriseHookRollbackCopyRederived = "hook_rollback_copy_rederived"
+
 // readWindowsEnterpriseStandaloneEnrollmentAt counts the manifest's targets
 // and exempt rows, and as pending the targets the guardian's last reconcile
 // (in runtimeDir) left waiting for their account's session: those never
@@ -4358,6 +4414,9 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 			// with an older hook matrix, not pending (GAP-2463).
 			if enterpriseHookAwaitingSignInError(row) && !enterpriseHookEarlierMatrixRow(row) {
 				enrollment.Pending++
+			}
+			if windowsEnterpriseEnrollmentRowFailed(row) {
+				enrollment.Failed++
 			}
 		}
 		enrollment.Accounts = windowsEnterpriseEnrollmentAccounts(state.Results)
@@ -4807,7 +4866,8 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		var verifyRun windowsEnterpriseStandaloneRun
 		var verifyErr error
 		if probeErr == nil {
-			verifyReport, verifyRun, verifyErr = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, verifyScript,
+			verifyReport, verifyRun, verifyErr = runWindowsEnterpriseStandaloneInstaller(
+				context.WithValue(ctx, windowsEnterpriseEnsureVerifyDegradedKey{}, true), cmd, opts, verifyScript,
 				windowsEnterprisePowerShellArgs("verify", verifyOpts))
 		}
 		if verifyErr != nil {
@@ -4921,12 +4981,12 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			}
 			cursorRepairPending = pending
 		}
-		verifyCtx := ctx
+		verifyCtx := context.WithValue(ctx, windowsEnterpriseEnsureVerifyDegradedKey{}, true)
 		if windowsEnterpriseIsElevated() && !cursorRepairPending {
 			// A compliant deployment runs no retire, so this Verify collects
 			// the old runtime copies a retire left and names each per-user
 			// folder still untrusted (#1105, GAP-0211).
-			verifyCtx = context.WithValue(ctx, windowsEnterpriseCollectGenerationsKey{}, true)
+			verifyCtx = context.WithValue(verifyCtx, windowsEnterpriseCollectGenerationsKey{}, true)
 		}
 		verifyReport, verifyRun, err := runWindowsEnterpriseStandaloneInstaller(verifyCtx, cmd, opts, script, windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
 		if err != nil {

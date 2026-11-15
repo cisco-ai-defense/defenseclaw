@@ -112,12 +112,12 @@ var managedCommands = []managedCommand{
 		Command: "defenseclaw routing status",
 		Launcher: []launcherPattern{
 			{words: []string{"routing", "status"}}, {words: []string{"routing", "budgets", "list"}},
-			{words: []string{"routing", "explain"}},
+			{words: []string{"routing", "explain"}}, {words: []string{"routing", "rules", "list"}},
 		},
 		Windows: managedOffered,
-		Probes:  [][]string{{"routing", "status"}, {"routing", "budgets", "list"}, {"routing", "explain"}},
+		Probes:  [][]string{{"routing", "status"}, {"routing", "rules", "list"}, {"routing", "budgets", "list"}, {"routing", "explain"}},
 		PerUser: perUserEverywhere, PerUserPath: []string{"routing", "status"},
-		Note: "`routing status`, `routing budgets list` and `routing explain <id>` show your own model routing decisions and budgets, read from the managed gateway; every other routing command is set in the administrator's config.",
+		Note: "`routing status`, `routing budgets list` and `routing explain <id>` show your own model routing decisions and budgets, read from the managed gateway; `routing rules list` shows the routing rules (all of them to an administrator, none to a standard account). Every routing command that changes the config, and `routing test`, is set in the administrator config and answers with the key that owns it (exit 3); the other routing commands are not offered here; an administrator dry-runs a rule with `routing test --as-user` on a workstation that has the per-user install.",
 	},
 	{
 		Command:  "defenseclaw sandbox ...",

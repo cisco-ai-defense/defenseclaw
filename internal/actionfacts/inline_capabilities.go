@@ -179,11 +179,18 @@ func InlineCodeNetworkAndExec(facts Facts) bool {
 	return false
 }
 
-func inlineSourceNetworkAndExec(row inlineCapabilityRow, source string) bool {
+// inlineSourceNetwork reports code that asks for a network capability: a
+// library name from the row or a URL, unless every destination is a loopback
+// literal and no value comes from outside the code.
+func inlineSourceNetwork(row inlineCapabilityRow, source string) bool {
 	if !identifierMatcher(row.network).MatchString(source) && !inlineLiteralURLPattern.MatchString(source) {
 		return false
 	}
-	if !identifierMatcher(row.dynamicInput).MatchString(source) && inlineCodeOnlyLoopback(source) {
+	return identifierMatcher(row.dynamicInput).MatchString(source) || !inlineCodeOnlyLoopback(source)
+}
+
+func inlineSourceNetworkAndExec(row inlineCapabilityRow, source string) bool {
+	if !inlineSourceNetwork(row, source) {
 		return false
 	}
 	return identifierMatcher(row.exec).MatchString(source) || (row.backtickExec && strings.Contains(source, "`"))
