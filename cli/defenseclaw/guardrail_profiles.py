@@ -126,6 +126,12 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "69e71164e4798439ed96acd8070ff36eb03bfe2ce260b3c46221824497610275",
             # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
             "657b41873648522db2f5f1d2237a822f94712b4775267cd7e129b62c2bfbbc16",
+            # 1.0.10 (s7/gemma4-judge-rel): tool-injection judge context packet
+            # (DEFENSECLAW CONTEXT) and two benign-case lines.
+            "70b55b216a595762d2fbcd26aa00bc10f08f7852a7b4c95642a0e1f6ff478ac4",
+            # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d3 a35d0653ef): the judge context packet on
+            # the delta 3 packs.
+            "107d55a8f760e474f198f9ebaff521e4ca8306c8a7d84d1730f8fe2db0309b0d",
             # 1.0.10 (s7/partjoin-pf-rel + int/r110-b11 1876efd336 + s7/partjoin-p3 02491003b4): prompt-injection floor,
             # joined-parts views and TRUST-AUTHORITY \s+ on the batch 11 packs.
             "41540a4a3658634f407df598c53e1c4177c2d486b40170f791299856c95aaf99",
@@ -137,6 +143,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "d04b477b9e8776d7cd94385cccfebb18fa498091719fab8357f2a0491ce1526b",
             # 1.0.10 (s7/browserjs merged with int/r110-b11d3 a35d0653ef): PAGE-SCRIPT-SESSION-EGRESS (alert only).
             "1c75c960dc15577086448f319605479c553acbcbd600dfa5102ed2ecdbe0936b",
+            # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d4 033c5cbd2b): the judge context packet on
+            # the delta 4 packs.
+            "48b9e16495f0d8b860964b0b813cd6347edc20eba48e0194ddd7cc84b45ecff9",
         }
     ),
     "permissive": frozenset(
@@ -219,6 +228,12 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "1e424c14053a75a0eb15df080839833433717195bd0bd7736ec35cddd4564524",
             # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
             "d0744d25ec528674c66da161034c6bfe2478a54cde9167647fe80c3e86454d8b",
+            # 1.0.10 (s7/gemma4-judge-rel): tool-injection judge context packet
+            # (DEFENSECLAW CONTEXT) and two benign-case lines.
+            "dbf9436a3f8c1d266ce0f5c0f664b72a1785e7a386988388832ff358d4f36423",
+            # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d3 a35d0653ef): the judge context packet on
+            # the delta 3 packs.
+            "5fb55ba370269899e425e70e001d13a24178ec5b057c25e74b40793494fb798d",
             # 1.0.10 (s7/partjoin-pf-rel + int/r110-b11 1876efd336 + s7/partjoin-p3 02491003b4): prompt-injection floor,
             # joined-parts views and TRUST-AUTHORITY \s+ on the batch 11 packs.
             "e64d4b457fd45024db8743471bbffb20ac46a189d10355681d83a99a5db8fc46",
@@ -230,6 +245,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "41971070bc6c01d5dedd83191c6a098b61125447a23d0d409ff5545cad5fc6ea",
             # 1.0.10 (s7/browserjs merged with int/r110-b11d3 a35d0653ef): PAGE-SCRIPT-SESSION-EGRESS (alert only).
             "4cd86a37760c2ae72de899e9b8df0080ba2bbd96b89dab0e735b11aa6e907c29",
+            # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d4 033c5cbd2b): the judge context packet on
+            # the delta 4 packs.
+            "e0b99daa614eaa547fee67f0c87e805e8bffa208dd9b9bb82578756db58eba87",
         }
     ),
     "strict": frozenset(
@@ -311,6 +329,12 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "23259c8008f836ee1e60f5dd9ebe86050736da685dc76e8bf4fdcbd56ab53f0f",
             # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
             "b956db73b9de22f9b3d9b107754c458bf4c042d7d109ae4baeb32803f9f378d7",
+            # 1.0.10 (s7/gemma4-judge-rel): tool-injection judge context packet
+            # (DEFENSECLAW CONTEXT) and two benign-case lines.
+            "eafe7ba6873ae3beb10f1b209b90fa47b9e282fede74af77a10a3079fc188de1",
+            # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d3 a35d0653ef): the judge context packet on
+            # the delta 3 packs.
+            "d232c2e79edde44565ff1a51b1f9f691ab1e26a1ac7b9c71566983d910c39465",
             # 1.0.10 (s7/partjoin-pf-rel + int/r110-b11 1876efd336 + s7/partjoin-p3 02491003b4): prompt-injection floor,
             # joined-parts views and TRUST-AUTHORITY \s+ on the batch 11 packs.
             "720da98b000e4294cbb96e0d8902e4a21b780fd54edbb243d939d5c7c4eec1b5",
@@ -322,6 +346,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "b8448b37aaa68a8fe573804ed2ce53cc0bb6c7e25e6c47c9096af26b14899ce1",
             # 1.0.10 (s7/browserjs merged with int/r110-b11d3 a35d0653ef): PAGE-SCRIPT-SESSION-EGRESS (alert only).
             "3c02f7c449076e385af4548ec6019d7ca821847b888a432a254be88bab3796fe",
+            # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d4 033c5cbd2b): the judge context packet on
+            # the delta 4 packs.
+            "2237afe661765bf883ec757d5195149b15171872ffbef9b1b134195c02f4c189",
         }
     ),
 }
