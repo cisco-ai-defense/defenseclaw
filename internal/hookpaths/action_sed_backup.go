@@ -183,6 +183,13 @@ func (r *sedBackupReader) read(command string, scope sedBackupScope, depth int) 
 // call reads one simple command; a cd changes the scope of the later calls.
 func (r *sedBackupReader) call(words []string, scope *sedBackupScope, depth int) {
 	if strings.Contains(words[0], sedHole) {
+		// A program word that holds a hole is a run-time word, which other
+		// layers judge; a hole that is a brace list past the caps (optionHole)
+		// is a word the reader could not expand, so the call may be an editor
+		// (bound rule, rel-1-0-10:GAP-0739).
+		if r.optionHole {
+			r.unresolved = true
+		}
 		return
 	}
 	switch programBase(words[0]) {
@@ -233,6 +240,9 @@ func (r *sedBackupReader) changeDirectory(words []string, scope *sedBackupScope)
 func (r *sedBackupReader) run(words []string, scope sedBackupScope, implicit bool, depth int) {
 	words, scope = r.unwrap(words, scope)
 	if len(words) == 0 || strings.Contains(words[0], sedHole) {
+		if len(words) > 0 && r.optionHole {
+			r.unresolved = true // as in call: a brace list past the caps names the program
+		}
 		return
 	}
 	switch program := sedProgram(words[0]); {
@@ -255,10 +265,18 @@ func (r *sedBackupReader) run(words []string, scope sedBackupScope, implicit boo
 			inner.unknown = inner.unknown || exec.dirUnknown
 			r.run(exec.child, inner, false, depth)
 		}
-	case program == "eval" && depth < sedBackupDepth && len(words) > 1:
+	case program == "eval" && len(words) > 1:
+		if depth >= sedBackupDepth {
+			r.unresolved = true // the depth cap: the body is not read (bound rule, rel-1-0-10:GAP-0738)
+			return
+		}
 		r.read(strings.Join(words[1:], " "), scope, depth+1)
-	case posixShellProgram(program) && depth < sedBackupDepth:
+	case posixShellProgram(program):
 		if body, ok := actionShellCommandBody(words); ok {
+			if depth >= sedBackupDepth {
+				r.unresolved = true // as for eval above
+				return
+			}
 			r.read(body, scope, depth+1)
 		}
 	}
@@ -880,10 +898,15 @@ func (r *sedBackupReader) readsShellStdin(call *syntax.CallExpr, values actionVa
 // stdinBody reads the program a shell takes from a heredoc or a herestring.
 func (r *sedBackupReader) stdinBody(stmt *syntax.Stmt, values actionValues, scope sedBackupScope, depth int) {
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) == 0 || len(stmt.Redirs) == 0 || depth >= sedBackupDepth || !r.readsShellStdin(call, values) {
+	if !ok || len(call.Args) == 0 || len(stmt.Redirs) == 0 || !r.readsShellStdin(call, values) {
 		return
 	}
-	for _, text := range sedRedirectBodies(stmt, values, r.cwd, r.home) {
+	bodies := sedRedirectBodies(stmt, values, r.cwd, r.home)
+	if depth >= sedBackupDepth && len(bodies) > 0 {
+		r.unresolved = true // the depth cap: the heredoc is not read (bound rule)
+		return
+	}
+	for _, text := range bodies {
 		r.read(text, scope, depth+1)
 	}
 }
@@ -928,12 +951,15 @@ func (r *sedBackupReader) pipeline(top *syntax.BinaryCmd, seen map[*syntax.Binar
 	seen[top] = true
 	flatten(top.X)
 	flatten(top.Y)
-	if depth >= sedBackupDepth {
-		return
-	}
 	for at, stage := range stages {
 		reader, ok := stage.Cmd.(*syntax.CallExpr)
 		if !ok || len(reader.Args) == 0 || !r.readsShellStdin(reader, values) {
+			continue
+		}
+		if depth >= sedBackupDepth {
+			if at > 0 {
+				r.unresolved = true // the depth cap: what the earlier stages print is not read (bound rule)
+			}
 			continue
 		}
 		for _, producer := range stages[:at] {

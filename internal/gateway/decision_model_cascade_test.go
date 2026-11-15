@@ -123,11 +123,11 @@ func TestDecisionModelCascades(t *testing.T) {
 		{2, "confirm", "codex", "alert", true, false},        // no ask: HIGH alert
 		{2, "down", "claudecode", "allow", true, false},      // rule verdict stands
 		{2, "down", "codex", "allow", true, false},
-		// 3. Rules, decision model, judge: as before this change.
+		// 3. Rules, decision model, judge.
 		{3, "allow", "claudecode", "allow", true, false},
 		{3, "allow", "codex", "allow", true, false},
-		{3, "block", "claudecode", "alert", true, true}, // HIGH floor, block_at CRITICAL
-		{3, "block", "codex", "alert", true, true},
+		{3, "block", "claudecode", "block", true, true}, // System One's own block stands (GAP-0867)
+		{3, "block", "codex", "block", true, true},
 		{3, "confirm", "claudecode", "allow", true, true}, // the judge decides
 		{3, "confirm", "codex", "allow", true, true},
 		{3, "down", "claudecode", "allow", true, true},
@@ -194,8 +194,8 @@ func TestDecisionModelAloneOnlyWhereTheJudgeDoesNotRun(t *testing.T) {
 	b.scannerCfg.DecisionModel.HookConnectors = []string{"*"}
 	b.SetHookDecisionJudge(newDecisionOnlyJudge(b.scannerCfg))
 	v = b.inspectToolPolicy(&ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{"command":"make -C ./fixtures"}`), Direction: "tool_call", Connector: "claudecode"})
-	if len(judge.captured) == 0 || v.Severity != "HIGH" {
-		t.Fatalf("judged connector: verdict %+v, judge calls %d; want cascade 3 (HIGH floor, judge ran)", v, len(judge.captured))
+	if len(judge.captured) == 0 || v.Severity != "CRITICAL" || v.Action != guardrailActionBlock {
+		t.Fatalf("judged connector: verdict %+v, judge calls %d; want cascade 3 (System One's block kept, judge ran: GAP-0867)", v, len(judge.captured))
 	}
 }
 

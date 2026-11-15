@@ -71,6 +71,10 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
+	// alignment is the per-session context of the alignment check
+	// (alignment.go); empty while the lane is off.
+	alignment alignmentStore
+
 	// apiBindFoundHeld: the first API bind of Run found the port held
 	// (another process, possibly another account, had it while this
 	// gateway restarted); set by acquireAPIListener, read by Run.
@@ -535,6 +539,12 @@ func (a *APIServer) hookSessionJudges(ctx context.Context) []*LLMJudge {
 	return out
 }
 
+// promptVerdictBlocks reports whether the guardrail blocked the user prompt
+// verdict judged: such a prompt is never a turn's task.
+func promptVerdictBlocks(verdict *ToolInspectVerdict) bool {
+	return verdict != nil && normalizedGuardrailAction(verdict.Action) == guardrailActionBlock
+}
+
 // observeUserTurn starts a new turn for the session after its prompt was
 // inspected: on every hook-lane judge, and in the user-download allowance. The
 // prompt becomes the turn's task, and names run-from hosts, only when the
@@ -542,7 +552,7 @@ func (a *APIServer) hookSessionJudges(ctx context.Context) []*LLMJudge {
 // later tool calls be excused by. scopeText is the part of the prompt that may
 // name scope targets; "" when it is not known to be what the owner typed.
 func (a *APIServer) observeUserTurn(ctx context.Context, prompt, scopeText, cwd string, verdict *ToolInspectVerdict) {
-	if verdict != nil && normalizedGuardrailAction(verdict.Action) == guardrailActionBlock {
+	if promptVerdictBlocks(verdict) {
 		prompt, scopeText = "", ""
 	} else {
 		// Only text the owner typed names a run-from host, as for the scope.

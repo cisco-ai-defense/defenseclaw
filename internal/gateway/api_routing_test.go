@@ -39,18 +39,31 @@ func routingAPIConfig() *config.Config {
 // (rel-1-0-10 T-ROUTER follow-up). Not for parallel tests.
 func isolatedRoutingAdminRuntime(t *testing.T) {
 	t.Helper()
+	swapRoutingAdminRuntime(t, routingadmin.NewRuntime())
+}
+
+// isolatedRoutingAdminRuntimeAt is isolatedRoutingAdminRuntime with a clock
+// the test owns: the ledger reads today from at, never from the real clock,
+// so a charge dated at at is counted on that day whatever day the test runs.
+func isolatedRoutingAdminRuntimeAt(t *testing.T, at time.Time) {
+	t.Helper()
+	swapRoutingAdminRuntime(t, routingadmin.NewRuntimeClock(func() time.Time { return at }))
+}
+
+func swapRoutingAdminRuntime(t *testing.T, rt *routingadmin.Runtime) {
+	t.Helper()
 	previous := routingAdminRuntime
-	routingAdminRuntime = routingadmin.NewRuntime()
+	routingAdminRuntime = rt
 	t.Cleanup(func() { routingAdminRuntime = previous })
 }
 
 func TestRoutingBudgetViewsShowOwnOnly(t *testing.T) {
-	isolatedRoutingAdminRuntime(t)
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	isolatedRoutingAdminRuntimeAt(t, now)
 	cfg := routingAPIConfig()
 	if routingAdminRuntime.For(cfg) == nil {
 		t.Fatal("evaluator")
 	}
-	now := time.Now()
 	routingAdminRuntime.Ledger().ApplyRemote([]string{"daily", "eng"}, nil, now)
 	routingAdminRuntime.Charge([]string{"user:daily:*:1001"}, 4, now)
 	routingAdminRuntime.Charge([]string{"user:daily:*:1002"}, 7, now)
@@ -65,6 +78,7 @@ func TestRoutingBudgetViewsShowOwnOnly(t *testing.T) {
 }
 
 func TestRoutingExplainHidesOtherUsers(t *testing.T) {
+	isolatedRoutingAdminRuntime(t)
 	routingAdminRuntime.Decisions().Record(routingadmin.DecisionEntry{RequestID: "req-explain-1", CallerKey: "owner", Outcome: "applied"})
 	a := &APIServer{scannerCfg: &config.Config{}}
 	rec := httptest.NewRecorder()
@@ -109,6 +123,7 @@ func TestRoutingTestRefusals(t *testing.T) {
 }
 
 func TestRecordRoutingDecisionKeepsNoPrompt(t *testing.T) {
+	isolatedRoutingAdminRuntime(t)
 	in := &ModelRouterInput{Text: "secret prompt text", Connector: "codex", Listener: engine.ListenerGuardrail, RequestModel: "gpt-5"}
 	d := &engine.Decision{Outcome: engine.OutcomeApplied, Backend: &engine.Backend{Alias: "fast", Model: "gpt-mini"}, RuleIDs: []string{"r"}}
 	recordRoutingDecision(t.Context(), in, d, false)

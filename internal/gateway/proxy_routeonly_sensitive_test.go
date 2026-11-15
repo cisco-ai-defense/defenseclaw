@@ -71,6 +71,7 @@ func TestRouteOnlySensitiveKeylessLocalModelGetsTheCall(t *testing.T) {
 }
 
 func TestRouteOnlySensitiveNeverFallsBackToTheCloud(t *testing.T) {
+	isolatedRoutingAdminRuntime(t)
 	for name, tc := range map[string]struct {
 		local  config.RoutingModelBackend
 		status int
@@ -225,6 +226,7 @@ func TestGuardrailChatSensitiveWithNoLocalModelIsDenied(t *testing.T) {
 }
 
 func TestAmendRoutingDecisionRecordsWhatWasDone(t *testing.T) {
+	isolatedRoutingAdminRuntime(t)
 	ctx := ContextWithRequestID(context.Background(), "req-s1c-amend-1")
 	in := &ModelRouterInput{Connector: "codex", Listener: engine.ListenerRouteOnly, RequestModel: "gpt-5", Caller: engine.Caller{Verified: true, Key: "1001"}}
 	d := &engine.Decision{Outcome: engine.OutcomeApplied, Backend: &engine.Backend{Alias: "local", Model: "qwen2.5"}}

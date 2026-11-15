@@ -168,9 +168,14 @@ func cascadeUnsureVerdict(onUnsure, reason string, risk float64) *ScanVerdict {
 // cascade.judge: block_needs_system_one turns a block System One did not
 // confidently make into a confirm, and max_action caps the action (log is
 // an allow that keeps the findings). The decision model alone (cascade 2)
-// is not the judge and keeps its verdict.
+// is not the judge and keeps its verdict, and so does a call System One
+// confidently blocked in cascade 3: the cap is the judge's role, and turning
+// the judge on never lowers what System One gives on its own (raise-only
+// across layers, rel-1-0-10:GAP-0867).
 func applyCascadeJudgeRole(cfg *config.Config, connector string, decisionOnly bool, v *ScanVerdict) *ScanVerdict {
-	if v == nil || decisionOnly || cfg == nil || cfg.SecureClientIntegration() || v.JudgeFailed {
+	if v == nil || decisionOnly || cfg == nil || cfg.SecureClientIntegration() || v.JudgeFailed || v.decisionFloorOnly {
+		// decisionFloorOnly: the judge gave no verdict and the answer is
+		// System One's own (GAP-0867, GAP-0868); the judge role caps nothing.
 		return v
 	}
 	e := cfg.ResolveCascade(connector)
@@ -181,7 +186,7 @@ func applyCascadeJudgeRole(cfg *config.Config, connector string, decisionOnly bo
 		out.Action, action, changed = guardrailActionConfirm, guardrailActionConfirm, true
 		out.Reason = strings.TrimSpace(out.Reason + " (a judge block needs System One to agree: guardrail.cascade.judge.block_needs_system_one; asked instead)")
 	}
-	if limit := config.CascadeActionRank(e.JudgeMaxAction); limit >= 0 && config.CascadeActionRank(action) > limit {
+	if limit := config.CascadeActionRank(e.JudgeMaxAction); limit >= 0 && config.CascadeActionRank(action) > limit && !v.systemOneBlocked {
 		capped := config.CascadeActionName(limit)
 		out.Reason = strings.TrimSpace(out.Reason + " (judge capped at " + capped + " by guardrail.cascade.judge.max_action)")
 		if capped == config.CascadeLog {

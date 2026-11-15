@@ -67,9 +67,7 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 		original.Action == guardrailActionBlock ||
 		original.RawAction == guardrailActionBlock ||
 		!req.toolChain.recorded ||
-		!profile.ExperimentalToolLifecycleEligible() ||
-		profile.ToolCallLifecycle.RouteForEvent(req.HookEventName) !=
-			connector.ToolEventRouteStructuredAction {
+		!artifactPromotionEvent(profile, req) {
 		return resp
 	}
 	caps := profile.Capabilities
@@ -117,6 +115,31 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 		resp.RuleIDs = mergeBoundedRuleIDs(8, eval.RuleIDs, resp.RuleIDs)
 	}
 	return resp
+}
+
+// artifactPromotionEvent reports whether a hook event is a tool proposal
+// whose script operands the artifact gate reads: the structured action event
+// of the connector tool lifecycle contract, or, for a connector that has no
+// lifecycle contract and no version gate (Kiro: not-gated), an event that
+// carries a tool call and that the connector can block on. Gated on the contract alone, a script named on a
+// Kiro command line was never read, so a script that Claude Code and every
+// other hook connector blocks ran unblocked under Kiro (rel-1-0-10:GAP-0777).
+// The gate is a same-request decision; it needs no invocation join.
+func artifactPromotionEvent(profile connector.HookProfile, req agentHookRequest) bool {
+	if profile.ExperimentalToolLifecycleEligible() {
+		return profile.ToolCallLifecycle.RouteForEvent(req.HookEventName) ==
+			connector.ToolEventRouteStructuredAction
+	}
+	if profile.ToolCallLifecycle.Version != 0 {
+		return false
+	}
+	switch profile.CompatibilityStatus {
+	case connector.HookCompatibilityKnown, connector.HookCompatibilityUnversioned, connector.HookCompatibilityNotGated:
+	default:
+		return false
+	}
+	caps := profile.Capabilities
+	return strings.TrimSpace(req.ToolName) != "" && caps.CanBlock && eventIn(req.HookEventName, caps.BlockEvents)
 }
 
 func promotedArtifactFindings(

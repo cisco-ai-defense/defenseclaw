@@ -377,7 +377,20 @@ type PrefixWrapperRun struct {
 	Dir               string
 	DirUnknown        bool
 	ChangesResolution bool
+	// Length is the number of wrappers the chain holds. A chain longer than
+	// MaxWrapperDepth is more than the action analysis unwraps (a dynamic
+	// word after it stops that reading at the first wrapper): a caller
+	// reports it as a truncation (the bound rule, cap depth), never an
+	// ordinary command (rel-1-0-10:GAP-0689).
+	Length int
 }
+
+// MaxPrefixWrapperChain is the most prefix wrappers (sudo, env, command,
+// nohup, ...) one simple command is unwrapped through. A chain longer than
+// this is no real call; the reading that reaches the bound says so
+// (PrefixWrapperRun.Length past MaxWrapperDepth) instead of treating the next
+// wrapper as the program.
+const MaxPrefixWrapperChain = 32
 
 // StaticPrefixWrapperChild reads words (the static values of the words of
 // one simple command; static[i] is false for a word the shell expands at
@@ -397,7 +410,7 @@ func StaticPrefixWrapperChild(words []string, static []bool) (PrefixWrapperRun, 
 	}
 	var run PrefixWrapperRun
 	index := 0
-	for depth := 0; depth < 8; depth++ {
+	for depth := 0; depth < MaxPrefixWrapperChain; depth++ {
 		name, ok := value(index)
 		if !ok || name == "" {
 			break
@@ -407,6 +420,7 @@ func StaticPrefixWrapperChild(words []string, static []bool) (PrefixWrapperRun, 
 			break
 		}
 		index = next
+		run.Length++
 	}
 	if index == 0 {
 		return PrefixWrapperRun{}, false
@@ -443,7 +457,7 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 		return word.Value, !word.Expands
 	}
 	var run PrefixWrapperRun
-	for depth := 0; index < len(args) && depth < 8; depth++ {
+	for depth := 0; index < len(args) && depth < MaxPrefixWrapperChain; depth++ {
 		word, static := value(index)
 		if !static || word == "" {
 			return PrefixWrapperRun{}, false
@@ -585,7 +599,7 @@ func flockShellString(args []*syntax.Word) (int, bool) {
 	}
 	var run PrefixWrapperRun
 	index := 0
-	for depth := 0; index < len(args) && depth < 8; depth++ {
+	for depth := 0; index < len(args) && depth < MaxPrefixWrapperChain; depth++ {
 		word, static := value(index)
 		if !static || word == "" {
 			return 0, false

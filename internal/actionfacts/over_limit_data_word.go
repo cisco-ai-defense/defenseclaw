@@ -65,6 +65,21 @@ type OverLimitWordSplit struct {
 // shorten, or the twin is itself over a bound): the caller then keeps the
 // call truncated.
 func SplitOverLimitWords(command string) (OverLimitWordSplit, bool) {
+	return splitOverLimitWords(command, false)
+}
+
+// SplitOverLimitWordsOfArgv is SplitOverLimitWords for the text of a call
+// whose command is an array of words (the Codex shell tool): the script
+// word of a shell -c is shell text to the reading of that array, so the
+// over-limit words inside it that are plain data (ssh host '...') leave the
+// call as its twin, as the same words typed as an argv are not code. A call
+// written as text keeps the stricter reading (a script handed to the local
+// shell is code, rel-1-0-10:GAP-0382, GAP-0689).
+func SplitOverLimitWordsOfArgv(command string) (OverLimitWordSplit, bool) {
+	return splitOverLimitWords(command, true)
+}
+
+func splitOverLimitWords(command string, nestedBodies bool) (OverLimitWordSplit, bool) {
 	if len(command) > maxCommandBytes {
 		return OverLimitWordSplit{Why: "text over the bound"}, false
 	}
@@ -73,10 +88,11 @@ func SplitOverLimitWords(command string) (OverLimitWordSplit, bool) {
 		return OverLimitWordSplit{Why: "does not parse"}, false
 	}
 	dataWords := map[*syntax.Word]bool{}
+	bodyWords := map[*syntax.Word]bool{}
 	bindings := literalBindings(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if call, isCall := node.(*syntax.CallExpr); isCall {
-			markDataWords(call, bindings, dataWords)
+			markDataWords(call, bindings, dataWords, bodyWords)
 		}
 		return true
 	})
@@ -96,6 +112,22 @@ func SplitOverLimitWords(command string) (OverLimitWordSplit, bool) {
 			return true
 		}
 		if !dataWords[word] {
+			// The script word of a shell -c is code to the local shell, but
+			// what the script does with an over-limit word of its own is
+			// decided by the grammar of the script: a body whose every
+			// over-limit word is data (ssh host '<script>' inside bash -lc)
+			// is read as its twin, the rest of the body kept
+			// (rel-1-0-10:GAP-0689, the argv form of the Codex shell tool).
+			if nestedBodies && bodyWords[word] {
+				if text, nested, ok := nestedBodyTwin(word); ok {
+					start, end := int(word.Pos().Offset()), int(word.End().Offset())
+					if start >= 0 && end <= len(command) && start < end {
+						replacements = append(replacements, replacement{start, end, text})
+						split.Data += nested.Data
+						return false
+					}
+				}
+			}
 			split.Code++
 			return true
 		}
@@ -182,7 +214,7 @@ func shortenedWordPart(part syntax.WordPart) (string, bool) {
 
 // markDataWords records, in dataWords, each over-limit operand of call that
 // is in DATA position.
-func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords map[*syntax.Word]bool) {
+func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords, bodyWords map[*syntax.Word]bool) {
 	if len(call.Args) < 2 {
 		return
 	}
@@ -211,10 +243,79 @@ func markDataWords(call *syntax.CallExpr, bindings map[string]string, dataWords 
 		return
 	}
 	for index, isBig := range big {
-		if isBig && overLimitOperandIsData(argv, index) {
+		switch {
+		case !isBig:
+		case overLimitOperandIsData(argv, index):
 			dataWords[call.Args[index]] = true
+		case overLimitShellBodyAt(argv, index):
+			bodyWords[call.Args[index]] = true
 		}
 	}
+}
+
+// nestedBodyTwin reads the script word of a shell -c as shell text: when its
+// over-limit words are all DATA the word becomes its twin, requoted, and the
+// nested split is returned. false for a word that is not one static literal
+// or a script with a code word, an unreadable text or no data word.
+func nestedBodyTwin(word *syntax.Word) (string, OverLimitWordSplit, bool) {
+	value := projectPOSIXWord(word)
+	if value.Expands || len(value.Value) <= maxScalarBytes {
+		return "", OverLimitWordSplit{}, false
+	}
+	nested, ok := SplitOverLimitWordsOfArgv(value.Value)
+	if !ok || nested.Code > 0 || nested.Data == 0 || len(nested.Twin) >= len(value.Value) {
+		return "", OverLimitWordSplit{}, false
+	}
+	return posixSingleQuoted(nested.Twin), nested, true
+}
+
+// overLimitShellBodyAt reports argv[at] as the script a POSIX shell takes
+// with -c, directly or behind transparent wrappers.
+func overLimitShellBodyAt(argv []string, at int) bool {
+	start := 0
+	for range maxWrapperDepth + 1 {
+		if at <= start || argv[start] == "" || argv[start] == "\x01" {
+			return false
+		}
+		program := overLimitProgram(argv[start])
+		switch {
+		case overLimitTransparentWrapper(program):
+			rest := transparentWrapperTarget(argv[start:])
+			next := len(argv) - len(rest)
+			if len(rest) == 0 || next <= start || at < next {
+				return false
+			}
+			start = next
+		case posixShellProgram(program):
+			index, ok := shellCommandBodyIndex(argv[start:])
+			return ok && start+index == at
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// shellCommandBodyIndex is the index of the script word of a POSIX shell
+// call (bash -c BODY, sh -lc BODY), skipping the options that take a value;
+// it reads the options only, not the whole invocation.
+func shellCommandBodyIndex(argv []string) (int, bool) {
+	for j := 1; j+1 < len(argv); j++ {
+		option := argv[j]
+		if !strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "+") {
+			return 0, false
+		}
+		switch option {
+		case "-o", "+o", "-O", "+O", "--rcfile", "--init-file":
+			j++
+			continue
+		}
+		if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
+			!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
+			return j + 1, true
+		}
+	}
+	return 0, false
 }
 
 // overLimitOperandIsData reports the over-limit word argv[at] as the plain
@@ -243,9 +344,30 @@ func overLimitOperandIsData(argv []string, at int) bool {
 			return overLimitInterpreterOperandIsData(argv, start, at)
 		case overLimitCodeProgram(program):
 			return false
+		case overLimitRunsOperand(program, argv, start, at):
+			return false
 		default:
 			return true
 		}
+	}
+	return false
+}
+
+// overLimitRunsOperand reports a program that runs the over-limit operand
+// argv[at] as code in its own grammar, though no shell reads it: a sed script
+// (its e and w commands run a program and write a file), a make assignment or
+// target (the recipes read it), a tar option value (--checkpoint-action,
+// --to-command, -I), an rsync remote shell (-e, --rsh) and the value of a git
+// -c setting (an alias that starts with ! is a shell command). A word these
+// take that is past the string bound is no plain data, as the argument of a
+// program that passes it on (rel-1-0-10:GAP-0761); a commit message of git,
+// the destination of a copy and the like stay DATA.
+func overLimitRunsOperand(program string, argv []string, start, at int) bool {
+	switch program {
+	case "sed", "gsed", "make", "gmake", "gnumake", "tar", "gtar", "bsdtar", "rsync":
+		return true
+	case "git":
+		return at-1 > start && argv[at-1] == "-c"
 	}
 	return false
 }
@@ -290,7 +412,7 @@ func overLimitCodeProgram(program string) bool {
 // overLimitInterpreterRow is the row of the inline interpreter table for a
 // program, nil when the program is not in it.
 func overLimitInterpreterRow(program string) *inlineCapabilityRow {
-	row, ok := inlineInterpreterRow(program)
+	_, row, ok := inlineInterpreterRow(program)
 	if !ok {
 		return nil
 	}

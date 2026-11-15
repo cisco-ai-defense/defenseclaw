@@ -281,6 +281,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		})
 		if intentEvent {
 			a.observeUserTurn(ctx, req.Prompt, req.Prompt, req.CWD, verdict)
+			a.observeAlignmentTurn(ctx, "codex", req.Prompt, verdict)
 		}
 		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{
@@ -370,6 +371,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	// directive.
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
 	verdict = a.applyCascadeFinal(ctx, "codex", hookCascadeSurface(req.HookEventName), req.HookEventName, req.ToolName, verdict)
+	verdict = a.applyAlignmentLane(ctx, "codex", req.HookEventName, req.ToolName, req.ToolUseID, codexAlignmentArgs(req.ToolInput), req.CWD, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction

@@ -12,6 +12,11 @@ import "github.com/defenseclaw/defenseclaw/internal/actionfacts"
 // a compound that reads the keys file beside other work is not the plain read
 // the whole-command rule allows. The caller decides what that is worth; an
 // action that only reads the file is no write of it (rel-1-0-10:GAP-0018).
+//
+// The excused scan reads a statement as a reader only under the call-level
+// GAP-0570 rules (actionCallKeepsMentions: $_ carries the name a reader read
+// into another statement, ls KEYS; echo x >> $_, rel-1-0-10:GAP-0860,
+// GAP-0643) and when the reading call runs a system program (GAP-0715).
 func ActionMentionsNoWriteRole(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) bool {
 	if ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts) != "protected-target" {
 		return false

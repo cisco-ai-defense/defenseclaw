@@ -72,8 +72,8 @@ func TestRecordJudgeTargetsIsCopyOnWrite(t *testing.T) {
 	}
 }
 
-// The call line of the tool-result header carries no credentials from the
-// call's arguments (rel-1-0-10:GAP-0638).
+// The tool-result sections carry no credentials from the call's arguments
+// (rel-1-0-10:GAP-0638).
 func TestToolResultJudgeCallIsRedacted(t *testing.T) {
 	j := newMockJudge(t, &mockLLMProvider{})
 	args, _ := json.Marshal(map[string]any{
@@ -81,7 +81,7 @@ func TestToolResultJudgeCallIsRedacted(t *testing.T) {
 		"headers": map[string]string{"Authorization": "Bearer tok_AbCdEf0123456789xyz"},
 	})
 	ctx := withToolResultCall(context.Background(), "fetch_items", json.RawMessage(args))
-	header := j.toolResultJudgeHeader(ctx, "message")
+	header := j.toolResultJudgeSections(ctx, "message").sections
 	for _, secret := range []string{"Pw0rdValue123", "AbCdEf0123456789", "tok_AbCdEf0123456789xyz"} {
 		if strings.Contains(header, secret) {
 			t.Errorf("header carries %q:\n%s", secret, header)
@@ -95,11 +95,12 @@ func TestToolResultJudgeCallIsRedacted(t *testing.T) {
 	sctx := ContextWithSessionID(context.Background(), "tr-redact-1")
 	j.ObserveSessionPrompt(sctx, "fetch the items, the token is Bearer tok_ZyXwVu9876543210abc")
 	sctx = withToolResultCall(sctx, "fetch_items", json.RawMessage(args))
-	if got := j.toolResultUserRequest(sctx); strings.Contains(got, "tok_ZyXwVu9876543210abc") || !strings.Contains(got, "fetch the items") {
-		t.Errorf("user request line not redacted: %q", got)
+	tc := j.toolResultJudgeSections(sctx, "message")
+	if strings.Contains(tc.sections, "tok_ZyXwVu9876543210abc") || !strings.Contains(tc.sections, "fetch the items") {
+		t.Errorf("user request section not redacted: %q", tc.sections)
 	}
-	if h := j.toolResultJudgeHeader(sctx, "message"); strings.Contains(h, "fetch the items") {
-		t.Errorf("the user's request reached the system header: %q", h)
+	if strings.Contains(tc.system, "fetch the items") || strings.Contains(tc.system, "api.example.com") {
+		t.Errorf("session text reached the system note: %q", tc.system)
 	}
 }
 
@@ -156,17 +157,36 @@ func TestJudgeStagesAreCascadeLanes(t *testing.T) {
 	}
 }
 
-// With the lane off the tool-result judges judge the output alone.
+// With the lane off the tool-result judges judge the output alone, on the
+// completion route and on the tool_result route (injection judge) alike,
+// with or without a recorded call (rel-1-0-10:GAP-0847).
 func TestToolResultContextLaneOff(t *testing.T) {
 	mock := &mockLLMProvider{response: &ChatResponse{Choices: []ChatChoice{{Message: &ChatMessage{Role: "assistant", Content: cleanInjectionJudgeJSON}}}}}
 	j := newMockJudge(t, mock)
-	j.cfg.PII, j.cfg.PIICompletion = true, true
-	ctx := withoutToolResultCall(withToolResultCall(context.Background(), "users_list", map[string]any{"q": "team"}))
-	j.RunJudges(ctx, "completion", "alice@example.com, bob@example.org", "message")
-	for _, req := range mock.captured {
-		for _, m := range req.Messages {
-			if strings.Contains(m.Content, "CONTEXT FROM DEFENSECLAW") || strings.Contains(m.Content, "USER_REQUEST") {
-				t.Fatalf("lane off still sends the tool-result context: %q", m.Content)
+	j.cfg.Injection, j.cfg.PII, j.cfg.PIICompletion = true, true, true
+	sctx := ContextWithSessionID(context.Background(), "tr-off-1")
+	j.ObserveSessionPrompt(sctx, "list my team")
+	for name, run := range map[string]func(){
+		"completion with call": func() {
+			j.RunJudges(withoutToolResultCall(withToolResultCall(sctx, "users_list", map[string]any{"q": "team"})), "completion", "alice@example.com, bob@example.org", "message")
+		},
+		"tool_result with call": func() {
+			j.RunJudges(withoutToolResultCall(withToolResultCall(sctx, "users_list", map[string]any{"q": "team"})), directionToolResult, "the team page lists alice and bob", "users_list")
+		},
+		"tool_result without call": func() {
+			j.RunJudges(withoutToolResultCall(sctx), directionToolResult, "the team page lists alice and bob", "users_list")
+		},
+	} {
+		mock.captured = nil
+		run()
+		if len(mock.captured) == 0 {
+			t.Fatalf("%s: no judge call", name)
+		}
+		for _, req := range mock.captured {
+			for _, m := range req.Messages {
+				if strings.Contains(m.Content, "CONTEXT FROM DEFENSECLAW") || strings.Contains(m.Content, "SESSION_USER_INTENT") || strings.Contains(m.Content, "CURRENT_TOOL_CALL") {
+					t.Fatalf("%s: lane off still sends the tool-result context: %.300q", name, m.Content)
+				}
 			}
 		}
 	}

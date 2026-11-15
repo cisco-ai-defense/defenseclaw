@@ -719,13 +719,22 @@ func capFloorStripKeywords(text string) string {
 // syntax depth or node bound, the wrapper bound or the fact bound. The facts
 // of such a call hold no, or only some of the, paths and commands of the
 // text, so no reader proved what the call does (rel-1-0-10:GAP-0688,
-// GAP-0689). The input bound is not here: it is the size of one script the
-// shell reading budget grades by target (the owner rule of GAP-0677, a benign
-// 10 KB `bash -c` script is allowed), and a call past the byte bound is
-// truncated by s7/posix-cap (GAP-0382). Other tools keep their own bounds.
+// GAP-0689). The input bound is not here: posixParseTruncation truncates a
+// call that stopped at a byte bound or at the inline program bound
+// (GAP-0382, GAP-0689), with the data-word and padding twins it reads
+// instead. Other tools keep their own bounds.
 func capFloorAnalysisCaps(facts actionfacts.Facts) bounded.CapSet {
 	var set bounded.CapSet
-	if facts.Parse.Status != actionfacts.StatusLimitExceeded || !trustedBashExecutionTool(facts.Tool) {
+	if !trustedBashExecutionTool(facts.Tool) {
+		return set
+	}
+	if prefixWrapperChainPastBound(facts) {
+		// A chain of plain prefix wrappers (sudo -n sudo -n ... rm) longer
+		// than the readers unwrap: the program it runs is not read, whatever
+		// the status of the analysis (rel-1-0-10:GAP-0689).
+		set = set.Union(bounded.Of(bounded.Depth))
+	}
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
 		return set
 	}
 	for _, issue := range facts.Parse.Issues {
@@ -739,6 +748,29 @@ func capFloorAnalysisCaps(facts actionfacts.Facts) bounded.CapSet {
 		}
 	}
 	return set
+}
+
+// prefixWrapperChainPastBound reports a command of the facts whose chain of
+// plain prefix wrappers (sudo, env, command, nohup, ...) is longer than the
+// action analysis unwraps (actionfacts.MaxWrapperDepth). A dynamic word
+// after such a chain (a ~ or $HOME operand) stops the analysis at the first
+// wrapper as a partial parse, with no wrapper limit, so the program the
+// chain runs was never read; the readers that unwrap further still prove a
+// block of their own (rel-1-0-10:GAP-0689).
+func prefixWrapperChainPastBound(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if len(command.Argv) <= actionfacts.MaxWrapperDepth || command.Dialect != actionfacts.DialectPOSIX {
+			continue
+		}
+		static := make([]bool, len(command.Argv))
+		for i := range static {
+			static[i] = len(command.Arguments) != len(command.Argv) || !command.Arguments[i].Expands
+		}
+		if run, wrapped := actionfacts.StaticPrefixWrapperChild(command.Argv, static); wrapped && run.Length > actionfacts.MaxWrapperDepth {
+			return true
+		}
+	}
+	return false
 }
 
 // capFloorMayNameProtected reports a call whose command text may name a

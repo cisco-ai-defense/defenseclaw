@@ -121,5 +121,7 @@ func hookShellCommand(connectorName string, req agentHookRequest) string {
 			return sensor.HookArgvCommand(argv)
 		}
 	}
-	return ""
+	// agy run_command names its command CommandLine.
+	command, _ := trustedShellCommandArgument(projected)
+	return command
 }
