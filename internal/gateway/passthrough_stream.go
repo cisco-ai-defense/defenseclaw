@@ -210,9 +210,9 @@ func (s *passthroughStream) run() {
 	var holdTimer streamHoldTimer
 	defer holdTimer.stop()
 	var lastRead time.Time // when the upstream last sent a byte
-	// sentAhead is how many bytes at the start of the event in progress went
-	// out unread (a TRUNCATED alert): they are left out when it ends.
-	sentAhead := 0
+	// stallReported: the event in progress passed the stall bound and its
+	// TRUNCATED alert is recorded; it stays held (GAP-0316).
+	stallReported := false
 	// overText: the event being handled carried more than streamLineMaxText
 	// bytes of text (GAP-0624).
 	overText := false
@@ -252,15 +252,15 @@ func (s *passthroughStream) run() {
 			flusher.Flush()
 		}
 	}
-	// pending is the bytes of the event in progress (an SSE event or a
-	// Bedrock frame that has not ended); unread is the part not yet sent.
-	pending := func() []byte {
+	// unread is the bytes of the event in progress (an SSE event or a
+	// Bedrock frame that has not ended): no event to the agent yet, and
+	// never sent before it ends and is read.
+	unread := func() int {
 		if s.bedrock != nil {
-			return bedrockPending
+			return len(bedrockPending)
 		}
-		return framer.Held()
+		return len(framer.Held())
 	}
-	unread := func() int { return max(len(pending())-sentAhead, 0) }
 	// endBlock ends a refused stream: the whole block reply when nothing was
 	// sent yet, else the block as the last assistant text of the stream
 	// under way. Held events are dropped.
@@ -369,20 +369,19 @@ func (s *passthroughStream) run() {
 		overText = false
 		return scanText() && boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame with over %d bytes of text", streamLineMaxText))
 	}
-	// truncateStalled ends the hold of an event in progress that got no new
-	// byte for streamHoldMaxPartialAge: the events before it are checked and
-	// sent, then the unknown tier decides; an alert sends its bytes unread.
-	// Only called with nothing queued, so nothing the tool-call hold keeps
-	// is passed.
+	// truncateStalled is the stall bound of an event in progress that got no
+	// new byte for streamHoldMaxPartialAge: the events before it are checked
+	// and sent, then the unknown tier decides, once per event. A block ends
+	// the stream. An alert keeps the event held (GAP-0316): its bytes are not
+	// read, and it may be the first event of a tool call the hold has not
+	// seen yet, so they go out only once it ends and is read (the tool-call
+	// rules decide first), or never, when the request or the upstream ends.
+	// Only called with nothing queued.
 	truncateStalled := func() bool {
 		if !checkHeld() || !boundHit(bounded.Time, fmt.Sprintf("a reply stream line or frame unfinished, no new byte for %s", streamHoldMaxPartialAge)) {
 			return false
 		}
-		if len(queue) == 0 {
-			b := pending()[sentAhead:]
-			sendRaw(b)
-			sentAhead += len(b)
-		}
+		stallReported = true
 		return true
 	}
 	// sseOversize decides an SSE event over the framer's bound (sseEventMax,
@@ -461,10 +460,7 @@ func (s *passthroughStream) run() {
 
 	// handle takes one event; true stops the stream.
 	handle := func(ev sseEvent) bool {
-		// The bytes of it that went out unread (a TRUNCATED alert) are not
-		// sent again.
-		cut := min(sentAhead, len(ev.Raw))
-		ev.Raw, sentAhead = ev.Raw[cut:], sentAhead-cut
+		stallReported = false
 		if ev.Unread {
 			return unreadEvent(ev)
 		}
@@ -595,13 +591,13 @@ read:
 	for {
 		// The hold's time bounds, on the events the tool-call hold lets out:
 		// the oldest of them waits at most streamHoldMaxAge for a check; an
-		// event in progress, with nothing queued, at most
+		// event in progress, with nothing queued, is reported once
 		// streamHoldMaxPartialAge after the last byte.
 		var deadline time.Time
 		if tailHold && initialFlushed {
 			if relN > 0 {
 				deadline = queueAt[0].Add(streamHoldMaxAge)
-			} else if len(queue) == 0 && unread() > 0 {
+			} else if len(queue) == 0 && unread() > 0 && !stallReported {
 				deadline = lastRead.Add(streamHoldMaxPartialAge)
 			}
 		}
@@ -611,7 +607,7 @@ read:
 		case <-holdTimer.wait(deadline, time.Now()):
 			if relN > 0 {
 				stopped = !checkHeld()
-			} else if len(queue) == 0 && unread() > 0 {
+			} else if len(queue) == 0 && unread() > 0 && !stallReported {
 				stopped = !truncateStalled()
 			}
 			if stopped {

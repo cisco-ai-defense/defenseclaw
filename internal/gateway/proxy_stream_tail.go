@@ -28,13 +28,14 @@ import (
 // whose text was read are checked and sent at streamHoldMaxBytes. The bytes
 // of one SSE event or eventstream frame that has not ended (their text
 // cannot be read, and they are no event to the client yet either) are held
-// until it ends, while the upstream goes on sending: streamHoldMaxPartialAge
-// without a new byte ends the hold, and the stream is TRUNCATED: the text
-// read so far is still checked, then the unknown tier of the pack decides
-// (alert and send in the default and permissive packs, block in the strict
-// pack), never a silent release. In size an unfinished event is bounded by
-// its framer: an SSE event over sseEventMax (the framer's bound)
-// is TRUNCATED the same way and also takes the fail mode, since it can
+// until it ends. streamHoldMaxPartialAge without a new byte makes the stream
+// TRUNCATED: the text read so far is still checked, then the unknown tier
+// of the pack decides, once per event: the strict pack blocks and ends the
+// stream; the default and permissive packs alert and keep the event held,
+// since its unread bytes may start a tool call (GAP-0316). It goes out once
+// it ends and is read, or never, when the request or the upstream ends.
+// In size an unfinished event is bounded by its framer: an SSE event over
+// sseEventMax (the framer's bound) is TRUNCATED and also takes the fail mode, since it can
 // never be read whole (a managed or strict install refuses; whichever rule
 // refuses wins). Otherwise that event alone is passed on unread, and the
 // events after it are held and checked as before (GAP-0313). An eventstream
