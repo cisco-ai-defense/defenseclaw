@@ -3959,6 +3959,9 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 		for _, line := range enterprisestatus.CoworkLines(result.Cowork) {
 			fmt.Fprintf(output, "  %s\n", line)
 		}
+		for _, line := range enterprisestatus.RoutingLines(result.Routing) {
+			fmt.Fprintf(output, "  %s\n", line)
+		}
 		enterprisestatus.WriteCoworkVMSensor(output, result.CoworkVMSensor)
 	}
 	writeWindowsEnterpriseScanners(output, result.Scanners)

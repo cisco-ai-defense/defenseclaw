@@ -1990,6 +1990,8 @@ def build_setup_sections(
             "Telemetry collection, retention, routing, and per-route redaction policy.",
             "Read-only effective plan; press E to manage destinations through setup observability.",
         ),
+        _routing_section(cfg),
+        _tokenomics_section(cfg),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
         # The admission defaults had no row since the retired
         # watch.allow_list_bypass_scan row went (GAP-1870).
@@ -9223,6 +9225,92 @@ def _firewall_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigFiel
         _header("Rules File", "firewall.rules_file", _value(cfg, "firewall.rules_file")),
         _header("Anchor Name", "firewall.anchor_name", _value(cfg, "firewall.anchor_name")),
         _header("How to edit", "firewall.hint", "edit config.yaml directly - these paths bind to system-owned files"),
+    )
+
+
+def _count(cfg: object | Mapping[str, Any] | None, key: str) -> int:
+    value = get_config_value(cfg, key, None)
+    return len(value) if isinstance(value, (list, tuple)) else 0
+
+
+def _routing_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
+    """Model routing (GAP-0630). Only values that cannot make the config
+    unloadable on their own are editable: on_classifier_error, min_confidence,
+    allow_user_override, and the default alias as a choice of the aliases that
+    exist. Turning routing on, the classifier, and the models, rules and
+    budgets have checks of their own (a model must exist, a classifier needs
+    its endpoint), so they are read-only here and changed with the
+    defenseclaw routing commands."""
+    models = get_config_value(cfg, "routing.models", None)
+    aliases = tuple(
+        str(m.get("name")) for m in (models if isinstance(models, (list, tuple)) else ()) if isinstance(m, dict) and m.get("name")
+    )
+    count_rules = _count(cfg, "routing.admin.rules")
+    count_budgets = _count(cfg, "routing.admin.budgets")
+    summary = f"{len(aliases)} model(s), {count_rules} rule(s), {count_budgets} budget(s)"
+    on = "on" if get_config_value(cfg, "routing.enabled", False) else "off"
+    classifier = str(get_config_value(cfg, "routing.classifier", "") or "vllm_sr")
+    cli_hint = "Change it with defenseclaw routing enable, disable and setup."
+    default_alias = (
+        _field(cfg, "Default Alias", "routing.default_alias", "choice", ("", *aliases), "Model used when nothing else is picked.")
+        if aliases
+        else ConfigField("Default Alias", "routing.default_alias", "header", "", "", hint="Add a model first: defenseclaw routing models add.")
+    )
+    return ConfigSection(
+        "Routing",
+        (
+            ConfigField("Routing", "routing.enabled", "header", on, on, hint=cli_hint),
+            ConfigField("Classifier", "routing.classifier", "header", classifier, classifier, hint=cli_hint),
+            default_alias,
+            _field(cfg, "Min Confidence", "routing.min_confidence", hint="0 to 1: a lower classifier confidence counts as no answer."),
+            _field(
+                cfg,
+                "On Classifier Error",
+                "routing.on_classifier_error",
+                "choice",
+                ("original", "rules"),
+                "original: send the request unchanged; rules: ask the built-in rules.",
+            ),
+            _field(cfg, "Allow User Override", "routing.allow_user_override", "bool", hint="A request that names an allowed alias keeps it."),
+            _header(".. Lists (read-only here) .."),
+            ConfigField(
+                "Models, rules, budgets", "routing.summary", "header", summary, summary,
+                hint="Change them with defenseclaw routing models, rules and budgets.",
+            ),
+        ),
+        "Model routing: which model answers which request.",
+        "Turn routing on or off, pick the classifier and edit the lists with defenseclaw routing; see defenseclaw routing status.",
+    )
+
+
+def _tokenomics_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
+    """Tokenomics and pricing (GAP-0630): read-only. Config.save() does not
+    persist observability.tokenomics or observability.pricing, so the editor
+    shows them and names the command that changes them (defenseclaw-tui rule 6)."""
+
+    def shown(key: str, default: Any = "") -> str:
+        value = get_config_value(cfg, key, default)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value) if value not in (None, "") else str(default)
+
+    hint = "Read-only here. Change it with defenseclaw setup tokenomics --enable or --disable, and defenseclaw routing pricing."
+    models = _count(cfg, "observability.pricing.models")
+    return ConfigSection(
+        "Tokenomics",
+        (
+            ConfigField("Enabled", "observability.tokenomics.enabled", "header", shown("observability.tokenomics.enabled", "false"), shown("observability.tokenomics.enabled", "false"), hint=hint),
+            ConfigField("Local store", "observability.tokenomics.local_store_enabled", "header", shown("observability.tokenomics.local_store_enabled", "false"), shown("observability.tokenomics.local_store_enabled", "false"), hint=hint),
+            ConfigField("Retention (days)", "observability.tokenomics.local_store_retention_days", "header", shown("observability.tokenomics.local_store_retention_days", "30"), shown("observability.tokenomics.local_store_retention_days", "30"), hint=hint),
+            ConfigField("Compute cost", "observability.tokenomics.cost_compute", "header", shown("observability.tokenomics.cost_compute", "true"), shown("observability.tokenomics.cost_compute", "true"), hint=hint),
+            ConfigField(
+                "Price table", "observability.pricing.version", "header",
+                (shown("observability.pricing.version", "none") + f", {models} model(s)"), (shown("observability.pricing.version", "none") + f", {models} model(s)"),
+                hint="Change prices with defenseclaw routing pricing set or import.",
+            ),
+        ),
+        "Per-call model usage and cost (off by default).",
+        "Read-only here: see defenseclaw setup tokenomics and Observability > Tokenomics.",
     )
 
 

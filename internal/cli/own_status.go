@@ -34,6 +34,49 @@ type ownStatusView struct {
 		ownStatusRow
 		LastEventAt string `json:"last_event_at"`
 	} `json:"cowork"`
+	// Routing is the routing member of the own-status answer (GAP-0574);
+	// absent from a gateway older than 1.0.10.
+	Routing *ownRoutingView `json:"routing"`
+}
+
+// ownRoutingView is whether model routing is on for this computer, the
+// route-only connectors, and the account budget nearest its limit.
+type ownRoutingView struct {
+	Enabled   bool     `json:"enabled"`
+	RouteOnly []string `json:"route_only"`
+	Budget    *struct {
+		ID          string  `json:"id"`
+		Period      string  `json:"period"`
+		LimitUSD    float64 `json:"limit_usd"`
+		PercentUsed float64 `json:"percent_used"`
+		OnExceed    string  `json:"on_exceed"`
+		Exceeded    bool    `json:"exceeded"`
+		ResetsAt    string  `json:"resets_at"`
+	} `json:"budget"`
+}
+
+// ownRoutingLines are the Routing and Budget rows of defenseclaw status; none
+// for a gateway that did not send the member.
+func ownRoutingLines(view *ownRoutingView) []string {
+	if view == nil {
+		return nil
+	}
+	text := "off"
+	if view.Enabled {
+		text = "on"
+		if len(view.RouteOnly) > 0 {
+			text += " (" + strings.Join(view.RouteOnly, ", ") + " routed)"
+		}
+	}
+	lines := []string{fmt.Sprintf("  Routing       %s", text)}
+	if b := view.Budget; b != nil {
+		row := fmt.Sprintf("%s %.0f%% of %.2f USD per %s", b.ID, b.PercentUsed, b.LimitUSD, b.Period)
+		if b.Exceeded {
+			row += ", used up (" + b.OnExceed + ")"
+		}
+		lines = append(lines, "  Budget        "+row)
+	}
+	return lines
 }
 
 // ownStatusRow is one connector or Cowork row. State is one of protected, not
@@ -116,6 +159,9 @@ func showOwnStatus(cmd *cobra.Command, asJSON bool) error {
 	}
 	fmt.Fprintf(out, "  Cowork        %s\n", ownStateText(view.Cowork.ownStatusRow))
 	fmt.Fprintf(out, "  Last Cowork   %s\n", last)
+	for _, line := range ownRoutingLines(view.Routing) {
+		fmt.Fprintln(out, line)
+	}
 	fmt.Fprintln(out)
 	for _, line := range ownStatusNextSteps() {
 		fmt.Fprintln(out, line)

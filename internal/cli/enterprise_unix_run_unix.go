@@ -331,6 +331,9 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		for _, line := range enterprisestatus.CoworkLines(result.Cowork) {
 			fmt.Fprintf(w, "  %s\n", line)
 		}
+		for _, line := range enterprisestatus.RoutingLines(result.Routing) {
+			fmt.Fprintf(w, "  %s\n", line)
+		}
 		enterprisestatus.WriteCoworkVMSensor(w, result.CoworkVMSensor)
 		for _, service := range result.Services {
 			fmt.Fprintf(w, "  %-46s %s\n", service.Name, service.State)
