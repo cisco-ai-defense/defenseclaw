@@ -3903,6 +3903,44 @@ func scopedMoveName(name string) bool {
 	return true
 }
 
+// sameFolderNameLinks reports links and moves that make and rename only
+// entries of plain names: every link name, every link text, every move
+// source and destination is one path component that scopedMoveName accepts
+// (no dot, no authorized-keys or SSH control file name), and no move keeps
+// a backup or names a target folder. Such a link points at a sibling of its
+// own entry under a plain name, in whatever folder an unplaced cd (cd $W)
+// left it, and a move keeps it in that folder or moves it, under its plain
+// name, into an existing folder of a plain name. A write through it reaches
+// the file the sibling name reaches written directly there, which the walk
+// judges in the folder it places the call in; and no entry the command makes
+// or renames is a protected name (rel-1-0-10:GAP-0571). A link text with a
+// separator, a dot or a protected name, an absolute text, and a move of any
+// other shape keep the opaque reading.
+func (l shellLinks) sameFolderNameLinks(ops []renameOp) bool {
+	if len(l.aliases) == 0 {
+		return false
+	}
+	plain := func(name string) bool {
+		return !strings.ContainsAny(name, "/\\") && scopedMoveName(name)
+	}
+	for _, alias := range l.aliases {
+		if !plain(alias.text) || !plain(filepath.Base(alias.name)) {
+			return false
+		}
+	}
+	for _, op := range ops {
+		if op.backup || op.targetDir != "" || !plain(op.dest) {
+			return false
+		}
+		for _, source := range op.sources {
+			if !plain(source) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // dotDotComponent reports a path word with a .. component: the move then
 // passes through a name the archive may have made a link, so the write
 // operand keeps the raw spelling (OperandPath) that the scope reading
@@ -4226,13 +4264,24 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	if !parsed {
 		// Resolve already marks a command that does not parse incomplete.
 		if opaqueLink.MatchString(command) {
+			if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
+				return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
+			}
 			links.unknown(true)
 		}
 		return links, false
 	}
-	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) && !links.addPythonLiteralLinks(file, command, cwd, home) {
-		links.unknown(true)
-		return links, false
+	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) {
+		// A PowerShell New-Item link and Move-Item with static operands are
+		// read as the ln and mv they are (rel-1-0-10:GAP-0749); every other
+		// link-making text keeps the opaque reading.
+		if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
+			return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
+		}
+		if !links.addPythonLiteralLinks(file, command, cwd, home) {
+			links.unknown(true)
+			return links, false
+		}
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, nestedCopyDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
@@ -4571,8 +4620,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
 				if archiveMayLink(program, words[1:], static[1:]) &&
-					(!onlyDirectoryStatementsBefore(file, call, home) ||
-						!tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, facts, record)) {
+					!archiveExtractionHoldsNoLink(file, call, program, words[1:], static[1:], dir, command, home, facts, record) {
 					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
 				if archiveCopiesLinks(program, words[1:], static[1:]) {
@@ -4789,6 +4837,19 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			walkFailed = !stable
 		}
 		unplacedRelative := cds && links.relative && linkCall == nil && !linkDirsKnown
+		// Links and moves of plain names only (sameFolderNameLinks) reach
+		// what those names reach written directly, wherever an unplaced cd
+		// leaves them: they are read as the walk places the direct names
+		// (rel-1-0-10:GAP-0571).
+		if (!stable && !walkFailed || unplacedRelative) && cds && !renames && !wrappedCds && len(findMoves) == 0 &&
+			links.known && !links.opaque && !links.unread && links.sameFolderNameLinks(renameOps) {
+			stable, unplacedRelative = links.followRenames(renameOps, userView), false
+			if stable && !userView {
+				stable = links.dotDotPastLinksClear(command, cwd, home) && links.aliasesAwayFromState(cwd, home) &&
+					movedEntriesAwayFromState(renameOps, findMoves, home)
+				links.movesStable = stable
+			}
+		}
 		if !stable || unplacedRelative {
 			// Only the disk walks of a nested directory change failed, with no
 			// move and no other unread link: the names of the link calls
