@@ -69,6 +69,7 @@ from defenseclaw import (
     legacy_connector,
     rulepack_validation,
     ux,
+    venv_integrity,
 )
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.audit_time_order import audit_time_order
@@ -5122,6 +5123,25 @@ def _check_component_connector_compatibility(
                 remediation += (
                     " to verify the version and turn action mode back on (or --mode observe to keep observing)"
                 )
+        if finding.connector in rechecked.changed and finding.installed_version:
+            # The gateway and its hook events keep the version setup recorded
+            # (agent_version_normalized) until setup records the one installed
+            # now. Say so when that matters: a verdict that is not a pass, or a
+            # contract other than the one recorded (GAP-0164).
+            was = rechecked.changed[finding.connector]
+            before = resolve_connector_contract(finding.connector, was) if was else None
+            before_contract = before.contract.contract_id if before is not None and before.contract is not None else ""
+            if tag != "pass" or (before is not None and before_contract != (finding.contract_id or "")):
+                from defenseclaw.hook_integrity import setup_command
+
+                if tag == "pass":
+                    tag = "warn"
+                detail += (
+                    f"; the gateway and its hook events still use the recorded version "
+                    f"{was or 'from before the update'} until setup records this one"
+                )
+                step = f"run '{setup_command(finding.connector)} --yes' to record the version installed now"
+                remediation = f"{remediation}; {step}" if remediation else step
         unverified_detail, unverified_step = _unverified_executable_note(cfg, finding.connector)
         if unverified_detail:
             detail += unverified_detail
@@ -5139,28 +5159,13 @@ def _check_component_connector_compatibility(
         )
 
 
-_DOCS_URL = "https://cisco-ai-defense.github.io/defenseclaw/docs"
+_DOCS_URL = venv_integrity.DOCS_URL
 
 
 def _install_repair_hint(what: str) -> str:
-    """The command that repairs *what* (a part of this install).
+    """The command that repairs *what* on this host (Windows: the install command)."""
 
-    On macOS and Linux the release upgrade resolver reinstalls the release at
-    the installed version too (the built-in ``defenseclaw upgrade`` stops early
-    when the version is already current, so it cannot repair a missing part);
-    on Windows, running the install command again does (from 1.0 the 0.8.x
-    Setup package and its ``/repair`` are retired).
-    """
-
-    if os.name == "nt":
-        return (
-            "repair the install by running the install command again "
-            f"({_DOCS_URL}/get-started/windows/install-lifecycle/#repair)"
-        )
-    return (
-        f"repair {what} with the release upgrade resolver, `bash defenseclaw-upgrade.sh --yes` "
-        f"(get and verify it as {_DOCS_URL}/get-started/upgrade/ shows)"
-    )
+    return venv_integrity.install_repair_hint(what, windows=os.name == "nt")
 
 
 def _scanner_repair_hint() -> str:
@@ -5180,6 +5185,36 @@ def _scanner_version_note(dist: str, expected: str) -> tuple[str, str]:
     if installed != expected:
         return "warn", f"{dist} {installed} (this release pins {expected}); {_scanner_repair_hint()}"
     return "pass", f"{dist} {installed}"
+
+
+def _mcp_scanner_import_note(status: str, note: str, dist: str) -> tuple[str, str, str]:
+    """``(status, note, remediation)`` once the MCP scanner SDK imports.
+
+    The installed metadata said cisco-ai-mcp-scanner was there while the SDK
+    failed to import (an upgrade had left files of an older LiteLLM wheel), so
+    doctor passed and `defenseclaw mcp scan` failed (GAP-0006). The import runs
+    in a child interpreter, as `defenseclaw mcp scan` would, so a damaged
+    package cannot break this run; a failure names the files that differ from
+    their wheels and the repair, which rebuilds the environment.
+    """
+    try:
+        # The first import after an install compiles and scans LiteLLM.
+        error = venv_integrity.import_error(
+            "from mcpscanner import Config, Scanner", env=trusted_system_subprocess_env()
+        )
+    except OSError as exc:
+        return "warn", f"{note}; could not start {sys.executable} to import it: {exc}", ""
+    if error is None:
+        slow = "its import did not finish within 60 s (a first start after an install can take longer)"
+        return "warn", f"{note}; {slow}, so run `defenseclaw doctor` again", ""
+    if not error:
+        return status, f"{note}, imports", ""
+    detail = f"{dist} is installed but does not import ({error})"
+    damaged = venv_integrity.damaged_files(venv_integrity.site_packages())
+    if damaged:
+        detail += "; files that differ from their wheels: " + venv_integrity.describe(damaged)
+    repair = _install_repair_hint("the Python environment")
+    return "fail", f"{detail}; {repair}", repair
 
 
 def _litellm_version_note() -> tuple[str, str]:
@@ -5218,7 +5253,10 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
     # The gateway scans MCP servers with `defenseclaw mcp scan`, the SDK in
     # this environment, not a standalone mcp-scanner launcher.
     status, note = _scanner_version_note(scanner_settings.MCP_SCANNER_DIST, scanner_settings.MCP_SCANNER_VERSION)
-    _emit(status, "Scanner: mcp-scanner", note, r=r)
+    remediation = ""
+    if status != "fail":
+        status, note, remediation = _mcp_scanner_import_note(status, note, scanner_settings.MCP_SCANNER_DIST)
+    _emit(status, "Scanner: mcp-scanner", note, r=r, remediation=remediation)
     status, note = _litellm_version_note()
     _emit(status, "Scanner: litellm", note, r=r)
 
@@ -16729,6 +16767,8 @@ def doctor(
                 live_health=inventory_health,
             )
             _check_hook_contract_lock(cfg, _c, r)
+            if _c == "hermes":
+                _check_hermes_shipped_plugins(cfg, r)
             _check_hook_runtime_integrity(cfg, _c, r)
     # S7.5 — surface inactive-connector residue (backup files / hook
     # scripts left over from a previous connector). Without this check
@@ -19918,6 +19958,27 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
             r=r,
             remediation=own_repair or f"re-register the hooks: {setup_command(connector)} --yes",
         )
+
+
+def _check_hermes_shipped_plugins(cfg, r: _DoctorResult) -> None:
+    """Say whether the gateway recognizes the shipped plugins of the installed Hermes (rel-1-0-10:GAP-0765).
+
+    DefenseClaw ships the shipped-plugin digests of every Hermes release a
+    hook contract covers. A Hermes newer than all of them makes every shipped
+    plugin an unknown plugin that the gateway scans; this row says so.
+    """
+    from defenseclaw.hermes_vendor_plugins import COVERED, shipped_plugin_coverage
+
+    if _gateway_store_unknown(cfg):
+        return
+    version, _proven = _agent_version_now(_gateway_store_dir(cfg), "hermes")
+    coverage = shipped_plugin_coverage(version)
+    if not coverage.state:
+        _emit("skip", "Hermes shipped plugins", coverage.detail, r=r)
+    elif coverage.state == COVERED:
+        _emit("pass", "Hermes shipped plugins", coverage.detail, r=r)
+    else:
+        _emit("warn", "Hermes shipped plugins", coverage.detail, r=r, remediation=coverage.step)
 
 
 def _agent_version_now(data_dir: str, connector: str) -> tuple[str, bool]:

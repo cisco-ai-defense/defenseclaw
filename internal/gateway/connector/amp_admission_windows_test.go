@@ -20,6 +20,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +93,10 @@ func TestAmpSealedExecutableAuthorityRejectsBinaryReplacement(t *testing.T) {
 	err := conn.Setup(context.Background(), opts)
 	if err == nil || !strings.Contains(err.Error(), "digest does not match protected evidence") {
 		t.Fatalf("setup after Amp binary replacement error=%v, want protected digest rejection", err)
+	}
+	// GAP-0249: an Amp update is refused for Amp alone and names the step.
+	if !strings.Contains(err.Error(), "run: defenseclaw setup amp --yes") || !errors.Is(err, ErrExecutableAdmission) {
+		t.Fatalf("setup after Amp binary replacement error=%v, want the setup step and ErrExecutableAdmission", err)
 	}
 	body, readErr := os.ReadFile(pluginPath)
 	if readErr != nil {

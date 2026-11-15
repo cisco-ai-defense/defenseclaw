@@ -213,6 +213,10 @@ func TestHermesSetupAdmissionRejectsChangedPathBytesVersionAndCustodyBeforeMutat
 			if !errors.Is(err, ErrExecutableAdmission) {
 				t.Fatalf("Setup error = %v, want ErrExecutableAdmission", err)
 			}
+			// GAP-0249: changed bytes are a Hermes update and name the step.
+			if changedBytes := test.name == "replaced executable bytes"; changedBytes != strings.Contains(err.Error(), "run: defenseclaw setup hermes --yes") {
+				t.Fatalf("Setup error = %v, want the setup step only for changed bytes", err)
+			}
 			assertHermesAdmissionTargetsUnchanged(t, before)
 		})
 	}

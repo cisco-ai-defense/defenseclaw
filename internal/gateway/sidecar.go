@@ -7050,6 +7050,22 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					}
 					continue
 				}
+				if connector.AgentExecutableChangedBeforeChange(err) {
+					// The agent updated in place (npm i -g, a self-update), so its
+					// executable no longer matches the evidence setup sealed. The
+					// new bytes are not trusted until setup admits them, and
+					// neither a rollback nor a DefenseClaw upgrade can cure it:
+					// failing the start took the gateway down for every connector
+					// of the account (GAP-0249). Same scope as the custody refusal:
+					// only this connector is not started, its registration stays
+					// for the setup the refusal names.
+					fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s not started, its agent executable changed since setup (other connectors unaffected): %v\n", registration.conn.Name(), err)
+					transaction.noteNotStarted(registration.conn.Name(), err)
+					if strings.TrimSpace(previousLock.Connector) != "" {
+						transaction.keptRegistrations = append(transaction.keptRegistrations, registration.conn.Name())
+					}
+					continue
+				}
 				// A refresh is an upgrade of an existing guard. Teardown restores
 				// the pre-install, possibly hookless settings, not that guard.
 				// Restore its prior posture with the rest of this transaction and
