@@ -29123,8 +29123,8 @@ function Copy-DefenseClawRecordedHookPreimage {
     # rollback copy: it gets the refusal below, not a strict-mode property
     # error that names no next step.
     $replacementDigest = ''
-    if ($null -ne $ReplacementSource) {
-        $replacementDigest = (Get-DefenseClawOptionalLayoutValue -Layout $ReplacementSource -Name 'sha256').ToLowerInvariant()
+    if ($null -ne $ReplacementSource -and $ReplacementSource.ContainsKey('sha256')) {
+        $replacementDigest = ([string]$ReplacementSource['sha256']).ToLowerInvariant()
     }
     if ($replacementDigest -cmatch '^[0-9a-f]{64}$') {
         if ($write) {
