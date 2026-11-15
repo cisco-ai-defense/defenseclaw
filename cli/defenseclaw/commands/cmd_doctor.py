@@ -16588,6 +16588,8 @@ def doctor(
                 live_health=inventory_health,
             )
             _check_hook_contract_lock(cfg, _c, r)
+            if _c == "hermes":
+                _check_hermes_shipped_plugins(cfg, r)
             _check_hook_runtime_integrity(cfg, _c, r)
     # S7.5 — surface inactive-connector residue (backup files / hook
     # scripts left over from a previous connector). Without this check
@@ -19707,6 +19709,27 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
             r=r,
             remediation=own_repair or f"re-register the hooks: {setup_command(connector)} --yes",
         )
+
+
+def _check_hermes_shipped_plugins(cfg, r: _DoctorResult) -> None:
+    """Say whether the gateway recognizes the shipped plugins of the installed Hermes (rel-1-0-10:GAP-0765).
+
+    DefenseClaw ships the shipped-plugin digests of every Hermes release a
+    hook contract covers. A Hermes newer than all of them makes every shipped
+    plugin an unknown plugin that the gateway scans; this row says so.
+    """
+    from defenseclaw.hermes_vendor_plugins import COVERED, shipped_plugin_coverage
+
+    if _gateway_store_unknown(cfg):
+        return
+    version, _proven = _agent_version_now(_gateway_store_dir(cfg), "hermes")
+    coverage = shipped_plugin_coverage(version)
+    if not coverage.state:
+        _emit("skip", "Hermes shipped plugins", coverage.detail, r=r)
+    elif coverage.state == COVERED:
+        _emit("pass", "Hermes shipped plugins", coverage.detail, r=r)
+    else:
+        _emit("warn", "Hermes shipped plugins", coverage.detail, r=r, remediation=coverage.step)
 
 
 def _agent_version_now(data_dir: str, connector: str) -> tuple[str, bool]:

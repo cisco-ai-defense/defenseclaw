@@ -162,7 +162,7 @@ func (f *hermesPluginFixture) plugin(root, name string) string {
 	return path
 }
 
-// pinVendor records the current bytes of a plugin as the vendor digest.
+// pinVendor records the current bytes of a plugin as one of its vendor digests.
 func (f *hermesPluginFixture) pinVendor(name, path string) {
 	f.t.Helper()
 	digest, err := hermesPluginTreeDigest(path, hermesScannerLoader(f.t))
@@ -170,7 +170,7 @@ func (f *hermesPluginFixture) pinVendor(name, path string) {
 		f.t.Fatal(err)
 	}
 	previous, existed := hermesPluginVendorDigests[name]
-	hermesPluginVendorDigests[name] = digest
+	hermesPluginVendorDigests[name] = append(slices.Clone(previous), digest)
 	f.t.Cleanup(func() {
 		if existed {
 			hermesPluginVendorDigests[name] = previous
@@ -787,7 +787,7 @@ func TestHermesVendorBaselineVouchesOnlyForVendorBytes(t *testing.T) {
 	if err != nil || row == nil || row.ScanID != "" || strings.Contains(row.ScannerFingerprint, "hermes-vendor") {
 		t.Fatalf("vendor baseline = %#v, %v; want an unmarked baseline with no scan", row, err)
 	}
-	hermesPluginVendorDigests["kanban"] = "0000"
+	hermesPluginVendorDigests["kanban"] = []string{"0000"}
 	f.w.runRescanCycle(context.Background())
 	if n := f.scan.scans(path); n != 1 {
 		t.Fatalf("plugin that stopped matching its digest scans = %d, want 1", n)

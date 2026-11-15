@@ -1008,6 +1008,7 @@ def _print_agents(
     gc = getattr(cfg, "guardrail", None)
     agent_missing = {c for c in actives if _agent_missing(cfg, c, health_map.get(c))}
     desktop_engine = _claude_desktop_engine_version(cfg) if "claudecode" in actives else ""
+    hermes_plugins = _hermes_shipped_plugins_note(cfg) if "hermes" in actives else ""
     # ``guardrail.enabled: false`` (``setup guardrail --disable``, or the
     # default ``uninstall``) makes the gateway tear every hook connector
     # down, so none of them enforces (GAP-1312). The OpenClaw row reports the
@@ -1210,6 +1211,8 @@ def _print_agents(
                     f"                {dim_text}{degraded}",
                     18,
                 )
+    if hermes_plugins:
+        _echo_wrapped(" " * 16 + ux._style(hermes_plugins, fg="yellow"), 18)
 
 
 class _PublicForegroundHealth(dict):
@@ -1699,6 +1702,28 @@ def _agent_missing(cfg, connector: str, live: dict | None = None) -> bool:
         )
     except Exception:  # noqa: BLE001 - status must survive incomplete evidence.
         return False
+
+
+def _hermes_shipped_plugins_note(cfg) -> str:
+    """A note when the gateway cannot recognize the shipped plugins of the installed Hermes, or "".
+
+    Reads the version the last agent discovery recorded; nothing is run
+    (rel-1-0-10:GAP-0765).
+    """
+    try:
+        from defenseclaw.hermes_vendor_plugins import COVERED, shipped_plugin_coverage
+        from defenseclaw.inventory import agent_discovery
+
+        disc = agent_discovery._read_cache(data_dir=str(getattr(cfg, "data_dir", "") or "") or None)
+        signal = disc.agents.get("hermes") if disc is not None else None
+        if signal is None or not signal.installed:
+            return ""
+        coverage = shipped_plugin_coverage(signal.version)
+    except Exception:  # noqa: BLE001 - the note is optional.
+        return ""
+    if coverage.state in ("", COVERED):
+        return ""
+    return f"Hermes shipped plugins: {coverage.detail}; {coverage.step}"
 
 
 def _claude_desktop_engine_version(cfg) -> str:
