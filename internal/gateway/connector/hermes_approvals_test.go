@@ -66,7 +66,7 @@ func TestManagedHermesRegistrationRequiresOwnedApprovals(t *testing.T) {
 	}
 	t.Setenv("HERMES_HOME", hermesHome)
 
-	allowlist := filepath.Join(hermesHome, hermesAllowlistFileName)
+	allowlist := filepath.Join(hermesHome, HermesAllowlistFileName)
 	if err := os.WriteFile(allowlist, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}

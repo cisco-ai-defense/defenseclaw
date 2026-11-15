@@ -420,7 +420,7 @@ func TestWindowsHookImageNativeScanWithAClaudeTarget(t *testing.T) {
 	if len(scan.Incomplete) != 0 {
 		t.Fatalf("the scan is incomplete: %v", scan.Incomplete)
 	}
-	for _, line := range append(append([]string{}, scan.Incomplete...), scan.Skipped...) {
+	for _, line := range append(append([]string{}, scan.Incomplete...), unverifiedLines(scan.Unverified)...) {
 		if strings.Contains(strings.ToLower(line), `managed-settings.d:`) {
 			t.Fatalf("the scan opened the managed-settings.d folder as a file: %s", line)
 		}
@@ -509,14 +509,14 @@ func TestWindowsHookImageNativeAccountFileBehindAJunction(t *testing.T) {
 		windowsHookImageAccountView(viewWindowsHookImageAccountPath))
 	scan := scanWindowsHookImageConfigFiles(files, `C:\Program Files\Cisco\DefenseClaw\bin`, readWindowsHookImageConfigFile)
 	incomplete = append(incomplete, scan.Incomplete...)
-	skipped = append(skipped, scan.Skipped...)
+	skipped = append(skipped, scan.Unverified...)
 	if len(incomplete) != 0 {
 		t.Fatalf("an account junction made the scan incomplete: %v", incomplete)
 	}
 	if len(files) != 1 || !strings.EqualFold(files[0].Path, plain) || len(skipped) != 2 {
-		t.Fatalf("files %+v, skipped %v", files, skipped)
+		t.Fatalf("files %+v, unverified %v", files, unverifiedLines(skipped))
 	}
-	for _, line := range skipped {
+	for _, line := range unverifiedLines(skipped) {
 		if !strings.Contains(line, windowsHookImageLinkInAccountPath) {
 			t.Fatalf("skipped line without link_in_account_path: %s", line)
 		}
@@ -726,12 +726,50 @@ func TestWindowsHookImageNativeVendorFolders(t *testing.T) {
 		t.Fatalf("an account's junction: files %+v problems %v", files, problems)
 	}
 	_, incomplete, skipped := expandWindowsHookImageConfigFiles(files, os.Lstat, os.ReadDir, windowsHookImageAccountView(viewWindowsHookImageAccountPath))
-	if len(incomplete) != 0 || len(skipped) != 1 || !strings.Contains(skipped[0], windowsHookImageLinkInAccountPath) {
-		t.Fatalf("an account's junction expanded: incomplete %v skipped %v", incomplete, skipped)
+	if len(incomplete) != 0 || len(skipped) != 1 || !strings.Contains(skipped[0].Line(), windowsHookImageLinkInAccountPath) {
+		t.Fatalf("an account's junction expanded: incomplete %v unverified %v", incomplete, unverifiedLines(skipped))
 	}
 	windowsHookImageNativeSetOwner(t, link, admins)
 	files, problems = windowsHookImageVendorFiles(programData, link, 1, vfs)
 	if len(files) != 0 || len(problems) != 1 || !strings.Contains(problems[0], windowsHookImageLinkAtMachineFolder) {
 		t.Fatalf("an administrator-owned junction: files %+v problems %v", files, problems)
+	}
+}
+
+// rel-1-0-10 GAP-0882, natively: an account file the reader is denied (a
+// deny ACE, as an Administrator meets on another account's .codex) is
+// unverified, and retire names it unreadable and stays pending.
+func TestHookImageRetirePendsOnAnAccountFileItIsDenied(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := user.User.Sid.String()
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("[hooks]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyWindowsSDDL(path, "D:P(D;;FR;;;"+me+")(A;;FA;;;"+me+")"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = applyWindowsSDDL(path, "D:P(A;;FA;;;"+me+")") })
+	file := windowsHookImageConfigFile{Path: path, User: true, Home: home, SID: skipTestSID}
+	scan := func() windowsHookImageConfigScan {
+		return scanWindowsHookImageConfigFiles([]windowsHookImageConfigFile{file}, hookImageTestBin, readWindowsHookImageConfigFile)
+	}
+	if got := scan(); len(got.Unverified) != 1 || len(got.Incomplete) != 0 {
+		t.Fatalf("scan of the denied file = %+v", got)
+	}
+	s := newSkipFixture(t)
+	steps := s.steps()
+	steps.Scan = scan
+	report := retireWindowsHookImages(steps)
+	if report.OK || report.Reason != windowsHookImageRetirePending || len(report.StillNamed) != 1 ||
+		!report.StillNamed[0].Unreadable || !report.StillNamed[0].Account || !strings.Contains(report.Error, "LocalSystem") {
+		t.Fatalf("retire over a denied account file = %+v", report)
 	}
 }

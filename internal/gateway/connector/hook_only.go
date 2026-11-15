@@ -64,7 +64,6 @@ var hermesConfigPathResolver = hermespath.ConfigPath
 
 const (
 	hermesAllowlistLogicalName      = "shell-hooks-allowlist.json"
-	hermesAllowlistFileName         = "shell-hooks-allowlist.json"
 	hermesAllowlistOwnerField       = "defenseclaw_managed"
 	hermesAllowlistMaxBytes         = 2 << 20
 	hermesDirectNativeStateFileName = "hermes-direct-native-state.json"
@@ -1131,7 +1130,7 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		// An allowlist Setup cannot repair is refused before anything is
 		// written: rolling back after the refusal tore down the hooks an
 		// earlier DefenseClaw registered and left Hermes unguarded (GAP-1241).
-		allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+		allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 		command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
 		if err := checkHermesAllowlistRepairable(allowlistPath, command); err != nil {
 			return setupRefusedUnchanged{err: fmt.Errorf("%s hook config: %w", c.name, err)}
@@ -1337,7 +1336,7 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 		// and managed verification must read back every required approval;
 		// an emptied allowlist makes the registration ineffective.
 		command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
-		return hermesOwnedApprovalsPresent(filepath.Join(filepath.Dir(hermesConfig), hermesAllowlistFileName), command)
+		return hermesOwnedApprovalsPresent(filepath.Join(filepath.Dir(hermesConfig), HermesAllowlistFileName), command)
 	}
 	path := c.configPath(opts)
 	const maxManagedPluginBytes = 4 << 20
@@ -2134,7 +2133,7 @@ func (c *hookOnlyConnector) removeHermesHomeEntries(opts SetupOpts, configPath s
 		}
 	}
 	if approvals {
-		if err := removeHermesOwnedApprovals(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName), command, nil, managedStandaloneRender(opts)); err != nil {
+		if err := removeHermesOwnedApprovals(filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName), command, nil, managedStandaloneRender(opts)); err != nil {
 			return fmt.Errorf("remove shell hook approvals: %w", err)
 		}
 	}
@@ -2150,7 +2149,7 @@ func hermesHomeHoldsOwnedEntries(configPath, hookScript, command string) (hooks,
 		return false, false, err
 	}
 	hooks = hermesHooksHoldOwnedEntries(cfg["hooks"], hookScript)
-	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	document, err := readHermesAllowlist(allowlistPath)
 	if err != nil {
 		return false, false, err
@@ -2515,7 +2514,7 @@ func verifyHermesCleanup(opts SetupOpts, configPath, hookScript, command string)
 	if hermesHooksHoldOwnedEntries(config["hooks"], hookScript) {
 		return fmt.Errorf("hermes teardown incomplete: DefenseClaw hook entries remain in %s", configPath)
 	}
-	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	if _, err := os.Stat(allowlistPath); err == nil {
 		document, err := readHermesAllowlist(allowlistPath)
 		if err != nil {
@@ -2662,7 +2661,7 @@ func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {
 		}
 		patched := []string{
 			configPath,
-			filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
+			filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName),
 		}
 		// Setup writes the direct-native state only on Windows; listing it
 		// elsewhere made the enterprise installer refuse every POSIX Hermes
@@ -4092,7 +4091,7 @@ func setupHermesFiles(opts SetupOpts, configPath, hookScript string) (err error)
 	if err := validateHermesWindowsConfigPath(configPath); err != nil {
 		return err
 	}
-	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	allowlistPath := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	configBackupPath := managedFileBackupPath(opts.DataDir, "hermes", "config.yaml")
 	allowlistBackupPath := managedFileBackupPath(opts.DataDir, "hermes", hermesAllowlistLogicalName)
 	statePath := filepath.Join(opts.DataDir, "hooks", hermesDirectNativeStateFileName)
@@ -4430,7 +4429,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	}
 	retireManagedConsent := managedStandaloneRender(opts)
 	logicalName := hermesAllowlistLogicalName
-	path := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	path := filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName)
 	backup, backupErr := loadManagedFileBackupForTransform(opts.DataDir, "hermes", logicalName, path)
 	if backupErr != nil && !os.IsNotExist(backupErr) {
 		return backupErr
