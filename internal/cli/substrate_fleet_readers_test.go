@@ -198,7 +198,13 @@ func (deniedReader) Close() error { return nil }
 func TestVerifyProbesTheActorListener(t *testing.T) {
 	t.Run("only actor routes", func(t *testing.T) {
 		fakeKubectl(t, nil)
-		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckActorRoutes], fleet.Pass, "only actor routes (8 of")
+		// The 9 actor routes of fleet.ActorListenerProbes answer 401 without a token:
+		// hook, notify, inspect, /llm/, the three OTLP paths, the relay's session
+		// check and (F18) the relay's task-end report /api/v1/substrate/relay/task.
+		if !fleet.ActorRouteAllowed("/api/v1/substrate/relay/task") {
+			t.Fatal("the relay task-end route is not an actor route")
+		}
+		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckActorRoutes], fleet.Pass, "only actor routes (9 of")
 	})
 	t.Run("an admin route on the actor listener fails", func(t *testing.T) {
 		fakeKubectl(t, nil)
