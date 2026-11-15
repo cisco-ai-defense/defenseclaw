@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 )
@@ -31,7 +32,7 @@ var enterpriseAccountKeysManagedInstalled = func(path string) bool {
 func runEnterpriseAccountKeys(cmd *cobra.Command) error {
 	env, err := newUnixLifecycleEnv(enterpriseunix.CurrentGOOS())
 	if err != nil {
-		return withExitCode(err, enterprisestatus.UnixExitFailure)
+		return cliusage.WithExitCode(err, enterprisestatus.UnixExitFailure)
 	}
 	if enterpriseAccountKeysEUID() != 0 {
 		gateway := filepath.Join(env.Layout.BinDir, "defenseclaw-gateway")

@@ -25,7 +25,7 @@ def test_unproven_undo_closes_managed_hooks_before_stopping_gateway() -> None:
 
 
 def test_standalone_hook_checks_durable_closure_before_accepting_open() -> None:
-    source = (ROOT / "internal/cli/hook_trusted_state_windows.go").read_text(encoding="utf-8")
+    source = (ROOT / "internal/hookcli/hook_trusted_state_windows.go").read_text(encoding="utf-8")
     prepare = source.split("func prepareEnterpriseManagedHookRuntime", 1)[1].split(
         "func validEnterpriseManagedRuntimeGenerationID", 1
     )[0]

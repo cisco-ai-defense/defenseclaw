@@ -27,6 +27,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -1527,14 +1528,14 @@ func TestKeepWindowsStandaloneHookBinaryChecksTheBinaryBeforeTheRuntimeFiles(t *
 	if err := os.WriteFile(roots.MetadataPath, []byte(`{"hashes":{"hook":"0123456789abcdef"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	savedRoots, savedManifest, savedStandalone := windowsManagedLayout.roots, enterpriseHookManifest, windowsHolderStandalone
+	savedRoots, savedManifest, savedStandalone := hookcli.WindowsManagedLayout.Roots, enterpriseHookManifest, windowsHolderStandalone
 	savedLstat, savedDir := windowsHookBinaryLstat, windowsHookRuntimeDir
 	t.Cleanup(func() {
-		windowsManagedLayout.roots, enterpriseHookManifest, windowsHolderStandalone = savedRoots, savedManifest, savedStandalone
+		hookcli.WindowsManagedLayout.Roots, enterpriseHookManifest, windowsHolderStandalone = savedRoots, savedManifest, savedStandalone
 		windowsHookBinaryLstat, windowsHookRuntimeDir = savedLstat, savedDir
 		resetWindowsHolderOutputForTest()
 	})
-	windowsManagedLayout.roots = func(string) (winpath.EnterpriseRoots, error) { return roots, nil }
+	hookcli.WindowsManagedLayout.Roots = func(string) (winpath.EnterpriseRoots, error) { return roots, nil }
 	enterpriseHookManifest = filepath.Join(roots.StateRoot, "targets.yaml")
 	windowsHolderStandalone = func() bool { return true }
 	var order []string

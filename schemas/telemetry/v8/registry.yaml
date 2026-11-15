@@ -475,7 +475,7 @@ inbound_bindings:
         kind: connector-log-v1
         predicates:
           - {location: leaf_attribute, key: defenseclaw.signal, operator: absent, value_type: string}
-          - {location: leaf_attribute, key: event.name, operator: equals, values: [claude_code.user_prompt], value_type: string}
+          - {location: leaf_attribute, key: event.name, operator: equals, values: [user_prompt], value_type: string}
       mapping: {strategy: connector-model-log-v1, alias_sets: [conversation-id-v1, request-id-v1, claudecode-turn-id-v1, provider-v1, request-model-v1, input-content-v1]}
       derived_targets: []
       time_rule: log-time-observed-receipt-v1

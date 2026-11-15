@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -104,7 +105,7 @@ func enterpriseHookForeignCleanupConnectors() ([]enterpriseHookWorkerForeignClea
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return nil, nil, nil
 	}
-	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	layout, programFiles, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		return nil, nil, err
 	}

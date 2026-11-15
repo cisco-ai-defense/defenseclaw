@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/pythoninert"
 )
 
 // An f- or t-string runs its replacement fields, so only inert comments and
@@ -89,7 +91,7 @@ func TestMaskPythonStringsKeepsOnlyCode(t *testing.T) {
 		{"expression before a conversion", `print(f"{p.write_text(42)!r}")`, true},
 		{"inequality in a field", `print(f"{p.write_text(42) != 1}")`, true},
 	} {
-		masked := MaskPythonStrings(tc.source)
+		masked := pythoninert.MaskPythonStrings(tc.source)
 		if len(masked) != len(tc.source) {
 			t.Fatalf("%s: masked length %d, want %d", tc.name, len(masked), len(tc.source))
 		}
@@ -112,7 +114,7 @@ func TestMaskPythonStringsFieldExpressions(t *testing.T) {
 		{`f"{x!r:{w}}"`, `f  x    w   `},
 		{`f"{d['k']=}"`, `f  d[   ]   `},
 	} {
-		if got := MaskPythonStrings(tc.source); got != tc.want {
+		if got := pythoninert.MaskPythonStrings(tc.source); got != tc.want {
 			t.Errorf("MaskPythonStrings(%q) = %q, want %q", tc.source, got, tc.want)
 		}
 	}
@@ -199,10 +201,10 @@ func TestPythonStringsMayRun(t *testing.T) {
 		{`from os import *; system("x")`, true},
 		{`import os as source; source.getcwd()`, true},
 	} {
-		if got := PythonStringsMayRun(MaskPythonStrings(tc.source), clean); got != tc.want {
+		if got := pythoninert.PythonStringsMayRun(pythoninert.MaskPythonStrings(tc.source), clean); got != tc.want {
 			t.Errorf("PythonStringsMayRun(%q, clean dir) = %t, want %t", tc.source, got, tc.want)
 		}
-		if !PythonStringsMayRun(MaskPythonStrings(tc.source), "") {
+		if !pythoninert.PythonStringsMayRun(pythoninert.MaskPythonStrings(tc.source), "") {
 			t.Errorf("PythonStringsMayRun(%q, unknown dir) = false: the interpreter imports on its own", tc.source)
 		}
 	}
@@ -387,7 +389,7 @@ func TestPythonStringsMayRunInAKnownDirectory(t *testing.T) {
 		// directory too, and it holds nothing.
 		{`"a".encode("idna")`, false},
 	} {
-		if got := PythonStringsMayRun(MaskPythonStrings(tc.source), clean); got != tc.want {
+		if got := pythoninert.PythonStringsMayRun(pythoninert.MaskPythonStrings(tc.source), clean); got != tc.want {
 			t.Errorf("PythonStringsMayRun(%q, clean dir) = %t, want %t", tc.source, got, tc.want)
 		}
 	}
@@ -410,7 +412,7 @@ func TestPythonStringsMayRunInAKnownDirectory(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, code := range []string{program, implicit} {
-			if !PythonStringsMayRun(MaskPythonStrings(code), dir) {
+			if !pythoninert.PythonStringsMayRun(pythoninert.MaskPythonStrings(code), dir) {
 				t.Errorf("PythonStringsMayRun(%q) beside %s = false: an import may load it", code, entry)
 			}
 		}
@@ -420,22 +422,22 @@ func TestPythonStringsMayRunInAKnownDirectory(t *testing.T) {
 		if err := os.Symlink(filepath.Join(clean, "notes.txt"), filepath.Join(linked, "notes")); err != nil {
 			t.Fatal(err)
 		}
-		if !PythonStringsMayRun(MaskPythonStrings(program), linked) {
+		if !pythoninert.PythonStringsMayRun(pythoninert.MaskPythonStrings(program), linked) {
 			t.Error("PythonStringsMayRun beside a link = false: a link may name a module")
 		}
 	}
 	crowded := t.TempDir()
-	for i := 0; i <= pythonDirMaxEntries; i++ {
+	for i := 0; i <= pythoninert.PythonDirMaxEntries; i++ {
 		if err := os.WriteFile(filepath.Join(crowded, fmt.Sprintf("n%03d.txt", i)), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if !PythonStringsMayRun(MaskPythonStrings(program), crowded) {
+	if !pythoninert.PythonStringsMayRun(pythoninert.MaskPythonStrings(program), crowded) {
 		t.Error("PythonStringsMayRun in a directory over the entry bound = false")
 	}
 	bigPackage := t.TempDir()
 	for _, sub := range []string{"a", "b"} {
-		for i := 0; i < pythonPackageMaxEntries/2+1; i++ {
+		for i := 0; i < pythoninert.PythonPackageMaxEntries/2+1; i++ {
 			name := filepath.Join(bigPackage, sub, fmt.Sprintf("n%04d.txt", i))
 			if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
 				t.Fatal(err)
@@ -445,26 +447,26 @@ func TestPythonStringsMayRunInAKnownDirectory(t *testing.T) {
 			}
 		}
 	}
-	if !PythonStringsMayRun(MaskPythonStrings(program), bigPackage) {
+	if !pythoninert.PythonStringsMayRun(pythoninert.MaskPythonStrings(program), bigPackage) {
 		t.Error("PythonStringsMayRun past the package entry bound = false")
 	}
 	for _, dir := range []string{"", "relative/dir", filepath.Join(clean, "missing")} {
 		for _, code := range []string{program, implicit} {
-			if !PythonStringsMayRun(MaskPythonStrings(code), dir) {
+			if !pythoninert.PythonStringsMayRun(pythoninert.MaskPythonStrings(code), dir) {
 				t.Errorf("PythonStringsMayRun(%q, %q) = false: the directory is not known", code, dir)
 			}
 		}
 	}
-	if !PythonStringsMayRun(MaskPythonStrings(program), clean+string(filepath.Separator)+"notes.txt") {
+	if !pythoninert.PythonStringsMayRun(pythoninert.MaskPythonStrings(program), clean+string(filepath.Separator)+"notes.txt") {
 		t.Error("PythonStringsMayRun with a file for a directory = false")
 	}
 	t.Setenv("PYTHONPATH", clean)
-	if !PythonStringsMayRun(MaskPythonStrings(program), clean) {
+	if !pythoninert.PythonStringsMayRun(pythoninert.MaskPythonStrings(program), clean) {
 		t.Error("PYTHONPATH puts another directory first")
 	}
 	t.Setenv("PYTHONPATH", "")
 	t.Setenv("PYTHONHOME", clean)
-	if !PythonStringsMayRun(MaskPythonStrings(program), clean) {
+	if !pythoninert.PythonStringsMayRun(pythoninert.MaskPythonStrings(program), clean) {
 		t.Error("PYTHONHOME moves the standard library")
 	}
 }

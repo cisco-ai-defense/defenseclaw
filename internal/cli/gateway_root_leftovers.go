@@ -13,15 +13,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
-
-func init() {
-	// The recovery chain also returns the agent config files and folders a
-	// root-run gateway wrote in the account home (GAP-0848).
-	daemon.RegisterRootOwnedAgentConfigPaths(connector.RootOwnedAgentConfigPaths)
-}
 
 // rootRuntimeStartBlockers is a variable so a test can stand in for root-owned
 // files it cannot create as an ordinary user.

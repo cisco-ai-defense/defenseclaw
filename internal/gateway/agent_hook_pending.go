@@ -907,6 +907,9 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 	tries++
 	p.Attempts++
 	newVerdict := p.Decided == nil
+	// A sandbox proposal no receipt acknowledged within its window: this
+	// pass closes it (DESIGN 18 counts it once, when its verdict is pinned).
+	expiredSandboxReceipt := newVerdict && p.SandboxReceipt != nil && p.Final == nil
 	var verdictErr error
 	if newVerdict {
 		var resp agentHookResponse
@@ -930,6 +933,8 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 		notePendingHookUnrecordedTry(p.ID)
 	case !found:
 		return nil // another pass took it
+	case expiredSandboxReceipt && p.Decided != nil:
+		a.noteSandboxReceiptExpiredCapacity(p.Request.ConnectorName)
 	}
 	if p.Decided == nil {
 		err = verdictErr

@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -70,7 +71,7 @@ func windowsSecureClientHookBinary(roots winpath.EnterpriseRoots) (string, error
 		winpath.ValidateEnterpriseInstallRoot(roots, filepath.Dir(bin)) != nil {
 		return "", fmt.Errorf("the GitHub Copilot machine policy is published only by an installed Secure Client DefenseClaw, not %s", executable)
 	}
-	return filepath.Join(bin, nativeHookLauncherName), nil
+	return filepath.Join(bin, hookcli.NativeHookLauncherName), nil
 }
 
 // Replaceable in tests.

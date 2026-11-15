@@ -249,3 +249,25 @@ func TestReadFlushIsThrottled(t *testing.T) {
 		t.Fatalf("a read inside the gap must not write: %+v", rows)
 	}
 }
+
+// GAP-0631: errors counts failed calls only. A call the client cancelled is
+// in calls (and has no usage), never in errors.
+func TestStoreErrorsCountFailedCallsNotCancelledOnes(t *testing.T) {
+	s := openStore(t)
+	now := time.Now()
+	for _, outcome := range []string{"completed", "completed", "failed", "cancelled", "cancelled", "cancelled"} {
+		r := rec("1", nil, "m", nil, now)
+		r.Outcome = outcome
+		if outcome != "completed" {
+			r.Usage = Usage{}
+		}
+		s.Emit(context.Background(), r)
+	}
+	rows, err := s.Run(context.Background(), Query{By: "model", AllOwners: true})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows %+v err %v", rows, err)
+	}
+	if got := rows[0]; got.Calls != 6 || got.Errors != 1 || got.UsageCalls != 2 {
+		t.Fatalf("calls %d errors %d usage_calls %d, want 6, 1, 2", got.Calls, got.Errors, got.UsageCalls)
+	}
+}

@@ -43,3 +43,24 @@ def _load_catalog() -> tuple[dict[str, Any], tuple[str, ...], dict[str, tuple[st
 
 ACP_REGISTRY, ACP_CLIENT_IDS, ACP_AGENT_ENTRY_POINTS = _load_catalog()
 ACP_AGENT_IDS = tuple(sorted(ACP_AGENT_ENTRY_POINTS))
+
+
+def own_tools_notice(agent_id: str) -> str:
+    """What the guard cannot do for an agent that runs its own tools, or "".
+
+    Such an agent (Hermes) asks the editor a permission only for what its own
+    approval policy names, and reports every other tool call after it ran. The
+    guard judges those reports and raises an alert that would have blocked; it
+    cannot refuse them. The connector's own hooks run before the tool does
+    (rel-1-0-10:GAP-0619).
+    """
+    for agent in ACP_REGISTRY["agents"]:
+        if agent["id"] == agent_id and agent.get("runs_own_tools") is True:
+            return (
+                f"{agent['name']} runs its own tools and asks the editor first only for what its own "
+                "approval policy names, so the guard sees most tool calls after they ran: it alerts and "
+                "records them but does not refuse them. To refuse a command before it runs, use "
+                f"the {agent['connector_id']} connector hooks: "
+                f"defenseclaw setup {agent['connector_id']} --mode action."
+            )
+    return ""
