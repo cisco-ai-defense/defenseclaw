@@ -405,7 +405,7 @@ func linksToDevNull(facts actionfacts.Facts, commandID int64) bool {
 // id_rsa, find ~ -path '*/.aws/credentials'): the search a credential harvest
 // starts with (T1552.001, T1552.004), as the single reads the path rules judge.
 // The names are the credential-file table's (an exact name or trailing path,
-// never a glob such as *.pem and never .env, which projects ship), so a find of
+// never a glob such as *.pem and never .env, which projects ship, and never a key known only by its extension: sync.key, server-key.pem), so a find of
 // ordinary names or inside a project is not one.
 func credentialFileSweep(c actionfacts.CommandFact, activeHome string) bool {
 	if path.Base(c.Program) != "find" || !c.ArgvComplete {
@@ -448,7 +448,8 @@ func credentialFileSweep(c actionfacts.CommandFact, activeHome string) bool {
 		if strings.ContainsAny(name, "*?[") {
 			continue
 		}
-		if shape, ok := actionfacts.MatchCredentialFileShape(name); ok && shape.Class != actionfacts.CredentialFileEnvironment {
+		if shape, ok := actionfacts.MatchCredentialFileShape(name); ok && shape.Class != actionfacts.CredentialFileEnvironment &&
+			shape.Class != actionfacts.CredentialFilePrivateKey {
 			return true
 		}
 	}

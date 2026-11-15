@@ -72,6 +72,8 @@ func TestCredentialFileSweepFiveTiers(t *testing.T) {
 		{"td-sweep-pgpass", `find /home -iname .pgpass`, "LBALB"},
 		{"td-sweep-sudo", `sudo find / -name id_rsa`, "LBALB"},
 		{"td-sweep-glob", `find / -name '*.pem'`, "AAAAA"},
+		{"td-sweep-key-extension", `find / -name "sync.key" 2>/dev/null`, "AAAAA"},
+		{"td-sweep-pem-name", `find / -name server-key.pem`, "AAAAA"},
 		{"td-sweep-env", `find / -name .env`, "AAAAA"},
 		{"td-sweep-project", `find ./src -name id_rsa`, "AAAAA"},
 		{"td-sweep-project-abs", `find /home/alice/proj -name .npmrc`, "AAAAA"},
