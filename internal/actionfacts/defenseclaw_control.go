@@ -6,6 +6,7 @@
 package actionfacts
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"unicode"
@@ -615,6 +616,7 @@ func commandArgv(command CommandFact, facts Facts) []string {
 }
 
 func (r *controlReader) read(facts Facts, text string, depth int) {
+	flowing := heredocFlowNamesProduct(text)
 	text = withoutDataHeredocs(text)
 	if !containsFold(text, defenseClawNamespace) {
 		return
@@ -715,7 +717,7 @@ func (r *controlReader) read(facts Facts, text string, depth int) {
 			unresolved = true
 		}
 	}
-	if unresolved && !r.hasProven() && namesProduct(text) {
+	if (unresolved || flowing) && !r.hasProven() && namesProduct(text) {
 		r.add(DefenseClawControlFact{Kind: DefenseClawControlUnproven})
 	}
 }
@@ -1759,16 +1761,25 @@ type heredoc struct {
 	body       string
 	start, end int
 	script     bool
+	// flows is a here-document whose output may be run by something the
+	// statement does not name: a substitution a shell reads, a variable that
+	// is run, a file a login or the call runs (GAP-0788).
+	flows bool
 	// word is a here-string (<<< WORD), whose operator needs a word after it.
 	word bool
 }
 
 // heredocs returns the here-documents and here-strings of text with the
-// consumer each feeds. A here-document that feeds cat, tee or a reader is
-// data, however long and whatever it says about DefenseClaw (GAP-0755); one
-// that feeds a program which runs its stdin as a script (a shell, at, batch,
-// crontab, a launcher or remote shell around one), or one whose program the
-// parse could not resolve, is a script.
+// consumer each feeds. A here-document is data (GAP-0755) only when what the
+// statement does with it cannot run it: cat or tee that shows it, or writes it
+// to a file nothing runs. It is a script when its statement may run stdin (a
+// shell, at, batch, crontab, a launcher or remote shell around one, or a
+// program the parse could not resolve), when its output flows on to something
+// that may run it (a pipeline into a shell, a command substitution or process
+// substitution that a shell, eval or source reads, a variable that is later
+// run), when it is kept on a descriptor for a later reader, or when it is
+// written to a place a login, a scheduler or a later command of the call runs
+// (GAP-0788).
 func heredocs(text string) []heredoc {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
 	if err != nil {
@@ -1776,56 +1787,310 @@ func heredocs(text string) []heredoc {
 	}
 	// A filter that passes its input on (cat <<EOF | sh) feeds the stage that
 	// reads it: any statement in a pipeline ahead of one that may run a script
-	// counts.
+	// counts, and so does every statement nested in that stage (a subshell or
+	// group whose output is piped).
 	upstream := map[*syntax.Stmt]bool{}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if pipe, ok := node.(*syntax.BinaryCmd); ok && (pipe.Op == syntax.Pipe || pipe.Op == syntax.PipeAll) {
 			if stdinMayBeScript(pipe.Y) || upstream[pipe.Y] {
-				markPipelineStages(pipe, upstream)
+				markStmtTree(pipe.X, upstream)
+				markStmtTree(pipe.Y, upstream)
 			}
 		}
 		return true
 	})
 	var out []heredoc
+	var ancestors []syntax.Node
 	syntax.Walk(file, func(node syntax.Node) bool {
-		stmt, ok := node.(*syntax.Stmt)
-		if !ok {
+		if node == nil {
+			ancestors = ancestors[:len(ancestors)-1]
 			return true
 		}
-		for _, redir := range stmt.Redirs {
-			var word *syntax.Word
-			switch redir.Op {
-			case syntax.Hdoc, syntax.DashHdoc:
-				word = redir.Hdoc
-			case syntax.WordHdoc:
-				word = redir.Word
-			}
-			if word == nil {
-				continue
-			}
-			var body strings.Builder
-			for _, part := range word.Parts {
-				switch part := part.(type) {
-				case *syntax.Lit:
-					body.WriteString(part.Value)
-				case *syntax.SglQuoted:
-					body.WriteString(part.Value)
-				case *syntax.DblQuoted:
-					for _, inner := range part.Parts {
-						if lit, ok := inner.(*syntax.Lit); ok {
-							body.WriteString(lit.Value)
+		if stmt, ok := node.(*syntax.Stmt); ok {
+			for _, redir := range stmt.Redirs {
+				var word *syntax.Word
+				switch redir.Op {
+				case syntax.Hdoc, syntax.DashHdoc:
+					word = redir.Hdoc
+				case syntax.WordHdoc:
+					word = redir.Word
+				}
+				if word == nil {
+					continue
+				}
+				var body strings.Builder
+				for _, part := range word.Parts {
+					switch part := part.(type) {
+					case *syntax.Lit:
+						body.WriteString(part.Value)
+					case *syntax.SglQuoted:
+						body.WriteString(part.Value)
+					case *syntax.DblQuoted:
+						for _, inner := range part.Parts {
+							if lit, ok := inner.(*syntax.Lit); ok {
+								body.WriteString(lit.Value)
+							}
 						}
 					}
 				}
+				flows := redir.N != nil && redir.N.Value != "0" || // kept on a descriptor for a later reader
+					outputRuns(file, upstream, stmt, ancestors)
+				script := stdinMayBeScript(stmt) || upstream[stmt] || flows
+				out = append(out, heredoc{
+					body: body.String(), start: int(word.Pos().Offset()), end: int(word.End().Offset()),
+					script: script, flows: flows, word: redir.Op == syntax.WordHdoc,
+				})
 			}
-			out = append(out, heredoc{
-				body: body.String(), start: int(word.Pos().Offset()), end: int(word.End().Offset()),
-				script: stdinMayBeScript(stmt) || upstream[stmt], word: redir.Op == syntax.WordHdoc,
-			})
 		}
+		ancestors = append(ancestors, node)
 		return true
 	})
 	return out
+}
+
+// outputRuns reports a statement whose output may be run: it is the body of
+// a command or process substitution that a shell, eval or source reads (or
+// that is assigned to a variable the call later runs), or it writes to a file
+// that a login, a scheduler or a later command of the call runs.
+func outputRuns(file *syntax.File, upstream map[*syntax.Stmt]bool, stmt *syntax.Stmt, ancestors []syntax.Node) bool {
+	for index := len(ancestors) - 1; index >= 0; index-- {
+		switch ancestors[index].(type) {
+		case *syntax.CmdSubst, *syntax.ProcSubst:
+		default:
+			continue
+		}
+		holder := enclosingStmt(ancestors[:index])
+		if holder == nil || stdinMayBeScript(holder) {
+			return true
+		}
+		if names := capturedNames(holder, ancestors[index]); len(names) > 0 && variableRuns(file, upstream, names) {
+			return true
+		}
+	}
+	for _, target := range outputTargets(stmt) {
+		if runLocationPath(target) || fileRunByCall(file, stmt, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// enclosingStmt is the innermost statement among nodes.
+func enclosingStmt(nodes []syntax.Node) *syntax.Stmt {
+	for index := len(nodes) - 1; index >= 0; index-- {
+		if stmt, ok := nodes[index].(*syntax.Stmt); ok {
+			return stmt
+		}
+	}
+	return nil
+}
+
+// capturedNames returns the variables a statement assigns from the
+// substitution sub (X=$(...), export X=$(...)).
+func capturedNames(holder *syntax.Stmt, sub syntax.Node) []string {
+	var assigns []*syntax.Assign
+	switch cmd := holder.Cmd.(type) {
+	case *syntax.CallExpr:
+		assigns = cmd.Assigns
+	case *syntax.DeclClause:
+		assigns = cmd.Args
+	}
+	var names []string
+	for _, assign := range assigns {
+		if assign.Name == nil || assign.Value == nil {
+			continue
+		}
+		found := false
+		syntax.Walk(assign.Value, func(node syntax.Node) bool {
+			if node == sub {
+				found = true
+			}
+			return !found
+		})
+		if found {
+			names = append(names, assign.Name.Value)
+		}
+	}
+	return names
+}
+
+// variableRuns reports a call that runs one of the named variables: as the
+// program, or as an operand of a statement that may run its operands or stdin
+// as a script (`bash -c "$X"`, `eval "$X"`, `echo "$X" | sh`).
+func variableRuns(file *syntax.File, upstream map[*syntax.Stmt]bool, names []string) bool {
+	runs := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok || runs {
+			return !runs
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		for index, arg := range call.Args {
+			if wordExpands(arg, names) && (index == 0 || stdinMayBeScript(stmt) || upstream[stmt]) {
+				runs = true
+			}
+		}
+		return !runs
+	})
+	return runs
+}
+
+// wordExpands reports a word that expands one of the named variables.
+func wordExpands(word *syntax.Word, names []string) bool {
+	found := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if param, ok := node.(*syntax.ParamExp); ok && param.Param != nil && slices.Contains(names, param.Param.Value) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// partialWordText is the literal text of a word with its expansions left out
+// ($N.md is ".md").
+func partialWordText(word *syntax.Word) string {
+	var out strings.Builder
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			out.WriteString(part.Value)
+		case *syntax.SglQuoted:
+			out.WriteString(part.Value)
+		case *syntax.DblQuoted:
+			for _, inner := range part.Parts {
+				if lit, ok := inner.(*syntax.Lit); ok {
+					out.WriteString(lit.Value)
+				}
+			}
+		}
+	}
+	return out.String()
+}
+
+// outputTargets returns the files a statement writes: its output redirects
+// and the file operands of a tee (also behind a launcher), as far as their
+// text is literal.
+func outputTargets(stmt *syntax.Stmt) []string {
+	var targets []string
+	for _, redir := range stmt.Redirs {
+		switch redir.Op {
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll:
+			if redir.Word != nil {
+				if target := partialWordText(redir.Word); target != "" {
+					targets = append(targets, target)
+				}
+			}
+		}
+	}
+	if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+		for index, word := range call.Args {
+			if commandBaseName(literalWordText(word)) != "tee" {
+				continue
+			}
+			for _, operand := range call.Args[index+1:] {
+				if target := partialWordText(operand); target != "" && !strings.HasPrefix(target, "-") {
+					targets = append(targets, target)
+				}
+			}
+			break
+		}
+	}
+	return targets
+}
+
+// fileRunByCall reports a file that another command of the call runs: as the
+// program, or as an operand of a statement that may run a script
+// (`bash FILE`, `source FILE`).
+func fileRunByCall(file *syntax.File, self *syntax.Stmt, target string) bool {
+	target = strings.TrimPrefix(target, "./")
+	runs := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		other, ok := node.(*syntax.Stmt)
+		if !ok || other == self || runs {
+			return !runs
+		}
+		call, ok := other.Cmd.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		for index, arg := range call.Args {
+			if strings.TrimPrefix(partialWordText(arg), "./") == target && (index == 0 || stdinMayBeScript(other)) {
+				runs = true
+			}
+		}
+		return !runs
+	})
+	return runs
+}
+
+// runLocationDirs are the folders whose files a scheduler, a service manager,
+// a login or the PATH runs.
+var runLocationDirs = map[string]bool{
+	"cron.d": true, "cron.daily": true, "cron.hourly": true, "cron.weekly": true, "cron.monthly": true,
+	"crontabs": true, "systemd": true, "init.d": true, "rc.d": true, "profile.d": true,
+	"launchagents": true, "launchdaemons": true, "autostart": true, "startup": true,
+	"bin": true, "sbin": true, "sudoers.d": true,
+}
+
+// runLocationNames are the files a login or the system reads and runs, and
+// runLocationExts the extensions of a script or a unit.
+var (
+	runLocationNames = map[string]bool{
+		"crontab": true, "rc.local": true, "profile": true, "bashrc": true, "bash.bashrc": true,
+		"environment": true, "sudoers": true,
+	}
+	runLocationExts = map[string]bool{
+		".sh": true, ".bash": true, ".zsh": true, ".ksh": true, ".fish": true, ".csh": true,
+		".ps1": true, ".psm1": true, ".bat": true, ".cmd": true, ".vbs": true,
+		".py": true, ".pl": true, ".rb": true,
+		".service": true, ".timer": true, ".socket": true, ".path": true, ".plist": true, ".desktop": true,
+	}
+)
+
+// runLocationPath reports a path that something other than the writing call
+// runs: a shell startup file, a file in a scheduler, service or startup
+// folder or on the PATH, a script or a unit by its extension. What a here-
+// document written there says is a script, not a note.
+func runLocationPath(path string) bool {
+	lower := strings.ToLower(strings.ReplaceAll(path, `\`, "/"))
+	segments := strings.Split(lower, "/")
+	base := segments[len(segments)-1]
+	for _, dir := range segments[:len(segments)-1] {
+		if runLocationDirs[dir] || strings.HasPrefix(dir, "rc") && strings.HasSuffix(dir, ".d") {
+			return true
+		}
+	}
+	if runLocationNames[base] || runLocationExts[filepath.Ext(base)] {
+		return true
+	}
+	if strings.HasPrefix(base, ".") {
+		for _, suffix := range []string{"rc", "profile", "login", "logout", "env", "environment"} {
+			if strings.HasSuffix(base, suffix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// heredocFlowNamesProduct reports a here-document that names the product and
+// whose output may be run by something the call does not show (GAP-0788): the
+// reading is not proven either way, so it is the unknown tier unless another
+// reading of the call proves a stop.
+func heredocFlowNamesProduct(text string) bool {
+	if !strings.Contains(text, "<<") {
+		return false
+	}
+	for _, doc := range heredocs(text) {
+		if doc.flows && containsFold(doc.body, defenseClawNamespace) {
+			return true
+		}
+	}
+	return false
 }
 
 // heredocBodies returns the bodies of the here-documents and here-strings of
@@ -1863,22 +2128,29 @@ func withoutDataHeredocs(text string) string {
 	return cut
 }
 
-// markPipelineStages marks every stage of a pipeline that ends in a statement
-// already marked.
-func markPipelineStages(pipe *syntax.BinaryCmd, marked map[*syntax.Stmt]bool) {
-	marked[pipe.X], marked[pipe.Y] = true, true
-	if inner, ok := pipe.X.Cmd.(*syntax.BinaryCmd); ok {
-		markPipelineStages(inner, marked)
-	}
+// markStmtTree marks a statement and every statement nested in it (a
+// subshell, a group, a command substitution inside a stage).
+func markStmtTree(stmt *syntax.Stmt, marked map[*syntax.Stmt]bool) {
+	syntax.Walk(stmt, func(node syntax.Node) bool {
+		if inner, ok := node.(*syntax.Stmt); ok {
+			marked[inner] = true
+		}
+		return true
+	})
 }
 
-// stdinMayBeScript reports a statement whose stdin may be run as a script: a
-// command whose program is unresolved, a shell (also behind a launcher or as
+// stdinMayBeScript reports a statement whose stdin or operands may be run as a
+// script: a command whose program is unresolved, eval, a shell (also behind a launcher or as
 // an operand of one, `docker exec -i c sh`), at, batch, crontab or ssh, or a
 // compound command (a loop or group around a shell). A bare redirection feeds
 // nothing.
 func stdinMayBeScript(stmt *syntax.Stmt) bool {
 	if stmt.Cmd == nil {
+		return false
+	}
+	if _, declares := stmt.Cmd.(*syntax.DeclClause); declares {
+		// export X=... runs nothing; what it captures is followed through the
+		// variable.
 		return false
 	}
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
@@ -1894,7 +2166,7 @@ func stdinMayBeScript(stmt *syntax.Stmt) bool {
 			return true
 		}
 		name := commandBaseName(argv[0])
-		if shellProgram(name) || name == "at" || name == "batch" || name == "crontab" || name == "ssh" || name == "source" || name == "." {
+		if shellProgram(name) || name == "at" || name == "batch" || name == "crontab" || name == "ssh" || name == "source" || name == "." || name == "eval" {
 			return true
 		}
 		for _, word := range argv[1:] {
