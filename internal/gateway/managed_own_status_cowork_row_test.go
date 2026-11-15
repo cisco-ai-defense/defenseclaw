@@ -61,6 +61,7 @@ func TestOwnStatusCoworkRowStateIsOneWordWithSeparateReason(t *testing.T) {
 // connectors and the caller own budget nearest its limit; users_see none
 // keeps the organization-wide facts and drops the budget.
 func TestOwnStatusRoutingSummary(t *testing.T) {
+	isolatedRoutingAdminRuntime(t)
 	cfg := routingAPIConfig()
 	cfg.Routing.RouteOnly = config.RoutingRouteOnlyConfig{Connectors: []string{"claudecode"}}
 	if routingAdminRuntime.For(cfg) == nil {
