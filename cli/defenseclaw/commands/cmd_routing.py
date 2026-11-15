@@ -1323,6 +1323,31 @@ def routing_test(app: AppContext, prompt: str, connector: str, as_profile: str, 
         click.echo(f"Simulated:  {', '.join(_strs(a['simulated']))}")
     for w in _strs(a.get("warnings")):
         ux.warn(w)
+    cause = _classifier_failure_cause(app, a)
+    if cause:
+        ux.warn(cause)
+
+
+def _classifier_failure_cause(app: AppContext, answer: dict) -> str:
+    """Why the classifier gave no answer, when the CLI can name it: a System One
+    classifier without routing.categories never calls its endpoint, so the
+    reason is configuration_failure whether or not the endpoint is up
+    (rel-1-0-10:GAP-0591); an unreachable endpoint is upstream_status or
+    timeout and doctor names it."""
+    if answer.get("failure") != "configuration_failure" or answer.get("source") != "systemone":
+        return ""
+    try:
+        routing = getattr(_loaded_cfg(app), "routing", None)
+    except Exception:  # noqa: BLE001 - no readable config: the doctor names it
+        return ""
+    categories = getattr(routing, "categories", None)
+    if isinstance(categories, dict) and categories:
+        return "System One gave no answer (configuration_failure): run defenseclaw doctor for the cause"
+    return (
+        "System One was not asked: routing.categories is empty, so it has nothing to choose from. "
+        "Add categories with defenseclaw routing setup --classifier systemone --route coding=<alias>, "
+        "or use defenseclaw routing setup --classifier rules"
+    )
 
 
 @routing_cmd.command("explain")

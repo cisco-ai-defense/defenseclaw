@@ -13504,6 +13504,12 @@ def _systemone_endpoint(routing, cfg) -> str:
     return str(getattr(getattr(cfg, "decision_model", None), "base_url", "") or "").strip()
 
 
+def _systemone_categories(routing) -> dict:
+    """routing.categories (category -> alias), {} when unset or malformed."""
+    categories = getattr(routing, "categories", None)
+    return categories if isinstance(categories, dict) else {}
+
+
 def _endpoint_origin(url: str) -> str:
     """scheme://host[:port] of url: no path, query or credentials in a row."""
     from urllib.parse import urlsplit
@@ -13518,6 +13524,22 @@ def _check_systemone_reachable(routing, cfg, r: _DoctorResult) -> None:
     """One real request to the System One endpoint (any HTTP answer means it
     is up; the classifier has its own breaker, so a healthy gateway can still
     be routing on the rules fallback: GAP-0591)."""
+    if not _systemone_categories(routing):
+        # System One picks one of routing.categories; without them the gateway
+        # never asks it, so every request falls back with reason
+        # configuration_failure whether or not the endpoint is up (GAP-0591).
+        _emit(
+            "fail",
+            "System One classifier",
+            "routing.categories is empty, so System One has nothing to choose from: every request takes "
+            "on_classifier_error (reason configuration_failure)",
+            remediation=(
+                "add categories with defenseclaw routing setup --classifier systemone --route coding=<alias> "
+                "(or set routing.categories), or use defenseclaw routing setup --classifier rules"
+            ),
+            r=r,
+        )
+        return
     endpoint = _systemone_endpoint(routing, cfg)
     if not endpoint:
         _emit(
