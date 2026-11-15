@@ -711,6 +711,20 @@ func commandWorkFolderDirs(cwd, home string, command *CommandFact, windows map[i
 	return dirs[0], dirs[1:], unresolved
 }
 
+// MayRunInUnresolvedFolder reports a call with a command that may run in a
+// folder the call does not give (cd "$X", cd "$(...)", popd, a loop that
+// moves on each pass): the commands whose path facts are UnresolvedFolder,
+// with or without a path fact (an unquoted pathname pattern has none).
+func (f Facts) MayRunInUnresolvedFolder() bool {
+	windows := windowsWorkFolders(f.Commands)
+	for index := range f.Commands {
+		if _, _, unresolved := commandWorkFolderDirs(f.CWD, f.ActiveHome, &f.Commands[index], windows); unresolved {
+			return true
+		}
+	}
+	return false
+}
+
 // withWorkFoldersOf is f, the analysis of a twin of the action original was
 // read from (a sequence of the same commands: ShortCircuitListReduction,
 // CompoundCommandReduction), with its paths read in the folders each command

@@ -7,6 +7,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -27,8 +28,12 @@ import (
 // is not known, so no confident path) and never CRITICAL from the uncertainty
 // alone (rel-1-0-10:GAP-0871). A folder in which every file is protected
 // (DefenseClaw state, git hooks, cron.d, the unit and autostart folders) is
-// not read so: any name would be one, and `cd "$D" && echo ok > out.txt`
-// would be the unknown tier.
+// not read so by a bare name: any name would be one, and `cd "$D" && echo ok
+// > out.txt` would be the unknown tier. The operand that spells the folder
+// itself (.defenseclaw/config.yaml) is as distinctive as .ssh/id_rsa: a
+// write to it is read so (rel-1-0-10:GAP-0961). A pathname pattern
+// (.ssh/id_*, .aws/*) is read as each protected spelling it may match
+// (actionfacts.RelativeGlobTwinsNamed, rel-1-0-10:GAP-0960).
 
 // unresolvedFolderTitle is the reason of that unknown-tier finding.
 const unresolvedFolderTitle = "A file this command names sits in a folder the command does not give, and it may be a protected file there"
@@ -57,14 +62,20 @@ var (
 // named protected file in one of the folders an unresolved folder may be (the
 // active home, a folder of it, /etc, /root), for the access the command
 // makes. A name is matched whole, or as the path the operand spells when it
-// has a folder of its own: .ssh/<key> and .ssh/authorized_keys, or the
-// credentials table, home files only (.aws/credentials, .kube/config). A bare config, config.json or token,
-// and a copy or a source file beside a credential (credentials.py), are files
-// of every project: owner traces had 12 strict false blocks of `config` and
-// one of `credentials.py` (s7-td327fix tdfx-h, tdfx-f).
+// has a folder of its own: a key or authorized_keys in a folder named .ssh,
+// whichever folder holds that (alice/.ssh/id_rsa below a parent of the
+// home, ../x/.ssh/id_ed25519: rel-1-0-10:GAP-0960); a write to DefenseClaw
+// state spelled from the home (.defenseclaw/config.yaml, .defenseclaw/hooks/x:
+// rel-1-0-10:GAP-0961); or the credentials table, home files only
+// (.aws/credentials, .kube/config). A bare config, config.json or token, a
+// read of a shell profile, a copy or a source file beside a credential
+// (credentials.py) and a project folder named credentials are files of
+// every project: owner traces had 12 strict false blocks of `config`, one
+// of `credentials.py` and 3 of project folders named credentials
+// (s7-td327fix tdfx-h, tdfx-f, tdfx-z).
 func unresolvedFolderNamesProtectedFile(value, home string, access actionfacts.PathAccess) bool {
 	value = path.Clean(strings.TrimPrefix(value, "./"))
-	if value == "." || value == ".." || strings.HasPrefix(value, "../") || strings.HasPrefix(value, "/") {
+	if value == "." || value == ".." || strings.HasPrefix(value, "/") {
 		return false
 	}
 	base := path.Base(value)
@@ -75,16 +86,72 @@ func unresolvedFolderNamesProtectedFile(value, home string, access actionfacts.P
 	if !strings.Contains(value, "/") {
 		return named(value)
 	}
-	// A name below a folder of its own is the protected file only in the
-	// folder that holds it in a home: .ssh/id_rsa and .ssh/authorized_keys,
-	// not src/credentials or internal/openshell/credentials (owner traces: 3
-	// strict false blocks of project folders named credentials, tdfx-z).
-	if value == ".ssh/"+base && named(base) {
-		return true
+	if path.Base(path.Dir(value)) == ".ssh" {
+		// A key or authorized_keys in a folder named .ssh is one wherever
+		// that folder is: the name and its folder are distinctive together.
+		if named(base) {
+			return true
+		}
+		shape, ok := actionfacts.MatchCredentialFileShape(value)
+		if ok && shape.Class == actionfacts.CredentialFileSSHPrivateKey {
+			return true
+		}
+	}
+	if strings.HasPrefix(value, "../") {
+		return false
+	}
+	if state, ok := strings.CutPrefix(value, ".defenseclaw/"); ok && access != actionfacts.PathAccessRead {
+		member, _, _ := strings.Cut(state, "/")
+		return slices.Contains(activeDefenseClawStateNames, member)
 	}
 	candidate := path.Join(home, value)
 	shape, ok := actionfacts.MatchCredentialFileShape(candidate)
 	return ok && shape.HomeFile && candidate == path.Join(home, shape.Relative)
+}
+
+// unresolvedFolderGlobNames are the relative spellings a pathname pattern
+// of an unresolved folder is matched against (RelativeGlobTwinsNamed): every
+// name of the name lists, alone and in .ssh, DefenseClaw state from the
+// home, and one path of each row of the credentials table. The twin is
+// judged by unresolvedFolderNamesProtectedFile, so a spelling here that is
+// no protected file adds nothing.
+var unresolvedFolderGlobNames = sync.OnceValue(func() []string {
+	var names []string
+	for _, name := range slices.Concat(unresolvedFolderReadNames, unresolvedFolderWriteNames) {
+		names = append(names, name, ".ssh/"+name)
+	}
+	for _, name := range activeDefenseClawStateNames {
+		names = append(names, ".defenseclaw/"+name)
+	}
+	for _, name := range actionfacts.CredentialFileShapeProbePaths() {
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return names
+})
+
+// unresolvedFolderGlobMayNameProtectedFile reports a call whose pathname
+// pattern, in a folder the call does not give, may match a named protected
+// file there: the twin that spells each protected name the pattern may
+// match (as if each existed, one reading per match) has an operand the
+// unknown tier reads.
+func unresolvedFolderGlobMayNameProtectedFile(request trustedActionRequest, facts actionfacts.Facts, noFolder bool) bool {
+	if facts.Parse.Dialect != actionfacts.DialectPOSIX || !noFolder && !facts.MayRunInUnresolvedFolder() {
+		return false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return false
+	}
+	for _, twin := range actionfacts.RelativeGlobTwinsNamed(command, request.Input.ActiveHome, unresolvedFolderGlobNames()) {
+		input := request.Input
+		input.Command, input.Args, input.Argv = twin, nil, nil
+		if unresolvedFolderMayNameProtectedFile(actionfacts.Analyze(input), noFolder) {
+			return true
+		}
+	}
+	return false
 }
 
 // unresolvedFolderOperand reports a path fact the unknown tier reads: a
@@ -135,7 +202,8 @@ func withUnresolvedFolderTier(findings []RuleFinding, request trustedActionReque
 		// A proven finding decides on its own; the unknown tier adds nothing.
 		return findings
 	}
-	if !unresolvedFolderMayNameProtectedFile(facts, noFolder || statement) {
+	if !unresolvedFolderMayNameProtectedFile(facts, noFolder || statement) &&
+		!unresolvedFolderGlobMayNameProtectedFile(request, facts, noFolder || statement) {
 		return findings
 	}
 	unknown := trustedActionLimitFindings(request.EnforcementCapable)

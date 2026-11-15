@@ -1885,7 +1885,7 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 			// No client evidence at all (an older hook client): the
 			// name fallback of round m.
 			base := filepath.Base(pattern)
-			if !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionGlobHasLiteral(base) {
+			if !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionfacts.GlobHasLiteral(base) {
 				// Only the last component is a pattern, in a directory
 				// this process cannot read, and it names nothing (git
 				// add *): no directory alias can be selected.
@@ -2255,27 +2255,6 @@ func actionGlobNotDirectory(dir string, err error) bool {
 	}
 	info, statErr := pathStat(dir)
 	return statErr == nil && !info.IsDir()
-}
-
-// actionGlobHasLiteral reports whether a pattern component keeps a literal
-// character outside *, ? and bracket expressions.
-func actionGlobHasLiteral(component string) bool {
-	for i := 0; i < len(component); i++ {
-		switch component[i] {
-		case '*', '?':
-		case '\\':
-			return true
-		case '[':
-			if end := strings.IndexByte(component[i+1:], ']'); end >= 0 {
-				i += end + 1
-				continue
-			}
-			return true
-		default:
-			return true
-		}
-	}
-	return false
 }
 
 // actionGlobViewHidden reports whether this process cannot see the cwd or
