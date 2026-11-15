@@ -1165,11 +1165,7 @@ func scanRuleCategoriesWithOptions(
 				if seen[rule.ID] {
 					continue // already found on raw pass
 				}
-				if rule.ID == secretAssignmentRuleID {
-					// A secret assignment is read in the text as written.
-					// normalizeShell turns an escaped newline into the letter n
-					// and so joins one assignment to the next; the rule pattern
-					// reads the JSON escape itself.
+				if assignmentRuleReadAsWritten(rule.ID) {
 					continue
 				}
 				loc := normalizedMatches.match(rule, normalizedText, normalizedScan)

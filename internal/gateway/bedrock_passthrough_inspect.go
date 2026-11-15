@@ -39,8 +39,10 @@ func bedrockStreamingPath(p string) bool {
 }
 
 // bedrockInvokeText is the assistant text of an InvokeModel body: the
-// Anthropic Messages shape (Claude) or the Nova, Llama, Mistral and Cohere
-// shapes. "" when the body has none.
+// Anthropic Messages shape (Claude), the Llama, Mistral, Cohere and Titan
+// shapes, or the OpenAI-compatible chat shape (gpt-oss, Mistral Large,
+// Jamba, DeepSeek: every choice, GAP-0519). "" when the body has none.
+// Nova answers in the Converse shape, which the caller reads first.
 func bedrockInvokeText(body []byte) string {
 	if t := extractPassthroughResponseContent(body, "anthropic"); t != "" {
 		return t
@@ -52,8 +54,13 @@ func bedrockInvokeText(body []byte) string {
 		} `json:"outputs"` // Mistral
 		Generations []struct {
 			Text string `json:"text"`
-		} `json:"generations"` // Cohere
-		Completion string `json:"completion"` // Anthropic text completions
+		} `json:"generations"` // Cohere Command
+		Completion string          `json:"completion"` // Anthropic text completions
+		Text       json.RawMessage `json:"text"`       // Cohere Command R
+		Results    []struct {
+			OutputText string `json:"outputText"`
+		} `json:"results"` // Titan Text
+		Choices []chatShapeChoice `json:"choices"` // chat shape
 	}
 	if json.Unmarshal(body, &other) != nil {
 		return ""
@@ -67,14 +74,107 @@ func bedrockInvokeText(body []byte) string {
 	for _, g := range other.Generations {
 		sb.WriteString(g.Text)
 	}
-	return sb.String()
+	sb.WriteString(respJSONString(other.Text))
+	for _, r := range other.Results {
+		sb.WriteString(r.OutputText)
+	}
+	if sb.Len() > 0 {
+		return sb.String()
+	}
+	return responsePiecesText(chatChoicesPieces(other.Choices, false))
+}
+
+// bedrockInvokeToolCalls is the tool calls of an InvokeModel body that is
+// not Converse shaped: Anthropic tool_use blocks (Claude), the chat shape's
+// tool_calls and legacy function_call (GAP-0519), and Cohere Command R
+// tool_calls (name and parameters).
+func bedrockInvokeToolCalls(body []byte) json.RawMessage {
+	if raw := extractPassthroughToolCalls(body, "anthropic"); raw != nil {
+		return raw
+	}
+	if raw := extractPassthroughToolCalls(body, "openai"); raw != nil {
+		return raw
+	}
+	var cohere struct {
+		ToolCalls []struct {
+			Name       string          `json:"name"`
+			Parameters json.RawMessage `json:"parameters"`
+		} `json:"tool_calls"`
+	}
+	if json.Unmarshal(body, &cohere) != nil || len(cohere.ToolCalls) == 0 {
+		return nil
+	}
+	type fn struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	type call struct {
+		Type     string `json:"type"`
+		Function fn     `json:"function"`
+	}
+	calls := make([]call, 0, len(cohere.ToolCalls))
+	for _, tc := range cohere.ToolCalls {
+		if tc.Name != "" {
+			calls = append(calls, call{Type: "function", Function: fn{Name: tc.Name, Arguments: jsonArgsText(tc.Parameters)}})
+		}
+	}
+	if len(calls) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(calls)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// bedrockInvokeChunkPieces reads one InvokeModelWithResponseStream chunk
+// by the shape of the model family: Anthropic stream events (Claude), the
+// Nova contentBlockDelta (text, reasoning, tool input), the chat shape
+// (every choice, tool input included), Mistral outputs, and the
+// generation, outputText, completion and text fields (Llama, Titan,
+// Anthropic text completions, Cohere), GAP-0519.
+func bedrockInvokeChunkPieces(inner []byte) []responsePiece {
+	if pieces := anthropicStreamPieces(inner); len(pieces) > 0 {
+		return pieces
+	}
+	var ev struct {
+		Generation        string              `json:"generation"`
+		OutputText        string              `json:"outputText"`
+		Completion        string              `json:"completion"`
+		Text              json.RawMessage     `json:"text"`
+		ContentBlockDelta *bedrockStreamDelta `json:"contentBlockDelta"`
+		Choices           []chatShapeChoice   `json:"choices"`
+		Outputs           []struct {
+			Text string `json:"text"`
+		} `json:"outputs"`
+		ToolCalls []struct {
+			Parameters json.RawMessage `json:"parameters"`
+		} `json:"tool_calls"` // Cohere Command R tool-calls-generation
+	}
+	if json.Unmarshal(inner, &ev) != nil {
+		return nil
+	}
+	out := []responsePiece{answerPiece(0, ev.Generation+ev.OutputText+ev.Completion+respJSONString(ev.Text))}
+	if ev.ContentBlockDelta != nil {
+		out = append(out, ev.ContentBlockDelta.pieces()...)
+	}
+	out = append(out, chatChoicesPieces(ev.Choices, true)...)
+	for i, o := range ev.Outputs {
+		out = append(out, answerPiece(i, o.Text))
+	}
+	for i, tc := range ev.ToolCalls {
+		out = append(out, toolInputPiece(0, i, jsonArgsText(tc.Parameters)))
+	}
+	return out
 }
 
 // bedrockStreamMaxFrame bounds one eventstream message the inspector holds.
 const bedrockStreamMaxFrame = 16 << 20
 
 // bedrockEventStreamText decodes an AWS eventstream as it arrives and
-// returns the assistant text of each whole message. It keeps only the
+// returns the model text of each whole message (answer, reasoning and tool
+// input, GAP-0370). It keeps only the
 // bytes of the message not yet complete. A malformed stream stops the
 // decoding (the bytes still reach the caller); Broken reports it.
 type bedrockEventStreamText struct {
@@ -100,12 +200,12 @@ func (s *bedrockEventStreamText) Model() string { return s.model }
 
 // Feed takes the next bytes of the stream and returns the text of the
 // messages they complete.
-func (s *bedrockEventStreamText) Feed(p []byte) string {
+func (s *bedrockEventStreamText) Feed(p []byte) []responsePiece {
 	if s.broken {
-		return ""
+		return nil
 	}
 	s.buf = append(s.buf, p...)
-	var sb strings.Builder
+	var out []responsePiece
 	for len(s.buf) >= 12 {
 		total := int(binary.BigEndian.Uint32(s.buf[:4]))
 		if total < 16 || total > bedrockStreamMaxFrame {
@@ -121,15 +221,15 @@ func (s *bedrockEventStreamText) Feed(p []byte) string {
 			s.broken, s.buf = true, nil
 			break
 		}
-		sb.WriteString(s.messageText(msg))
+		out = append(out, s.messagePieces(msg)...)
 	}
 	if len(s.buf) == 0 {
 		s.buf = nil
 	}
-	return sb.String()
+	return out
 }
 
-func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
+func (s *bedrockEventStreamText) messagePieces(msg eventstream.Message) []responsePiece {
 	var mtype, etype string
 	for _, h := range msg.Headers {
 		switch h.Name {
@@ -140,7 +240,7 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 		}
 	}
 	if mtype != "event" {
-		return ""
+		return nil
 	}
 	switch etype {
 	case "chunk":
@@ -150,11 +250,11 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 			Bytes string `json:"bytes"`
 		}
 		if json.Unmarshal(msg.Payload, &c) != nil || c.Bytes == "" {
-			return ""
+			return nil
 		}
 		inner, err := base64.StdEncoding.DecodeString(c.Bytes)
 		if err != nil {
-			return ""
+			return nil
 		}
 		if s.model == "" {
 			var start struct {
@@ -166,28 +266,15 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 				s.model = start.Message.Model
 			}
 		}
-		if t := extractSSEChunkText(string(inner), "anthropic"); t != "" {
-			return t
-		}
-		var other struct {
-			Generation string `json:"generation"`
-			OutputText string `json:"outputText"`
-			Completion string `json:"completion"`
-		}
-		if json.Unmarshal(inner, &other) == nil {
-			return other.Generation + other.OutputText + other.Completion
-		}
+		return bedrockInvokeChunkPieces(inner)
 	case "contentBlockDelta":
 		// ConverseStream: the event type names the frame, the payload is
-		// {"contentBlockIndex":0,"delta":{"text":"..."}}.
-		var d struct {
-			Delta struct {
-				Text string `json:"text"`
-			} `json:"delta"`
-		}
+		// {"contentBlockIndex":0,"delta":{"text" | "reasoningContent":{"text"}
+		// | "toolUse":{"input"}}}.
+		var d bedrockStreamDelta
 		if json.Unmarshal(msg.Payload, &d) == nil {
-			return d.Delta.Text
+			return d.pieces()
 		}
 	}
-	return ""
+	return nil
 }
