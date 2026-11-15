@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
@@ -55,15 +56,115 @@ type AwkTwin struct {
 // awkFileState is what the twin reading learns about program files.
 type awkFileState struct {
 	programFiles, unknown bool
-	// dirPrefix is the folder the calls after a cd, pushd or env -C run in,
-	// spelled relative to the folder the hook runs in (or absolute): a
-	// relative program file name is read below it, so the file read is the one
-	// the shell opens (rel-1-0-10:GAP-0733). dirUnknown is set once a cd names
-	// no folder the words give (cd -, cd with no operand, a ~ or a variable,
-	// popd): a relative name is then unread, the unknown tier. awkPath is set
-	// when the text names AWKPATH, which gawk searches for a bare -f name.
-	dirPrefix           string
-	dirUnknown, awkPath bool
+	// dirs are the folders the text being read may start in: the folders
+	// the calls of an enclosing text may run in at the shell string that
+	// holds it (one, the hook's own folder "", for the call itself).
+	dirs []awkDir
+	// awkPath is set when the text names AWKPATH, which gawk searches for a
+	// bare -f name.
+	awkPath bool
+}
+
+// awkDir is a folder a call may run in, spelled relative to the folder the
+// hook runs in (or absolute); unknown when no words give it (cd -, cd with
+// no operand, a ~ or a variable, popd).
+type awkDir struct {
+	prefix  string
+	unknown bool
+}
+
+// maxAwkDirs is the most folders one awk call is read in: past it the
+// folder is unknown, the cap paths of the bound rule.
+const maxAwkDirs = 8
+
+// awkDirEvent is a cd, pushd, popd or chdir of a text at offset at. certain
+// are the offset ranges in which the change certainly ran: the right side of
+// an && whose left side is a chain of calls the change is one of (cd x &&
+// awk -f f runs awk only once the cd succeeded). Anywhere else (after a ;,
+// behind false && or ||, in an if branch, a subshell, a pipeline stage) the
+// change may or may not have run, so a later call may run in either folder
+// (rel-1-0-10:GAP-0852).
+type awkDirEvent struct {
+	at      int
+	certain [][2]int
+	target  string
+	unknown bool
+}
+
+// awkDirsAt are the folders a call at offset at may run in: the folders the
+// text starts in, through each change before it, replaced where the change
+// certainly ran and added to where it may not have.
+func awkDirsAt(start []awkDir, events []awkDirEvent, at int, trunc *bounded.Truncated) []awkDir {
+	dirs := slices.Clone(start)
+	if len(dirs) == 0 {
+		dirs = []awkDir{{}}
+	}
+	for _, event := range events {
+		if event.at >= at {
+			break
+		}
+		changed := make([]awkDir, 0, len(dirs))
+		for _, dir := range dirs {
+			switch {
+			case dir.unknown || event.unknown:
+				changed = append(changed, awkDir{unknown: true})
+			default:
+				changed = append(changed, awkDir{prefix: awkJoinDir(dir.prefix, event.target)})
+			}
+		}
+		certain := slices.ContainsFunc(event.certain, func(span [2]int) bool { return span[0] <= at && at < span[1] })
+		if certain {
+			dirs = changed
+		} else {
+			dirs = append(dirs, changed...)
+		}
+		dirs = slices.Compact(slices.SortedFunc(slices.Values(dirs), func(a, b awkDir) int {
+			if a.unknown != b.unknown {
+				if a.unknown {
+					return 1
+				}
+				return -1
+			}
+			return strings.Compare(a.prefix, b.prefix)
+		}))
+		if len(dirs) > maxAwkDirs {
+			trunc.Hit(bounded.Paths)
+			dirs = append(dirs[:maxAwkDirs-1], awkDir{unknown: true})
+		}
+	}
+	return dirs
+}
+
+// awkCertainSpans maps each call of file that is one of the left side of an
+// && (a chain of calls joined by &&) to the offset ranges of the right side
+// of that &&: the commands there run only once the call succeeded.
+func awkCertainSpans(file *syntax.File) map[*syntax.CallExpr][][2]int {
+	spans := map[*syntax.CallExpr][][2]int{}
+	var chain func(stmt *syntax.Stmt) []*syntax.CallExpr
+	chain = func(stmt *syntax.Stmt) []*syntax.CallExpr {
+		if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess {
+			return nil
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.CallExpr:
+			return []*syntax.CallExpr{cmd}
+		case *syntax.BinaryCmd:
+			if cmd.Op == syntax.AndStmt {
+				return append(chain(cmd.X), chain(cmd.Y)...)
+			}
+		}
+		return nil
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if and, ok := node.(*syntax.BinaryCmd); ok && and.Op == syntax.AndStmt && and.Y != nil {
+			span := [2]int{int(and.Y.Pos().Offset()), int(and.Y.End().Offset())}
+			for _, call := range chain(and.X) {
+				spans[call] = append(spans[call], span)
+			}
+		}
+		return true
+	})
+	return spans
 }
 
 // awkAbsoluteName reports a program file name that names the same file
@@ -84,13 +185,12 @@ func awkJoinDir(dir, name string) string {
 	return strings.TrimRight(dir, "/") + "/" + name
 }
 
-// awkChangeDir records the folder a cd or pushd of the words moves to.
-func (state *awkFileState) awkChangeDir(words []string, static []bool, at int) {
+// awkChangeDir is the change of folder of a cd or pushd of the words.
+func awkChangeDir(words []string, static []bool, at int) awkDirEvent {
 	target := ""
 	for i := at + 1; i < len(words); i++ {
 		if !static[i] {
-			state.dirUnknown = true
-			return
+			return awkDirEvent{unknown: true}
 		}
 		if strings.HasPrefix(words[i], "-") && words[i] != "-" && words[i] != "--" {
 			continue
@@ -102,38 +202,29 @@ func (state *awkFileState) awkChangeDir(words []string, static []bool, at int) {
 		break
 	}
 	if target == "" || target == "-" || strings.HasPrefix(target, "~") || strings.HasPrefix(target, "+") {
-		state.dirUnknown = true
-		return
+		return awkDirEvent{unknown: true}
 	}
-	state.dirPrefix = awkJoinDir(state.dirPrefix, target)
+	return awkDirEvent{target: target}
 }
 
-// awkReaderFor is the program file reader of an awk call: a relative name is
-// read below the folder the walk tracked (an earlier cd, env -C, sudo -D), as
-// the shell opens it, and is unread, so the call is the unknown tier, when the
-// folder is not known (cd -, a computed folder) or a bare name is looked up
-// through AWKPATH with no static value. A static AWKPATH assignment on the
-// call itself names the folders gawk searches. An absolute name is the same
-// file wherever the call runs.
-func awkReaderFor(files awkprog.FileReader, state *awkFileState, run PrefixWrapperRun, awkPath string, awkPathSet bool) awkprog.FileReader {
+// awkReaderFor is the program file reader of an awk call that may run in
+// dirs (awkDirsAt): a relative name is read below each of the folders, as the
+// shell opens it there, and the files read are the program, joined as awk
+// joins the files of several -f options, so the strongest of them decides; a
+// name read in none of the folders is unread, the unknown tier. A folder no
+// words give (cd -, a computed folder), or a bare name looked up through
+// AWKPATH with no static value, is unread too: a call that may run there is
+// also the unknown tier (state.unknown), whatever the other folders prove. A
+// static AWKPATH assignment on the call itself names the folders gawk
+// searches. An absolute name is the same file wherever the call runs.
+func awkReaderFor(files awkprog.FileReader, state *awkFileState, dirs []awkDir, run PrefixWrapperRun, awkPath string, awkPathSet bool) awkprog.FileReader {
 	if files == nil {
 		return nil
 	}
-	prefix := state.dirPrefix
-	if run.Dir != "" {
-		prefix = awkJoinDir(prefix, run.Dir)
-	}
-	unknown := state.dirUnknown || run.DirUnknown
-	if prefix == "" && !unknown && !state.awkPath && !awkPathSet {
+	if len(dirs) == 1 && dirs[0] == (awkDir{}) && run.Dir == "" && !run.DirUnknown && !state.awkPath && !awkPathSet {
 		return files
 	}
-	return func(name string) (string, bool) {
-		if awkAbsoluteName(name) || name == "-" {
-			return files(name)
-		}
-		if unknown {
-			return "", false
-		}
+	lookup := func(prefix, name string) (string, bool) {
 		if !strings.ContainsAny(name, `/\`) && (state.awkPath || awkPathSet) {
 			if !awkPathSet {
 				return "", false
@@ -149,6 +240,29 @@ func awkReaderFor(files awkprog.FileReader, state *awkFileState, run PrefixWrapp
 			return "", false
 		}
 		return files(awkJoinDir(prefix, name))
+	}
+	return func(name string) (string, bool) {
+		if awkAbsoluteName(name) || name == "-" {
+			return files(name)
+		}
+		var texts []string
+		for _, dir := range dirs {
+			if dir.unknown || run.DirUnknown {
+				state.unknown = true
+				continue
+			}
+			prefix := dir.prefix
+			if run.Dir != "" {
+				prefix = awkJoinDir(prefix, run.Dir)
+			}
+			if text, ok := lookup(prefix, name); ok && !slices.Contains(texts, text) {
+				texts = append(texts, text)
+			}
+		}
+		if len(texts) == 0 {
+			return "", false
+		}
+		return strings.Join(texts, "\n"), true
 	}
 }
 
@@ -206,6 +320,8 @@ func awkCommandTwin(command string, depth int, trunc *bounded.Truncated, files a
 	if !parsed {
 		return "", nil
 	}
+	certain := awkCertainSpans(file)
+	var dirEvents []awkDirEvent
 	type edit struct {
 		start, end int
 		text       string
@@ -240,10 +356,13 @@ func awkCommandTwin(command string, depth int, trunc *bounded.Truncated, files a
 		}
 		switch wrapperProgramName(words[index]) {
 		case "cd", "pushd":
-			state.awkChangeDir(words, static, index)
+			event := awkChangeDir(words, static, index)
+			event.at, event.certain = int(call.Pos().Offset()), certain[call]
+			dirEvents = append(dirEvents, event)
 		case "popd", "chdir":
-			state.dirUnknown = true
+			dirEvents = append(dirEvents, awkDirEvent{at: int(call.Pos().Offset()), certain: certain[call], unknown: true})
 		}
+		dirs := awkDirsAt(state.dirs, dirEvents, int(call.Pos().Offset()), trunc)
 		awkPath, awkPathSet := "", false
 		for _, assign := range call.Assigns {
 			if assign.Name != nil && assign.Name.Value == "AWKPATH" && assign.Value != nil {
@@ -266,7 +385,7 @@ func awkCommandTwin(command string, depth int, trunc *bounded.Truncated, files a
 					dynamic[i], prefix[i], hole[i] = true, "", awkprog.Hole
 				}
 			}
-			reading := awkprog.Call{Words: words[first : last+1], Dynamic: dynamic, Prefix: prefix, Holed: hole, Files: awkReaderFor(files, state, run, awkPath, awkPathSet)}.Read()
+			reading := awkprog.Call{Words: words[first : last+1], Dynamic: dynamic, Prefix: prefix, Holed: hole, Files: awkReaderFor(files, state, dirs, run, awkPath, awkPathSet)}.Read()
 			if reading.Files > 0 {
 				state.programFiles = true
 				state.unknown = state.unknown || reading.Unread || reading.Dynamic
@@ -345,7 +464,12 @@ func awkCommandTwin(command string, depth int, trunc *bounded.Truncated, files a
 			if !trunc.Within(bounded.Depth, depth+1, maxNestedShellStrings) {
 				return true // an awk program in the string is not read
 			}
-			if inner, innerBodies := awkCommandTwin(value.Value, depth+1, trunc, files, state); inner != "" && inner != value.Value {
+			// The string's calls start in the folders this call may run in.
+			outer := state.dirs
+			state.dirs = dirs
+			inner, innerBodies := awkCommandTwin(value.Value, depth+1, trunc, files, state)
+			state.dirs = outer
+			if inner != "" && inner != value.Value {
 				replace(call.Args[text].Pos(), call.Args[text].End(), posixSingleQuoted(inner))
 				bodies = append(bodies, innerBodies...)
 			}

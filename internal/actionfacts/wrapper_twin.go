@@ -388,8 +388,8 @@ type PrefixWrapperRun struct {
 // MaxPrefixWrapperChain is the most prefix wrappers (sudo, env, command,
 // nohup, ...) one simple command is unwrapped through. A chain longer than
 // this is no real call; the reading that reaches the bound says so
-// (PrefixWrapperRun.Capped) instead of treating the next wrapper as the
-// program.
+// (PrefixWrapperRun.Length past MaxWrapperDepth) instead of treating the next
+// wrapper as the program.
 const MaxPrefixWrapperChain = 32
 
 // StaticPrefixWrapperChild reads words (the static values of the words of

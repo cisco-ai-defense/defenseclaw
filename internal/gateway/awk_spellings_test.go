@@ -150,6 +150,25 @@ func awkSpellings() []awkSpelling {
 		{id: "J05D", cmd: `cd ordinary && awk -f prog2.awk a.txt`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "allow"},
 		{id: "J06D", cmd: `env -C ordinary awk -f prog2.awk a.txt`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "allow"},
 		{id: "A-cd-dotdot-awk-f", cmd: `cd ordinary && cd .. && awk -f prog2.awk`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "block"},
+		// GAP-0852 (review tbrev r1, J05D-cd-relative-f-ctl x false-and-cd): a
+		// cd that may not have run (behind false && or ||, after a ;, in an
+		// untaken branch, in a subshell that ended) does not move the call: the
+		// program file is read in every folder the call may run in, and the
+		// strongest decides. A cd of an && chain the call is on the right of
+		// certainly ran (J05D allows). A folder no words give stays the unknown
+		// tier, with what the other folders prove still deciding.
+		{id: "J05D-false-and-cd", cmd: "false && cd ordinary\nawk -f prog2.awk a.txt", files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "block"},
+		{id: "J05D-false-and-cd-semi", cmd: `false && cd ordinary; awk -f prog2.awk a.txt`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "block"},
+		{id: "J05D-true-or-cd", cmd: `true || cd ordinary; awk -f prog2.awk a.txt`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "block"},
+		{id: "J05D-cd-or-true", cmd: `cd ordinary || true; awk -f prog2.awk a.txt`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "block"},
+		{id: "J05D-if-false-cd", cmd: `if false; then cd ordinary; fi; awk -f prog2.awk a.txt`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "block"},
+		{id: "J05D-subshell-cd-ended", cmd: `(cd ordinary); awk -f prog2.awk a.txt`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "block"},
+		{id: "J05D-semi-cd", cmd: `cd ordinary; awk -f prog2.awk a.txt`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "block"},
+		{id: "J05D-false-and-cd-var", cmd: `false && cd "$D"; awk -f prog2.awk a.txt`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "block"},
+		{id: "J05D-false-and-cd-in-sh-c", cmd: `sh -c 'false && cd ordinary; awk -f prog2.awk a.txt'`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "block"},
+		{id: "J05D-and-chain-in-sh-c", cmd: `cd ordinary && sh -c 'awk -f prog2.awk a.txt'`, files: map[string]string{"prog2.awk": awkTouchLink, "ordinary/prog2.awk": `{print $1}`}, want: "allow"},
+		{id: "J05D-ctl-uncertain-benign-both", cmd: `false && cd ordinary; awk -f prog3.awk a.txt`, files: map[string]string{"prog3.awk": `{print $2}`, "ordinary/prog3.awk": `{print $1}`}, want: "allow"},
+		{id: "J05D-ctl-uncertain-unknown-folder", cmd: `false && cd "$D"; awk -f prog3.awk a.txt`, files: map[string]string{"prog3.awk": `{print $2}`}, want: "unknown"},
 
 		{id: "J05-dash", cmd: `cd - && awk -f prog.awk a.txt`, files: file, want: "unknown"},
 		{id: "J05-var", cmd: `cd "$D" && awk -f prog.awk a.txt`, files: file, want: "unknown"},
