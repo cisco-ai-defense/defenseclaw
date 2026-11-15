@@ -662,6 +662,11 @@ func dispatchTrustedAction(
 			// at the depth cap (the one bound rule, rel-1-0-10:GAP-0806).
 			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Depth), request) }()
 		}
+		if cut := trustedUndecodedCommandCut(request.Input, facts); cut.Any() {
+			// A command array past the decode bound is read by nothing: the
+			// call is TRUNCATED (the one bound rule, rel-1-0-10:GAP-0858).
+			defer func() { findings = withUndecodedCommandTruncation(findings, cut, request) }()
+		}
 		// A script past the input bound is not read in full, so the bound of the argv
 		// call still cuts it (rel-1-0-10:GAP-0712), and so do the words a POSIX -c
 		// script runs as its arguments and long wrapper words (rel-1-0-10:GAP-0803).

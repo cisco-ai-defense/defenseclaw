@@ -196,3 +196,40 @@ func TestGAP0803LauncherArgumentsAndDepthAreBounded(t *testing.T) {
 		}
 	}
 }
+
+// An argv launcher whose tool arguments are past the decode bound
+// (maxArgvDecodeBytes) is read by nothing: TRUNCATED at the unknown tier of
+// the pack, at MEDIUM severity, never CRITICAL from the bound alone, for an
+// ordinary script and the fixture alike (rel-1-0-10:GAP-0858).
+func TestGAP0858ArgvPastTheDecodeBoundIsTruncated(t *testing.T) {
+	gap0589WindowsHost(t)
+	cwd := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pad := "# " + strings.Repeat("x", (1<<20)+64) + "\n"
+	for _, tier := range boundedTestTiers {
+		floor := bounded.Unknown(tier.tier)
+		api := gap0589TierAPI(t, "codex", tier.posture, tier.managed, tier.tier)
+		for _, row := range []struct{ id, body string }{
+			{"benign-git", `git log --oneline -5`},
+			{"redirect", overLimitWindowsRedirect},
+		} {
+			for _, argv := range [][]interface{}{
+				{"pwsh", "-Command", pad + row.body},
+				{"cmd", "/c", "rem " + pad[2:] + " & " + row.body},
+			} {
+				resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
+					HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+					ToolInput: map[string]interface{}{"command": argv},
+				})
+				if boundedParse(resp.Action) < floor || !containsString(resp.RuleIDs, evaluationLimitRuleID) {
+					t.Errorf("%s/%s/%v: action %s rules %v, want at least %s with %s", tier.name, row.id, argv[0], resp.Action, resp.RuleIDs, floor, evaluationLimitRuleID)
+				}
+				if row.id == "benign-git" && strings.EqualFold(resp.Severity, "CRITICAL") {
+					t.Errorf("%s/%s/%v: severity %s from the bound alone, want below CRITICAL", tier.name, row.id, argv[0], resp.Severity)
+				}
+			}
+		}
+	}
+}

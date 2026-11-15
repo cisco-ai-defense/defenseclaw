@@ -254,3 +254,32 @@ func trustedArgvReadingCut(input actionfacts.Input, facts actionfacts.Facts) bou
 	}
 	return bounded.Of(bounded.Bytes)
 }
+
+// trustedUndecodedCommandCut is the cap of a shell execution call whose
+// tool arguments are past maxArgvDecodeBytes and hold no command string: its
+// command array is decoded by no reader (not the launcher body reading, not
+// the argv cut), so the call is TRUNCATED at the byte cap, the one bound
+// rule (rel-1-0-10:GAP-0858). Below that size the argv readings decide.
+func trustedUndecodedCommandCut(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded || len(input.Argv) > 0 ||
+		len(input.Args) <= maxArgvDecodeBytes || !trustedShellCommandTool(input.Tool) {
+		return bounded.CapSet{}
+	}
+	if _, known := trustedBashCommandInput(input); known {
+		return bounded.CapSet{}
+	}
+	return bounded.Of(bounded.Bytes)
+}
+
+// withUndecodedCommandTruncation adds the TRUNCATED finding of
+// trustedUndecodedCommandCut. Nothing of the call was read, so the bound
+// alone decides it: the unknown tier at MEDIUM severity, never CRITICAL. A
+// limit finding the call already carries is kept as it is.
+func withUndecodedCommandTruncation(findings []RuleFinding, cut bounded.CapSet, request trustedActionRequest) []RuleFinding {
+	had := boundedLimitIndex(findings) >= 0
+	findings = withBoundedTruncation(findings, cut, request)
+	if index := boundedLimitIndex(findings); !had && index >= 0 {
+		findings[index].Severity = "MEDIUM"
+	}
+	return findings
+}
