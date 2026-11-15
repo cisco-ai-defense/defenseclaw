@@ -309,7 +309,8 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 	var after windowsHookImageConfigScan
 	for {
 		after = steps.Scan()
-		if len(after.Incomplete) == 0 && len(windowsHookImageBlockingNamedFiles(after, skip)) == 0 {
+		if len(after.Incomplete) == 0 && len(windowsHookImageBlockingNamedFiles(after, skip)) == 0 &&
+			windowsHookImageBlockingUnverified(after, skip) == 0 {
 			break
 		}
 		if !steps.Now().Before(deadline) {
@@ -579,6 +580,19 @@ func windowsHookImageBlockingNamedFiles(scan windowsHookImageConfigScan, skip ma
 		}
 	}
 	return out
+}
+
+// windowsHookImageBlockingUnverified counts the scan's unverified account
+// files that do not belong to a skipped profile: retire waits on them too (a
+// file held open can be read again; turev #6).
+func windowsHookImageBlockingUnverified(scan windowsHookImageConfigScan, skip map[string]bool) int {
+	count := 0
+	for _, file := range scan.Unverified {
+		if sid := file.File.SID; sid == "" || !skip[sid] {
+			count++
+		}
+	}
+	return count
 }
 
 // windowsHookImageRecordSkips audits each skipped profile and records the

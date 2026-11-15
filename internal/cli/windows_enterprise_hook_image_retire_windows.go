@@ -356,8 +356,8 @@ func reconcileWindowsCodexRequirementsForHookImage(gateway string) error {
 
 // scanWindowsHookImageConfigs reads every file DefenseClaw writes that can
 // name a hook image of bin (windowsHookImageConfigFiles): machine files make
-// the scan incomplete when they cannot be read, account files are skipped
-// (windowsHookImageConfigScan). An account path is looked at, listed and read
+// the scan incomplete when they cannot be read, account files are unverified
+// (windowsHookImageConfigScan.Unverified). An account path is looked at, listed and read
 // only from its home's handle with no link followed from the home down
 // (link_in_account_path otherwise).
 func scanWindowsHookImageConfigs(roots winpath.EnterpriseRoots, bin string) windowsHookImageConfigScan {
@@ -402,36 +402,13 @@ func viewWindowsHookImageAccountPath(home, path string) (fs.FileInfo, []fs.DirEn
 
 // windowsHookImageScanMaxBytes bounds one scanned file. Every file
 // DefenseClaw writes that names a hook is far smaller; a larger one is not
-// read (a machine file makes the scan incomplete, an account file is skipped).
+// read (a machine file makes the scan incomplete, an account file is unverified).
 const windowsHookImageScanMaxBytes = 16 << 20
 
-// windowsHookImageScanFileTimeout bounds one file's open and read, so a
-// file an account holds with an oplock, or a path that does not answer,
-// cannot keep retire or prune (which hold the lifecycle lock) waiting. A
-// read still blocked at the timeout is given up on; its goroutine ends with
-// the process.
-const windowsHookImageScanFileTimeout = 5 * time.Second
-
-var errWindowsHookImageScanTimeout = fmt.Errorf("did not answer within %s; not read", windowsHookImageScanFileTimeout)
-
+// readWindowsHookImageConfigFile reads one file within
+// windowsHookImageScanTimeout.
 func readWindowsHookImageConfigFile(file windowsHookImageConfigFile) ([]byte, error) {
-	type result struct {
-		body []byte
-		err  error
-	}
-	done := make(chan result, 1)
-	go func() {
-		body, err := readWindowsHookImageConfigFileNow(file)
-		done <- result{body, err}
-	}()
-	timer := time.NewTimer(windowsHookImageScanFileTimeout)
-	defer timer.Stop()
-	select {
-	case got := <-done:
-		return got.body, got.err
-	case <-timer.C:
-		return nil, errWindowsHookImageScanTimeout
-	}
+	return windowsHookImageBounded(func() ([]byte, error) { return readWindowsHookImageConfigFileNow(file) })
 }
 
 // readWindowsHookImageConfigFileNow reads a regular file: a link, a
@@ -575,7 +552,7 @@ func windowsHookImageConfigFiles(roots winpath.EnterpriseRoots) ([]windowsHookIm
 	accountFiles, accountProblems := enterprisehooks.WindowsManagedHookConfigFiles(
 		filepath.Join(roots.StateRoot, "hook-guardian", "targets.yaml"))
 	for _, file := range accountFiles {
-		files = append(files, windowsHookImageConfigFile{Path: file.Path, User: file.User, Home: file.Home, SID: file.SID})
+		files = append(files, windowsHookImageConfigFile{Path: file.Path, User: file.User, Home: file.Home, SID: file.SID, Unverified: file.Unverified})
 	}
 	problems = append(problems, accountProblems...)
 	return files, problems
@@ -650,20 +627,30 @@ func containsFoldString(values []string, want string) bool {
 }
 
 // writeWindowsHookImageRetiredMarker writes the retire marker and protects it
-// like an install file. It fails closed: when the protection cannot be set,
-// the marker is removed again, so no unprotected marker tells the writers the
-// install is retired (rel-1-0-10:GAP-0840: a failed protection left the
-// marker behind, and every later retire reported pending over it).
+// like an install file. The body goes to <marker>.new, is protected there and
+// then renamed over the marker, so a failed write or protection leaves the
+// marker as it was: none when there was none, so no unprotected marker tells
+// the writers the install is retired (rel-1-0-10:GAP-0840: a failed
+// protection left the marker behind, and every later retire reported pending
+// over it), and the earlier one with its recorded skips when retire rewrites
+// it (turev #8: a failed rewrite removed it and un-retired the install).
 func writeWindowsHookImageRetiredMarker(path string, body []byte, protect func(path, sddl string) error) error {
-	if err := os.WriteFile(path, body, 0o600); err != nil {
-		_ = os.Remove(path)
+	temp := path + ".new"
+	_ = os.Remove(temp)
+	discard := func(err error) error {
+		if removeErr := os.Remove(temp); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			return fmt.Errorf("%w; remove %s: %v", err, temp, removeErr)
+		}
 		return err
 	}
-	if err := protect(path, windowsInstallFileSDDL); err != nil {
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-			return fmt.Errorf("protect the retire marker: %w; remove it again: %v", err, removeErr)
-		}
-		return fmt.Errorf("protect the retire marker: %w", err)
+	if err := os.WriteFile(temp, body, 0o600); err != nil {
+		return discard(err)
+	}
+	if err := protect(temp, windowsInstallFileSDDL); err != nil {
+		return discard(fmt.Errorf("protect the retire marker: %w", err))
+	}
+	if err := os.Rename(temp, path); err != nil {
+		return discard(fmt.Errorf("replace the retire marker: %w", err))
 	}
 	return nil
 }

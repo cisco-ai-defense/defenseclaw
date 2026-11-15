@@ -41,18 +41,22 @@ type windowsHookImageConfigFile struct {
 	// Home is the folder an account file is read below: the enrolled
 	// account's home, or ProgramData for a vendor folder file. The file is
 	// read only when no link lies at or below Home on its path
-	// (link_in_account_path otherwise: skipped, never read).
+	// (link_in_account_path otherwise: unverified, never read).
 	Home string
 	// Note says why a file outside an account's home is an account file
-	// ("not_admin_owned: <element>"); it is shown with a skipped line.
+	// ("not_admin_owned: <element>"); it is shown with an unverified line.
 	// Home is then ProgramData: the file is opened from ProgramData's handle.
 	Note string
 	// SID is the enrolled account an account file in its home belongs to
 	// (the profile `hook-image retire --skip-profile` names); "" otherwise.
 	SID string
+	// Unverified, when set, is why the list could not vouch for this
+	// account file (its agent home is not resolvable, or outside the home):
+	// it is never read and is unverified (rel-1-0-10 GAP-0884).
+	Unverified string
 }
 
-// line is the Incomplete or Skipped line of file for err.
+// line is the Incomplete or Unverified line of file for err.
 func (f windowsHookImageConfigFile) line(err error) string {
 	if f.Note != "" {
 		return fmt.Sprintf("%s (%s): %v", f.Path, f.Note, err)
@@ -60,7 +64,7 @@ func (f windowsHookImageConfigFile) line(err error) string {
 	return fmt.Sprintf("%s: %v", f.Path, err)
 }
 
-// windowsHookImageLinkInAccountPath starts the skipped line of an account
+// windowsHookImageLinkInAccountPath starts the unverified line of an account
 // file whose path has a link at or below the account home.
 const windowsHookImageLinkInAccountPath = "link_in_account_path"
 
@@ -89,16 +93,57 @@ func windowsHookImageAccountPathError(err error) error {
 // through that handle. SYSTEM would resolve every folder of the path with its
 // own rights if it opened the path by name, so a folder the account replaced
 // with a junction would point SYSTEM's open anywhere the account chooses.
+//
+// Each view is bounded (windowsHookImageBounded): an account that holds an
+// oplock on its own agent config kept retire, which holds lifecycle.lock,
+// waiting in the open (rel-1-0-10 GAP-0886); it is unverified instead.
 func windowsHookImageAccountView(view func(home, path string) (fs.FileInfo, []fs.DirEntry, error)) func(home, path string) (fs.FileInfo, []fs.DirEntry, error) {
+	type viewed struct {
+		info     fs.FileInfo
+		children []fs.DirEntry
+	}
 	return func(home, path string) (fs.FileInfo, []fs.DirEntry, error) {
 		if strings.TrimSpace(home) == "" {
 			return nil, nil, errWindowsHookImageNoAccountHome
 		}
-		info, children, err := view(home, path)
+		got, err := windowsHookImageBounded(func() (viewed, error) {
+			info, children, err := view(home, path)
+			return viewed{info, children}, err
+		})
 		if err != nil {
 			return nil, nil, windowsHookImageAccountPathError(err)
 		}
-		return info, children, nil
+		return got.info, got.children, nil
+	}
+}
+
+// windowsHookImageScanTimeout bounds one open, listing or read of the scan,
+// so a path held with an oplock, or one that does not answer, cannot keep
+// retire or prune (which hold the lifecycle lock) waiting. A call still
+// blocked at the timeout is given up on; its goroutine ends with the process.
+var windowsHookImageScanTimeout = 5 * time.Second
+
+var errWindowsHookImageScanTimeout = errors.New("did not answer in time (an oplock, or a path that does not answer); not read")
+
+// windowsHookImageBounded runs do within windowsHookImageScanTimeout.
+func windowsHookImageBounded[T any](do func() (T, error)) (T, error) {
+	type result struct {
+		value T
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		value, err := do()
+		done <- result{value, err}
+	}()
+	timer := time.NewTimer(windowsHookImageScanTimeout)
+	defer timer.Stop()
+	select {
+	case got := <-done:
+		return got.value, got.err
+	case <-timer.C:
+		var zero T
+		return zero, errWindowsHookImageScanTimeout
 	}
 }
 
@@ -129,17 +174,26 @@ type windowsHookImageVendorFS struct {
 // owned by SYSTEM or Administrators; from the first element that is not, the
 // rest is account files read below ProgramData (Note not_admin_owned:
 // <element>), so one the user made unreadable, or a link the user made, is
-// skipped and never voids the scan (which would keep every folder and leave
-// retire pending). A link owned by SYSTEM or Administrators is not followed
+// unverified and never voids the scan (prune would keep every folder; retire
+// names it and stays pending until it is readable or its profile skipped). A link owned by SYSTEM or Administrators is not followed
 // either: it makes the scan incomplete (link_at_machine_folder), since only
 // an administrator can make it and what it points to is not known. A folder
 // SYSTEM cannot list is a problem (the scan is incomplete) when it is a
-// machine folder and an account entry (skipped by the scan) otherwise; the
+// machine folder and an account entry (unverified by the scan) otherwise; the
 // listing goes on with its siblings, so one unreadable folder cannot hide
 // the other files. A missing vendor folder lists nothing. Owners do not
 // change under the scan: a standard user cannot make a folder of theirs
 // owned by SYSTEM or Administrators, nor replace one that is.
 func windowsHookImageVendorFiles(programData, dir string, depth int, vfs windowsHookImageVendorFS) ([]windowsHookImageConfigFile, []string) {
+	// Bounded like an account view (GAP-0886): a standard user can hold an
+	// oplock on an element it made in a vendor folder.
+	inspect, list := vfs.Inspect, vfs.List
+	vfs.Inspect = func(root, path string) (winpath.BelowInfo, error) {
+		return windowsHookImageBounded(func() (winpath.BelowInfo, error) { return inspect(root, path) })
+	}
+	vfs.List = func(root, path string) ([]fs.DirEntry, error) {
+		return windowsHookImageBounded(func() ([]fs.DirEntry, error) { return list(root, path) })
+	}
 	var files []windowsHookImageConfigFile
 	var problems []string
 	entry := func(path, note string) windowsHookImageConfigFile {
@@ -349,6 +403,10 @@ func expandWindowsHookImageConfigFiles(
 			continue
 		}
 		expanded[entryKey] = true
+		if entry.Unverified != "" {
+			refuse(entry, errors.New(entry.Unverified))
+			continue
+		}
 		var info fs.FileInfo
 		var children []fs.DirEntry
 		var err error
@@ -526,12 +584,13 @@ func windowsHookImageFoldersNamedIn(body []byte, bin string) []string {
 	return out
 }
 
-// windowsHookImageEncodedArgument is a command-line switch; one followed by
-// a blank is read, and its value is the word after it (windowsHookImageSwitchValue). Only
+// windowsHookImageEncodedArgument is a command-line switch (a hyphen, two,
+// a slash, or the en dash, em dash or horizontal bar PowerShell reads as a
+// hyphen); one followed by a blank or a colon is read, and its value is the word after it (windowsHookImageSwitchValue). Only
 // a switch PowerShell reads as -EncodedCommand counts
 // (windowsHookImageEncodedSwitch), and only on a line that starts
 // powershell or pwsh.
-var windowsHookImageEncodedArgument = lazyregexp.New(`(?:^|[\s"'])(?:--?|/)([A-Za-z]+)`)
+var windowsHookImageEncodedArgument = lazyregexp.New(`(?:^|[\s"'])(?:--?|/|\x{2013}|\x{2014}|\x{2015})([A-Za-z]+)`)
 
 // windowsHookImageSwitchValue is the word at text[at:] after blanks: up to
 // a blank, a quote, a comma or a semicolon.
@@ -591,11 +650,16 @@ func windowsHookImageEncodedScripts(text string, depth int) (scripts []string, u
 	}
 	for _, match := range windowsHookImageEncodedArgument.FindAllStringSubmatchIndex(text, -1) {
 		name := text[match[2]:match[3]]
-		if match[3] >= len(text) || (text[match[3]] != ' ' && text[match[3]] != '\t') ||
+		if match[3] >= len(text) || (text[match[3]] != ' ' && text[match[3]] != '\t' && text[match[3]] != ':') ||
 			!windowsHookImageEncodedSwitch(name) || !windowsHookImagePowerShellLine(text, match[2]) {
 			continue
 		}
-		value := windowsHookImageSwitchValue(text, match[3])
+		start := match[3]
+		if text[start] == ':' {
+			// -EncodedCommand:<value>
+			start++
+		}
+		value := windowsHookImageSwitchValue(text, start)
 		// A JSON writer may escape the slash.
 		value = strings.ReplaceAll(value, `\/`, "/")
 		if len(value) > windowsHookImageEncodedScriptLimit {

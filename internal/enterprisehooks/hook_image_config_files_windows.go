@@ -20,6 +20,8 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // WindowsHookConfigFile is one path WindowsManagedHookConfigFiles lists.
@@ -34,6 +36,12 @@ type WindowsHookConfigFile struct {
 	Home string
 	// SID is the enrolled account of an account file (User).
 	SID string
+	// Unverified, when set, says why the account's file at Path cannot be
+	// vouched for and is not read: its agent home could not be resolved
+	// (a signed-out Hermes account) or lies outside the account home. The
+	// caller treats it as an account file it could not read (retire stays
+	// pending, rel-1-0-10 GAP-0884, turev #4).
+	Unverified string
 }
 
 // WindowsManagedHookConfigFiles lists, for every enabled target of the
@@ -60,6 +68,12 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 		return nil, []string{fmt.Sprintf("%s: %v", manifestPath, err)}
 	}
 	registry := newWindowsStandaloneHookConfigRegistry()
+	// The guardian resolves each account's files with its service
+	// environment, which sets no agent home; an administrator's shell may
+	// (rel-1-0-10 GAP-0885: CODEX_HOME or OPENCODE_CONFIG_DIR made retire
+	// read the administrator's folder, as a machine file, for every account).
+	restore := withoutCallerAgentHomes()
+	defer restore()
 	var files []WindowsHookConfigFile
 	var problems []string
 	for _, target := range manifest.Targets {
@@ -84,6 +98,22 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 			problems = append(problems, fmt.Sprintf("%s (%s): %v", home, name, err))
 			continue
 		}
+		sid := strings.TrimSpace(target.SID)
+		if name == "hermes" {
+			// The Hermes home is the account's HERMES_HOME, read from its
+			// loaded registry hive. A signed-out account's hive is not
+			// loaded: the profile default is then no proof of where its
+			// Hermes reads, so the account is unverified, never read at the
+			// default (rel-1-0-10 GAP-0884).
+			if _, err := hermespath.ConfigPathForAccount(home); err != nil {
+				reason := "Hermes home not resolvable: " + err.Error()
+				if errors.Is(err, hermespath.ErrAccountSignedOut) {
+					reason = "signed out, Hermes home not resolvable while its registry hive is not loaded (HERMES_HOME may move it): " + err.Error()
+				}
+				files = append(files, WindowsHookConfigFile{Path: hermespath.ConfigPathForUserHome(home), User: true, Home: home, SID: sid, Unverified: reason})
+				continue
+			}
+		}
 		setup := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
 		var paths []string
 		if err := connector.WithUserHomeDir(home, func() error {
@@ -96,8 +126,17 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 		}
 		for _, path := range paths {
 			file := WindowsHookConfigFile{Path: path}
-			if windowsPathWithin(home, path) {
-				file.User, file.Home, file.SID = true, home, strings.TrimSpace(target.SID)
+			switch {
+			case windowsPathWithin(home, path):
+				file.User, file.Home, file.SID = true, home, sid
+			case windowsPathInProgramFiles(path):
+				// A machine path the connector also watches (Claude Code's
+				// managed settings): only an administrator writes there.
+			default:
+				// An agent home the account moved out of its profile is
+				// still the account's: never a machine file (turev #4).
+				file.User, file.Home, file.SID = true, home, sid
+				file.Unverified = "outside the account home " + home + " (a moved agent home); not read as SYSTEM"
 			}
 			files = append(files, file)
 		}
@@ -114,4 +153,34 @@ func newWindowsStandaloneHookConfigRegistry() *connector.Registry {
 	registry.RegisterBuiltin(connector.NewCursorConnector())
 	registerWindowsStandalonePerUserConnectors(registry)
 	return registry
+}
+
+// windowsCallerAgentHomes are the environment variables that move an agent's
+// home; the guardian's service environment sets none of them.
+var windowsCallerAgentHomes = []string{
+	"CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_PLUGIN_CACHE_DIR", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG",
+	"COPILOT_HOME", "XDG_CONFIG_HOME", "HERMES_HOME",
+}
+
+// withoutCallerAgentHomes unsets windowsCallerAgentHomes until restore runs.
+func withoutCallerAgentHomes() (restore func()) {
+	previous := map[string]string{}
+	for _, name := range windowsCallerAgentHomes {
+		if value, set := os.LookupEnv(name); set {
+			previous[name] = value
+			_ = os.Unsetenv(name)
+		}
+	}
+	return func() {
+		for name, value := range previous {
+			_ = os.Setenv(name, value)
+		}
+	}
+}
+
+// windowsPathInProgramFiles reports whether path lies below the trusted
+// Program Files folder.
+func windowsPathInProgramFiles(path string) bool {
+	programFiles, err := winpath.TrustedProgramFiles()
+	return err == nil && windowsPathWithin(programFiles, path)
 }

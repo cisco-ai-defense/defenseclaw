@@ -1458,8 +1458,10 @@ enrolled account's agent config names a launch folder; otherwise `hook_image_ret
 ([Roll back](/docs/enterprise/lifecycle#roll-back)). The account files are every connector's hook configs and the
 files its managed install writes beside them (the Copilot VS Code Local hook file and plugin hooks, the Hermes
 allowlist, the Kiro `defenseclaw` agent). An account file `retire` could not read or verify (a link on its path below
-the account home, access denied, too large, no answer in time) also holds it back: it is listed with `account: true`,
-`unreadable: true` and the `cause`. An elevated administrator is denied some account folders, so run `retire` as
+the account home, access denied, too large, no answer within 5 seconds, an agent home moved out of the profile, or the
+Hermes home of a signed-out account, whose `HERMES_HOME` cannot be read while it is signed out) also holds it back: it
+is listed with `account: true`, `unreadable: true` and the `cause`. Each account's files are found as the guardian
+finds them; the agent homes the administrator's shell sets (`CODEX_HOME` and the like) are ignored. An elevated administrator is denied some account folders, so run `retire` as
 LocalSystem. An enrolled account that is signed out does not hold back the machine
 files: `retire` drops its launch-folder runtime selections and lists it in `signed_out_profiles`; its own files still
 need its sign-in (the guardian rewrites them) or `--skip-profile`. `--skip-profile <SID>` (repeatable, no blanket
