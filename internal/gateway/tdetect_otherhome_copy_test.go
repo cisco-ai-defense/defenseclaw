@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -53,6 +54,10 @@ func td810OtherHomeFiles(t *testing.T, check func(pack string, hook, inspect fun
 		}
 		for _, file := range files {
 			for _, home := range []string{"/home/x", "/Users/x", "/root"} {
+				if runtime.GOOS == "windows" && home == "/root" {
+					// /root is not an absolute path on a Windows host.
+					continue
+				}
 				check(p.name, hook, inspect, file, home)
 			}
 		}
