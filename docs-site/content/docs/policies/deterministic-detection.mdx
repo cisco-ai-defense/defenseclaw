@@ -70,14 +70,14 @@ the permissive ones. In every profile,
 `CMD-WRAPPED-DOWNLOAD-EXEC` and `CMD-SUBST-DOWNLOAD-EXEC` keep a `false`
 declaration because only their exact action proof can match them.
 
-The 277 enabled balanced/default rules are generated from
+The 279 enabled balanced/default rules are generated from
 `policies/guardrail/default/rules/*.yaml`:
 
 | Family | Rules | What it detects |
 | --- | ---: | --- |
 | `command` | 150 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
 | `sensitive-path` | 29 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
-| `secret` | 24 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and secret assignments (a credential-named key with a random-looking value) |
+| `secret` | 26 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and secret assignments (a credential-named key with a random-looking value) |
 | `trust-exploit` | 30 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, role and chat-template spoofing, hidden text, and obfuscation signals |
 | `c2` | 18 | Known exfiltration endpoints, cloud metadata SSRF forms, DNS tunneling, and DNS exfiltration indicators |
 | `enterprise-data` | 15 | Structured payment, banking, contact, medical, birth-date, CSV, and JSON PII shapes |
