@@ -65,6 +65,12 @@ func RegisterWindowsStandalonePerUserConnectors(registry *connector.Registry) {
 		registry.RegisterBuiltin(connector.NewCopilotConnector())
 		return
 	}
+	registerWindowsStandalonePerUserConnectors(registry)
+}
+
+// registerWindowsStandalonePerUserConnectors adds every built-in per-user
+// connector of the standalone profile to registry.
+func registerWindowsStandalonePerUserConnectors(registry *connector.Registry) {
 	registry.RegisterBuiltin(connector.NewCopilotConnector())
 	registry.RegisterBuiltin(connector.NewAntigravityConnector())
 	registry.RegisterBuiltin(connector.NewDevinConnector())
