@@ -149,11 +149,11 @@ func TestHookImageRetireDeselectsOnlyEnrolledSignedOutAccounts(t *testing.T) {
 			asked[sid] = o
 		}
 		return []enterprisehooks.WindowsLaunchSelection{
-				{Connector: "copilot", SID: signedOut, Selector: selector},
-				{Connector: "claudecode", SID: signedOut, Selector: `C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-runtime-selector.state`},
-			}, map[string]error{
-				`C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-runtime-selector.state`: errors.New("selector lock busy"),
-			}
+			{Connector: "copilot", SID: signedOut, Selector: selector},
+			{Connector: "claudecode", SID: signedOut, Selector: `C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-runtime-selector.state`},
+		}, map[string]error{
+			`C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-runtime-selector.state`: errors.New("selector lock busy"),
+		}
 	}
 	result := deselectWindowsHookImageSignedOutSelections(winpath.EnterpriseRoots{StateRoot: stateRoot}, bin, managed.StandaloneWindowsGatewaySvc)
 	if !asked[signedOut] || asked[signedIn] || asked[stranger] {

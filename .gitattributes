@@ -25,6 +25,9 @@ internal/opencodebridge/adapter.js text eol=lf
 internal/gateway/connector/testdata/bridge_host/** text eol=lf
 # Released per-user hook renders the upgrade tests run as they shipped.
 internal/gateway/connector/testdata/released-hooks/** text eol=lf
+# The Copilot VS Code Local hook file DefenseClaw 1.0.9 wrote on dc-ent-win;
+# enterprisepolicy tests compare the 1.0.10 transition render with it byte for byte.
+internal/enterprisepolicy/testdata/copilot-vscode-1.0.9/** text eol=lf
 
 # The Substrate goldens are compared byte for byte by Go tests that also run on Windows runners:
 # the rendered egress policies, the SubstrateInstall overlays, the access policy listing and the chart renders.

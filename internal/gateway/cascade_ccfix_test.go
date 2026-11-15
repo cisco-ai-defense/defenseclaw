@@ -188,6 +188,12 @@ func TestCascadeUninspectedMarkerWhateverTheVerdict(t *testing.T) {
 // over the cap is at least the unknown tier, never a silent allow, and a
 // policy that lowers everything cannot take it below that.
 func TestCascadeInspectContentCutIsUninspected(t *testing.T) {
+	// The gateway compiles its rule generation at boot (NewSidecar,
+	// publishRulePackOverrides); this test calls the handlers without a
+	// boot, so compile it first. Otherwise the one-time compile (about
+	// 240 ms under -race) runs inside the 200 ms inspectScanTimeout of the
+	// first scan and the route answers 504 instead of a verdict.
+	ensureDefaultRuleGeneration()
 	api := cascadeModuleConfig(t, "default", cascadeAllowAllModule, "")
 	api.scannerCfg.Guardrail.Cascade.Policy.Lowest = "allow"
 	api.scannerCfg.Guardrail.Mode = "action"

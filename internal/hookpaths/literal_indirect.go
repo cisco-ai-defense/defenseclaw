@@ -31,7 +31,7 @@ type indirectRead struct {
 var scriptRead = indirectRead{limit: maxIndirectSourceBytes}
 
 // readIndirectSource reads only one regular file under cwd (the volume root,
-// for readIndirectSourceAnywhere).
+// for readIndirectSourceAnywhereWith).
 // These reads occur only for an explicit source, make, or AWK -f command.
 func readIndirectSource(name, cwd string) (string, bool) {
 	return readIndirectSourceWith(name, cwd, scriptRead)
@@ -73,18 +73,14 @@ func readIndirectSourceWith(name, cwd string, lim indirectRead) (string, bool) {
 	return readIndirectSourceIn(root, relative, before, err, lim)
 }
 
-// readIndirectSourceAnywhere reads the regular file a script operand names as
+// readIndirectSourceAnywhereWith reads the regular file a script operand names as
 // the system opens it, wherever it lies: a name relative to cwd is joined to
 // it unchanged (a .. climbs the physical parent, as the shell does), and the
 // read starts at the root of the volume the path is on, so a script beside
 // the project or in the user home is read as one in the project is. It is
 // the same bounded read (a regular file of at most maxIndirectSourceBytes; a
 // link past the system bound or a share that does not answer is an unread
-// body).
-func readIndirectSourceAnywhere(name, cwd string) (string, bool) {
-	return readIndirectSourceAnywhereWith(name, cwd, scriptRead)
-}
-
+// body); lim bounds the read.
 func readIndirectSourceAnywhereWith(name, cwd string, lim indirectRead) (string, bool) {
 	if !filepath.IsAbs(cwd) || name == "" || strings.ContainsAny(name, "\x00\r\n") {
 		return "", false
