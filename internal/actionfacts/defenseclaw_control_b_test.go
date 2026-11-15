@@ -98,3 +98,41 @@ func TestDefenseClawExtensionGroupsAreRegisteredGroups(t *testing.T) {
 		t.Errorf("a guardrail uninstall is judged %q (decided %v)", kind, decided)
 	}
 }
+
+// TestDefenseClawControlDataHeredocWithAnUnresolvedCommand is GAP-0755: a task
+// brief written with cat > FILE <<'TASK' names DefenseClaw in prose, and the
+// call runs a command later that the parse cannot resolve (a script word built
+// from variables). The here-document feeds cat, so it is data: the call names
+// the product in no command, and the unresolved command is not a DefenseClaw
+// reading. A here-document that feeds a shell keeps its reading.
+func TestDefenseClawControlDataHeredocWithAnUnresolvedCommand(t *testing.T) {
+	prose := "Notes on DefenseClaw: the <DefenseClawDropInName> file, the defenseclaw-dev hosts.\n" +
+		"Do not run defenseclaw-gateway stop in this sandbox; a run of defenseclaw guardrail disable is not allowed.\n" +
+		"defenseclaw-gateway stop\n"
+	call := func(consumer string) string {
+		return "D=/home/u/work; N=brief; mkdir -p $D; cd $D\ncat > $N.md <<'TASK'\n" + prose + "TASK\n" +
+			consumer + "\nsleep 5; ls $D | grep $N"
+	}
+	input := func(text string) Input {
+		return Input{Tool: "Bash", Command: text, CWD: "/home/u/work", ActiveHome: "/home/u"}
+	}
+	for name, consumer := range map[string]string{
+		"a script word built from variables": `nohup bash -c "$RUN" '$D/$N.out' > /dev/null 2>&1 &`,
+		"a program in a variable":            `"$TOOL" --prompt-file "$D/$N.md" --out "$D/$N.out"`,
+	} {
+		text := call(consumer)
+		if got := worstDefenseClawControl(DefenseClawControl(Analyze(input(text)), text)); got != "" {
+			t.Errorf("%s: a data here-document made the call %q", name, got)
+		}
+	}
+	// The same prose fed to a shell is a script, and says what it says.
+	script := "bash <<'TASK'\n" + prose + "TASK\n"
+	if got := worstDefenseClawControl(DefenseClawControl(Analyze(input(script)), script)); got == "" {
+		t.Errorf("a here-document that feeds a shell was not read")
+	}
+	// A filter in front of a shell passes the document on.
+	piped := "cat <<'TASK' | sh\n" + prose + "TASK\n"
+	if got := worstDefenseClawControl(DefenseClawControl(Analyze(input(piped)), piped)); got == "" {
+		t.Errorf("a here-document piped through cat into a shell was not read")
+	}
+}

@@ -295,11 +295,20 @@ func embeddedShellScript(argv []string, name string) (string, bool) {
 	if len(argv) < 3 || shellProgram(name) || defenseClawProgramName(argv) != "" {
 		return "", false
 	}
+	// The words between the program and the shell are its options, their
+	// values, numbers and paths (`nsenter -t 1 -m sh -c SCRIPT`, `chroot / sh
+	// -c SCRIPT`). Any other bare word is another command or a host (`tail -10
+	// log ssh -n host bash -c SCRIPT`): the program does not run the shell.
 	for index := 1; index+1 < len(argv); index++ {
 		if shellProgram(commandBaseName(argv[index])) {
 			if script, ok := shellScript(argv[index:]); ok && script != "" {
 				return script, true
 			}
+			return "", false
+		}
+		word := argv[index]
+		afterOption := index > 1 && strings.HasPrefix(argv[index-1], "-") && !strings.HasPrefix(word, "-")
+		if !strings.HasPrefix(word, "-") && !afterOption && !strings.ContainsAny(word, `/\`) && strings.Trim(word, "0123456789") != "" {
 			return "", false
 		}
 	}

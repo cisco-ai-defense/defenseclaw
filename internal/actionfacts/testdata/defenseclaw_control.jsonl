@@ -433,7 +433,8 @@
 {"id": "g596b-t16", "dialect": "", "command": "defenseclaw mcp uninstall foo", "want": ""}
 {"id": "g596b-t17", "dialect": "", "command": "defenseclaw guardrail uninstall", "want": "uninstall"}
 {"id": "g596b-t18", "dialect": "", "command": "cat > runbook.md <<'EOF'\nTo stop the gateway run:\ndefenseclaw-gateway stop\nEOF", "want": ""}
-{"id": "g596b-t19", "dialect": "", "command": "D=/home/u/work; N=brief; mkdir -p $D; cd $D\ncat > $N.md <<'TASK'\nNotes on DefenseClaw: the <DefenseClawDropInName> file and defenseclaw-dev hosts. Do not run defenseclaw-gateway stop here.\nTASK\nnohup bash -c 'for i in 1 2; do node run.mjs --out '$D/$N.out' > '$D/$N.stdout'; break; done' > /dev/null 2>&1 &\nsleep 5; ls $D | grep $N", "want": ""}
 {"id": "g596b-t20", "dialect": "", "command": "bash <<'EOF'\ndefenseclaw-gateway status\nEOF", "want": ""}
 {"id": "g596b-t21", "dialect": "", "command": "sudo ~/.local/bin/defenseclaw-gateway status", "want": ""}
 {"id": "g596b-t22", "dialect": "", "command": "strace -f sh -c 'defenseclaw status'", "want": ""}
+{"id": "g596b-t23", "dialect": "", "command": "tail -10 out.log ssh -n host sudo -iu u bash -lc 'defenseclaw-gateway stop'", "want": ""}
+{"id": "g596b-t24", "dialect": "", "command": "strace -f -o out.txt sh -c 'defenseclaw-gateway stop'", "want": "unproven"}
