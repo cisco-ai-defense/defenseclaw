@@ -26,6 +26,10 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		t.Run(connectorName, func(t *testing.T) {
 			f := newManagedHookAuditFixtureFor(t, connectorName, nil)
+			// The sandbox receipt route feeds the hook capacity counter
+			// (S8 review P3-4): an acknowledged call is answered, a proposal
+			// whose receipt window ends is counted once by the fail mode.
+			withHookCapacity(t, time.Now())
 			binding := sandboxauth.Binding{
 				ID: "sb_0875_own", SandboxName: "own-sandbox", Connector: connectorName,
 				Routes: []sandboxauth.Route{sandboxauth.RouteHook},
@@ -108,6 +112,7 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if got := f.audited(t, session)[session]; got != "allow" {
 				t.Fatalf("audited final verdict = %q, want allow", got)
 			}
+			waitHookCapacity(t, HookCapacityCounts{Answered: 1})
 			rows, err := f.store.ListEvents(200)
 			if err != nil {
 				t.Fatal(err)
@@ -186,6 +191,9 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			if got := f.audited(t, missing)[missing]; got != "unconfirmed/no_answer" {
 				t.Fatalf("unacknowledged verdict = %q, want unconfirmed/no_answer", got)
 			}
+			// The replayed acknowledgement and the retry-window cleanup
+			// above counted nothing more; the expired receipt is one deny.
+			waitHookCapacity(t, HookCapacityCounts{Answered: 1, DeadlineDenies: 1})
 
 			// The answer is still only a proposal when its ACK audit fails.
 			// The hook receives 503 and recovery audits the closed block,
