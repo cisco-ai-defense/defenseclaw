@@ -99,10 +99,7 @@ func runWindowsHookImageRetire(skipProfiles []string) windowsHookImageRetireRepo
 			return windowsRecordedArtifactHash(roots.MetadataPath, artifact)
 		},
 		WriteMarker: func(path string, body []byte) error {
-			if err := os.WriteFile(path, body, 0o600); err != nil {
-				return err
-			}
-			return applyWindowsSDDL(path, windowsInstallFileSDDL)
+			return writeWindowsHookImageRetiredMarker(path, body, applyWindowsSDDL)
 		},
 		ReconcileCodex:  reconcileWindowsCodexRequirementsForHookImage,
 		RestartGuardian: func() error { return restartWindowsHookImageGuardian(guardian) },
@@ -539,4 +536,23 @@ func containsFoldString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// writeWindowsHookImageRetiredMarker writes the retire marker and protects it
+// like an install file. It fails closed: when the protection cannot be set,
+// the marker is removed again, so no unprotected marker tells the writers the
+// install is retired (rel-1-0-10:GAP-0840: a failed protection left the
+// marker behind, and every later retire reported pending over it).
+func writeWindowsHookImageRetiredMarker(path string, body []byte, protect func(path, sddl string) error) error {
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	if err := protect(path, windowsInstallFileSDDL); err != nil {
+		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			return fmt.Errorf("protect the retire marker: %w; remove it again: %v", err, removeErr)
+		}
+		return fmt.Errorf("protect the retire marker: %w", err)
+	}
+	return nil
 }
