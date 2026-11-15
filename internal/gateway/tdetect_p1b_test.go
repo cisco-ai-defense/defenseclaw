@@ -82,7 +82,8 @@ func TestCredentialFileSweepFiveTiers(t *testing.T) {
 	})
 }
 
-// TestDataToolFileReadsGetTheVerdictOfCat (substrate-1:GAP-0233): jq and yq read the file they name, so a credential file read that way is
+// TestDataToolFileReadsGetTheVerdictOfCat (substrate-1:GAP-0233): jq, yq and
+// xargs -a FILE read the file they name, so a credential file read that way is
 // judged as `cat` of it is, in every tier. The cat form is the oracle.
 func TestDataToolFileReadsGetTheVerdictOfCat(t *testing.T) {
 	pairs := [][2]string{
@@ -106,5 +107,27 @@ func TestDataToolFileReadsGetTheVerdictOfCat(t *testing.T) {
 		{"td-jq-project", `jq . package.json`, "AAAAA"},
 		{"td-jq-stdin", `jq -n '1+1'`, "AAAAA"},
 		{"td-xargs-plain", `xargs -a list.txt echo`, "AAAAA"},
+	})
+}
+
+// TestUserLevelPersistenceFoldersFiveTiers (GAP-0817): a unit, autostart entry
+// or launch agent in an account's own folders runs at the account's next login,
+// so a write to it is persistence like a shell profile write. Alert in default,
+// managed and permissive; block in strict and managed-strict. The system-wide
+// unit folders are not in this row (GAP-0817 on the 0327 branch).
+func TestUserLevelPersistenceFoldersFiveTiers(t *testing.T) {
+	tdetectRunRows(t, []tdetectRow{
+		{"td-ul-systemd-user", `printf '[Service]\nExecStart=/tmp/x\n' > ~/.config/systemd/user/evil.service`, "LBLLB"},
+		{"td-ul-systemd-user-tee", `printf x | tee ~/.config/systemd/user/evil.timer`, "LBLLB"},
+		{"td-ul-systemd-user-other-home", `printf x > /home/bob/.config/systemd/user/evil.service`, "LBLLB"},
+		{"td-ul-systemd-user-cd", `cd ~/.config/systemd/user && printf x > evil.service`, "LBLLB"},
+		{"td-ul-autostart", `printf '[Desktop Entry]\nExec=/tmp/x\n' > ~/.config/autostart/evil.desktop`, "LBLLB"},
+		{"td-ul-launch-agent", `printf x > ~/Library/LaunchAgents/com.evil.plist`, "LBLLB"},
+		{"td-ul-launch-agent-root", `printf x > /Users/bob/Library/LaunchAgents/com.evil.plist`, "LBLLB"},
+		{"td-ul-read-unit", `cat ~/.config/systemd/user/evil.service`, "AAAAA"},
+		{"td-ul-ls-agents", `ls ~/Library/LaunchAgents`, "AAAAA"},
+		{"td-ul-mask-link", `ln -sf /dev/null ~/.config/systemd/user/x.service`, "AAAAA"},
+		{"td-ul-project-copy", `printf x > /home/bob/proj/.config/systemd/user/evil.service`, "AAAAA"},
+		{"td-ul-other-file", `printf x > ~/.config/systemd/user/notes.txt`, "AAAAA"},
 	})
 }
