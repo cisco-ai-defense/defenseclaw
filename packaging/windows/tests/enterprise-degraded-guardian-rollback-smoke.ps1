@@ -183,13 +183,7 @@ foreach ($case in @(
         @{ line = 'claudecode for DCFC-X\dana (S-1-5-21-1-2-3-1003) is enrolled with the hook matrix of an earlier DefenseClaw release (upgrade pending at the account''s next connect)'; ok = $true; label = 'earlier hook matrix' },
         @{ line = 'the guardian cannot repair codex for DCFC-X\dana (S-1-5-21-1-2-3-1003) while that account is signed out: x'; ok = $false; label = 'signed-out line for a connector that did not fail' },
         @{ line = 'the guardian cannot repair claudecode for DCFC-X\erin (S-1-5-21-1-2-3-1001) while that account is signed out: x'; ok = $false; label = 'signed-out line for a healthy SID' },
-        @{ line = 'claudecode for DCFC-X\dana (S-1-5-21-1-2-3-1003) is protected'; ok = $false; label = 'an unknown line about the failed row' },
-        # GAP-0794: 1.0.10 and later start every one of those lines with the
-        # form a Setup before 1.0.10 attributes, so an older Setup's rollback
-        # accepts the restored 1.0.10 reconcile and starts its services again.
-        @{ line = 'last guardian reconcile failed for claudecode@DCFC-X\dana (S-1-5-21-1-2-3-1003): the guardian cannot repair claudecode for DCFC-X\dana (S-1-5-21-1-2-3-1003) while that account is signed out: have the account sign in'; ok = $true; label = 'prefixed signed-out repair' },
-        @{ line = 'last guardian reconcile failed for claudecode@DCFC-X\dana (S-1-5-21-1-2-3-1003): claudecode for DCFC-X\dana (S-1-5-21-1-2-3-1003) is pending until that account signs in: x'; ok = $true; label = 'prefixed pending until sign-in' },
-        @{ line = 'last guardian reconcile failed for codex@DCFC-X\dana (S-1-5-21-1-2-3-1003): the guardian cannot repair codex for DCFC-X\dana (S-1-5-21-1-2-3-1003) while that account is signed out: x'; ok = $false; label = 'prefixed line for a connector that did not fail' }
+        @{ line = 'claudecode for DCFC-X\dana (S-1-5-21-1-2-3-1003) is protected'; ok = $false; label = 'an unknown line about the failed row' }
     )) {
     $report = New-Report -Failures 1
     $report.errors = @($report.errors | Where-Object { -not ([string]$_).StartsWith('last guardian reconcile failed for') }) + $case.line

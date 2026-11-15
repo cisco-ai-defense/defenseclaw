@@ -166,8 +166,8 @@ C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 		len(scan.Skipped) != 1 || !strings.HasPrefix(scan.Skipped[0], `C:\Users\u\.codex\hooks.json: `) {
 		t.Fatalf("scan = %+v", scan)
 	}
-	if !scan.UserFiles[`c:\users\u\.cursor\hooks.json`] || scan.UserFiles[`c:\a.json`] {
-		t.Fatalf("account files %v", scan.UserFiles)
+	if !scan.UserFiles[`c:\users\u\.cursor\hooks.json`] || len(scan.NamedBySystem()["0123456789abcdef"]) != 1 {
+		t.Fatalf("account files %v, by system %v", scan.UserFiles, scan.NamedBySystem())
 	}
 }
 
@@ -399,6 +399,20 @@ func TestHookImageStageKeepsTheMarkerWhenTheStartFails(t *testing.T) {
 	}
 	if image := winpath.ResolveEnterpriseHookImageWith(r.fs, hookImageTestBin); image.State != winpath.EnterpriseHookImageRetired {
 		t.Fatalf("a failed stage un-retired: %+v", image)
+	}
+}
+
+// An account file that still names a folder is the guardian's to rewrite at
+// that account's next pass; retire does not wait for it (the older Setup
+// reads only machine files) and reports it (review 2 P2-C).
+func TestHookImageRetireDoesNotWaitForAnAccountFile(t *testing.T) {
+	r := newRetireFixture(t)
+	folder, _ := winpath.EnterpriseHookImageDigest(r.recorded["hook"])
+	r.userFiles = map[string]bool{`c:\users\c\.kiro\hooks.json`: true}
+	r.named = []map[string][]string{{folder: {`C:\Users\c\.kiro\hooks.json`}}}
+	report := retireWindowsHookImages(r.steps())
+	if !report.OK || len(report.StillNamed) != 0 || !strings.Contains(strings.Join(report.Notes, "\n"), "still_named_by_account_file: "+`C:\Users\c\.kiro\hooks.json`) {
+		t.Fatalf("retire = %+v", report)
 	}
 }
 

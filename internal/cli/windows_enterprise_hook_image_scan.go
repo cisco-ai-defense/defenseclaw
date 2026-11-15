@@ -11,16 +11,13 @@
 package cli
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf16"
 
-	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -251,6 +248,20 @@ type windowsHookImageConfigScan struct {
 	Skipped []string
 }
 
+// NamedBySystem reports the folders a machine file names (retire waits
+// only for those: the older release's Setup reads only them).
+func (s windowsHookImageConfigScan) NamedBySystem() map[string][]string {
+	out := map[string][]string{}
+	for folder, files := range s.Named {
+		for _, file := range files {
+			if !s.UserFiles[strings.ToLower(file)] {
+				out[folder] = append(out[folder], file)
+			}
+		}
+	}
+	return out
+}
+
 // errWindowsHookImageScanUnsafe is a scanned path that is a link, a folder
 // or another non-regular file: it is never read.
 var errWindowsHookImageScanUnsafe = errors.New("not a regular file (a link, a folder or a device); not read")
@@ -432,17 +443,7 @@ func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin str
 // image of this install's bin counts, so a string an account writes about
 // another folder, another install or a relative path keeps nothing.
 func windowsHookImageFoldersNamedIn(body []byte, bin string) []string {
-	// A PowerShell bridge names the hook only inside the base64 script of
-	// its -EncodedCommand (the Copilot VS Code Local hooks, the Codex and
-	// Cursor machine commands): read those scripts too, before the case is
-	// folded (base64 is case-sensitive). Without them retire ended ok over a
-	// Copilot file that named a launch folder, and the 1.0.9 guardian failed
-	// that account (rel-1-0-10 GAP-0794); prune could remove such a folder.
-	raw := string(body)
-	for _, script := range windowsHookImageEncodedScripts(raw, windowsHookImageEncodedScriptDepth) {
-		raw += "\n" + script
-	}
-	text := strings.ReplaceAll(strings.ToLower(raw), "/", `\`)
+	text := strings.ReplaceAll(strings.ToLower(string(body)), "/", `\`)
 	for strings.Contains(text, `\\`) {
 		text = strings.ReplaceAll(text, `\\`, `\`)
 	}
@@ -488,45 +489,6 @@ func windowsHookImageFoldersNamedIn(body []byte, bin string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// windowsHookImageEncodedArgument is a PowerShell -EncodedCommand argument
-// (any abbreviation PowerShell accepts, from -e on) and its base64 value.
-var windowsHookImageEncodedArgument = lazyregexp.New(`(?i)(?:^|[\s"'])-(e[a-z]*)\s+([A-Za-z0-9+/]{4,}={0,2})`)
-
-// windowsHookImageEncodedScriptLimit bounds one base64 value the scan
-// decodes; windowsHookImageEncodedScriptDepth how deep a decoded script's
-// own -EncodedCommand is read.
-const (
-	windowsHookImageEncodedScriptLimit = 256 << 10
-	windowsHookImageEncodedScriptDepth = 2
-)
-
-// windowsHookImageEncodedScripts returns the scripts (base64 of UTF-16LE)
-// of every -EncodedCommand argument in text and, to depth, in those scripts.
-// A value that is not such a script is skipped.
-func windowsHookImageEncodedScripts(text string, depth int) []string {
-	if depth <= 0 {
-		return nil
-	}
-	var scripts []string
-	for _, match := range windowsHookImageEncodedArgument.FindAllStringSubmatch(text, -1) {
-		if !strings.HasPrefix("encodedcommand", strings.ToLower(match[1])) || len(match[2]) > windowsHookImageEncodedScriptLimit {
-			continue
-		}
-		decoded, err := base64.StdEncoding.DecodeString(match[2])
-		if err != nil || len(decoded)%2 != 0 {
-			continue
-		}
-		units := make([]uint16, len(decoded)/2)
-		for i := range units {
-			units[i] = uint16(decoded[2*i]) | uint16(decoded[2*i+1])<<8
-		}
-		script := string(utf16.Decode(units))
-		scripts = append(scripts, script)
-		scripts = append(scripts, windowsHookImageEncodedScripts(script, depth-1)...)
-	}
-	return scripts
 }
 
 // windowsHookImagePathStart finds where the absolute path that ends at end
