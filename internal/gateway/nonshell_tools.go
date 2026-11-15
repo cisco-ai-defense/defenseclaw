@@ -297,6 +297,33 @@ func nonShellPathTwin(ctx context.Context, request trustedActionRequest, e tools
 
 // nonShellContentOf is the text a native file tool call writes, read the way
 // the MCP lane reads it (nested values and edit lists included).
+// applyPatchFileTexts is the text an apply_patch call writes: per file the
+// envelope adds or updates (by the path it names), the lines it adds, and
+// all of them joined. Read as a write tool's content, the envelope named no
+// content, so a rule that reads what is written (a system schedule line,
+// CMD-PERSIST-SYSTEM-SCHEDULE) never matched a Codex or OpenCode patch that
+// Claude Code's Write of the same file raises (rel-1-0-10:GAP-0780).
+func applyPatchFileTexts(raw json.RawMessage) (byPath map[string]string, all string) {
+	parsed, _ := decodeCodeGuardArgsObject(raw)
+	if parsed == nil {
+		return nil, ""
+	}
+	text, _ := exactCodeGuardStringField(parsed, codeGuardBestEffortObject(parsed),
+		"command", "cmd", "patch", "patchText", "patch_text", "input")
+	files, _ := codeGuardPatchFiles(text)
+	byPath = make(map[string]string, len(files))
+	parts := make([]string, 0, len(files))
+	for _, file := range files {
+		if prior, ok := byPath[file.path]; ok {
+			byPath[file.path] = prior + "\n" + file.content
+		} else {
+			byPath[file.path] = file.content
+		}
+		parts = append(parts, file.content)
+	}
+	return byPath, strings.Join(parts, "\n")
+}
+
 func nonShellContentOf(raw json.RawMessage) string {
 	m, err := toolshape.Map("write", raw, "")
 	if err != nil {
@@ -319,11 +346,15 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	// tool and the MCP twin of it alike (an MCP call is never judged harder).
 	command, isShell := trustedBashCommandInput(request.Input)
 	text := command
+	var patchTexts map[string]string
 	if !isShell {
 		if !actionfacts.PathTool(request.Input.Tool) {
 			return findings
 		}
 		text = nonShellContentOf(request.Input.Args)
+		if codeGuardPatchTool(request.Input.Tool) {
+			patchTexts, text = applyPatchFileTexts(request.Input.Args)
+		}
 		if !toolshape.ShellCandidate(string(request.Input.Args)) {
 			return findings
 		}
@@ -360,6 +391,10 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	}
 	for _, p := range facts.Paths {
 		path := firstNonEmpty(p.Resolved, p.Normalized, p.Value)
+		text := text
+		if fileText, ok := patchTexts[p.Value]; ok {
+			text = fileText
+		}
 		for _, id := range toolshape.PathRules(string(p.Access), path, text) {
 			add(id, "")
 		}
