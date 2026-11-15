@@ -389,8 +389,10 @@ func (s *passthroughStream) run() {
 	// the one bound of an unfinished event): it can never be read whole. The
 	// text read before it is checked, then the bound rule decides (TRUNCATED,
 	// the unknown tier of the pack), then the fail mode (a managed or strict
-	// install refuses); whichever refuses wins. True: the rest of the stream
-	// is forwarded as it comes, after the alerts (GAP-0241).
+	// install refuses); whichever refuses wins. True: that event alone is
+	// passed on unread, after the alerts (GAP-0241); the events after it are
+	// held and checked as before, and the final check is still enforced
+	// (GAP-0313).
 	sseOversize := func() bool {
 		if tailHold && (!scanText() || !boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame unfinished at %d bytes", streamHoldMaxLine))) {
 			return false
@@ -429,12 +431,43 @@ func (s *passthroughStream) run() {
 		return true
 	}
 
+	// unreadEvent passes on a piece of an SSE event over sseEventMax. At its
+	// first piece the event is decided (sseOversize); the events before it
+	// go out first, checked. An open tool call cannot be held past it: the
+	// call takes its fail mode, as one over the hold cap does.
+	unreadEvent := func(ev sseEvent) bool {
+		if ev.UnreadStart {
+			if callHold && !holdOff {
+				if !brokenReported {
+					brokenReported = true
+					if p.uninspectableReply(ctx, label, mode, "a streamed tool call could not be inspected") {
+						sseBlockMsg = blockMessage(s.customBlockMsg, "tool_call", "the provider reply could not be inspected")
+						return true
+					}
+				}
+				holdOff, callHold = true, false
+			}
+			relN, heldBytes = len(queue), 0
+			if !sseOversize() {
+				return true
+			}
+			// sseOversize checked every byte of text read so far.
+			initialFlushed = true
+			writeQueue()
+		}
+		sendRaw(ev.Raw)
+		return false
+	}
+
 	// handle takes one event; true stops the stream.
 	handle := func(ev sseEvent) bool {
 		// The bytes of it that went out unread (a TRUNCATED alert) are not
 		// sent again.
 		cut := min(sentAhead, len(ev.Raw))
 		ev.Raw, sentAhead = ev.Raw[cut:], sentAhead-cut
+		if ev.Unread {
+			return unreadEvent(ev)
+		}
 		if sseCalls != nil {
 			textBefore := accumulated.Len()
 			if why := s.eventContent(ev, sseCalls, &accumulated, &streamResponseModel); why != "" && !ambiguousReported {
@@ -549,7 +582,6 @@ func (s *passthroughStream) run() {
 	}()
 
 	stopped := false
-	rawTail := false // the fail mode forwards what is left without inspection
 	readTotal := 0
 	// reportRead tells a test that every byte read so far is handled: sent,
 	// or held by the initial buffer or the tool-call hold. Events the
@@ -651,15 +683,6 @@ read:
 					break read
 				}
 			}
-			if s.bedrock == nil && framer.Broken() {
-				// Decided once: either way the read loop ends here.
-				if !sseOversize() {
-					stopped = true
-					break read
-				}
-				rawTail = true
-				break read
-			}
 		}
 		if readErr != nil {
 			if encoded && readErr != io.EOF && ctx.Err() == nil {
@@ -716,32 +739,6 @@ read:
 		}
 	}
 
-	if rawTail {
-		// Let the agent have what was read (its text was checked), then the
-		// rest as it comes.
-		relN = len(queue)
-		initialFlushed = true
-		writeQueue()
-		// The bytes of the event the framer could not hold come first: the
-		// agent gets every byte of the stream (GAP-0241).
-		if held := framer.Held(); len(held) > sentAhead {
-			sendRaw(held[sentAhead:])
-		}
-		for {
-			select {
-			case rd := <-reads:
-				if rd.panic != nil {
-					panic(rd.panic)
-				}
-				sendRaw(rd.b)
-				if rd.err != nil {
-					return
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}
 	if sseBlockMsg == "" && streamEnded && !stopped {
 		// The stream ended (or broke) inside a call: what is finished now is
 		// checked before the held events go out.

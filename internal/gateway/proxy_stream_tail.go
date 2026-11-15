@@ -36,8 +36,9 @@ import (
 // its framer: an SSE event at streamHoldMaxLine (the framer's sseEventMax)
 // is TRUNCATED the same way and also takes the fail mode, since it can
 // never be read whole (a managed or strict install refuses; whichever rule
-// refuses wins); an eventstream frame over bedrockStreamMaxFrame breaks
-// framing, which takes the fail mode.
+// refuses wins). Otherwise that event alone is passed on unread, and the
+// events after it are held and checked as before (GAP-0313). An eventstream
+// frame over bedrockStreamMaxFrame breaks framing, which takes the fail mode.
 //
 // On the passthrough these bounds apply to the events the tool-call hold
 // (substrate-1 GAP-0189, GAP-0098) has let out; an open tool call waits for
