@@ -9,7 +9,7 @@ import "testing"
 // "account change", "shutdown" and "history clearing" of rel-1-0-10 T-DETECT.
 // A call that makes a local account or sets a password from a script, takes the
 // host down, or switches the shell history off is a finding in every tier: an
-// alert (MEDIUM findings, power and history, are recorded and allowed in the
+// alert (MEDIUM findings, power, history and the credential sweep, are recorded and allowed in the
 // permissive pack, as in rel), and a block where the pack blocks enforceable findings (strict,
 // managed-strict). Reads of the same names, a group change (the privileged-group
 // rule keeps those), ordinary history settings and text that only names the
@@ -56,5 +56,29 @@ func TestAccountPowerAndHistoryRulesFiveTiers(t *testing.T) {
 		{"td-hist-control", `export HISTCONTROL=ignoreboth`, "AAAAA"},
 		{"td-hist-set-e", `set -e`, "AAAAA"},
 		{"td-hist-text", `echo 'export HISTSIZE=0' >> notes.txt`, "AAAAA"},
+	})
+}
+
+// TestCredentialFileSweepFiveTiers: a find from the machine or a home that
+// tests for a credential file by name is the search of a credential harvest
+// (T1552.001/.004). Names are the credential-file table's; globs, .env, a
+// project folder and a find of ordinary names stay allowed.
+func TestCredentialFileSweepFiveTiers(t *testing.T) {
+	tdetectRunRows(t, []tdetectRow{
+		{"td-sweep-id-rsa", `find / -name id_rsa 2>/dev/null`, "LBALB"},
+		{"td-sweep-home-key", `find ~ -name id_ed25519`, "LBALB"},
+		{"td-sweep-aws", `find / -path '*/.aws/credentials' -type f 2>/dev/null`, "LBALB"},
+		{"td-sweep-npmrc-exec", `find / -name '.npmrc' -type f -exec sh -c 'cat "$1" >> /tmp/creds.txt' _ {} \;`, "LBALB"},
+		{"td-sweep-exec-copy", `find / -name id_rsa 2>/dev/null -exec cp --parents {} /tmp/stage \;`, "LBALB"},
+		{"td-sweep-pgpass", `find /home -iname .pgpass`, "LBALB"},
+		{"td-sweep-sudo", `sudo find / -name id_rsa`, "LBALB"},
+		{"td-sweep-glob", `find / -name '*.pem'`, "AAAAA"},
+		{"td-sweep-env", `find / -name .env`, "AAAAA"},
+		{"td-sweep-project", `find ./src -name id_rsa`, "AAAAA"},
+		{"td-sweep-project-abs", `find /home/alice/proj -name .npmrc`, "AAAAA"},
+		{"td-sweep-ordinary", `find / -name '*.log' -mtime +30`, "AAAAA"},
+		{"td-sweep-text", `echo find / -name id_rsa`, "AAAAA"},
+		{"td-sweep-grep", `grep -rn "find / -name id_rsa" docs/`, "AAAAA"},
+		{"td-sweep-pub", `find / -name id_rsa.pub`, "AAAAA"},
 	})
 }

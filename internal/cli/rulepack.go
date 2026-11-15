@@ -71,6 +71,7 @@ var shippedToolCallRegexIDs = map[string]bool{
 	"source_control.clone_then_run_or_adhoc_push": true,
 	// Non-shell tool and command rules (s7/nonshell): selected by the toolshape and actionfacts proofs, regex inert.
 	"CMD-ACCOUNT-CREATE":          true,
+	"CMD-CRED-SWEEP":              true,
 	"CMD-GIT-SHOW-SECRET":         true,
 	"CMD-HOST-POWER":              true,
 	"CMD-PERSIST-SYSTEM-SCHEDULE": true,

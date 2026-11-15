@@ -22,6 +22,7 @@ import (
 // Rule ids of the non-shell tool lane (S7, rel-1-0-10:GAP-0016). They live in
 // the rule packs (commands.yaml), so severity, title and tags are data.
 const (
+	credentialSweepRuleID   = "CMD-CRED-SWEEP"
 	mcpSQLDestructiveRuleID = "MCP-SQL-DESTRUCTIVE"
 	mcpSQLPrivilegeRuleID   = "MCP-SQL-PRIVILEGE"
 	mcpSQLAuditOffRuleID    = "MCP-SQL-AUDIT-OFF"
@@ -357,6 +358,9 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
 				add(id, "")
 			}
+			if credentialFileSweep(c, request.Input.ActiveHome) {
+				add(credentialSweepRuleID, "")
+			}
 		}
 	}
 	for _, p := range facts.Paths {
@@ -384,6 +388,61 @@ func linksToDevNull(facts actionfacts.Facts, commandID int64) bool {
 			if word == os.DevNull {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// credentialFileSweep reports a find that starts at a whole-machine or whole-
+// home folder and tests for a credential file by its name (find / -name
+// id_rsa, find ~ -path '*/.aws/credentials'): the search a credential harvest
+// starts with (T1552.001, T1552.004), as the single reads the path rules judge.
+// The names are the credential-file table's (an exact name or trailing path,
+// never a glob such as *.pem and never .env, which projects ship), so a find of
+// ordinary names or inside a project is not one.
+func credentialFileSweep(c actionfacts.CommandFact, activeHome string) bool {
+	if path.Base(c.Program) != "find" || !c.ArgvComplete {
+		return false
+	}
+	var roots, names []string
+	options := false
+	for index := 1; index < len(c.Argv); index++ {
+		argument := c.Argv[index]
+		if !options && (strings.HasPrefix(argument, "-") && argument != "-" || argument == "(" || argument == "!") {
+			options = true
+		}
+		if !options {
+			roots = append(roots, argument)
+			continue
+		}
+		switch argument {
+		case "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename":
+			if index+1 < len(c.Argv) {
+				names = append(names, c.Argv[index+1])
+			}
+		}
+	}
+	broad := false
+	for _, root := range roots {
+		// The shell expands ~ and $HOME to the active home before the facts see them.
+		if home := strings.TrimRight(activeHome, "/"); home != "" && strings.TrimRight(root, "/") == home {
+			broad = true
+		}
+		switch strings.TrimRight(root, "/") {
+		case "", "~", "$HOME", "${HOME}", "/home", "/root", "/Users", "/mnt", "/Volumes", "/var", "/opt", "/srv", "/etc":
+			broad = true
+		}
+	}
+	if !broad {
+		return false
+	}
+	for _, name := range names {
+		name = strings.TrimPrefix(name, "*/")
+		if strings.ContainsAny(name, "*?[") {
+			continue
+		}
+		if shape, ok := actionfacts.MatchCredentialFileShape(name); ok && shape.Class != actionfacts.CredentialFileEnvironment {
+			return true
 		}
 	}
 	return false

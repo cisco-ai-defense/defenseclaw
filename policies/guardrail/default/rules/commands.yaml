@@ -1623,6 +1623,13 @@ rules:
     severity: HIGH
     confidence: 0.8
     tags: [persistence, account]
+  - id: CMD-CRED-SWEEP
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Search of the machine for credential files"
+    severity: MEDIUM
+    confidence: 0.8
+    tags: [credential, discovery]
   - id: CMD-HOST-POWER
     tool_call_only: true
     pattern: 'a^'
