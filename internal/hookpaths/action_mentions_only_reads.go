@@ -3,11 +3,7 @@
 
 package hookpaths
 
-import (
-	"mvdan.cc/sh/v3/syntax"
-
-	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
-)
+import "github.com/defenseclaw/defenseclaw/internal/actionfacts"
 
 // ActionMentionsNoWriteRole reports a command the target scan holds as a
 // protected-target only because of words in statements that read a protected
@@ -17,17 +13,19 @@ import (
 // the whole-command rule allows. The caller decides what that is worth; an
 // action that only reads the file is no write of it (rel-1-0-10:GAP-0018).
 //
-// A command that names $_ is never such a reading: $_ is the last word of the
-// statement before, so it carries the name a reader statement read into the
-// role of another statement (ls KEYS; echo x >> $_ appends to KEYS), which
-// the per-statement excuse cannot see (rel-1-0-10:GAP-0860). Shell text the
-// parser cannot read is not proven free of one. ($_ of PowerShell is the
-// pipeline item, not a word of another statement.)
+// A POSIX call whose reader statements are no plain reads under the
+// GAP-0570 rules is never such a reading (actionCallKeepsMentions): $_ is the
+// last word of the statement before, so it carries the name a reader read
+// into another statement (ls KEYS; echo x >> $_ appends to KEYS,
+// rel-1-0-10:GAP-0860, GAP-0643); an assignment, a function or a program word
+// that is not static can change what a reader runs. Shell text the parser
+// cannot read is not proven free of one. ($_ of PowerShell is the pipeline
+// item, not a word of another statement.)
 func ActionMentionsNoWriteRole(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) bool {
 	if ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts) != "protected-target" {
 		return false
 	}
-	if dialect != actionfacts.DialectPowerShell && actionNamesLastArgument(command) {
+	if dialect != actionfacts.DialectPowerShell && actionPosixCallKeepsMentions(command, home) {
 		return false
 	}
 	memo := NewTargetMemo()
@@ -35,19 +33,11 @@ func ActionMentionsNoWriteRole(command, cwd, home string, dialect actionfacts.Di
 	return memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts) == ""
 }
 
-// actionNamesLastArgument reports shell text that expands $_ (also ${_} and
-// inside quotes, here-documents or substitutions), or that does not parse.
-func actionNamesLastArgument(command string) bool {
+// actionPosixCallKeepsMentions reports POSIX shell text whose reader
+// statements are no plain reads (actionCallKeepsMentions: $_, an assignment, a
+// function, an echo of an expansion, a program word that is not static, a
+// rebound reader name), or text that does not parse.
+func actionPosixCallKeepsMentions(command, home string) bool {
 	file, ok := parseShell(command)
-	if !ok {
-		return true
-	}
-	names := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if expansion, isParam := node.(*syntax.ParamExp); isParam && expansion.Param != nil && expansion.Param.Value == "_" {
-			names = true
-		}
-		return !names
-	})
-	return names
+	return !ok || actionCallKeepsMentions(file, home)
 }

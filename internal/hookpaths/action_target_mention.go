@@ -610,27 +610,18 @@ func actionSSHCopyIDToThisHost(call *syntax.CallExpr, home string) bool {
 	return false
 }
 
-// actionPlainReadStatements are the statements whose words name files only
-// for a reader to read them (rel-1-0-10:GAP-0570): a known reader statement
-// (actionKnownReadOnlyShell: ls, cat, stat, grep ...) at the top of the call
-// or in an && or || list, and each stage of such a pipeline whose stages are
-// all readers (ls -la ~/.ssh | head -5). Such a statement prints to the
-// terminal or to /dev/null: it writes no file and hands no name to the other
-// statements, so a protected path it names is not a write target of the
-// call, whatever the others run (ssh -V, make). A statement that changes
-// folder (cd, pushd, popd) is not one: the folder decides what later
-// relative names reach. A call has none when it reads $_ (the last word of
-// the statement before, which can pass a name on), assigns a variable or
-// declares a function (PATH=/tmp/x can change what a later reader runs, as
-// actionKnownReadOnlyShell reads it), or prints an expansion with echo or
-// printf (the rel-1-0-6:GAP-0225 ruling keeps the mention there: only a
-// fixed-text echo is verdict-neutral, actionFixedTextEchoes).
-func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]bool {
-	if file == nil {
-		return nil
-	}
+// actionCallKeepsMentions reports a call in which a statement that only reads
+// may still hand a name on or run something else than a reader: it rebinds a
+// reader name, reads $_ (the last word of the statement before), assigns a
+// variable, declares a function (PATH=/tmp/x, f() {...} change what a later
+// reader runs), prints an expansion with echo or printf (rel-1-0-6:GAP-0225:
+// only a fixed-text echo is verdict-neutral, actionFixedTextEchoes), or runs
+// a program word that is not static. A reader statement of such a call is no
+// plain read (actionPlainReadStatements), and its mentions are not excused
+// (ActionMentionsNoWriteRole, rel-1-0-10:GAP-0018 under GAP-0570/GAP-0643).
+func actionCallKeepsMentions(file *syntax.File, home string) bool {
 	if actionRebindsReaderNames(file, home) {
-		return nil
+		return true
 	}
 	neutral := actionFixedTextEchoes(file)
 	// An agent's exit-status wrapper (status=$?; printf '%s' "$status";
@@ -660,7 +651,29 @@ func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]
 		}
 		return !kept
 	})
-	if kept {
+	return kept
+}
+
+// actionPlainReadStatements are the statements whose words name files only
+// for a reader to read them (rel-1-0-10:GAP-0570): a known reader statement
+// (actionKnownReadOnlyShell: ls, cat, stat, grep ...) at the top of the call
+// or in an && or || list, and each stage of such a pipeline whose stages are
+// all readers (ls -la ~/.ssh | head -5). Such a statement prints to the
+// terminal or to /dev/null: it writes no file and hands no name to the other
+// statements, so a protected path it names is not a write target of the
+// call, whatever the others run (ssh -V, make). A statement that changes
+// folder (cd, pushd, popd) is not one: the folder decides what later
+// relative names reach. A call has none when it reads $_ (the last word of
+// the statement before, which can pass a name on), assigns a variable or
+// declares a function (PATH=/tmp/x can change what a later reader runs, as
+// actionKnownReadOnlyShell reads it), or prints an expansion with echo or
+// printf (the rel-1-0-6:GAP-0225 ruling keeps the mention there: only a
+// fixed-text echo is verdict-neutral, actionFixedTextEchoes).
+func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]bool {
+	if file == nil {
+		return nil
+	}
+	if actionCallKeepsMentions(file, home) {
 		return nil
 	}
 	reads := map[*syntax.Stmt]bool{}
