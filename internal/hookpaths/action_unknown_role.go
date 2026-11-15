@@ -107,7 +107,7 @@ func actionCallRoleUnknown(call *syntax.CallExpr, home string) bool {
 	}
 	program, known := staticProgramWord(words[0], home)
 	if !known {
-		return true
+		return !actionRunTimeProgramRunsText(words, home)
 	}
 	if actionInterpreterScriptArguments(words, home) {
 		return true
@@ -116,6 +116,32 @@ func actionCallRoleUnknown(call *syntax.CallExpr, home string) bool {
 	// A program the scan does not list is unknown, bare name or path alike;
 	// the GNU g prefix of a listed coreutil (gtee, gtruncate) is that coreutil.
 	return !actionRoleKnownProgram(base) && !actionRoleKnownProgram(strings.TrimPrefix(base, "g"))
+}
+
+// actionRunTimeProgramRunsText reports a program named at run time that is
+// given a shell -c option before its first operand ("$SHELL" -c TEXT,
+// $BASH -lc TEXT): a shell started through a variable runs TEXT as code, so
+// TEXT is no data of unknown role and a protected write in it keeps the rel
+// block in every pack. A run-time program without -c ($T send TEXT) stays
+// unknown (rel-1-0-10:GAP-0018, GAP-0975).
+func actionRunTimeProgramRunsText(words []*syntax.Word, home string) bool {
+	for _, word := range words[1:] {
+		value, known := StaticWord(word, home)
+		if !known || value == "--" || len(value) < 2 || value[0] != '-' {
+			return false
+		}
+		if value[1] == '-' {
+			continue
+		}
+		cluster := value[1:]
+		if strings.Trim(cluster, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
+			return false
+		}
+		if strings.Contains(cluster, "c") {
+			return true
+		}
+	}
+	return false
 }
 
 // actionOptionWithAttachedValue reports an option that carries its value in the
