@@ -572,6 +572,10 @@ func analyzeStructuredArgvWords(
 			out.markLimit(IssueWrapperLimit)
 			return out
 		}
+		var run []WrapperFact
+		if cost == 0 {
+			nestedArgv, run = staticPOSIXNeutralRun(nestedArgv)
+		}
 		child = analyzeStructuredArgvWords(
 			nestedArgv,
 			staticPOSIXWrappedWords(command.Arguments, argv, nestedArgv),
@@ -579,6 +583,11 @@ func analyzeStructuredArgvWords(
 			wrapperDepth+cost,
 			DialectPOSIX,
 		)
+		if len(run) > 0 {
+			for i := range child.commands {
+				child.commands[i].Wrappers = append(cloneWrapperFacts(run), child.commands[i].Wrappers...)
+			}
+		}
 	case "su":
 		nested, ok := exactRootSuCommand(command)
 		if !ok {
@@ -683,6 +692,36 @@ func analyzeStructuredArgvWords(
 	}
 	attachStructuredChild(&out, command, child)
 	return out
+}
+
+// staticPOSIXNeutralRun reads the rest of a run of context-neutral wrappers
+// (nice, time, timeout, nohup) in one walk: nested is the command at the end
+// of the run, and run the wrappers in between, outermost first, as the
+// wrapper facts each command of the end command's reading carries. Each
+// wrapper of the run was a command of its own read one level deeper, and
+// each level prepended and cloned the wrapper facts of every command below
+// it: a 64-deep run, which spends no wrapper depth (substrate-1:GAP-0334),
+// cost O(n^3) allocations per call, and the hook got slower with every call
+// in one process (rel-1-0-10:GAP-0977). A wrapper the reading cannot unwrap
+// exactly (an uncertain option, no command) ends the run, and the usual
+// reading of that wrapper decides. The words of every wrapper of the run are
+// static when the outer call's are (a suffix of its words), so the outer
+// call's checks hold for them.
+func staticPOSIXNeutralRun(nested []string) ([]string, []WrapperFact) {
+	var run []WrapperFact
+	for len(nested) >= 2 {
+		program := commandProgram(nested[0])
+		if _, neutral := posixContextNeutralWrappers[program]; !neutral {
+			break
+		}
+		deeper, ok, uncertain := staticPOSIXWrapperArgv(nested, program)
+		if !ok || uncertain || len(deeper) == 0 {
+			break
+		}
+		run = append(run, WrapperFact{Executable: nested[0], Argv: nested})
+		nested = deeper
+	}
+	return nested, run
 }
 
 func attachStructuredChild(
