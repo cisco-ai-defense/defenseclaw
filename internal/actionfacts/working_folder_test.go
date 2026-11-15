@@ -4,68 +4,155 @@
 package actionfacts
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
 
 // TestWorkingFolderResolvesRelativeOperandsAfterACD pins the shape of the
-// tracking (working_folder.go): which commands run in the folder a cd moved the
-// call to, which run in the hook's folder, and which leave the folder unknown
-// (then the operand keeps its resolution against the hook's folder, never a
-// guess). Substrate-1:GAP-0327.
+// tracking (working_folder.go): the folders each command may run in. A move
+// counts alone only where it is proven to have run and worked (the right side
+// of `cd X &&`, the then-branch of `if cd X`); after a cd that may fail or not
+// run (`;`, a newline, `false && cd X;`, `|| cd X`, a branch) the operand is
+// read in the folder before the move AND in the moved one, so the strongest
+// reading decides (substrate-1:GAP-0327, rel-1-0-10:GAP-0869). A folder the
+// call does not give keeps the hook folder's reading and is marked unresolved
+// (rel-1-0-10:GAP-0871).
 func TestWorkingFolderResolvesRelativeOperandsAfterACD(t *testing.T) {
 	const cwd, home = "/work/proj", "/home/alice"
+	const hooks, top = "/work/proj/.git/hooks/pre-push", "/work/proj/pre-push"
 	for _, tc := range []struct {
 		name, command string
-		// want is the resolved write target of the last redirect or "" when
-		// the call has no path fact for it.
-		want string
+		// want are the resolved write targets of the call, in any order.
+		want []string
+		// unresolved: a write target sits in a folder the call does not give.
+		unresolved bool
 	}{
-		{"and", "cd .git/hooks && echo x > pre-push", "/work/proj/.git/hooks/pre-push"},
-		{"semicolon", "cd .git/hooks; echo x > pre-push", "/work/proj/.git/hooks/pre-push"},
-		{"newline", "cd .git/hooks\necho x > pre-push", "/work/proj/.git/hooks/pre-push"},
-		{"two steps", "cd .git && cd hooks && echo x > pre-push", "/work/proj/.git/hooks/pre-push"},
-		{"parent", "cd .. && echo x > f", "/work/f"},
-		{"absolute", "cd /etc/cron.d && echo x > job", "/etc/cron.d/job"},
-		{"absolute then relative", "cd /etc && cd cron.d && echo x > job", "/etc/cron.d/job"},
-		{"home tilde", "cd ~ && echo x > .bashrc", "/home/alice/.bashrc"},
-		{"home tilde folder", "cd ~/.ssh && echo x > authorized_keys", "/home/alice/.ssh/authorized_keys"},
-		{"bare cd is home", "cd && echo x > .bashrc", "/home/alice/.bashrc"},
-		{"home variable", "cd $HOME/.aws && echo x > credentials", "/home/alice/.aws/credentials"},
-		{"pushd", "pushd .git/hooks && echo x > pre-push", "/work/proj/.git/hooks/pre-push"},
-		{"option then folder", "cd -P .git/hooks && echo x > pre-push", "/work/proj/.git/hooks/pre-push"},
-		{"subshell sees its cd", "(cd .git/hooks && echo x > pre-push)", "/work/proj/.git/hooks/pre-push"},
-		{"subshell does not leak", "(cd .git/hooks); echo x > pre-push", "/work/proj/pre-push"},
-		{"group leaks", "{ cd .git/hooks; }; echo x > pre-push", "/work/proj/.git/hooks/pre-push"},
-		{"pipe does not leak", "cd .git/hooks | cat; echo x > pre-push", "/work/proj/pre-push"},
-		{"background does not leak", "cd .git/hooks & echo x > pre-push", "/work/proj/pre-push"},
-		{"or: unknown", "cd .git/hooks || true; echo x > pre-push", "/work/proj/pre-push"},
-		{"if body: unknown", "if true; then cd .git/hooks; fi; echo x > pre-push", "/work/proj/pre-push"},
-		{"variable target: unknown", "cd $X && echo x > pre-push", "/work/proj/pre-push"},
-		{"glob target: unknown", "cd .git/h* && echo x > pre-push", "/work/proj/pre-push"},
-		{"dash target: unknown", "cd - && echo x > pre-push", "/work/proj/pre-push"},
-		{"popd: unknown", "popd && echo x > pre-push", "/work/proj/pre-push"},
-		{"other user home: unknown", "cd ~bob && echo x > f", "/work/proj/f"},
-		{"before the cd", "echo x > before && cd .git", "/work/proj/before"},
-		{"absolute operand is untouched", "cd .git/hooks && echo x > /tmp/f", "/tmp/f"},
-		{"no cd", "echo x > pre-push", "/work/proj/pre-push"},
-		{"shell body inherits the cd", "cd .git/hooks && sh -c 'echo x > pre-push'", "/work/proj/.git/hooks/pre-push"},
-		{"shell body then its own cd", "cd .git && bash -c 'cd hooks && echo x > pre-push'", "/work/proj/.git/hooks/pre-push"},
-		{"shell body of an unknown folder", "cd $X && sh -c 'echo x > pre-push'", "/work/proj/pre-push"},
-		{"shell body without a cd", "sh -c 'echo x > pre-push'", "/work/proj/pre-push"},
+		{"and", "cd .git/hooks && echo x > pre-push", []string{hooks}, false},
+		{"semicolon: the cd may fail", "cd .git/hooks; echo x > pre-push", []string{top, hooks}, false},
+		{"newline: the cd may fail", "cd .git/hooks\necho x > pre-push", []string{top, hooks}, false},
+		{"two steps", "cd .git && cd hooks && echo x > pre-push", []string{hooks}, false},
+		{"parent", "cd .. && echo x > f", []string{"/work/f"}, false},
+		{"absolute", "cd /etc/cron.d && echo x > job", []string{"/etc/cron.d/job"}, false},
+		{"absolute then relative", "cd /etc && cd cron.d && echo x > job", []string{"/etc/cron.d/job"}, false},
+		{"missing folder then ;", "cd /nonexistent; echo x > f", []string{"/work/proj/f", "/nonexistent/f"}, false},
+		{"home tilde", "cd ~ && echo x > .bashrc", []string{"/home/alice/.bashrc"}, false},
+		{"home tilde folder", "cd ~/.ssh && echo x > authorized_keys", []string{"/home/alice/.ssh/authorized_keys"}, false},
+		{"bare cd is home", "cd && echo x > .bashrc", []string{"/home/alice/.bashrc"}, false},
+		{"home variable", "cd $HOME/.aws && echo x > credentials", []string{"/home/alice/.aws/credentials"}, false},
+		{"pushd", "pushd .git/hooks && echo x > pre-push", []string{hooks}, false},
+		{"builtin cd", "builtin cd .git/hooks && echo x > pre-push", []string{hooks}, false},
+		{"option then folder", "cd -P .git/hooks && echo x > pre-push", []string{hooks}, false},
+		{"cdpath on the call", "CDPATH=/srv cd app && echo x > f", []string{"/work/proj/app/f", "/srv/app/f"}, false},
+		{"if cd: the then-branch is proven", "if cd .git/hooks; then echo x > pre-push; fi", []string{hooks}, false},
+		{"if cd: the else-branch may run anywhere", "if cd .git/hooks; then :; else echo x > pre-push; fi", []string{top, hooks}, false},
+		{"subshell sees its cd", "(cd .git/hooks && echo x > pre-push)", []string{hooks}, false},
+		{"subshell does not leak", "(cd .git/hooks); echo x > pre-push", []string{top}, false},
+		{"group: the cd may fail", "{ cd .git/hooks; }; echo x > pre-push", []string{top, hooks}, false},
+		{"pipe does not leak", "cd .git/hooks | cat; echo x > pre-push", []string{top}, false},
+		{"background does not leak", "cd .git/hooks & echo x > pre-push", []string{top}, false},
+		{"false and cd", "false && cd .git/hooks; echo x > pre-push", []string{top, hooks}, false},
+		{"test and cd", "test -d .git/hooks && cd .git/hooks; echo x > pre-push", []string{top, hooks}, false},
+		{"group false and cd", "{ false && cd .git/hooks; }; echo x > pre-push", []string{top, hooks}, false},
+		{"or cd", "true || cd .git/hooks; echo x > pre-push", []string{top, hooks}, false},
+		{"cd or true", "cd .git/hooks || true; echo x > pre-push", []string{top, hooks}, false},
+		{"cd or exit", "cd .git/hooks || exit 1; echo x > pre-push", []string{top, hooks}, false},
+		{"if body", "if true; then cd .git/hooks; fi; echo x > pre-push", []string{top, hooks}, false},
+		{"while body moving each pass", "while true; do cd sub; done; echo x > f", []string{"/work/proj/f", "/work/proj/sub/f", "/work/proj/sub/sub/f"}, true},
+		{"function that moves", "f() { cd /srv; }; f; echo x > g", []string{"/work/proj/g"}, true},
+		{"function never called", "f() { cd /srv; }; echo x > g", []string{"/work/proj/g"}, false},
+		{"variable target: unresolved", "cd $X && echo x > pre-push", []string{top}, true},
+		{"command substitution target: unresolved", "cd \"$(cat d)\" && echo x > pre-push", []string{top}, true},
+		{"glob target: unresolved", "cd .git/h* && echo x > pre-push", []string{top}, true},
+		{"dash target: unresolved", "cd - && echo x > pre-push", []string{top}, true},
+		{"popd: unresolved", "popd && echo x > pre-push", []string{top}, true},
+		{"other user home: unresolved", "cd ~bob && echo x > f", []string{"/work/proj/f"}, true},
+		{"before the cd", "echo x > before && cd .git", []string{"/work/proj/before"}, false},
+		{"absolute operand is untouched", "cd .git/hooks; echo x > /tmp/f", []string{"/tmp/f"}, false},
+		{"no cd", "echo x > pre-push", []string{top}, false},
+		{"shell body inherits the cd", "cd .git/hooks && sh -c 'echo x > pre-push'", []string{hooks}, false},
+		{"shell body then its own cd", "cd .git && bash -c 'cd hooks && echo x > pre-push'", []string{hooks}, false},
+		{"shell body after a cd that may fail", "cd .git/hooks; sh -c 'echo x > pre-push'", []string{top, hooks}, false},
+		{"shell body of an unknown folder", "cd $X && sh -c 'echo x > pre-push'", []string{top}, true},
+		{"shell body without a cd", "sh -c 'echo x > pre-push'", []string{top}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := Analyze(Input{Tool: "Bash", Command: tc.command, CWD: cwd, ActiveHome: home, DialectHint: DialectPOSIX})
-			got := ""
+			var got []string
+			unresolved := false
 			for _, path := range facts.Paths {
 				if path.Access == PathAccessWrite || path.Access == PathAccessAppend {
-					got = path.Resolved
+					if !slices.Contains(got, path.Resolved) {
+						got = append(got, path.Resolved)
+					}
+					unresolved = unresolved || path.UnresolvedFolder()
 				}
 			}
-			if got != tc.want {
-				t.Errorf("%q: resolved write %q, want %q (%+v)", tc.command, got, tc.want, facts.Paths)
+			want := slices.Clone(tc.want)
+			slices.Sort(got)
+			slices.Sort(want)
+			if !slices.Equal(got, want) || unresolved != tc.unresolved {
+				t.Errorf("%q: resolved writes %q unresolved=%v, want %q unresolved=%v (%+v)", tc.command, got, unresolved, want, tc.unresolved, facts.Paths)
+			}
+			// The reading in the hook's folder (when there is one) is the
+			// operand; the others are readings, not further operands.
+			if operands := facts.OperandPaths(); len(operands) > len(facts.Paths) {
+				t.Errorf("%q: more operands than path facts", tc.command)
 			}
 		})
+	}
+}
+
+// TestWorkingFolderOtherReadingsAreNotOperands: the other-folder readings
+// are path facts every rule sees, but OperandPaths and AtHookFolder leave
+// them out, so a proof that counts operands or places links by the hook's
+// folder reads the call as before (rel-1-0-10:GAP-0869).
+func TestWorkingFolderOtherReadingsAreNotOperands(t *testing.T) {
+	facts := Analyze(Input{Tool: "Bash", Command: "cd .git/hooks; echo x > pre-push", CWD: "/work/proj", ActiveHome: "/home/alice", DialectHint: DialectPOSIX})
+	writes := func(paths []PathFact) (n int) {
+		for _, path := range paths {
+			if path.Access == PathAccessWrite {
+				n++
+			}
+		}
+		return n
+	}
+	if got := writes(facts.Paths); got != 2 {
+		t.Fatalf("path facts: %d writes, want 2 (hook folder and moved folder): %+v", got, facts.Paths)
+	}
+	if got := writes(facts.OperandPaths()); got != 1 {
+		t.Errorf("OperandPaths: %d writes, want 1", got)
+	}
+	hook := facts.AtHookFolder()
+	if got := writes(hook.Paths); got != 1 {
+		t.Errorf("AtHookFolder: %d writes, want 1", got)
+	}
+	for _, path := range hook.Paths {
+		if path.Access == PathAccessWrite && path.Resolved != "/work/proj/pre-push" {
+			t.Errorf("AtHookFolder write %q, want the hook folder's /work/proj/pre-push", path.Resolved)
+		}
+	}
+}
+
+// TestWorkingFolderSetBound: a call whose commands may run in more folders
+// than the bound reads the first ones and marks the rest unresolved.
+func TestWorkingFolderSetBound(t *testing.T) {
+	command := ""
+	for i := 0; i < maxWorkFolders+3; i++ {
+		command += fmt.Sprintf("cd /d%d; ", i)
+	}
+	command += "echo x > f"
+	facts := Analyze(Input{Tool: "Bash", Command: command, CWD: "/work", ActiveHome: "/home/alice", DialectHint: DialectPOSIX})
+	writes, unresolved := 0, false
+	for _, path := range facts.Paths {
+		if path.Access == PathAccessWrite {
+			writes++
+			unresolved = unresolved || path.UnresolvedFolder()
+		}
+	}
+	if writes > maxWorkFolders || !unresolved {
+		t.Errorf("%d write readings unresolved=%v, want at most %d and unresolved", writes, unresolved, maxWorkFolders)
 	}
 }
 
@@ -86,8 +173,9 @@ func TestWorkingFolderStepBound(t *testing.T) {
 
 // TestWindowsWorkingFolderParity: the PowerShell and CMD dialects keep the same
 // reading of a cd-first call as the POSIX one (windows_simple_commands.go
-// tracks the folder for them): the operand after the folder change resolves in
-// that folder, a move the reader cannot read leaves the hook's folder.
+// tracks the folder for them): the operand after the folder change is read in
+// that folder (and, as the move may fail, in the hook's), a move the reader
+// cannot read leaves the hook's folder.
 func TestWindowsWorkingFolderParity(t *testing.T) {
 	const cwd, home = `C:\work\proj`, `C:\Users\alice`
 	for _, tc := range []struct {
@@ -105,14 +193,15 @@ func TestWindowsWorkingFolderParity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := Analyze(Input{Tool: "PowerShell", Command: tc.command, CWD: cwd, ActiveHome: home, DialectHint: tc.dialect})
-			got := ""
+			found := false
 			for _, path := range facts.Paths {
-				if path.Access == PathAccessWrite || path.Access == PathAccessAppend {
-					got = path.Resolved
+				if (path.Access == PathAccessWrite || path.Access == PathAccessAppend) &&
+					strings.EqualFold(strings.ReplaceAll(path.Resolved, "/", `\`), tc.want) {
+					found = true
 				}
 			}
-			if !strings.EqualFold(strings.ReplaceAll(got, "/", `\`), tc.want) {
-				t.Errorf("%q: resolved write %q, want %q (%+v)", tc.command, got, tc.want, facts.Paths)
+			if !found {
+				t.Errorf("%q: no write reading %q (%+v)", tc.command, tc.want, facts.Paths)
 			}
 		})
 	}

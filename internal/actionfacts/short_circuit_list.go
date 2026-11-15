@@ -162,7 +162,11 @@ func sequenceReduction(input Input, facts Facts, compound bool) (view Facts, ok 
 			return Facts{}, false
 		}
 	}
-	return twin, true
+	// The twin runs every command one after the other, so a cd in it may
+	// fail before every later one; the action said where each runs (`cd X
+	// && b` runs b in X only). Its paths are read in the folders of the
+	// action (rel-1-0-10:GAP-0869).
+	return twin.withWorkFoldersOf(original, input.MovedWindowsShellCWD), true
 }
 
 // shortCircuitListSequence returns source with each top-level && or || list

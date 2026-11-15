@@ -350,6 +350,12 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	if len(parts) > maxStatementsAlone {
 		return []SimpleCommand{{EvaluationFailure: "limit"}}
 	}
+	// The folders each statement may run in, by the working-folder tracking
+	// of the analysis (working_folder.go): the walk below moves its folder
+	// at every cd as if the cd ran and worked, so a statement after a cd that
+	// may fail or not run is also read where the shell was before it
+	// (rel-1-0-10:GAP-0869).
+	mayRunIn := simplePartWorkFolders(source, parts, input.CWD, input.ActiveHome)
 	var futureSafe []bool
 	var checkedCases, tooManyCases bool
 	compact := func(states []simpleShellState, index int) []simpleShellState {
@@ -511,6 +517,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		stmt := file.Stmts[0]
 		nextVariants := make([]simpleShellState, 0, len(variants))
 		emitted := make(map[SimpleCommand]bool)
+		var own []SimpleCommand
 		for _, prior := range variants {
 			if simpleReboundReading(prior, part) {
 				continue
@@ -601,6 +608,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if !emitted[command] {
 				result = append(result, command)
 				emitted[command] = true
+				own = append(own, command)
 				if len(result) > maxSimpleEvaluations {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}
 				}
@@ -767,6 +775,23 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if part.maySkip && len(prior.forked) != 0 {
 				// The statement may not run: the word of the loop stays.
 				nextVariants = append(nextVariants, prior)
+			}
+		}
+		for _, command := range own {
+			if len(mayRunIn[partIndex]) == 0 || !simpleRelativePathOperand(command.Text) {
+				continue
+			}
+			for _, dir := range mayRunIn[partIndex] {
+				again := command
+				again.CWD, again.AbsoluteOnly = dir, false
+				if emitted[again] {
+					continue
+				}
+				emitted[again] = true
+				result = append(result, again)
+				if len(result) > maxSimpleEvaluations {
+					return []SimpleCommand{{EvaluationFailure: "limit"}}
+				}
 			}
 		}
 		states[part.scope] = compact(uniqueSimpleStates(nextVariants), partIndex+1)

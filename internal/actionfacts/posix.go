@@ -115,7 +115,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 			command, ok := projectPOSIXStatement(typed, pipelines[typed], stack, statementIDs, &out)
 			if ok {
 				statementIDs[typed] = command.ID
-				command.workFolder = workFolders[typed]
+				command.workFolders = workFolders[typed]
 				out.appendCommand(command)
 			}
 		}
@@ -1530,7 +1530,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		}
 		for i := range child.commands {
 			// The body of a wrapper starts in the folder its caller is in.
-			child.commands[i].workFolder = child.commands[i].workFolder.within(command.workFolder)
+			child.commands[i].workFolders = child.commands[i].workFolders.within(command.workFolders)
 			if child.commands[i].ParentCommandID == 0 {
 				child.commands[i].ParentCommandID = command.ID
 				if posixDescriptorIsUnredirected(child.commands[i], 1) {

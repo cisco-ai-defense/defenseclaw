@@ -304,7 +304,7 @@ func (o parseOutput) factsWithWindowsShellCWD(tool, cwd, activeHome string, wind
 	}
 	commands := cloneCommands(o.commands)
 	paths := cloneSlice(o.paths)
-	normalizePathFactsForCommandsInShell(paths, cwd, activeHome, commands, windowsShellCWD)
+	paths = normalizePathFactsForCommandsInShell(paths, cwd, activeHome, commands, windowsShellCWD)
 	reconcileNormalizedDeviceWrites(commands, paths)
 	network := cloneSlice(o.network)
 	normalizeNetworkFacts(network)
