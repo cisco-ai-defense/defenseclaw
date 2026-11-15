@@ -16,7 +16,10 @@
 
 package scanner
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func credentialRule(t *testing.T) rule {
 	t.Helper()
@@ -83,6 +86,9 @@ func TestHardcodedCredentialRuleLowEntropyPlaceholdersOnly(t *testing.T) {
 		{"random letters after a stand-in word", "test-QwhTzrPkvMbnXcLsdGyFjRea", true},
 		{"random letters long after a stand-in word", "example_qhtzrpkvmbnxclsdgyfjreaw", true},
 		{"repeated character", prefix + "qqqqqqqqqqqqqqqqqqqqqqqq", false},
+		// The old gateway post-log fixture shape: a plain word beside a long
+		// run of one repeated letter is a placeholder (GAP-0710/0942 ruling).
+		{"word beside a repeated letter run", "private-" + strings.Repeat("v", 32), false},
 		{"repeated unit", "abcabcabcabcabcabcabc", false},
 		{"sequential letters", prefix + "abcdefghijklmnopqrstuvwx", false},
 		{"sequential digits", "0123456789012345"[:10] + "-abcdefghij", false},
