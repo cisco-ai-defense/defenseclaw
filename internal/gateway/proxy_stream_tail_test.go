@@ -961,15 +961,14 @@ func TestStreamTailStalledPartialLine(t *testing.T) {
 					// GAP-0316 (the tool-call hold outranks the tail timers):
 					// the default pack records the TRUNCATED alert and keeps
 					// the unfinished event held, since its unread bytes may
-					// start a tool call. The stream stays open.
-					log := captureStderr(t, func() { time.Sleep(streamHoldMaxPartialAge + 1500*time.Millisecond) })
+					// start a tool call. The stream stays open. The alert is
+					// read from its telemetry row: os.Stderr cannot be
+					// swapped while the handler runs (a data race).
+					time.Sleep(streamHoldMaxPartialAge + 1500*time.Millisecond)
 					select {
 					case out := <-got:
 						t.Fatalf("the default pack sent the unfinished line or ended the stream (%d bytes)", len(out))
 					default:
-					}
-					if !strings.Contains(log, "PASSTHROUGH-STREAM-TRUNCATED") {
-						t.Fatalf("no truncation log line: %s", log)
 					}
 					alerts, err := proxy.store.ListAlerts(50)
 					if err != nil {
