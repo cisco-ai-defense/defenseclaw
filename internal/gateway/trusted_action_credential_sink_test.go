@@ -83,6 +83,8 @@ func TestCredentialLiteralDispositionFollowsWhatTheCallDoesWithIt(t *testing.T) 
 		{"variable slot in a connection string", "Bash", map[string]any{"command": "psql postgres://user:${DB_PASSWORD}@db.internal/app"}, credNone},
 		{"write to test file", "Write", map[string]any{"file_path": "/work/app/login_test.go", "content": "token := \"" + github + "\""}, credAudit},
 		{"write placeholders", "Write", map[string]any{"file_path": "/work/README.md", "content": "password: changeme123456\napi_key: YOUR_API_KEY_HERE_1234\ntoken: ${GITHUB_TOKEN_12345}\n"}, credNone},
+		{"write a placeholder password", "Write", map[string]any{"file_path": "/work/README.md", "content": "password: dummy_password_2024\n"}, credNone},
+		{"write a real password where the placeholder was", "Write", map[string]any{"file_path": "/work/README.md", "content": "password: " + password + "\n"}, credAlert},
 		{"memory entity", "mcp__memory__create_entities", map[string]any{"entities": []any{map[string]any{"name": "t", "observations": []any{"Password: " + password}}}}, credAlert},
 		{"memory observation", "mcp__memory__add_observations", map[string]any{"observations": []any{map[string]any{"entityName": "t", "contents": []any{"key " + stripe}}}}, credAlert},
 		{"database write", "mcp__sqlite__write_query", map[string]any{"query": "INSERT INTO s VALUES ('smtp','password','" + password + "')"}, credAlert},

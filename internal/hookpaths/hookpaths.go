@@ -1874,6 +1874,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	opaqueFacts := map[string]string{}
 	var globFacts, walkFacts map[string]string
 	var unprovenReason string
+	var backupUnresolved bool
 	protectedDecision := hermesV4AProtected
 	var noDereferenceTouchSafe bool
 	// identities is the file-identity evidence for InstructionIdentityKey:
@@ -1998,11 +1999,18 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				if twin, _, isTwin := actionfacts.ActiveUserTildeTwin(command, home, clientLogin()); isTwin {
 					command = twin
 				}
+				if !isApplyPatchToolName(tool) && !backupUnresolved {
+					// A sed -i or perl -i backup path the reader cannot resolve
+					// in full is told to the gateway, which judges it at least in
+					// the unknown tier (BackupUnresolvedKey, GAP-0540).
+					backupUnresolved = SedInPlaceBackupUnresolved(command, cwd, home)
+				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
-					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands)
+					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands) ||
+						actionSedInPlaceWrite(command, cwd, home, nil)
 					if protectedDecision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
 						protectedDecision = false
 					}
@@ -2251,6 +2259,10 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if noDereferenceTouchSafe {
 		targets[NoDereferenceTouchSafeKey] = "1"
 		size += len(jsonString(NoDereferenceTouchSafeKey)) + 1 + len(jsonString("1")) + 1
+	}
+	if backupUnresolved {
+		targets[BackupUnresolvedKey] = "1"
+		size += len(jsonString(BackupUnresolvedKey)) + 1 + len(jsonString("1")) + 1
 	}
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
@@ -2701,7 +2713,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if unread := shareBodyUnreadFact(); unread != "" {
 		entry := len(jsonString(ShareBodyUnreadKey)) + 1 + len(jsonString(unread)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
-			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision)
+			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision, backupUnresolved)
 		}
 		targets[ShareBodyUnreadKey] = unread
 		size += entry
@@ -2709,7 +2721,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if unprovenReason != "" {
 		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
-			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision)
+			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision, backupUnresolved)
 		}
 		targets[UnprovenReasonKey] = unprovenReason
 		size += entry
@@ -2717,7 +2729,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if identity != "" {
 		entry := len(jsonString(InstructionIdentityKey)) + 1 + len(jsonString(identity)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+3 {
-			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision)
+			return unprovenEvidence(cwd, unprovenReason, identity, protectedDecision, backupUnresolved)
 		}
 		targets[InstructionIdentityKey] = identity
 		size += entry
@@ -3279,13 +3291,16 @@ func incompleteEvidenceKeeping(cwd string, protectedDecision bool) string {
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
-func unprovenEvidence(cwd, reason, identity string, protectedDecision bool) string {
+func unprovenEvidence(cwd, reason, identity string, protectedDecision, backupUnresolved bool) string {
 	// The full target map overflowed while adding the class reason or the
 	// file-identity evidence. Keep the incomplete-map marker and both facts
 	// in the small header.
 	targets := map[string]string{CWDKey: cwd, TruncatedKey: "1"}
 	if protectedDecision {
 		targets[ActionDecisionKey] = ProtectedTargetDecision
+	}
+	if backupUnresolved {
+		targets[BackupUnresolvedKey] = "1"
 	}
 	if reason != "" {
 		targets[UnprovenReasonKey] = reason
@@ -3322,6 +3337,7 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[NoDereferenceTouchSafeKey] != "" && targets[NoDereferenceTouchSafeKey] != "1") ||
+		(targets[BackupUnresolvedKey] != "" && targets[BackupUnresolvedKey] != "1") ||
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
 		!validShareBodyUnreadFact(targets[ShareBodyUnreadKey]) ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
