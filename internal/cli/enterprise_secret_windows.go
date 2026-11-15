@@ -35,9 +35,11 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
@@ -259,13 +261,13 @@ func windowsSecretElevation(action string, opts *enterpriseSecretOptions) error 
 	if windowsSecretIsElevated() {
 		return nil
 	}
-	if _, standalone := managedHostWindowsStandalone(); standalone {
+	if _, standalone := hookcli.ManagedHostWindowsStandalone(); standalone {
 		// Every other standard-account refusal of an enterprise command
 		// on a managed computer exits 5 elevation_required with one
 		// sentence; this one exited 1603 (GAP-0931). It is audited like
 		// them (GAP-2639).
 		reportManagedCommandRefusal("enterprise secret "+action, refusalpipe.ReasonElevationRequired)
-		return withExitCode(&managedViewRefusal{code: "elevation_required", message: windowsSecretStandardUserAnswer(action, opts)},
+		return cliusage.WithExitCode(&managedViewRefusal{code: "elevation_required", message: windowsSecretStandardUserAnswer(action, opts)},
 			enterprisestatus.WindowsExitAccessDenied)
 	}
 	return secretFailed("elevation_required", windowsSecretExitFailure, errors.New("run this command from an elevated Administrator prompt or the MDM agent"))

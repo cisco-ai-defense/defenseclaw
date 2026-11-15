@@ -1435,7 +1435,8 @@ func inboundAliasAnyValue(
 		var value *commonpb.AnyValue
 		var state otlpTypedAttributeState
 		value, state = leaf.attributes().lookup(source)
-		if state == otlpTypedAttributeAbsent {
+		if state == otlpTypedAttributeAbsent ||
+			(state == otlpTypedAttributeUnique && claudeCodeRedactedContentV8(value, alias, authenticatedSource)) {
 			continue
 		}
 		if state != otlpTypedAttributeUnique {
@@ -1458,12 +1459,40 @@ func inboundAliasAnyValue(
 		case "$authenticated_source":
 			return &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: authenticatedSource}}, otlpTypedAttributeUnique
 		case "$scalar_log_body":
+			if authenticatedSource == claudeCodeInboundSource {
+				// Claude Code log bodies are the event name
+				// (claude_code.user_prompt), never content.
+				continue
+			}
 			if text, ok := inboundLogBodyString(leaf.logRecord.GetBody()); ok {
 				return &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: text}}, otlpTypedAttributeUnique
 			}
 		}
 	}
 	return selected, selectedState
+}
+
+const (
+	claudeCodeInboundSource = "claudecode"
+	// claudeCodeRedactedPrompt is what Claude Code sends as the prompt of its
+	// user_prompt event unless OTEL_LOG_USER_PROMPTS is set.
+	claudeCodeRedactedPrompt = "<REDACTED>"
+)
+
+// claudeCodeRedactedContentV8 reports a Claude Code content attribute that
+// carries the redaction marker instead of the text. It is read as absent, so
+// the record says the input was not reported instead of preserving the marker
+// as the prompt.
+func claudeCodeRedactedContentV8(
+	value *commonpb.AnyValue,
+	alias observability.InboundAlias,
+	authenticatedSource string,
+) bool {
+	if authenticatedSource != claudeCodeInboundSource || alias.ValueType() != observability.InboundValueStructured {
+		return false
+	}
+	text, ok := value.GetValue().(*commonpb.AnyValue_StringValue)
+	return ok && text.StringValue == claudeCodeRedactedPrompt
 }
 
 // normalizeInboundAliasValueV8 applies only transformations named by the

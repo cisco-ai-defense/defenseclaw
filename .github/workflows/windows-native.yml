@@ -175,7 +175,7 @@ jobs:
           # The real-NTFS managed record guard must run here, not skip (#1300).
           $recordTest = 'TestWindowsManagedRecordTrustUsesRealACLs'
           $record = Invoke-WindowsNativeProcess $go @(
-            'test', '-vet=off', '-v', '-count=1', '-run', ('^' + $recordTest + '$'), './internal/cli'
+            'test', '-vet=off', '-v', '-count=1', '-run', ('^' + $recordTest + '$'), './internal/hookcli'
           ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-managed-record-acl-test.log')
           $escapedRecordTest = [regex]::Escape($recordTest)
           if ([string]$record.StdOut -notmatch "(?m)^--- PASS: $escapedRecordTest ") {

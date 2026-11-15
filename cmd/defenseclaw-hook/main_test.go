@@ -26,9 +26,10 @@ import (
 	"testing"
 )
 
-// The hook imports the CLI for its command contract. Gateway rules and
-// telemetry catalogs still have to be ready before their first real use, but
-// compiling them in package init makes every short-lived hook pay for them.
+// Package init is paid on every agent tool call. The hook links neither the
+// gateway server nor the telemetry catalogs (TestSlimHookLinksNoGatewayPackages);
+// what it still links, observability through internal/config, must not
+// compile catalogs in package init either.
 func TestHookStartupInitBudget(t *testing.T) {
 	if os.Getenv("DEFENSECLAW_HOOK_STARTUP_HELPER") == "1" {
 		return
@@ -43,22 +44,25 @@ func TestHookStartupInitBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hook startup helper: %v\n%s", err, output)
 	}
-	lines := regexp.MustCompile(`(?m)^init github\.com/defenseclaw/defenseclaw/internal/(gateway|telemetry|observability) @[^\n]*?, ([0-9]+) bytes,`)
+	if gone := regexp.MustCompile(`(?m)^init github\.com/defenseclaw/defenseclaw/internal/(gateway|telemetry) @`).Find(output); gone != nil {
+		t.Fatalf("the hook runs gateway or telemetry package init: %s", gone)
+	}
+	lines := regexp.MustCompile(`(?m)^init github\.com/defenseclaw/defenseclaw/internal/[a-z0-9/]+ @[^\n]*?, ([0-9]+) bytes,`)
 	var total int64
 	matches := lines.FindAllSubmatch(output, -1)
-	if len(matches) != 3 {
-		t.Fatalf("expected init traces for gateway, telemetry and observability, got %d", len(matches))
+	if len(matches) == 0 {
+		t.Fatalf("no DefenseClaw package init trace in the helper output: GODEBUG=inittrace=1 did not report\n%s", output)
 	}
 	for _, match := range matches {
-		bytes, err := strconv.ParseInt(string(match[2]), 10, 64)
+		bytes, err := strconv.ParseInt(string(match[1]), 10, 64)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("%s package init: %d bytes", match[1], bytes)
 		total += bytes
 	}
+	t.Logf("defenseclaw package init: %d bytes", total)
 	if total > 20<<20 {
-		t.Fatalf("hook imports allocate %d bytes in gateway/telemetry/observability package init, want at most 20 MiB", total)
+		t.Fatalf("hook imports allocate %d bytes in DefenseClaw package init, want at most 20 MiB", total)
 	}
 }
 

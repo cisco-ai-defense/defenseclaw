@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -155,9 +156,9 @@ func TestManagementContractWindowsSecret(t *testing.T) {
 		notElevated := func(managedHost bool) func() {
 			return func() {
 				windowsSecretIsElevated = func() bool { return false }
-				managedHostWindowsStandalone = func() (string, bool) {
+				hookcli.ManagedHostWindowsStandalone = func() (string, bool) {
 					if managedHost {
-						return `HKLM\` + WindowsEnterpriseMarkerKey, true
+						return `HKLM\` + hookcli.WindowsEnterpriseMarkerKey, true
 					}
 					return "", false
 				}
@@ -175,9 +176,9 @@ func TestManagementContractWindowsSecret(t *testing.T) {
 		}
 		for name, tc := range cases {
 			t.Run(name, func(t *testing.T) {
-				savedElevated, savedInstalled, savedManaged := windowsSecretIsElevated, windowsSecretDeploymentInstalled, managedHostWindowsStandalone
+				savedElevated, savedInstalled, savedManaged := windowsSecretIsElevated, windowsSecretDeploymentInstalled, hookcli.ManagedHostWindowsStandalone
 				t.Cleanup(func() {
-					windowsSecretIsElevated, windowsSecretDeploymentInstalled, managedHostWindowsStandalone = savedElevated, savedInstalled, savedManaged
+					windowsSecretIsElevated, windowsSecretDeploymentInstalled, hookcli.ManagedHostWindowsStandalone = savedElevated, savedInstalled, savedManaged
 				})
 				tc.setup()
 				out, err := runWindowsSecretCommand(t, "set", tc.opts, value+"\r\n")
@@ -224,7 +225,7 @@ func TestManagementContractWindowsSecretEveryVerbAndFailure(t *testing.T) {
 		{name: "not elevated, managed",
 			setup: func(*testing.T, *windowsSecretLockEvents, managed.StandaloneLayout) {
 				windowsSecretIsElevated = func() bool { return false }
-				managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
+				hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + hookcli.WindowsEnterpriseMarkerKey, true }
 			},
 			want: every(outcome{"elevation_required", enterprisestatus.WindowsExitAccessDenied})},
 		{name: "not elevated, unmanaged",

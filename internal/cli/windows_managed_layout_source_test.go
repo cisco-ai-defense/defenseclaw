@@ -15,22 +15,22 @@ import (
 	"testing"
 )
 
-// windowsManagedLayoutSeamFile declares windowsManagedLayout, the one place
+// windowsManagedLayoutSeamFile declares hookcli.WindowsManagedLayout, the one place
 // internal/cli resolves the computer's own standalone layout and trusted
 // enterprise roots (cowork-1-0-8 GAP-0093, round 2).
-const windowsManagedLayoutSeamFile = "windows_managed_layout_windows.go"
+const windowsManagedLayoutSeamFile = "../hookcli/windows_managed_layout_windows.go"
 
 // windowsSelfHealFile is the guardian's self-heal. It repairs the install,
 // policy and service objects under the computer's Program Files and
-// ProgramData, so it asks windowsManagedLayout.programRoots for them and
+// ProgramData, so it asks hookcli.WindowsManagedLayout.ProgramRoots for them and
 // never resolves the registrations itself (GAP-0093, review 2 S2). Other
 // files read the same registrations to classify a path and stay as they are.
 const windowsSelfHealFile = "enterprise_hooks_self_heal_windows.go"
 
 // testDeploymentResolverProblems lists where one parsed non-test file of
-// internal/cli goes around windowsManagedLayout: a direct use of
+// internal/cli goes around hookcli.WindowsManagedLayout: a direct use of
 // managed.StandaloneWindowsLayout or winpath.TrustedEnterpriseRoots (called
-// or taken as a value), or a write to windowsManagedLayout. Only the seam
+// or taken as a value), or a write to hookcli.WindowsManagedLayout. Only the seam
 // file declares the variable and names the two resolvers. The Secure Client
 // profile's own lookups are left as they are: a call of
 // winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient), and
@@ -63,11 +63,11 @@ func testDeploymentResolverProblems(fset *token.FileSet, name string, file *ast.
 	}
 	isSeam := func(expr ast.Expr) bool {
 		expr = ast.Unparen(expr)
-		if selector, ok := expr.(*ast.SelectorExpr); ok {
-			expr = selector.X
+		if windowsManagedLayoutRef(expr) {
+			return true
 		}
-		ident, ok := ast.Unparen(expr).(*ast.Ident)
-		return ok && ident.Name == "windowsManagedLayout"
+		selector, ok := expr.(*ast.SelectorExpr)
+		return ok && windowsManagedLayoutRef(selector.X)
 	}
 	seamFile := name == windowsManagedLayoutSeamFile
 	var problems []string
@@ -106,39 +106,39 @@ func testDeploymentResolverProblems(fset *token.FileSet, name string, file *ast.
 			if name == windowsSelfHealFile {
 				for _, member := range []string{"TrustedProgramFiles", "TrustedProgramData"} {
 					if selects(typed, winpathNames, member) {
-						report(typed, "winpath."+member+" is resolved directly in the guardian's self-heal; ask windowsManagedLayout.programRoots")
+						report(typed, "winpath."+member+" is resolved directly in the guardian's self-heal; ask hookcli.WindowsManagedLayout.ProgramRoots")
 					}
 				}
 			}
 			if selects(typed, managedNames, "StandaloneWindowsLayout") {
-				report(typed, "managed.StandaloneWindowsLayout is resolved directly; ask windowsManagedLayout.standalone")
+				report(typed, "managed.StandaloneWindowsLayout is resolved directly; ask hookcli.WindowsManagedLayout.Standalone")
 			}
 			if selects(typed, winpathNames, "TrustedEnterpriseRoots") {
 				call, isCall := parent.(*ast.CallExpr)
 				secureClientCall := isCall && call.Fun == typed && len(call.Args) == 1 && selects(call.Args[0], winpathNames, "EnterpriseProfileSecureClient")
-				secureClientHost := name == "managed_host_guard_windows.go" && enclosingDecl() == "secureClientHost"
+				secureClientHost := name == "../hookcli/managed_host_guard_windows.go" && enclosingDecl() == "SecureClientHost"
 				if !secureClientCall && !secureClientHost {
-					report(typed, "winpath.TrustedEnterpriseRoots is resolved directly; ask windowsManagedLayout.roots")
+					report(typed, "winpath.TrustedEnterpriseRoots is resolved directly; ask hookcli.WindowsManagedLayout.Roots")
 				}
 			}
 		case *ast.AssignStmt:
 			for _, lhs := range typed.Lhs {
 				if isSeam(lhs) {
-					report(lhs, "windowsManagedLayout is written outside the tests")
+					report(lhs, "hookcli.WindowsManagedLayout is written outside the tests")
 				}
 			}
 		case *ast.UnaryExpr:
 			if typed.Op == token.AND && isSeam(typed.X) {
-				report(typed, "windowsManagedLayout's address is taken outside the tests")
+				report(typed, "hookcli.WindowsManagedLayout's address is taken outside the tests")
 			}
 		case *ast.IncDecStmt:
 			if isSeam(typed.X) {
-				report(typed, "windowsManagedLayout is written outside the tests")
+				report(typed, "hookcli.WindowsManagedLayout is written outside the tests")
 			}
 		case *ast.ValueSpec:
 			for _, ident := range typed.Names {
-				if ident.Name == "windowsManagedLayout" && !seamFile {
-					report(ident, "windowsManagedLayout is declared outside "+windowsManagedLayoutSeamFile)
+				if ident.Name == "WindowsManagedLayout" && !seamFile {
+					report(ident, "hookcli.WindowsManagedLayout is declared outside "+windowsManagedLayoutSeamFile)
 				}
 			}
 		}
@@ -154,18 +154,23 @@ func testDeploymentResolverProblems(fset *token.FileSet, name string, file *ast.
 // these roots. The scan reads every file whatever its build tags, so it runs
 // on every OS.
 func TestWindowsManagedLayoutIsTheOneSourceOfTheDeploymentRoots(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
 	fset := token.NewFileSet()
 	var problems []string
 	uses, seamDeclared, selfHealUses := 0, false, 0
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
+	var names []string
+	// The hook commands, the seam among them, are in internal/hookcli.
+	for _, dir := range []string{"", "../hookcli/"} {
+		entries, err := os.ReadDir("./" + dir)
+		if err != nil {
+			t.Fatal(err)
 		}
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") && !strings.HasSuffix(entry.Name(), "_test.go") {
+				names = append(names, dir+entry.Name())
+			}
+		}
+	}
+	for _, name := range names {
 		file, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatal(err)
@@ -174,15 +179,15 @@ func TestWindowsManagedLayoutIsTheOneSourceOfTheDeploymentRoots(t *testing.T) {
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch typed := node.(type) {
 			case *ast.SelectorExpr:
-				if ident, ok := typed.X.(*ast.Ident); ok && ident.Name == "windowsManagedLayout" {
+				if windowsManagedLayoutRef(typed.X) {
 					uses++
-					if name == windowsSelfHealFile && typed.Sel.Name == "programRoots" {
+					if name == windowsSelfHealFile && typed.Sel.Name == "ProgramRoots" {
 						selfHealUses++
 					}
 				}
 			case *ast.ValueSpec:
 				for _, ident := range typed.Names {
-					seamDeclared = seamDeclared || ident.Name == "windowsManagedLayout" && name == windowsManagedLayoutSeamFile
+					seamDeclared = seamDeclared || ident.Name == "WindowsManagedLayout" && name == windowsManagedLayoutSeamFile
 				}
 			}
 			return true
@@ -190,18 +195,18 @@ func TestWindowsManagedLayoutIsTheOneSourceOfTheDeploymentRoots(t *testing.T) {
 	}
 	sort.Strings(problems)
 	if len(problems) != 0 {
-		t.Fatalf("internal/cli goes around windowsManagedLayout:\n%s", strings.Join(problems, "\n"))
+		t.Fatalf("internal/cli goes around hookcli.WindowsManagedLayout:\n%s", strings.Join(problems, "\n"))
 	}
 	if !seamDeclared {
-		t.Fatalf("windowsManagedLayout is not declared in %s", windowsManagedLayoutSeamFile)
+		t.Fatalf("hookcli.WindowsManagedLayout is not declared in %s", windowsManagedLayoutSeamFile)
 	}
 	if selfHealUses == 0 {
-		t.Fatalf("%s does not ask windowsManagedLayout.programRoots: the scan read the wrong file", windowsSelfHealFile)
+		t.Fatalf("%s does not ask hookcli.WindowsManagedLayout.ProgramRoots: the scan read the wrong file", windowsSelfHealFile)
 	}
 	// 29 layout and 29 roots call sites at the change, plus the two
 	// function values the package seams default to.
 	if uses < 58 {
-		t.Fatalf("only %d uses of windowsManagedLayout: the scan read the wrong files", uses)
+		t.Fatalf("only %d uses of hookcli.WindowsManagedLayout: the scan read the wrong files", uses)
 	}
 }
 
@@ -221,13 +226,13 @@ func reads() {
 	_, _ = managed.StandaloneWindowsLayout()
 	_, _ = wp.TrustedEnterpriseRoots("standalone")
 	_, _ = wp.TrustedEnterpriseRoots(wp.EnterpriseProfileSecureClient)
-	windowsManagedLayout.roots = wp.TrustedEnterpriseRoots
-	windowsManagedLayout = windowsManagedLayout
-	_ = &windowsManagedLayout
-	_, _ = windowsManagedLayout.standalone()
+	WindowsManagedLayout.Roots = wp.TrustedEnterpriseRoots
+	WindowsManagedLayout = WindowsManagedLayout
+	_ = &WindowsManagedLayout
+	_, _ = WindowsManagedLayout.Standalone()
 }
 
-var secureClientHost = func() bool { return check(wp.TrustedEnterpriseRoots) }
+var SecureClientHost = func() bool { return check(wp.TrustedEnterpriseRoots) }
 `
 	parse := func(name string) []string {
 		fset := token.NewFileSet()
@@ -255,7 +260,7 @@ var secureClientHost = func() bool { return check(wp.TrustedEnterpriseRoots) }
 			t.Errorf("the scan reported %s:\n%s", quiet, got)
 		}
 	}
-	if got := parse("managed_host_guard_windows.go"); len(got) != 7 {
+	if got := parse("../hookcli/managed_host_guard_windows.go"); len(got) != 7 {
 		t.Errorf("in the Secure Client host classification's file the scan reported %d, want 7 (all but secureClientHost's):\n%s", len(got), strings.Join(got, "\n"))
 	}
 	for _, problem := range parse(windowsManagedLayoutSeamFile) {
@@ -276,7 +281,7 @@ func repair() {
 	programFiles, _ := wp.TrustedProgramFiles()
 	programData, _ := wp.TrustedProgramData()
 	_, _ = programFiles, programData
-	programFiles, programData = windowsManagedLayout.programRoots()
+	programFiles, programData = WindowsManagedLayout.ProgramRoots()
 }
 `
 	parse := func(name string) []string {
@@ -295,4 +300,17 @@ func repair() {
 	if other := parse("windows_managed_hooks_lifecycle.go"); len(other) != 0 {
 		t.Errorf("the scan reported a file that classifies a path by the registrations:\n%s", strings.Join(other, "\n"))
 	}
+}
+
+// windowsManagedLayoutRef reports a reference to the seam: WindowsManagedLayout
+// inside internal/hookcli, hookcli.WindowsManagedLayout here.
+func windowsManagedLayoutRef(expr ast.Expr) bool {
+	switch typed := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		return typed.Name == "WindowsManagedLayout"
+	case *ast.SelectorExpr:
+		pkg, ok := typed.X.(*ast.Ident)
+		return ok && pkg.Name == "hookcli" && typed.Sel.Name == "WindowsManagedLayout"
+	}
+	return false
 }

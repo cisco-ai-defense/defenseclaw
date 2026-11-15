@@ -25,6 +25,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -555,11 +556,15 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 	sawQuoted := false
 	sawUnquoted := false
 	unquotedExpansion := false
+	prefix, prefixed := "", false
 	for _, part := range word.Parts {
 		rawUnquotedExpansion := posixUnquotedExpansion(part, value.Len() == 0)
 		partValue, partQuote, partExpands := projectPOSIXWordPart(part)
 		if partExpands {
 			expands = true
+			if !prefixed {
+				prefix, prefixed = value.String(), true
+			}
 		} else {
 			if partQuote == QuoteNone {
 				sawUnquoted = true
@@ -579,10 +584,17 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 		quote = QuoteNone
 	}
 	staticValue := value.String()
+	if !prefixed {
+		prefix = staticValue
+	}
 	result := ArgumentFact{
 		Value:   staticValue,
 		Quote:   quote,
 		Expands: expands || unquotedExpansion,
+	}
+	if result.Expands {
+		result.staticPrefix = prefix
+		result.holeText = posixHoleText(word)
 	}
 	if expands {
 		result.homeSpelling = posixHomeSpelling(word)
@@ -596,6 +608,40 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 		result.literalTilde = strings.HasPrefix(staticValue, "~")
 	}
 	return result
+}
+
+// posixHoleText is the static text of a word with awkprog.Hole in the place of
+// each expansion, also inside double quotes: the text around a computed part
+// of an awk program is the program awk gets.
+func posixHoleText(word *syntax.Word) string {
+	var text strings.Builder
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			text.WriteString(unquotePOSIXLiteral(part.Value, false))
+		case *syntax.SglQuoted:
+			if part.Dollar {
+				text.WriteString(awkprog.Hole)
+			} else {
+				text.WriteString(part.Value)
+			}
+		case *syntax.DblQuoted:
+			if part.Dollar {
+				text.WriteString(awkprog.Hole)
+				continue
+			}
+			for _, nested := range part.Parts {
+				if lit, ok := nested.(*syntax.Lit); ok {
+					text.WriteString(unquotePOSIXLiteral(lit.Value, true))
+				} else {
+					text.WriteString(awkprog.Hole)
+				}
+			}
+		default:
+			text.WriteString(awkprog.Hole)
+		}
+	}
+	return text.String()
 }
 
 // carryPOSIXLiteralTildes keeps the parser's quoted-tilde mark on the argv a
@@ -1375,7 +1421,9 @@ func posixDescriptorIsUnredirected(command CommandFact, fd int64) bool {
 func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 	outerCommands := cloneCommands(out.commands)
 	for _, command := range outerCommands {
-		if !command.ArgvComplete || len(command.Argv) < 2 {
+		// An awk call is read word by word, so a computed word that is not
+		// its program leaves the reading of its commands whole (GAP-0653).
+		if len(command.Argv) < 2 || !command.ArgvComplete && !IsAwkCall(command) {
 			continue
 		}
 		program := commandProgram(command.Executable)
@@ -1438,6 +1486,21 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				return
 			}
 			child = parseCommandAs(nested, dialect, out.nextID, wrapperDepth+1)
+		case "awk", "gawk", "mawk", "nawk":
+			// An awk program starts a shell command through system(),
+			// print | and | getline; a command written as string literals
+			// is judged as the hook running it directly (GAP-0499). One
+			// built from anything else is answered by the gateway at the
+			// unknown tier (awkprog.DynamicReason).
+			body := AwkCall(command).Read().Body
+			if body == "" {
+				continue
+			}
+			if wrapperDepth >= maxWrapperDepth {
+				out.markLimit(IssueWrapperLimit)
+				return
+			}
+			child = parsePOSIX(body, out.nextID, wrapperDepth+1)
 		case "sudo", "exec", "env", "command", "builtin", "nsenter", "chroot":
 			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(command.Argv, program)
 			if uncertain {

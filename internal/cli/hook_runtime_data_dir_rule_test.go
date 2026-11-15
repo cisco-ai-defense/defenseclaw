@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
@@ -86,7 +87,7 @@ func TestHookOutageModeAndHookDataDirShareOneDataDirRule(t *testing.T) {
 			} {
 				t.Setenv("DEFENSECLAW_CONFIG", env.config)
 				t.Setenv("DEFENSECLAW_HOME", env.home)
-				if got := hookOutageFailModeNow("opencode", hooks); got != "open" {
+				if got := hookcli.HookOutageFailModeNow("opencode", hooks); got != "open" {
 					t.Fatalf("%s: hook-outage-mode = %q, want the default tier's open", env.label, got)
 				}
 				if got := os.Getenv("DEFENSECLAW_CONFIG"); got != env.config {
@@ -139,10 +140,10 @@ func TestHookOutageModeAndHookDataDirShareOneDataDirRule(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if got := hookOutageFailModeNow("opencode", hooks); got != owner.want {
+				if got := hookcli.HookOutageFailModeNow("opencode", hooks); got != owner.want {
 					t.Fatalf("lock of a %s: hook-outage-mode = %q, want %q", owner.label, got, owner.want)
 				}
-				if got := hookOutageFailModeFor("opencode", hooks, true); got != "open" {
+				if got := hookcli.HookOutageFailModeFor("opencode", hooks, true); got != "open" {
 					t.Fatalf("lock of a %s: --install-window = %q, want the default tier's open", owner.label, got)
 				}
 				if err := os.RemoveAll(lock); err != nil {
@@ -158,15 +159,15 @@ func TestHookOutageModeAndHookDataDirShareOneDataDirRule(t *testing.T) {
 		stubOutageInstallFolders(t, func() string { return "" }, func() (string, bool) { return "", false })
 		t.Setenv("DEFENSECLAW_CONFIG", "")
 		t.Setenv("DEFENSECLAW_HOME", "")
-		if got := hookOutageFailModeFor("opencode", filepath.Join(data, "hooks"), true); got != "closed" {
+		if got := hookcli.HookOutageFailModeFor("opencode", filepath.Join(data, "hooks"), true); got != "closed" {
 			t.Fatalf("strict --install-window = %q, want closed", got)
 		}
 	})
 	t.Run("a relative config path names no folder", func(t *testing.T) {
-		if _, dir, err := loadHookRuntimeConfig(filepath.Join("srv", "config.yaml")); err == nil || dir != "" {
+		if _, dir, err := hookcli.LoadHookRuntimeConfig(filepath.Join("srv", "config.yaml")); err == nil || dir != "" {
 			t.Fatalf("loadHookRuntimeConfig(relative) = %q, %v", dir, err)
 		}
-		if got := configDataDir(filepath.Join(string(filepath.Separator)+"x", "config.yaml"), strings.Repeat(" ", 2)); got != "" {
+		if got := hookcli.ConfigDataDir(filepath.Join(string(filepath.Separator)+"x", "config.yaml"), strings.Repeat(" ", 2)); got != "" {
 			t.Fatalf("configDataDir(blank) = %q", got)
 		}
 	})

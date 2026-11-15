@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -105,7 +106,7 @@ func TestWindowsRecordedDeploymentRefusalsComeBeforeAnyChange(t *testing.T) {
 			}
 			continue
 		}
-		if commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+		if cliusage.ExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
 			!strings.Contains(result.Errors[0].Message, "nothing was changed") {
 			t.Fatalf("%s: refusal %v, errors %+v", tc.name, err, result.Errors)
 		}
