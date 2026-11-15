@@ -451,19 +451,19 @@
 {"id": "g596c-b02", "dialect": "", "command": "defenseclaw config set routing.mode auto --json", "want": ""}
 {"id": "g596c-b03", "dialect": "", "command": "defenseclaw config unset --json observability.sinks", "want": ""}
 {"id": "g596c-b04", "dialect": "", "command": "defenseclaw config set notifications.enabled -1", "want": ""}
-{"id": "g596c-e04", "dialect": "", "command": "bash -c \"$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\"", "want": "unproven"}
-{"id": "g596c-e05", "dialect": "", "command": "eval \"$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\"", "want": "unproven"}
+{"id": "g596c-e04", "dialect": "", "command": "bash -c \"$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\"", "want": "stop"}
+{"id": "g596c-e05", "dialect": "", "command": "eval \"$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\"", "want": "stop"}
 {"id": "g596c-e24", "dialect": "", "command": "( cat <<'EOF'\ndefenseclaw stop\nEOF\n) | sh", "want": "stop"}
 {"id": "g596c-e29", "dialect": "", "command": "tee -a ~/.bashrc <<< 'defenseclaw stop'", "want": "stop"}
 {"id": "g596c-e32", "dialect": "", "command": "exec 3<<'EOF'\ndefenseclaw stop\nEOF\nbash <&3", "want": "stop"}
 {"id": "g596c-e37", "dialect": "", "command": "tee /etc/cron.d/x <<< '* * * * * root defenseclaw stop'", "want": "unproven"}
 {"id": "g596c-e39", "dialect": "", "command": "sh < <(cat <<'EOF'\ndefenseclaw stop\nEOF\n)", "want": "stop"}
 {"id": "g596c-x118", "dialect": "", "command": "sudo tee /etc/cron.d/x <<< '* * * * * root defenseclaw-gateway stop'", "want": "unproven"}
-{"id": "g596c-e50", "dialect": "", "command": "X=$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\nbash -c \"$X\"", "want": "unproven"}
-{"id": "g596c-e51", "dialect": "", "command": "export X=$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\neval \"$X\"", "want": "unproven"}
-{"id": "g596c-e52", "dialect": "", "command": "cat > ~/run.sh <<'EOF'\ndefenseclaw stop\nEOF\n", "want": "unproven"}
-{"id": "g596c-e53", "dialect": "", "command": "cat > prog <<'EOF'\ndefenseclaw stop\nEOF\nchmod +x prog\n./prog", "want": "unproven"}
-{"id": "g596c-e54", "dialect": "", "command": "cat <<'EOF' > prog\ndefenseclaw stop\nEOF\nsh prog", "want": "unproven"}
+{"id": "g596c-e50", "dialect": "", "command": "X=$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\nbash -c \"$X\"", "want": "stop"}
+{"id": "g596c-e51", "dialect": "", "command": "export X=$(cat <<'EOF'\ndefenseclaw stop\nEOF\n)\neval \"$X\"", "want": "stop"}
+{"id": "g596c-b17", "dialect": "", "command": "cat > ~/run.sh <<'EOF'\ndefenseclaw stop\nEOF\n", "want": ""}
+{"id": "g596c-e53", "dialect": "", "command": "cat > prog <<'EOF'\ndefenseclaw stop\nEOF\nchmod +x prog\n./prog", "want": "stop"}
+{"id": "g596c-e54", "dialect": "", "command": "cat <<'EOF' > prog\ndefenseclaw stop\nEOF\nsh prog", "want": "stop"}
 {"id": "g596c-e55", "dialect": "", "command": "{ cat <<'EOF'\ndefenseclaw stop\nEOF\n} | bash", "want": "stop"}
 {"id": "g596c-b10", "dialect": "", "command": "git commit -m \"$(cat <<'EOF'\nfix: the note says defenseclaw stop is not allowed here\nEOF\n)\"", "want": ""}
 {"id": "g596c-b11", "dialect": "", "command": "cat > notes.md <<'EOF'\nDo not run defenseclaw stop in the sandbox.\nEOF\ncat notes.md", "want": ""}

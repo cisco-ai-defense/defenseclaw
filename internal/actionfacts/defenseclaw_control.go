@@ -6,7 +6,6 @@
 package actionfacts
 
 import (
-	"path/filepath"
 	"slices"
 	"strings"
 	"unicode"
@@ -616,7 +615,7 @@ func commandArgv(command CommandFact, facts Facts) []string {
 }
 
 func (r *controlReader) read(facts Facts, text string, depth int) {
-	flowing := heredocFlowNamesProduct(text)
+	flowing := heredocFlowBodies(text)
 	text = withoutDataHeredocs(text)
 	if !containsFold(text, defenseClawNamespace) {
 		return
@@ -717,7 +716,17 @@ func (r *controlReader) read(facts Facts, text string, depth int) {
 			unresolved = true
 		}
 	}
-	if (unresolved || flowing) && !r.hasProven() && namesProduct(text) {
+	// A here-document whose output a shell, a variable or a run location
+	// takes on is the script it carries (GAP-0788): read as one, so a proven
+	// stop in it is the stop, a benign call in it (a script written and run
+	// by the call) is nothing, and what it holds unreadable is the unknown
+	// tier.
+	for _, body := range flowing {
+		if containsFold(body, defenseClawNamespace) && r.script(facts, body, depth) {
+			unresolved = true
+		}
+	}
+	if unresolved && !r.hasProven() && namesProduct(text) {
 		r.add(DefenseClawControlFact{Kind: DefenseClawControlUnproven})
 	}
 }
@@ -1763,7 +1772,8 @@ type heredoc struct {
 	script     bool
 	// flows is a here-document whose output may be run by something the
 	// statement does not name: a substitution a shell reads, a variable that
-	// is run, a file a login or the call runs (GAP-0788).
+	// is run, a file a login or the call runs (GAP-0788). Its body is read as
+	// the script it carries.
 	flows bool
 	// word is a here-string (<<< WORD), whose operator needs a word after it.
 	word bool
@@ -2027,34 +2037,28 @@ func fileRunByCall(file *syntax.File, self *syntax.Stmt, target string) bool {
 	return runs
 }
 
-// runLocationDirs are the folders whose files a scheduler, a service manager,
-// a login or the PATH runs.
-var runLocationDirs = map[string]bool{
-	"cron.d": true, "cron.daily": true, "cron.hourly": true, "cron.weekly": true, "cron.monthly": true,
-	"crontabs": true, "systemd": true, "init.d": true, "rc.d": true, "profile.d": true,
-	"launchagents": true, "launchdaemons": true, "autostart": true, "startup": true,
-	"bin": true, "sbin": true, "sudoers.d": true,
-}
-
-// runLocationNames are the files a login or the system reads and runs, and
-// runLocationExts the extensions of a script or a unit.
+// runLocationDirs are the folders whose files a scheduler, a service manager
+// or a login runs by itself, and runLocationNames the files a login or the
+// system reads and runs. A script or a unit by its extension, or a file in a
+// bin folder, is not here: a script written to a project and never run by this
+// call is a file, not a command (a here-document that writes a test script is
+// the common benign call), and one the same call runs is found by
+// fileRunByCall.
 var (
+	runLocationDirs = map[string]bool{
+		"cron.d": true, "cron.daily": true, "cron.hourly": true, "cron.weekly": true, "cron.monthly": true,
+		"crontabs": true, "systemd": true, "init.d": true, "rc.d": true, "profile.d": true,
+		"launchagents": true, "launchdaemons": true, "autostart": true, "startup": true, "sudoers.d": true,
+	}
 	runLocationNames = map[string]bool{
 		"crontab": true, "rc.local": true, "profile": true, "bashrc": true, "bash.bashrc": true,
 		"environment": true, "sudoers": true,
 	}
-	runLocationExts = map[string]bool{
-		".sh": true, ".bash": true, ".zsh": true, ".ksh": true, ".fish": true, ".csh": true,
-		".ps1": true, ".psm1": true, ".bat": true, ".cmd": true, ".vbs": true,
-		".py": true, ".pl": true, ".rb": true,
-		".service": true, ".timer": true, ".socket": true, ".path": true, ".plist": true, ".desktop": true,
-	}
 )
 
 // runLocationPath reports a path that something other than the writing call
-// runs: a shell startup file, a file in a scheduler, service or startup
-// folder or on the PATH, a script or a unit by its extension. What a here-
-// document written there says is a script, not a note.
+// runs: a shell startup file, or a file in a scheduler, service or startup
+// folder. What a here-document written there says is a script, not a note.
 func runLocationPath(path string) bool {
 	lower := strings.ToLower(strings.ReplaceAll(path, `\`, "/"))
 	segments := strings.Split(lower, "/")
@@ -2064,7 +2068,7 @@ func runLocationPath(path string) bool {
 			return true
 		}
 	}
-	if runLocationNames[base] || runLocationExts[filepath.Ext(base)] {
+	if runLocationNames[base] {
 		return true
 	}
 	if strings.HasPrefix(base, ".") {
@@ -2077,20 +2081,21 @@ func runLocationPath(path string) bool {
 	return false
 }
 
-// heredocFlowNamesProduct reports a here-document that names the product and
-// whose output may be run by something the call does not show (GAP-0788): the
-// reading is not proven either way, so it is the unknown tier unless another
-// reading of the call proves a stop.
-func heredocFlowNamesProduct(text string) bool {
+// heredocFlowBodies returns the bodies of the here-documents whose output may
+// be run by something the statement does not name (GAP-0788): a substitution a
+// shell reads, a variable that is run, a descriptor, a file a login, a
+// scheduler or a later command of the call runs.
+func heredocFlowBodies(text string) []string {
 	if !strings.Contains(text, "<<") {
-		return false
+		return nil
 	}
+	var bodies []string
 	for _, doc := range heredocs(text) {
-		if doc.flows && containsFold(doc.body, defenseClawNamespace) {
-			return true
+		if doc.flows {
+			bodies = append(bodies, doc.body)
 		}
 	}
-	return false
+	return bodies
 }
 
 // heredocBodies returns the bodies of the here-documents and here-strings of
