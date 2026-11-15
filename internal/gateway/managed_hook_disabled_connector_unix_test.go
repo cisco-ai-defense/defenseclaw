@@ -18,12 +18,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // disabledConnectorSocketAPI is a standalone managed gateway in action mode
@@ -255,7 +257,15 @@ func TestManagedHookSocketAnswersADisabledConnectorAllowWithoutAScan(t *testing.
 	req = req.WithContext(withDisabledConnectorCall(withManagedHookPeer(req.Context(), alice)))
 	rec := httptest.NewRecorder()
 	reloaded.handleAgentHook("codex").ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || auditRowsFor(t, reloadedStore, "codex") == 0 {
+	// The call is recorded once its audit write lands, which a host starved of
+	// CPU can delay past the answer: wait for the row (a signal, not a speed
+	// limit), and only for as long as the host's slowdown allows.
+	rows := auditRowsFor(t, reloadedStore, "codex")
+	for deadline := time.Now().Add(max(30*time.Second, testenv.Scale(5*time.Second, 3*testenv.HostSlowdown()))); rows == 0 && time.Now().Before(deadline); {
+		time.Sleep(25 * time.Millisecond)
+		rows = auditRowsFor(t, reloadedStore, "codex")
+	}
+	if rec.Code != http.StatusOK || rows == 0 {
 		t.Fatalf("a call marked disabled whose connector the live config enables must be inspected and recorded: %d %s", rec.Code, rec.Body.String())
 	}
 	// (b) a require-sandbox floor that names codex still refuses the host

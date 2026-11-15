@@ -146,7 +146,7 @@ func (c *systemOneClassifier) Classify(ctx context.Context, in engine.ClassifyIn
 		if reqCtx.Err() != nil {
 			return none, classifierErr(engine.FailureTimeout, errors.New("systemone timed out"))
 		}
-		return none, classifierErr(engine.FailureConfig, fmt.Errorf("systemone unreachable: %s", redactDecisionModelError(err)))
+		return none, classifierErr(engine.FailureUpstreamStatus, fmt.Errorf("systemone unreachable: %s", redactDecisionModelError(err)))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDecisionModelResponseBytes+1))

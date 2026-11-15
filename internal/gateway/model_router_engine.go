@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -31,9 +33,12 @@ type engineRouter struct {
 	classifier engine.Classifier // vllm_sr client, nil unless started
 	dotenv     string
 	sticky     *engine.StickyCache
+	marks      *engine.StickyCache // routing.sensitive conversation marks
 	// admin, when set (tests), is used for every generation instead of
 	// the routing.admin evaluator compiled per generation (adminFor).
 	admin engine.AdminEvaluator
+	// logger writes the audit rows of routing refusals (route-only).
+	logger *audit.Logger
 
 	mu sync.Mutex
 	// cache keeps the engines of the last two generations, so requests
@@ -48,7 +53,7 @@ type engineCacheEntry struct {
 }
 
 func newEngineRouter(boot *config.Config, classifier engine.Classifier, dotenv string) *engineRouter {
-	return &engineRouter{boot: boot, classifier: classifier, dotenv: dotenv, sticky: engine.NewStickyCache()}
+	return &engineRouter{boot: boot, classifier: classifier, dotenv: dotenv, sticky: engine.NewStickyCache(), marks: engine.NewSensitiveMarkCache()}
 }
 
 // SetAdminEvaluator installs the routing.admin rules and budgets evaluator
@@ -91,11 +96,12 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 	} else {
 		var err error
 		eng, err = engine.New(cfg, engine.Options{
-			Classifier:   classifier,
-			Admin:        r.adminFor(cfg),
-			Managed:      cfg != nil && cfg.StandaloneEnterprise(),
-			Sticky:       r.sticky,
-			CredentialOK: func(b engine.Backend, _ engine.Request) bool { return r.backendCredentialOK(cfg, b) },
+			Classifier:     classifier,
+			Admin:          r.adminFor(cfg),
+			Managed:        cfg != nil && cfg.StandaloneEnterprise(),
+			Sticky:         r.sticky,
+			SensitiveMarks: r.marks,
+			CredentialOK:   func(b engine.Backend, req engine.Request) bool { return r.backendCredentialOK(cfg, b, req) },
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[routing] policy build failed, routing off for this generation: %v\n", err)
@@ -104,6 +110,13 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 	}
 	r.cache[1], r.cache[0] = r.cache[0], &engineCacheEntry{gen: gen, cfg: cfg, eng: eng}
 	return eng, cfg
+}
+
+// SetAuditLogger installs the audit logger of routing refusal rows.
+func (r *engineRouter) SetAuditLogger(l *audit.Logger) {
+	if r != nil {
+		r.logger = l
+	}
 }
 
 // Gate checks a forwarded exit against the admin verdict of the outcome
@@ -162,8 +175,60 @@ func (r *engineRouter) backendKey(cfg *config.Config, b engine.Backend) string {
 	return ResolveAPIKey(b.APIKeyEnv, r.dotenv)
 }
 
-func (r *engineRouter) backendCredentialOK(cfg *config.Config, b engine.Backend) bool {
-	return (b.APIKeyEnv == "" && b.Credential == "") || r.backendKey(cfg, b) != ""
+// backendCredentialOK reports whether a call of req can authenticate to b:
+// it has no key reference or its key resolves, and on the route-only
+// listener the inbound credential class can reach it (routeOnlyCredentialFits).
+func (r *engineRouter) backendCredentialOK(cfg *config.Config, b engine.Backend, req engine.Request) bool {
+	key := r.backendKey(cfg, b)
+	if key == "" && (b.APIKeyEnv != "" || b.Credential != "") {
+		return false
+	}
+	return routeOnlyCredentialFits(req, b, key)
+}
+
+// backendKeyless reports whether b is a model called with no credential at
+// all: no key reference, its own base_url, not Bedrock (Bedrock is signed
+// or keyed), and either a loopback base_url (Ollama, vLLM on this host) or
+// a request routing.sensitive narrowed (its local models are tried with no
+// credential rather than falling back to the cloud, GAP-0576).
+func backendKeyless(b engine.Backend, narrowed bool) bool {
+	if b.APIKeyEnv != "" || strings.TrimSpace(b.Credential) != "" || strings.TrimSpace(b.BaseURL) == "" ||
+		strings.EqualFold(strings.TrimSpace(b.Provider), "bedrock") || b.Bedrock != nil {
+		return false
+	}
+	return narrowed || isLoopbackBaseURL(b.BaseURL)
+}
+
+func isLoopbackBaseURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	if strings.EqualFold(u.Hostname(), "localhost") {
+		return true
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip != nil && ip.IsLoopback()
+}
+
+// routeOnlyCredentialFits is the route-only credential rule (DESIGN 7.3)
+// as an eligibility filter, so the engine skips a backend the route
+// attempt could not authenticate to and `routing explain` shows the model
+// actually used: a login token or Bedrock bearer key never crosses
+// providers, and a gateway-held credential signs only Bedrock. A backend
+// with its own key, or a keyless one, always fits.
+func routeOnlyCredentialFits(req engine.Request, b engine.Backend, key string) bool {
+	if req.Listener != engine.ListenerRouteOnly || key != "" || backendKeyless(b, req.Narrowed) {
+		return true
+	}
+	same := strings.EqualFold(strings.TrimSpace(b.Provider), req.RequestedProvider)
+	switch req.CredentialClass {
+	case engine.CredentialOAuth, engine.CredentialBearer:
+		return same
+	case engine.CredentialGateway:
+		return same || strings.EqualFold(strings.TrimSpace(b.Provider), "bedrock")
+	}
+	return true
 }
 
 // Route implements ModelRouter.
@@ -187,7 +252,7 @@ func (r *engineRouter) RouteDetailed(ctx context.Context, in *ModelRouterInput) 
 		return normalizeSemanticRouteOutcome(out)
 	}
 	d := eng.Decide(ctx, engineRequest(in))
-	recordRoutingDecision(ctx, in, &d, cfg != nil && cfg.StandaloneEnterprise())
+	out.recordCaller = recordRoutingDecision(ctx, in, &d, cfg != nil && cfg.StandaloneEnterprise())
 	out.Route = &d
 	out.Latency = time.Since(started)
 	switch d.Outcome {
@@ -201,15 +266,15 @@ func (r *engineRouter) RouteDetailed(ctx context.Context, in *ModelRouterInput) 
 			Reason: fmt.Sprintf("source=%s rule=%s model=%s", d.Source, boundedRouterLabel(d.RuleID, 64), b.Alias),
 		}
 		decision.APIKey = r.backendKey(cfg, b)
-		return mergeEngineFacts(outcomeFromDecision(in, decision, out.Latency), &d)
+		return mergeEngineFacts(outcomeFromDecision(in, decision, out.Latency), &d, out.recordCaller)
 	default:
 		out.FailureCode = d.FailureCode
 	}
 	return normalizeSemanticRouteOutcome(out)
 }
 
-func mergeEngineFacts(o SemanticRouteOutcome, d *engine.Decision) SemanticRouteOutcome {
-	o.Route = d
+func mergeEngineFacts(o SemanticRouteOutcome, d *engine.Decision, recordCaller string) SemanticRouteOutcome {
+	o.Route, o.recordCaller = d, recordCaller
 	return o
 }
 
@@ -307,19 +372,45 @@ func (p *GuardrailProxy) applyRouteGate(ctx context.Context, o *SemanticRouteOut
 	if deny := p.routeGate(ctx, *o, target); deny != nil {
 		o.Result, o.Deny, o.Decision = SemanticRouteDenied, deny, nil
 		o.FailureCode = SemanticRouteFailureFiltered
+		amendRoutingDecision(ctx, *o)
 	}
 }
 
-// recordRouteDeny writes the audit row of a managed routing refusal.
+// sensitiveFloorOf is the sensitive source of a request the router cannot
+// re-route (its floor, or an earlier sensitive turn of the conversation):
+// it would go to its own (cloud) model unchecked. "" when routing or
+// routing.sensitive is off, or the request is not sensitive.
+func (r *engineRouter) sensitiveFloorOf(ctx context.Context, req engine.Request) string {
+	if r == nil {
+		return ""
+	}
+	eng, _ := r.engineFor(ctx)
+	return eng.SensitiveFloor(req)
+}
+
+// recordRouteDeny writes the audit row of a routing refusal.
 func (p *GuardrailProxy) recordRouteDeny(ctx context.Context, path string, d *engine.DenyReason) {
-	if p == nil || p.logger == nil {
+	if p == nil {
 		return
 	}
-	code := "routing_admin_denied"
+	auditRouteDeny(ctx, p.logger, path, d)
+}
+
+// auditRouteDeny writes the audit row of a routing refusal: a managed
+// admin rule (target routing.admin) or a sensitive request no local model
+// could serve (target routing.sensitive). Code and path only, no text.
+func auditRouteDeny(ctx context.Context, logger *audit.Logger, path string, d *engine.DenyReason) {
+	if logger == nil {
+		return
+	}
+	code, target := "routing_admin_denied", "routing.admin"
 	if d != nil && d.Code != "" {
 		code = d.Code
 	}
-	_ = p.logger.LogActionCtx(ctx, string(audit.ActionInspectRequestBlock), "routing.admin", "routing refused the model request: "+boundedRouterLabel(code, 96)+" path="+boundedRouterLabel(path, 128))
+	if code == engine.DenyCodeSensitiveLocal {
+		target = "routing.sensitive"
+	}
+	_ = logger.LogActionCtx(ctx, string(audit.ActionInspectRequestBlock), target, "routing refused the model request: "+boundedRouterLabel(code, 96)+" path="+boundedRouterLabel(path, 128))
 }
 
 // routerActive reports whether this request is routed at all.

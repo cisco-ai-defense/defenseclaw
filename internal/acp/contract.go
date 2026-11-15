@@ -293,6 +293,12 @@ func entryStartsLock(entry any, lockPath string) bool {
 // from another machine) and the guard must not start.
 var ErrRuntimeContractMissing = errors.New("ACP runtime contract lock is missing")
 
+// ErrAgentExecutableDrift is an agent executable whose bytes are not the
+// ones the lock pins: most often the agent updated in place (kiro-cli 2.35.1
+// to 3.3.0, rel-1-0-10:GAP-0250). The guard still refuses it; its startup
+// text names the per-user command that re-pins an updated agent.
+var ErrAgentExecutableDrift = errors.New("ACP agent executable digest does not match the runtime contract")
+
 type RuntimeContractLock struct {
 	Version     int    `json:"version"`
 	GeneratedAt string `json:"generated_at"`
@@ -460,8 +466,12 @@ func (lock RuntimeContractLock) guardExecutablePathMatches(guardPath string) err
 // executableDigestsMatch checks the agent and guard executables against the
 // digests the lock pins.
 func (lock RuntimeContractLock) executableDigestsMatch(agentPath, guardPath string) error {
-	if observed, err := fileSHA256(agentPath); err != nil || !strings.EqualFold(observed, lock.Agent.SHA256) {
-		return errors.New("ACP agent executable digest does not match the runtime contract")
+	observed, err := fileSHA256(agentPath)
+	if err != nil {
+		return errors.New("ACP agent executable named by the runtime contract cannot be read")
+	}
+	if !strings.EqualFold(observed, lock.Agent.SHA256) {
+		return ErrAgentExecutableDrift
 	}
 	observedGuardDigest, err := fileSHA256(guardPath)
 	if err != nil || !strings.EqualFold(observedGuardDigest, lock.Guard.SHA256) {

@@ -507,7 +507,13 @@ The error starts `hook_image_start_failed: the hook image of this release could 
 
 The error says `refusing to replace the installed hook` and ends `Nothing was stopped or changed` (exit `1603`). The installed `defenseclaw-hook.exe` does not match the digest in `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json` (`hashes.hook`), and the guardian's protected copy, `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\payload\defenseclaw-hook.exe`, is missing or does not match it either. Before an upgrade Setup keeps a rollback copy of the hook and checks it against that digest; with no matching copy it stops. The new release's `/repair` does not help: a Setup repairs only its own release and exits `1639`. `/uninstall` refuses with `unrecorded artifact hash drift`.
 
-**Fix.** Wait about 5 seconds and run the new Setup again: a running guardian that still has its copy restores the hook itself. If it still refuses, run `/repair` with the Setup of the release that is installed (the release that installed it, for example 1.0.8, not the new one), as an administrator or as SYSTEM, from the folder with that Setup:
+Setup 1.0.10 and later do not stop here: they take their own verified hook as the rollback copy, go on, and report `hook_rollback_copy_rederived` ([the hook during an upgrade](/docs/enterprise/windows#the-hook-during-an-upgrade)). That includes a host an interrupted upgrade left with every DefenseClaw service stopped and disabled, where each `/repair`, `/uninstall`, `/upgrade` and `/ensure` of the earlier release failed this way: as LocalSystem, run the 1.0.10 Setup `/ensure` with the deployment's config, and then run it once more. The second run is a no-op.
+
+```powershell
+.\DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
+```
+
+**Fix with an earlier Setup.** Wait about 5 seconds and run the new Setup again: a running guardian that still has its copy restores the hook itself. If it still refuses, run `/repair` with the Setup of the release that is installed (the release that installed it, for example 1.0.8, not the new one), as an administrator or as SYSTEM, from the folder with that Setup:
 
 ```powershell
 .\DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1

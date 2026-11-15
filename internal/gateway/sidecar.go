@@ -1174,6 +1174,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 	}
 	router := newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	router.SetAuditLogger(s.logger)
 	s.modelRouter = router
 	activeEngineRouter.Store(router)
 
@@ -8330,6 +8331,7 @@ func (s *Sidecar) removeRemovedConnectorLeftovers(ctx context.Context, registry 
 			s.auditDroppedConnectorState(name, "lock-only")
 		}
 	}
+	s.reclaimUnguardedConnectorHooks(ctx, registry)
 }
 
 // retiredConnectorOpts is retiredConnectorOpts for the current config.

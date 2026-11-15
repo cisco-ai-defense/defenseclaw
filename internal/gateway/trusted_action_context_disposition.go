@@ -23,6 +23,17 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
+// trustedActionDispositionScope is what the dispatch knows of the request
+// beyond its facts. The zero value is a plain call.
+type trustedActionDispositionScope struct {
+	// protectedLocalFileRead: the Copilot Local file tool opens the file
+	// (trustedActionRequest.CopilotSharedLocalFile).
+	protectedLocalFileRead bool
+	// sendDestination: the arguments are the routing values of a message
+	// call, where its text is sent (trustedActionRequest.sendDestination).
+	sendDestination bool
+}
+
 // applyTrustedActionContextDisposition is the trusted-action-only disposition
 // boundary for content literals and selected advisory rules. It deliberately
 // is not called by prompt, tool-result, or completion scanners: those scan
@@ -30,13 +41,18 @@ import (
 //
 // The function returns an owned findings slice and never promotes a finding
 // that an earlier boundary already marked detection-only. Its only authority
-// input is ActionFacts derived from the current action.
+// input is ActionFacts derived from the current action, and the scope the
+// dispatch derived from the same request.
 func applyTrustedActionContextDisposition(
 	generation *compiledRulePackCategories,
 	facts actionfacts.Facts,
 	findings []RuleFinding,
-	protectedLocalFileRead ...bool,
+	scopes ...trustedActionDispositionScope,
 ) []RuleFinding {
+	var scope trustedActionDispositionScope
+	if len(scopes) != 0 {
+		scope = scopes[0]
+	}
 	adjusted := append([]RuleFinding(nil), findings...)
 	// Detection sees the complete action, while authorization considers only
 	// commands and redirects statically proven to execute. A harmless preview
@@ -89,7 +105,7 @@ func applyTrustedActionContextDisposition(
 					trustedActionContextFindingProof(finding.RuleID, findingFacts),
 				)
 			case trustedActionSensitivePathRead:
-				if len(protectedLocalFileRead) != 0 && protectedLocalFileRead[0] &&
+				if scope.protectedLocalFileRead &&
 					finding.enforcement != findingEnforcementDetectionOnly &&
 					(slices.Contains(finding.Tags, "credential") || slices.Contains(finding.Tags, "privilege")) {
 					// The Local file tool opens this exact credential or control
@@ -147,9 +163,20 @@ func applyTrustedActionContextDisposition(
 			continue
 		}
 		if !trustedActionContentFindingHasRiskPair(findingFacts, rule) {
-			// Literal secret/PII material in an action remains visible for
-			// local audit, but cannot alert or block without command-local
-			// proof of external egress or an active sensitive-path write.
+			if trustedActionCredentialLiteralRule(finding) &&
+				finding.enforcement != findingEnforcementDetectionOnly &&
+				trustedActionPersistsCredentialLiteral(findingFacts, scope.sendDestination) {
+				// A credential value the action writes into a file, a store
+				// or a process alerts: it leaves the context for a place that
+				// keeps it. Without proof of where it goes it never blocks.
+				finding.enforcement = findingEnforcementAlertOnly
+				adjusted[index] = finding
+				continue
+			}
+			// Literal secret/PII material the action only looks at, and PII
+			// anywhere, remains visible for local audit, but cannot alert or
+			// block without command-local proof of external egress or an
+			// active sensitive-path write.
 			adjusted[index] = trustedActionAuditFinding(finding)
 			continue
 		}

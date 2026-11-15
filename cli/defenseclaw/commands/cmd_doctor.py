@@ -13301,18 +13301,106 @@ def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _systemone_endpoint(routing, cfg) -> str:
+    """The endpoint routing.classifier systemone calls: its own base_url, or
+    the decision model when routing.systemone.use_decision_model is on (the
+    default)."""
+    own = getattr(routing, "systemone", None) or {}
+    own = own if isinstance(own, dict) else {}
+    if own.get("use_decision_model", True) is False:
+        return str(own.get("base_url") or "").strip()
+    return str(getattr(getattr(cfg, "decision_model", None), "base_url", "") or "").strip()
+
+
+def _endpoint_origin(url: str) -> str:
+    """scheme://host[:port] of url: no path, query or credentials in a row."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}" if parts.scheme and host else "the configured endpoint"
+
+
+def _check_systemone_reachable(routing, cfg, r: _DoctorResult) -> None:
+    """One real request to the System One endpoint (any HTTP answer means it
+    is up; the classifier has its own breaker, so a healthy gateway can still
+    be routing on the rules fallback: GAP-0591)."""
+    endpoint = _systemone_endpoint(routing, cfg)
+    if not endpoint:
+        _emit(
+            "warn",
+            "System One classifier",
+            "no endpoint: every request takes the classifier-failure path",
+            remediation=(
+                "set decision_model.base_url and decision_model.model, or set "
+                "routing.systemone.use_decision_model false with routing.systemone.base_url and model"
+            ),
+            r=r,
+        )
+        return
+    code, _detail = _http_probe(endpoint, timeout=2.0)
+    mode = getattr(routing, 'on_classifier_error', '') or 'original'
+    origin = _endpoint_origin(endpoint)
+    if code > 0:
+        _emit("pass", "System One classifier", f"{origin} answers (HTTP {code})", r=r)
+        return
+    _emit(
+        "fail",
+        "System One classifier",
+        f"{origin} is not reachable: routing uses on_classifier_error ({mode}) for every request",
+        remediation=(
+            "start the System One endpoint, or check its URL with defenseclaw setup decision-model --ping; "
+            "routing.on_classifier_error rules keeps keyword routing while it is down"
+        ),
+        r=r,
+    )
+
+
+def _check_inprocess_routing(routing, classifier: str, models: list, r: _DoctorResult, cfg=None) -> None:
+    """The rules and systemone classifiers run inside the gateway: there is no
+    container or router endpoint to probe (GAP-0567). A rules classifier with
+    no routing.decisions sends every request to default_alias (GAP-0565)."""
+    default = str(getattr(routing, "default_alias", "") or "")
+    label = "rules classifier, in process" if classifier == "rules" else f"{classifier} classifier"
+    detail = f"{label}; {len(models)} model(s)" + (f"; default {default}" if default else "")
+    decisions = getattr(routing, "decisions", []) or []
+    if classifier == "rules" and not decisions:
+        first = default or (str(models[0].get("name") or "") if models and isinstance(models[0], dict) else "")
+        first = first or "the default model"
+        _emit(
+            "warn",
+            "Semantic routing",
+            f"{detail}; no route rules (routing.decisions is empty), so every request goes to "
+            f"{first}",
+            remediation=(
+                "add rules: defenseclaw routing setup --route coding=ALIAS (and reasoning, summarize), "
+                "or write routing.signals and routing.decisions in config.yaml"
+            ),
+            r=r,
+        )
+        return
+    _emit("pass", "Semantic routing", detail, r=r)
+    if classifier == "systemone":
+        _check_systemone_reachable(routing, cfg, r)
+
+
 def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     routing = getattr(cfg, "routing", None)
     if routing is None or not bool(getattr(routing, "enabled", False)):
         _emit("skip", "Semantic routing", "disabled", r=r)
         return
 
+    classifier = str(getattr(routing, "classifier", "") or "vllm_sr").strip()
     remote = getattr(routing, "remote", {}) or {}
     remote_endpoint = str(remote.get("endpoint") or "").strip() if isinstance(remote, dict) else ""
     port = int(getattr(routing, "port", 0) or 8080)
     endpoint = remote_endpoint or f"http://127.0.0.1:{port}"
-    mode = "remote" if remote_endpoint else "managed Docker"
     models = getattr(routing, "models", []) or []
+    if classifier != "vllm_sr":
+        _check_inprocess_routing(routing, classifier, models, r, cfg)
+        return
+    mode = "remote" if remote_endpoint else "managed Docker"
 
     live = live_health.get("routing") if isinstance(live_health, dict) else None
     if isinstance(live, dict):
@@ -17645,7 +17733,10 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             "safe",
             _fix_acp_guard_pins,
             (),
-            ("re-pin the upgraded DefenseClaw ACP guard in the editor entries DefenseClaw wrote",),
+            (
+                "re-pin the upgraded DefenseClaw ACP guard, or an agent you updated once you confirm it, "
+                "in the editor entries DefenseClaw wrote",
+            ),
             False,
             False,
         ),
@@ -19769,10 +19860,15 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
             _emit("pass", label, f"healthy; profile {profile} ({mode})", r=r)
             continue
         if all("acp refresh" in problem for problem in problems):
-            fix = "re-pin the upgraded guard: defenseclaw doctor --fix (or defenseclaw acp refresh)"
+            # The upgraded guard, or an agent the user updated (acp refresh
+            # --agent re-pins it after its custody check, rel-1-0-10:GAP-0250).
+            fix = (
+                "re-pin it: defenseclaw doctor --fix (or defenseclaw acp refresh"
+                + (f" --agent {agent}" if any("--agent" in problem for problem in problems) else "")
+                + ")"
+            )
         else:
-            # Setup re-pins the agent and the guard; refresh never re-pins
-            # a changed agent binary.
+            # Setup re-pins the agent and the guard.
             fix = cmd_acp.setup_repair_command(cfg, client, agent, data_dir)
             if os.name == "nt":
                 fix = run_instruction(fix)
@@ -22015,9 +22111,12 @@ def _fix_acp_guard_pins(
     """Re-pin the upgraded DefenseClaw ACP guard, as ``defenseclaw acp refresh`` does.
 
     Companion to :func:`_check_acp_bindings`. Only the editor entries
-    DefenseClaw wrote are touched, and only their guard digest: an agent
-    executable that changed since setup is named with its setup command,
-    never re-pinned. Managed enrollments keep their locks in a per-user
+    DefenseClaw wrote are touched, and only their pins. An agent that changed
+    since setup is re-pinned only when you confirm it at the prompt and it
+    passes the custody check of ``acp refresh --agent`` (rel-1-0-10:GAP-0250);
+    with --yes, or when it fails that check, it is named with its command and
+    left for you to review, so an unattended repair never accepts agent bytes
+    nobody looked at. Managed enrollments keep their locks in a per-user
     runtime directory that doctor does not know, so they are left alone.
     """
     if getattr(cfg, "acp", None) is None:
@@ -22034,40 +22133,85 @@ def _fix_acp_guard_pins(
         if not pairs:
             return ("skip", "no ACP binding is configured")
         pending = cmd_acp.refresh_guard_pins(data_dir, apply=False)
-        agent_drift = [
-            f"{client}/{agent}"
+        drifted = {
+            (client, agent)
             for client, agent in pairs
-            if "agent executable digest has drifted" in cmd_acp._verify_binding(data_dir, client, agent)
-        ]
+            if "agent executable digest has drifted" in " ".join(cmd_acp._verify_binding(data_dir, client, agent))
+        }
+        # An agent the user updated is re-pinned at its pinned path after
+        # the custody check (rel-1-0-10:GAP-0250); one that fails it keeps
+        # its setup command.
+        agent_pending, agent_refused = (
+            cmd_acp.refresh_agent_pins(data_dir, pairs=drifted, apply=False) if drifted else ([], [])
+        )
     except Exception as exc:  # noqa: BLE001 - unreadable editor settings must not abort the repair run.
         return ("skip", f"could not read the editor ACP settings: {exc}")
+    if agent_pending and assume_yes:
+        # An unattended repair (--yes, the TUI auto-repair) does not accept
+        # changed agent bytes: it names the refresh instead.
+        agent_refused = agent_refused + [
+            (pair, f"the agent changed since setup ({old[:12]} to {new[:12]}); "
+             f"review it and run: defenseclaw acp refresh --agent {pair.split('/', 1)[1]}")
+            for pair, _path, old, new in agent_pending
+        ]
+        agent_pending = []
     agent_note = ""
-    if agent_drift:
-        commands = ", ".join(
-            f"`{cmd_acp.setup_repair_command(cfg, *pair.split('/'), data_dir)}`" for pair in agent_drift
+    if agent_refused:
+        agent_note = "; ".join(
+            f"{pair}: the agent changed since setup and cannot be re-pinned ({reason}); review it and "
+            + run_instruction(f"`{cmd_acp.setup_repair_command(cfg, *pair.split('/'), data_dir)}`")
+            for pair, reason in agent_refused
         )
-        agent_note = (
-            f"{', '.join(agent_drift)}: the agent executable changed since setup (for example, it updated); "
-            f"doctor does not re-pin it, so review it and {run_instruction(commands)}"
-        )
-    if not pending:
+    agent_pairs = [pair for pair, _path, _old, _new in agent_pending]
+    work = []
+    if pending:
+        work.append(f"the DefenseClaw ACP guard for {', '.join(pending)}")
+    if agent_pairs:
+        changes = ", ".join(f"{pair} ({old[:12]} to {new[:12]})" for pair, _path, old, new in agent_pending)
+        work.append(f"the updated agent for {changes}")
+    if not work:
         current = "the ACP guard pins are current"
         return ("skip", f"{current}; {agent_note}" if agent_note else current)
     suffix = f"; {agent_note}" if agent_note else ""
     if plan_only:
         return (
             "plan",
-            f"re-pin the DefenseClaw ACP guard for {', '.join(pending)} (as 'defenseclaw acp refresh'){suffix}",
+            f"re-pin {' and '.join(work)} (as 'defenseclaw acp refresh' [--agent]){suffix}",
         )
-    if not assume_yes and not click.confirm(
-        f"    Re-pin the DefenseClaw ACP guard for {', '.join(pending)}?",
-        default=True,
-    ):
+    if not assume_yes and not click.confirm(f"    Re-pin {' and '.join(work)}?", default=True):
         return ("skip", "declined by user")
     try:
-        done = cmd_acp.refresh_guard_pins(data_dir)
+        done = cmd_acp.refresh_guard_pins(data_dir) if pending else []
+        agent_done = (
+            cmd_acp.refresh_agent_pins(data_dir, pairs={tuple(pair.split("/", 1)) for pair in agent_pairs})[0]
+            if agent_pairs
+            else []
+        )
     except (OSError, click.ClickException) as exc:
-        return ("fail", f"could not re-pin the ACP guard: {exc}")
-    if not done:
+        return ("fail", f"could not re-pin the ACP pins: {exc}")
+    _log_acp_agent_repins(cfg, agent_done)
+    parts = []
+    if done:
+        parts.append(f"the DefenseClaw ACP guard for {', '.join(done)}")
+    if agent_done:
+        parts.append(f"the updated agent for {', '.join(pair for pair, _p, _o, _n in agent_done)}")
+    if not parts:
         return ("skip", "the ACP guard pins are current")
-    return ("pass", f"re-pinned the DefenseClaw ACP guard for {', '.join(done)}{suffix}")
+    return ("pass", f"re-pinned {' and '.join(parts)}{suffix}")
+
+
+def _log_acp_agent_repins(cfg, repinned) -> None:
+    """Record each agent doctor re-pinned, as 'acp refresh --agent' does (rel-1-0-10:GAP-0250)."""
+    if not repinned:
+        return
+    from defenseclaw.logger import CanonicalObservabilityError, Logger
+
+    try:
+        logger = Logger(_VerifiedGatewayRecorder(cfg))
+        for pair, path_value, previous, digest in repinned:
+            logger.log_config_change(
+                "acp-agent-repin",
+                f"scope={pair} agent={path_value} previous_sha256={previous} sha256={digest} source=doctor",
+            )
+    except (CanonicalObservabilityError, OSError) as exc:
+        ux.echo(f"    ⚠ Re-pinned, but the audit event was not recorded ({exc}).", err=True)
