@@ -1488,6 +1488,14 @@ func actionLiteralCommandWords(args []*syntax.Word, home string) (words []*synta
 		case "command", "builtin", "nohup", "exec", "nice", "env", "sudo", "doas", "timeout",
 			"stdbuf", "ionice", "setsid":
 		default:
+			// Any other wrapper the shared reader knows (chroot, nsenter,
+			// unbuffer, taskset, flock, xargs ...) runs the program at its
+			// child index: a write behind it is no read the scan excuses
+			// (rel-1-0-10:GAP-0910).
+			if next := actionLiteralWrapperChild(args, home); next > 0 {
+				args = args[next:]
+				continue
+			}
 			return args, true
 		}
 		durationPending := program == "timeout"
@@ -1553,6 +1561,18 @@ func actionLiteralCommandWords(args []*syntax.Word, home string) (words []*synta
 		args = args[index:]
 	}
 	return nil, false
+}
+
+// actionLiteralWrapperChild is the index of the program word the wrapper at
+// args[0] runs, by the shared wrapper reader (actionfacts.WrapperChildIndex),
+// or -1. A word that expands at run time is not static there.
+func actionLiteralWrapperChild(args []*syntax.Word, home string) int {
+	values := make([]string, len(args))
+	static := make([]bool, len(args))
+	for i, word := range args {
+		values[i], static[i] = StaticWord(word, home)
+	}
+	return actionfacts.WrapperChildIndex(values, static)
 }
 
 // actionLiteralWrapperOption reports how many words an option of sudo, doas,

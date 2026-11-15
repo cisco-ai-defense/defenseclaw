@@ -153,7 +153,11 @@ func AwkCallBehindWrappers(command CommandFact) (CommandFact, bool) {
 			inner.Argv, inner.Arguments = cloneSlice(argv), cloneSlice(arguments)
 			return inner, true
 		}
-		start := awkWrapperChild(argv, arguments)
+		static := make([]bool, len(arguments))
+		for i, argument := range arguments {
+			static[i] = !argument.Expands
+		}
+		start := WrapperChildIndex(argv, static)
 		if start <= 0 || start >= len(argv) {
 			return CommandFact{}, false
 		}
@@ -162,12 +166,17 @@ func AwkCallBehindWrappers(command CommandFact) (CommandFact, bool) {
 	return CommandFact{}, false
 }
 
-// awkWrapperChild is the index of the program word the wrappers at the
-// head of argv run, or -1 (see AwkCallBehindWrappers).
-func awkWrapperChild(argv []string, arguments []ArgumentFact) int {
-	static := make([]bool, len(arguments))
-	for i, argument := range arguments {
-		static[i] = !argument.Expands
+// WrapperChildIndex is the index of the program word the wrappers at the
+// head of argv run (static[i] is false for a word the shell expands at run
+// time), or -1: the prefix wrappers StaticPrefixWrapperChild reads, unbuffer,
+// and chroot, nsenter and xargs by their own grammars. It is the one answer
+// to "which program does this wrapper run" for the readers that look through
+// a wrapper without reading its child as the caller's own call:
+// AwkCallBehindWrappers and the excused mention scan of hookpaths
+// (rel-1-0-10:GAP-0859, GAP-0910).
+func WrapperChildIndex(argv []string, static []bool) int {
+	if len(argv) == 0 || len(static) != len(argv) {
+		return -1
 	}
 	if run, ok := StaticPrefixWrapperChild(argv, static); ok {
 		return run.Index
