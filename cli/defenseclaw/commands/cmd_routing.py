@@ -480,6 +480,42 @@ def _gateway_binary() -> str | None:
     return path_gateway(honor_override=False)
 
 
+# How long routing enable --connector waits for the running gateway to reload
+# config.yaml and render the agent settings (it polls the agent file and /health).
+RENDER_WAIT_SECONDS = 10.0
+RENDER_POLL_SECONDS = 0.5
+# /health route-only rows carry no config generation: a not-ready row seen
+# right after the save can be the one from before it. A failure is reported
+# only once it has held this long (or at the end of the wait).
+RENDER_FAILED_SETTLE_SECONDS = 5.0
+
+
+def _await_render(app: AppContext, cfg: Any, connector: str, upstream: dict[str, Any]) -> tuple[str, str, str]:
+    """(state, cause, fix) once the gateway has rendered the connector, has
+    said why it cannot, or the bounded wait ends ("pending"). A gateway that
+    is not running ends the wait at once: it renders when it starts."""
+    import time
+
+    from defenseclaw import doctor_route_only as dro
+
+    deadline = time.monotonic() + RENDER_WAIT_SECONDS
+    failing_since: float | None = None
+    while True:
+        live = _health_routing(app)
+        health = None if not live or live.get("state") == "unreachable" else {"routing": live}
+        state, cause, fix = dro.render_outcome(cfg, connector, upstream, health)
+        now = time.monotonic()
+        if state == dro.RENDER_FAILED:
+            failing_since = now if failing_since is None else failing_since
+            if now - failing_since >= RENDER_FAILED_SETTLE_SECONDS or now >= deadline:
+                return state, cause, fix
+        elif state != dro.RENDER_PENDING or health is None or now >= deadline:
+            return state, cause, fix
+        else:
+            failing_since = None
+        time.sleep(RENDER_POLL_SECONDS)
+
+
 def _route_only_change(app: AppContext, connector: str, *, enable: bool) -> None:
     """Route one hook connector (or stop) through routing_route_only, owned
     by the routing core. Its helpers take the loaded config and save
@@ -493,7 +529,22 @@ def _route_only_change(app: AppContext, connector: str, *, enable: bool) -> None
     except ro.RouteOnlyError as exc:
         raise click.ClickException(str(exc)) from exc
     if enable:
+        state, cause, fix = _await_render(app, cfg, connector, out.get("upstream") or {})
         base = str((out.get("upstream") or {}).get("base_url") or "")
+        if state == "failed":
+            raise click.ClickException(
+                f"{connector} is set to route through DefenseClaw in config.yaml, but the gateway did not render "
+                f"it, so {connector} still calls its model directly: {cause}"
+                + (f"\nFix: {fix}" if fix else "")
+                + f"\nTo undo: defenseclaw routing disable --connector {connector}"
+            )
+        if state == "pending":
+            ux.warn(
+                f"{connector} routing is saved in config.yaml but not applied yet: {cause}"
+                + (f" ({fix})" if fix else "")
+            )
+            click.echo(f"Check it with: defenseclaw doctor. Restart {connector} once the gateway applies it.")
+            return
         click.echo(f"Routing {connector} model calls through DefenseClaw" + (f" (upstream {base})." if base else "."))
     else:
         click.echo(f"Stopped routing {connector}." if out.get("changed") else f"{connector} was not routed.")
