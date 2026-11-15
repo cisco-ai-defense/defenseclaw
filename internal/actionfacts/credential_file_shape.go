@@ -363,6 +363,11 @@ func CredentialFileShapeProbePaths() []string {
 			probe = row.relative
 		case row.under != "":
 			probe = row.under + "/probe"
+		case row.folder != "":
+			probe = row.folder + "/probe"
+			if len(row.suffixes) != 0 {
+				probe += row.suffixes[0]
+			}
 		case row.base != "":
 			probe = row.base
 		case row.basePrefix != "":
