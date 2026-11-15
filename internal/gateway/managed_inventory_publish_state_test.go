@@ -113,6 +113,11 @@ func managedPublishFullComponent() endpointInventoryComponent {
 		skillScope:                  "user",
 		skillLocation:               "~/.claude/skills/pdf",
 		skillAgents:                 []string{"claudecode"},
+		skillPublisher:              "Anthropic",
+		skillPublisherSource:        "plugin_manifest",
+		skillPlugin:                 "pr-review@official",
+		skillPluginVersion:          "1.0.1",
+		skillPluginEnabled:          &installed,
 	}
 }
 
@@ -227,6 +232,11 @@ func TestManagedInventoryDigestDetectsMeaningfulFields(t *testing.T) {
 		"skillScope":                  func(c *endpointInventoryComponent) { c.skillScope = "bundled" },
 		"skillLocation":               func(c *endpointInventoryComponent) { c.skillLocation = "~/.agents/skills/pdf" },
 		"skillAgents":                 func(c *endpointInventoryComponent) { c.skillAgents = []string{"claudecode", "codex"} },
+		"skillPublisher":              func(c *endpointInventoryComponent) { c.skillPublisher = "Other" },
+		"skillPublisherSource":        func(c *endpointInventoryComponent) { c.skillPublisherSource = "declared" },
+		"skillPlugin":                 func(c *endpointInventoryComponent) { c.skillPlugin = "other@official" },
+		"skillPluginVersion":          func(c *endpointInventoryComponent) { c.skillPluginVersion = "1.0.2" },
+		"skillPluginEnabled":          func(c *endpointInventoryComponent) { c.skillPluginEnabled = nil },
 	}
 	for name, mutate := range componentCases {
 		t.Run("component/"+name, func(t *testing.T) {

@@ -116,6 +116,12 @@ type endpointInventoryComponent struct {
 	skillScope         string
 	skillLocation      string
 	skillAgents        []string
+	// skillPublisherSource: vendor_bundled, plugin_manifest, declared, unknown.
+	skillPublisher       string
+	skillPublisherSource string
+	skillPlugin          string
+	skillPluginVersion   string
+	skillPluginEnabled   *bool
 }
 
 // endpointInventoryCarrier is an atomic, typed snapshot split into parallel
@@ -1212,6 +1218,11 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventorySkillLastSeen:               aiDiscoveryV8OptionalText(component.skillLastSeen),
 			DefenseClawInventorySkillScope:                  aiDiscoveryV8OptionalText(component.skillScope),
 			DefenseClawInventorySkillLocation:               aiDiscoveryV8OptionalText(component.skillLocation),
+			DefenseClawInventorySkillPublisher:              aiDiscoveryV8OptionalText(component.skillPublisher),
+			DefenseClawInventorySkillPublisherSource:        aiDiscoveryV8OptionalText(component.skillPublisherSource),
+			DefenseClawInventorySkillPlugin:                 aiDiscoveryV8OptionalText(component.skillPlugin),
+			DefenseClawInventorySkillPluginVersion:          aiDiscoveryV8OptionalText(component.skillPluginVersion),
+			DefenseClawInventorySkillPluginEnabled:          inventoryOptionalBool(component.skillPluginEnabled),
 		}
 		if len(component.skillAgents) > 0 {
 			input.DefenseClawInventorySkillAgents = observability.Present(component.skillAgents)
@@ -1522,6 +1533,7 @@ func discoveredEntriesFromReport(
 				row := &components[len(components)-1]
 				row.skillContentHash, row.skillContentStatus = facts.ContentHash, facts.ContentStatus
 				row.skillScope, row.skillLocation = facts.Scope, facts.Location
+				applySkillPublisher(row, signal.Vendor, *facts)
 			}
 		}
 	}
@@ -1541,6 +1553,24 @@ func discoveredEntriesFromReport(
 		}
 	}
 	return components
+}
+
+// applySkillPublisher names the best publisher evidence the endpoint has: the
+// agent vendor for a skill it ships, the plugin manifest author for a plugin
+// skill, else the skill's own SKILL.md claim.
+func applySkillPublisher(row *endpointInventoryComponent, vendor string, facts inventory.AISkillFacts) {
+	row.skillPublisherSource = "unknown"
+	if plugin := facts.Plugin; plugin != nil {
+		row.skillPlugin, row.skillPluginVersion, row.skillPluginEnabled = plugin.ID, plugin.Version, plugin.Enabled
+	}
+	switch {
+	case facts.Scope == inventory.SkillScopeBundled && vendor != "":
+		row.skillPublisher, row.skillPublisherSource = inventorySafeBounded(vendor, 128), "vendor_bundled"
+	case facts.Plugin != nil && facts.Plugin.Author != "":
+		row.skillPublisher, row.skillPublisherSource = facts.Plugin.Author, "plugin_manifest"
+	case facts.Author != "":
+		row.skillPublisher, row.skillPublisherSource = facts.Author, "declared"
+	}
 }
 
 // discoveredMCPEntriesFromReport enumerates per-server MCP inventory
