@@ -1782,12 +1782,11 @@ func actionShellProfileMayDotglob(home string) bool {
 	if _, err := pathStat(home); err != nil || strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "" {
 		return true
 	}
-	files := []string{"/etc/profile", "/etc/bashrc", "/etc/bash.bashrc", "/etc/zshenv", "/etc/zsh/zshenv",
-		"/etc/zprofile", "/etc/zsh/zprofile", "/etc/zshrc", "/etc/zsh/zshrc", "/etc/zlogin", "/etc/zsh/zlogin"}
+	files := actionfacts.ShellStartupSystemPaths()
 	if profiles, err := filepath.Glob("/etc/profile.d/*.sh"); err == nil {
 		files = append(files, profiles...)
 	}
-	for _, name := range []string{".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".profile", ".zshenv", ".zprofile", ".zshrc", ".zlogin"} {
+	for _, name := range actionfacts.ShellStartupHomeNames() {
 		files = append(files, filepath.Join(home, name))
 	}
 	for _, name := range files {

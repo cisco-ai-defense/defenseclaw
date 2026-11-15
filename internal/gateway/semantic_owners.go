@@ -1903,6 +1903,22 @@ func matchesRelativePathAtComponentBoundary(
 	return false
 }
 
+// accountHomeRelative is the part of a path below an account's home: the
+// active user's home, or the home of another account under a home root (/root,
+// /home/<user>, /Users/<user>, C:/Users/<user>). What a file in an account's
+// home does for that account (a login shell reads its startup file, sshd
+// reads its authorized_keys) it does whoever wrote it, so a rule about such a
+// file reads the same relative name in every account's home.
+func accountHomeRelative(facts actionfacts.Facts, candidate actionfacts.PathFact) (string, bool) {
+	if relative, ok := activeHomeRelative(facts, candidate); ok {
+		return relative, true
+	}
+	if resolved := canonicalSemanticPath(semanticPathValue(candidate)); isAbsoluteSemanticPath(resolved) {
+		return liveHomeRelative(resolved)
+	}
+	return "", false
+}
+
 func liveHomeRelative(value string) (string, bool) {
 	value = canonicalSemanticPath(value)
 	for _, prefix := range []string{"~/", "$home/", "${home}/", "/root/"} {

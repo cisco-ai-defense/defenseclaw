@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -228,12 +229,6 @@ func extractionFolder(program string, args []string, static []bool, cwd string) 
 	return filepath.Clean(folder), wide, true
 }
 
-// archiveShellStartupNames are the shell startup files of a home folder.
-var archiveShellStartupNames = map[string]bool{
-	".bashrc": true, ".bash_profile": true, ".bash_login": true, ".bash_aliases": true, ".profile": true,
-	".zshenv": true, ".zprofile": true, ".zshrc": true, ".zlogin": true,
-}
-
 // archiveLandsProtected reports a member file that lands on a protected
 // name below folder: a protected file (authorized keys, the SSH control and
 // key files, the DefenseClaw state, as protectedReachPath reads them), a
@@ -261,7 +256,7 @@ func archiveLandsProtected(members []string, folder, home string, wide bool) boo
 
 // archiveNamesProtected reads a landing path by its names.
 func archiveNamesProtected(target, home string) bool {
-	if archiveShellStartupNames[strings.ToLower(filepath.Base(target))] && filepath.Dir(target) == filepath.Clean(home) {
+	if actionfacts.ShellStartupHomeFile(strings.ToLower(filepath.Base(target))) && filepath.Dir(target) == filepath.Clean(home) {
 		return true
 	}
 	components := strings.Split(strings.ToLower(filepath.ToSlash(target)), "/")

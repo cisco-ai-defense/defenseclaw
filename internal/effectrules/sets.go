@@ -19,6 +19,7 @@ package effectrules
 import (
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
@@ -72,19 +73,6 @@ var agentConfigFolders = []string{
 // agentConfigNames are the protected file names inside an agent folder.
 var agentConfigNames = []string{"settings.json", "settings.local.json", "hooks.json"}
 
-// shellStartupFiles are the user shell startup files (the system /etc copies
-// are added as absolute members in buildSets).
-var shellStartupFiles = []string{
-	".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".profile",
-	".zshenv", ".zprofile", ".zshrc", ".zlogin",
-}
-
-var shellStartupSystemFiles = []string{
-	"/etc/profile", "/etc/bashrc", "/etc/bash.bashrc",
-	"/etc/zshenv", "/etc/zsh/zshenv", "/etc/zprofile", "/etc/zsh/zprofile",
-	"/etc/zshrc", "/etc/zsh/zshrc", "/etc/zlogin", "/etc/zsh/zlogin",
-}
-
 // sshPrivateKeyNames are the default SSH private key names (credentials).
 var sshPrivateKeyNames = []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
 
@@ -120,8 +108,8 @@ func buildSets(home string, flavor effects.Flavor) map[string]protectedSet {
 	sets[SetSSHAuthorizedKeys] = protectedSet{files: akFiles, dirs: []string{ssh}}
 
 	// Shell startup files.
-	rc := append([]string(nil), shellStartupSystemFiles...)
-	for _, name := range shellStartupFiles {
+	rc := actionfacts.ShellStartupSystemPaths()
+	for _, name := range actionfacts.ShellStartupHomeNames() {
 		rc = append(rc, j(home, name))
 	}
 	sets[SetShellRC] = protectedSet{files: rc}

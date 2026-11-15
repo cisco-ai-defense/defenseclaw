@@ -2724,12 +2724,7 @@ func matchesAuthorizedKeys(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	relative, ok := activeHomeRelative(facts, candidate)
-	if !ok {
-		if resolved := canonicalSemanticPath(semanticPathValue(candidate)); isAbsoluteSemanticPath(resolved) {
-			relative, ok = liveHomeRelative(resolved)
-		}
-	}
+	relative, ok := accountHomeRelative(facts, candidate)
 	if ok && authorizedKeysRelative(relative) {
 		return true
 	}
@@ -2755,15 +2750,14 @@ func matchesSafeSSHDirectoryCandidate(
 
 func matchesShellProfileCandidate(value string) bool {
 	value = canonicalSemanticPath(value)
-	if value == "/etc/profile" {
+	if actionfacts.ShellStartupSystemFile(value) {
 		return true
 	}
-	switch pathBase(value) {
-	case ".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc",
-		"config.fish", "profile.ps1", "microsoft.powershell_profile.ps1":
+	switch base := pathBase(value); base {
+	case "config.fish", "profile.ps1", "microsoft.powershell_profile.ps1":
 		return true
 	default:
-		return false
+		return actionfacts.ShellStartupHomeFile(base)
 	}
 }
 
@@ -2772,7 +2766,7 @@ func looksLikeSystemShellProfilePath(value string) bool {
 	if len(value) >= 3 && value[1] == ':' && value[2] == '/' {
 		value = value[2:]
 	}
-	return value == "/etc/profile"
+	return actionfacts.ShellStartupSystemFile(value)
 }
 
 func matchesActiveShellProfile(
@@ -2780,16 +2774,22 @@ func matchesActiveShellProfile(
 	candidate actionfacts.PathFact,
 ) bool {
 	if candidate.Flavor == actionfacts.PathFlavorPOSIX &&
-		canonicalSemanticPath(semanticPathValue(candidate)) == "/etc/profile" {
+		actionfacts.ShellStartupSystemFile(canonicalSemanticPath(semanticPathValue(candidate))) {
 		return true
 	}
-	relative, ok := activeHomeRelative(facts, candidate)
+	// Another account's startup file runs at that account's next login just
+	// as the active user's does (the matching of authorized_keys above reads
+	// the same way): `echo ... >> /root/.bashrc` is persistence in the root
+	// account, whoever the agent runs as.
+	relative, ok := accountHomeRelative(facts, candidate)
 	if !ok {
 		return false
 	}
+	if actionfacts.ShellStartupHomeFile(relative) {
+		return true
+	}
 	switch relative {
-	case ".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc",
-		".config/fish/config.fish",
+	case ".config/fish/config.fish",
 		".config/powershell/profile.ps1",
 		".config/powershell/microsoft.powershell_profile.ps1",
 		"documents/powershell/profile.ps1",
@@ -2821,7 +2821,7 @@ func matchesSafeShellProfileCandidate(
 	// not acquire the authority of /Users/alice/.bashrc.
 	return isAbsoluteSemanticPath(value) &&
 		matchesShellProfileCandidate(value) &&
-		value != "/etc/profile"
+		!actionfacts.ShellStartupSystemFile(value)
 }
 
 func matchesGitHookCandidate(value string) bool {
