@@ -360,7 +360,7 @@ func f16BlockText(t *testing.T, rec *httptest.ResponseRecorder, stream bool) str
 	t.Helper()
 	if stream {
 		s := newBedrockEventStreamText()
-		txt := s.Feed(rec.Body.Bytes())
+		txt := responsePiecesText(s.Feed(rec.Body.Bytes()))
 		s.Finish()
 		if strings.TrimSpace(txt) == "" {
 			t.Fatalf("the block reply carries no text: %q", rec.Body.Bytes())
