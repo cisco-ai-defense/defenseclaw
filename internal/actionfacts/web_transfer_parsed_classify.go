@@ -9076,7 +9076,7 @@ func classifyParsedWgetTransfer(out *parseOutput, command *CommandFact) {
 		// leaves the destination unknown. A wget --post-file without -O was
 		// a partial parse, so its exact upload was never enforceable
 		// (GAP-0595).
-		if name, ok := wgetPlainUploadResponseName(command.Argv, parsed); ok {
+		if name, ok := wgetPlainUploadResponseName(parsed); ok {
 			appendPath(out, command.ID, PathAccessWrite, name)
 			hasDownloadFile = true
 		} else {
@@ -9306,39 +9306,25 @@ func curlOutputHasUnmodeledGlobReference(value string) bool {
 
 // wgetPlainUploadResponseName is the file a plain wget upload saves its
 // response to when it has no -O: the last segment of the URL path, or
-// index.html for an empty path, in the working directory. It reads only the
-// closed set of options that leave that name alone (quiet switches, the
-// certificate switch and the upload source or body itself). Any other
-// option (-P, -r, -x, -N, -c, -E, --content-disposition ...), a query or
-// fragment in the URL, a body-less call or more than one URL leaves the name
-// unknown.
-func wgetPlainUploadResponseName(argv []string, parsed wgetArgvParse) (string, bool) {
+// index.html for an empty path, in the working directory. It reads the
+// option table: only an option that moves or renames the response (-P, -r,
+// -x, -N, -c, -E, -nc, -k, -p, --content-disposition ...) or a file the
+// call reads URLs from leaves the name unknown; timeouts, tries, headers,
+// the user agent, the method and the quiet switches do not. A query or
+// fragment in the URL, a body-less call or more than one URL leaves it
+// unknown too.
+func wgetPlainUploadResponseName(parsed wgetArgvParse) (string, bool) {
 	if !parsed.Complete || len(parsed.Targets) != 1 ||
 		(!parsed.PostDataSet && !parsed.PostFileSet && !parsed.BodyDataSet && !parsed.BodyFileSet) {
 		return "", false
 	}
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" {
-			break
-		}
-		if !strings.HasPrefix(arg, "-") || arg == "-" {
-			continue
-		}
-		switch arg {
-		case "-q", "--quiet", "-nv", "--no-verbose", "-S", "--server-response",
-			"--no-check-certificate":
-			continue
-		case "--post-file", "--body-file", "--post-data", "--body-data":
-			i++
-			continue
-		}
-		if name, _, found := strings.Cut(arg, "="); found {
-			switch name {
-			case "--post-file", "--body-file", "--post-data", "--body-data":
-				continue
-			}
-		}
+	// The option table decides: an option that moves or renames the
+	// response, or makes wget read more URLs, leaves the name unknown; every
+	// other option of the table (timeouts, tries, headers, user agent,
+	// method, quiet switches, address family ...) does not touch it.
+	if parsed.responseMoved || parsed.timestamping || parsed.noClobber ||
+		parsed.convertLinks || parsed.recursive || parsed.pageRequisites ||
+		parsed.OutputSet || parsed.InputFileSet || parsed.ConfigIndirect {
 		return "", false
 	}
 	raw := parsed.Targets[0]

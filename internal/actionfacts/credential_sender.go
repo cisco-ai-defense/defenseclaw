@@ -266,10 +266,22 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 		// read: a network role, an unproven role, a part the projection did
 		// not read.
 		exact := sender.Origin != SenderProjected && sender.Origin != SenderRemoteCopy
+		operands := sender.Operands
+		if !exact && sender.CommandID != 0 && !judgedByUploadRule(facts, byID[sender.CommandID]) {
+			// A projected upload the exact rule cannot judge (a partial or
+			// uncertain parse, another dialect) is read here by the files its
+			// upload options name (GAP-0768).
+			exact = true
+			if files, known := uploadOptionFiles(byID[sender.CommandID]); known {
+				// the option tables name what is sent; the other words
+				// (--key, --cert, a TLS file) are not data
+				operands = files
+			}
+		}
 		if remoteOperandCount(sender.Operands) >= 2 {
 			exact = true // scp -3: the file goes through the local host to a second remote
 		}
-		for _, operand := range sender.Operands {
+		for _, operand := range operands {
 			if exact && credentialPathOperand(operand, facts.CWD, facts.ActiveHome) {
 				return CredentialSenderFile
 			}
@@ -291,6 +303,14 @@ func credentialHandedToSender(facts Facts) CredentialSenderReason {
 		}
 	}
 	return reason
+}
+
+// judgedByUploadRule reports a command the exact credential-file upload rule
+// reads (projectCredentialFileUploads): a complete parse, a POSIX command that
+// runs, with no uncertain control flow.
+func judgedByUploadRule(facts Facts, command CommandFact) bool {
+	return facts.Authoritative() && command.Dialect == DialectPOSIX &&
+		command.Effect == EffectExecute && !command.ControlFlowUncertain
 }
 
 // credentialToRemoteOperand reads a command no network program of the
