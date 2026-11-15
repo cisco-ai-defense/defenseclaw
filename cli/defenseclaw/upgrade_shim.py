@@ -110,6 +110,17 @@ NEWER_CONFIG_KEYS = (
     ("routing.route_only", (1, 0, 10)),
     ("routing.sensitive", (1, 0, 10)),
     ("routing.systemone", (1, 0, 10)),
+    ("guardrail.history_seen_max", (1, 0, 10)),
+    ("guardrail.max_body_values", (1, 0, 10)),
+    ("openshell.admin.actor_secrets", (1, 0, 10)),
+    ("openshell.admin.ask_hosts", (1, 0, 10)),
+    ("openshell.admin.ask_timeout", (1, 0, 10)),
+    ("openshell.admin.idle_suspend_after", (1, 0, 10)),
+    ("openshell.admin.runtimes", (1, 0, 10)),
+    ("openshell.admin.sandbox_class", (1, 0, 10)),
+    ("openshell.admin.unattended_asks", (1, 0, 10)),
+    ("openshell.admin.url_rules", (1, 0, 10)),
+    ("substrate", (1, 0, 10)),
 )
 # Where a downgrade keeps the keys it set aside, in the data folder:
 # {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
