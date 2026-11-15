@@ -122,3 +122,38 @@ func TestSkillInventoryRecordsListEveryAgentOfASharedFolder(t *testing.T) {
 		t.Fatal("each agent keeps its own component id")
 	}
 }
+
+func TestSkillInventoryRecordsNameTheBestPublisherEvidence(t *testing.T) {
+	enabled := false
+	entry := func(name string, facts inventory.AISkillFacts) inventory.AIEvidence {
+		facts.ContentStatus = inventory.SkillContentTooLarge
+		return inventory.AIEvidence{Type: "skill_entry", Basename: name, Skill: &facts}
+	}
+	plugin := &inventory.AISkillPlugin{ID: "pr-review@official", Version: "1.0.1", Author: "Anthropic", Enabled: &enabled}
+	signal := skillReportSignal("codex", "codex", "sha256:"+strings.Repeat("1", 64),
+		entry("bundled", inventory.AISkillFacts{Scope: inventory.SkillScopeBundled, Author: "ignored"}),
+		entry("plugin", inventory.AISkillFacts{Scope: inventory.SkillScopePlugin, Author: "ignored", Plugin: plugin}),
+		entry("declared", inventory.AISkillFacts{Scope: inventory.SkillScopeUser, Author: "Jane Doe"}),
+		entry("anon", inventory.AISkillFacts{Scope: inventory.SkillScopeUser}),
+	)
+	signal.Vendor = "OpenAI"
+	bodies := skillRecordBodies(t, discoveredEntriesFromReport(
+		inventory.AIDiscoveryReport{Signals: []inventory.AISignal{signal}}, inventory.SignalSkill, "skill"))
+	field := func(key, name string) any { return bodies[key+"/codex"]["defenseclaw.inventory.skill."+name] }
+	for key, want := range map[string][2]any{
+		"bundled":  {"OpenAI", "vendor_bundled"},
+		"plugin":   {"Anthropic", "plugin_manifest"},
+		"declared": {"Jane Doe", "declared"},
+		"anon":     {nil, "unknown"},
+	} {
+		if got := [2]any{field(key, "publisher"), field(key, "publisher_source")}; got != want {
+			t.Errorf("%s publisher = %v, want %v", key, got, want)
+		}
+	}
+	if got := [3]any{field("plugin", "plugin"), field("plugin", "plugin_version"), field("plugin", "plugin_enabled")}; got != [3]any{"pr-review@official", "1.0.1", false} {
+		t.Errorf("plugin fields = %v", got)
+	}
+	if field("declared", "plugin") != nil {
+		t.Error("a skill no plugin ships has no plugin field")
+	}
+}

@@ -34,7 +34,7 @@ func writeSkillFiles(t *testing.T, root string, files map[string]string) {
 
 func mustHashSkill(t *testing.T, root string) string {
 	t.Helper()
-	hash, status, _ := hashSkillFolder(root, maxSkillBytes)
+	hash, status, _, _ := hashSkillFolder(root, maxSkillBytes)
 	if status != SkillContentOK || !strings.HasPrefix(hash, "sha256:") {
 		t.Fatalf("hashSkillFolder(%s) = %q, %q", root, hash, status)
 	}
@@ -108,7 +108,7 @@ func TestHashSkillFolderNeverFollowsLinks(t *testing.T) {
 	if err := os.Symlink(skill, linkedSkill); err != nil {
 		t.Fatal(err)
 	}
-	if hash, status, _ := hashSkillFolder(linkedSkill, maxSkillBytes); hash != "" || status != SkillContentSymlink {
+	if hash, status, _, _ := hashSkillFolder(linkedSkill, maxSkillBytes); hash != "" || status != SkillContentSymlink {
 		t.Fatalf("linked skill folder = %q, %q", hash, status)
 	}
 }
@@ -124,7 +124,7 @@ func TestHashSkillFolderLimits(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if _, status, _ := hashSkillFolder(many, maxSkillBytes); status != SkillContentTooLarge {
+		if _, status, _, _ := hashSkillFolder(many, maxSkillBytes); status != SkillContentTooLarge {
 			t.Fatalf("%d %s: status %q", maxSkillEntries+1, name, status)
 		}
 	}
@@ -138,12 +138,30 @@ func TestHashSkillFolderLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = file.Close()
-	if _, status, _ := hashSkillFolder(big, maxSkillBytes); status != SkillContentTooLarge {
+	if _, status, _, _ := hashSkillFolder(big, maxSkillBytes); status != SkillContentTooLarge {
 		t.Fatalf("oversized file: status %q", status)
 	}
 
-	if _, status, _ := hashSkillFolder(filepath.Join(big, "missing"), maxSkillBytes); status != SkillContentUnreadable {
+	if _, status, _, _ := hashSkillFolder(filepath.Join(big, "missing"), maxSkillBytes); status != SkillContentUnreadable {
 		t.Fatalf("missing folder: status %q", status)
+	}
+}
+
+func TestSkillAuthor(t *testing.T) {
+	for manifest, want := range map[string]string{
+		"---\nname: a\nauthor: Acme Corp\n---\n":               "Acme Corp",
+		"---\nname: a\nauthor: \"Acme # Labs\"\n---\n":         "Acme # Labs",
+		"---\nmetadata:\n  author: Jane Doe # owner\n---\n":    "Jane Doe",
+		"---\nother:\n  author: not-metadata\n---\n":           "",
+		"---\nname: a\n---\nauthor: after the frontmatter\n":   "",
+		"no frontmatter\nauthor: x\n":                          "",
+		"\ufeff---\r\nauthor: Windows Line Endings\r\n---\r\n": "Windows Line Endings",
+		"---\nauthor: bad\x07bell\n---\n":                      "",
+		"---\nauthor: " + strings.Repeat("é", 100) + "\n---\n": strings.Repeat("é", maxSkillAuthorBytes/2),
+	} {
+		if got := skillAuthor([]byte(manifest)); got != want {
+			t.Errorf("skillAuthor(%q) = %q, want %q", manifest, got, want)
+		}
 	}
 }
 
@@ -246,6 +264,9 @@ func TestValidateSkillFactsRejectsForgedFields(t *testing.T) {
 		"scope":         func(f *AISkillFacts) { f.Scope = "system" },
 		"absolute path": func(f *AISkillFacts) { f.Location = "/Users/alice/.claude/skills/x" },
 		"control char":  func(f *AISkillFacts) { f.Location = "~/x\n" },
+		"long author":   func(f *AISkillFacts) { f.Author = strings.Repeat("a", maxSkillAuthorBytes+1) },
+		"plugin id":     func(f *AISkillFacts) { f.Plugin = &AISkillPlugin{ID: "../x@y"} },
+		"plugin text":   func(f *AISkillFacts) { f.Plugin = &AISkillPlugin{ID: "x@y", Author: "a\x07"} },
 	} {
 		facts := good
 		mutate(&facts)

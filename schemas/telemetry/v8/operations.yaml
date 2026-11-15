@@ -2355,8 +2355,8 @@ attributes:
   normalization:
     id: enum-v1
     overrides:
-      enum: [user, project, bundled, managed]
-    notes: user is a skill in a user skill folder, project a skill in a repository skill folder, bundled a skill the agent vendor ships, managed a skill in an admin folder outside every home such as /etc/codex/skills
+      enum: [user, project, bundled, managed, plugin]
+    notes: user is a skill in a user skill folder, project a skill in a repository skill folder, bundled a skill the agent vendor ships, managed a skill in an admin folder outside every home such as /etc/codex/skills, plugin a skill an installed agent plugin ships
   introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.skill.location
   type: string
@@ -2388,6 +2388,76 @@ attributes:
     id: bounded-v1
     overrides: {max_utf8_bytes: 1040, max_item_utf8_bytes: 64, max_items: 16}
     notes: Sorted connector slugs, at most 16; a shared folder such as ~/.agents/skills lists every agent that reads it, and each agent still gets its own record keyed by its own component id
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.publisher
+  type: string
+  brief: Best-effort publisher of one discovered skill
+  examples: [OpenAI]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: The agent vendor for a bundled skill, else the author of the plugin that ships it, else the author its SKILL.md declares; publisher_source says which. Absent when unknown
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.publisher_source
+  type: string
+  brief: How the skill publisher was determined
+  examples: [declared]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [vendor_bundled, plugin_manifest, declared, unknown]
+    notes: vendor_bundled is a skill the agent ships in its own bundled folder; plugin_manifest is the author in the manifest of the installed plugin that ships the skill; declared is the skill's own unverified SKILL.md claim
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.plugin
+  type: string
+  brief: Installed agent plugin that ships the skill
+  examples: [pr-review-toolkit@claude-plugins-official]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: name@marketplace as the agent records it (Claude Code installed_plugins.json, Codex config.toml, Copilot CLI installed-plugins, Cursor plugins/cache, or name@local for Cursor plugins/local); absent for a skill no plugin ships
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.plugin_version
+  type: string
+  brief: Version of the installed plugin that ships the skill
+  examples: [1.0.1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: The plugin manifest version, else the version the agent records or its install folder name
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.plugin_enabled
+  type: boolean
+  brief: Whether the agent has the plugin that ships the skill turned on
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: From Claude Code enabledPlugins or Codex config.toml; absent when the agent records no state
   introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.connector.identifiers
   type: array
@@ -9194,6 +9264,16 @@ groups:
   - ref: defenseclaw.inventory.skill.location
     requirement_level: recommended
   - ref: defenseclaw.inventory.skill.agents
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.publisher
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.publisher_source
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.plugin
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.plugin_version
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.skill.plugin_enabled
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.publisher
     requirement_level: recommended
