@@ -53,15 +53,43 @@ var (
 	hermesTestPath = os.Getenv("PATH")
 )
 
-// hermesLookPython finds python3 on the PATH the process started with.
+// hermesLookPython finds the Python the plugin scanner runs under, on the PATH
+// the process started with: python3 with an execute bit on Unix; on Windows
+// python.exe, python3.exe or the py.exe launcher (in that order), skipping the
+// Microsoft Store aliases under WindowsApps, which start the Store instead of
+// Python. Hermes runs on Windows, so its GAP-0808 bytecode tests must run
+// there too (rel-1-0-10:GAP-0808).
 func hermesLookPython() (string, error) {
-	for _, dir := range filepath.SplitList(hermesTestPath) {
-		candidate := filepath.Join(dir, "python3")
-		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+	names := []string{"python3"}
+	if runtime.GOOS == "windows" {
+		names = []string{"python.exe", "python3.exe", "py.exe"}
+	}
+	for _, name := range names {
+		for _, dir := range filepath.SplitList(hermesTestPath) {
+			if runtime.GOOS == "windows" && strings.Contains(strings.ToLower(dir), `\microsoft\windowsapps`) {
+				continue
+			}
+			candidate := filepath.Join(dir, name)
+			info, err := os.Stat(candidate)
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
+				continue
+			}
 			return candidate, nil
 		}
 	}
 	return "", errors.New("python3 not found")
+}
+
+// hermesPythonArgs are the arguments that make hermesPythonPath run Python 3:
+// the py.exe launcher needs -3.
+func hermesPythonArgs(args ...string) []string {
+	if strings.EqualFold(filepath.Base(hermesPythonPath), "py.exe") {
+		return append([]string{"-3"}, args...)
+	}
+	return args
 }
 
 // hermesScannerLoader returns the loader the watcher uses in production,
@@ -108,7 +136,7 @@ func runHermesManifestCommand(manifests map[string][]byte) ([]string, error) {
 sys.path.insert(0, sys.argv[1])
 from defenseclaw.commands.cmd_plugin import plugin
 plugin.main(["manifest-entrypoints"], standalone_mode=False)`
-	cmd := exec.Command(hermesPythonPath, "-I", "-c", script, cli)
+	cmd := exec.Command(hermesPythonPath, hermesPythonArgs("-I", "-c", script, cli)...)
 	cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
 	cmd.Stdin = bytes.NewReader(request)
 	var stderr bytes.Buffer
