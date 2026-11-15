@@ -18,6 +18,7 @@ package actionfacts
 
 import (
 	"path"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -273,11 +274,16 @@ func hereDocAssignmentWord(word string) bool {
 type hereDocBindings struct {
 	// unresolved: a binding the reading cannot follow: a sourced file, eval
 	// or trap code that is not static or does not parse, a command word made
-	// at run time, enable -f, a statement that does not parse.
+	// at run time, enable -f, a name reference (declare -n), a statement that
+	// does not parse.
 	unresolved bool
-	// resolution: PATH (or zsh path) or another name that changes what a
-	// word runs (resolutionVariable) is bound, by an assignment in any
-	// spelling, a declaration, a for name, read, mapfile or printf -v.
+	// resolution: a variable that controls command lookup (PATH, zsh path,
+	// the startup and loader variables, BASH_CMDS, BASH_ALIASES: see
+	// hereDocResolutionName) is written in any form the parser reads: an
+	// assignment, a declaration, a for or select name, read, mapfile,
+	// printf -v, getopts, unset, let, arithmetic or an expansion that
+	// assigns, behind any command or builtin prefix, or a name made at run
+	// time (bind).
 	resolution bool
 	// names are the function, alias, hash and enable names the text defines.
 	names map[string]bool
@@ -298,9 +304,17 @@ func (b *hereDocBindings) renames(word string) bool {
 }
 
 // hereDocResolutionName reports a name whose value changes the program a
-// word runs.
+// word runs or the file a shell reads first: PATH and the other resolution
+// variables (resolutionVariable: IFS, ENV, BASH_ENV, LD_*, DYLD_*), the zsh
+// path array and the function path, the tables bash keeps of the program
+// and the alias of a name (BASH_CMDS, BASH_ALIASES), and the zsh startup
+// directory (rel-1-0-10:GAP-0927).
 func hereDocResolutionName(name string) bool {
-	return name == "path" || resolutionVariable(name)
+	switch name {
+	case "path", "fpath", "FPATH", "BASH_CMDS", "BASH_ALIASES", "ZDOTDIR":
+		return true
+	}
+	return resolutionVariable(name)
 }
 
 // hereDocCallBindings reads statements with the parser and the shared
@@ -319,7 +333,22 @@ func hereDocCallBindings(statements []string) *hereDocBindings {
 	return bindings
 }
 
-// read adds the bindings of node (a parsed statement or eval or trap code).
+// bind is the one rule of the reading (rel-1-0-10:GAP-0927): a write to a
+// variable that controls how a command word is looked up is a binding that
+// may rename the consumer, and a write to a name made at run time may be
+// that variable. name is the written name as the text spells it (an array
+// subscript and a backslash are not part of the name).
+func (b *hereDocBindings) bind(name string, static bool) {
+	name, _, _ = strings.Cut(strings.ReplaceAll(name, `\`, ""), "[")
+	if !static || hereDocResolutionName(name) {
+		b.resolution = true
+	}
+}
+
+// read adds the bindings of node (a parsed statement or eval or trap code):
+// every write the parser can see to a variable that controls command
+// lookup, every change of the function, alias, hash or enable table, and
+// every name reference, which can turn any later write into either.
 func (b *hereDocBindings) read(node syntax.Node, depth int) {
 	if depth > maxControlNesting {
 		b.unresolved = true
@@ -330,20 +359,74 @@ func (b *hereDocBindings) read(node syntax.Node, depth int) {
 		case *syntax.Assign:
 			switch {
 			case typed.Name != nil && !typed.Naked:
-				b.resolution = b.resolution || hereDocResolutionName(typed.Name.Value)
+				b.bind(typed.Name.Value, true)
 			case typed.Name == nil && typed.Value != nil:
 				// A declaration word that is no plain assignment
-				// (export PA""TH=x, declare "$N=x"): its name is its
-				// static text before =, or any name.
-				// An unquoted backslash in the name is removed by the shell
-				// (export PA\TH=x binds PATH).
+				// (export PA""TH=x, declare "$N=x"): its name is its static
+				// text before =, or any name. An option is no name.
 				text, static := simpleStaticWord(typed.Value, nil)
+				if static && strings.HasPrefix(text, "-") {
+					break
+				}
 				name, _, _ := strings.Cut(text, "=")
-				name = strings.ReplaceAll(name, "\\", "")
-				b.resolution = b.resolution || !static || hereDocResolutionName(name)
+				b.bind(name, static)
+			}
+		case *syntax.DeclClause:
+			if typed.Variant != nil && typed.Variant.Value == "nameref" {
+				b.unresolved = true
+			}
+			if typed.Variant != nil && hereDocDeclaresLocal(typed.Variant.Value) {
+				for _, arg := range typed.Args {
+					switch {
+					case arg.Name != nil && arg.Naked:
+						// local PATH, declare PATH: a new variable of that
+						// name, though it has no value.
+						b.bind(arg.Name.Value, true)
+					case arg.Name == nil && arg.Value != nil:
+						// declare -n: a name reference.
+						if text, static := simpleStaticWord(arg.Value, nil); static {
+							b.namerefOption(text)
+						}
+					}
+				}
+			}
+		case *syntax.LetClause:
+			// let "PATH=5": a quoted expression is a word, not a parsed
+			// assignment.
+			for _, expr := range typed.Exprs {
+				if word, isWord := expr.(*syntax.Word); isWord {
+					text, static := simpleStaticWord(word, nil)
+					if !static || hereDocMentionsResolutionName(text) {
+						b.resolution = true
+					}
+				}
 			}
 		case *syntax.WordIter:
-			b.resolution = b.resolution || typed.Name != nil && hereDocResolutionName(typed.Name.Value)
+			if typed.Name != nil {
+				b.bind(typed.Name.Value, true)
+			}
+		case *syntax.CoprocClause:
+			if typed.Name != nil {
+				text, static := simpleStaticWord(typed.Name, nil)
+				b.bind(text, static)
+			}
+		case *syntax.BinaryArithm:
+			if hereDocArithAssigns(typed.Op.String()) {
+				b.bindArith(typed.X)
+			}
+		case *syntax.UnaryArithm:
+			if typed.Op == syntax.Inc || typed.Op == syntax.Dec {
+				b.bindArith(typed.X)
+			}
+		case *syntax.ParamExp:
+			if typed.Exp != nil && (typed.Exp.Op == syntax.AssignUnset || typed.Exp.Op == syntax.AssignUnsetOrNull) {
+				// ${PATH:=/x}
+				if typed.Excl || typed.Param == nil {
+					b.resolution = true
+				} else {
+					b.bind(typed.Param.Value, true)
+				}
+			}
 		case *syntax.FuncDecl:
 			if typed.Name != nil {
 				b.names[typed.Name.Value] = true
@@ -358,9 +441,95 @@ func (b *hereDocBindings) read(node syntax.Node, depth int) {
 	})
 }
 
-// readCall adds the names a call defines: alias NAME=..., hash -p FILE
-// NAME, enable NAME, the code of eval and trap, and every name for a sourced
-// file, enable -f or a command word made at run time.
+// hereDocDeclaresLocal reports a declaration keyword that makes a variable
+// of the name it gets without a value.
+func hereDocDeclaresLocal(variant string) bool {
+	return variant == "declare" || variant == "typeset" || variant == "local"
+}
+
+// hereDocArithAssigns reports the operator text of an arithmetic assignment
+// (=, +=, <<=, **=), not of a comparison.
+func hereDocArithAssigns(op string) bool {
+	switch op {
+	case "==", "!=", "<=", ">=":
+		return false
+	}
+	return strings.HasSuffix(op, "=")
+}
+
+// bindArith binds the target of an arithmetic assignment: a name, or any
+// name when the target is not a plain word.
+func (b *hereDocBindings) bindArith(target syntax.ArithmExpr) {
+	word, isWord := target.(*syntax.Word)
+	if !isWord {
+		b.resolution = true
+		return
+	}
+	text, static := simpleStaticWord(word, nil)
+	b.bind(text, static)
+}
+
+// namerefOption marks a declaration option group that makes a name
+// reference (declare -n, local -rn): the reference may point at any name, so
+// no later write is read (unresolved).
+func (b *hereDocBindings) namerefOption(option string) {
+	if strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "--") && strings.ContainsRune(option, 'n') {
+		b.unresolved = true
+	}
+}
+
+// hereDocOption is the value of an option that takes one: the text after
+// the letter in the same word (-vPATH), or the next word (-v PATH).
+type hereDocOption struct {
+	letter byte
+	text   string
+	static bool
+}
+
+// hereDocParse splits the words of a builtin call from index from into its
+// operands (indexes) and the values of the options in valued, the way the
+// builtins read them: a word that starts with - is a group of letters up to
+// the first that takes a value, the rest of the word is the value, or the
+// next word when the letter ends the group; -- ends the options. A word made
+// at run time is an operand. firstOperandEnds stops at the first operand
+// (printf: what follows the format is data).
+func hereDocParse(words []string, static []bool, from int, valued string, firstOperandEnds bool) (operands []int, options []hereDocOption, groups []string) {
+	flags := true
+	for index := from; index < len(words); index++ {
+		word := words[index]
+		switch {
+		case !static[index] || !flags || len(word) < 2 || word[0] != '-':
+			operands = append(operands, index)
+			if firstOperandEnds {
+				return operands, options, groups
+			}
+		case word == "--":
+			flags = false
+		default:
+			groups = append(groups, word)
+			for at := 1; at < len(word); at++ {
+				if strings.IndexByte(valued, word[at]) < 0 {
+					continue
+				}
+				if at+1 < len(word) {
+					options = append(options, hereDocOption{word[at], word[at+1:], true})
+				} else if index+1 < len(words) {
+					index++
+					options = append(options, hereDocOption{word[at], words[index], static[index]})
+				}
+				break
+			}
+		}
+	}
+	return operands, options, groups
+}
+
+// readCall adds what a call changes: a variable that controls command
+// lookup (printf -v, read, mapfile, getopts, unset, let, wait -p, a
+// declaration), the function, alias, hash and enable tables, the code of
+// eval and trap, and every name for a sourced file, enable -f or a command
+// word made at run time. The words are read as the shell reads them: past
+// the command and builtin prefixes, attached option values included.
 func (b *hereDocBindings) readCall(call *syntax.CallExpr, depth int) {
 	if len(call.Args) == 0 {
 		return
@@ -385,64 +554,119 @@ func (b *hereDocBindings) readCall(call *syntax.CallExpr, depth int) {
 		b.unresolved = true
 		return
 	}
-	operands := func(skipValue string) []int {
-		var found []int
-		for index := at + 1; index < len(words); index++ {
+	// target binds every name of operands, or any name for one made at run
+	// time.
+	target := func(operands []int) {
+		for _, index := range operands {
+			b.bind(words[index], static[index])
+		}
+	}
+	// unresolvedOperands marks a table change whose operand is made at run
+	// time.
+	unresolvedOperands := func(operands []int) {
+		for _, index := range operands {
 			if !static[index] {
 				b.unresolved = true
-				return nil
 			}
-			if strings.HasPrefix(words[index], "-") {
-				if strings.ContainsAny(words[index][1:], skipValue) {
-					index++
-				}
-				continue
-			}
-			found = append(found, index)
 		}
-		return found
 	}
 	switch words[at] {
-	case "export", "declare", "typeset", "local", "readonly":
-		// A declaration the parser reads as a plain call (export PA\TH=x):
-		// each NAME=value word, after the shell removes its backslashes,
-		// or any name for a word made at run time.
-		for index := at + 1; index < len(words); index++ {
-			if !static[index] {
-				b.resolution = true
-				continue
+	case "printf":
+		// printf -v NAME FORMAT ARGS: only the options before the format.
+		_, options, _ := hereDocParse(words, static, at+1, "v", true)
+		for _, option := range options {
+			if option.letter == 'v' {
+				b.bind(option.text, option.static)
 			}
-			if name, _, cut := strings.Cut(words[index], "="); cut && !strings.HasPrefix(name, "-") &&
-				hereDocResolutionName(strings.ReplaceAll(name, `\`, "")) {
+		}
+	case "read", "mapfile", "readarray":
+		valued := "dinNptu"
+		if words[at] != "read" {
+			valued = "dnOsuCc"
+		}
+		operands, options, _ := hereDocParse(words, static, at+1, valued, false)
+		target(operands)
+		for _, option := range options {
+			if option.letter == 'a' && words[at] == "read" {
+				// read -a NAME fills the array NAME.
+				b.bind(option.text, option.static)
+			}
+		}
+	case "wait":
+		_, options, _ := hereDocParse(words, static, at+1, "p", false)
+		for _, option := range options {
+			if option.letter == 'p' {
+				b.bind(option.text, option.static)
+			}
+		}
+	case "getopts":
+		// getopts OPTSTRING NAME: the second operand is the variable.
+		operands, _, _ := hereDocParse(words, static, at+1, "", false)
+		if len(operands) > 1 {
+			target(operands[1:2])
+		}
+	case "unset":
+		operands, _, _ := hereDocParse(words, static, at+1, "", false)
+		target(operands)
+	case "let":
+		// Every word is an arithmetic expression that may assign.
+		for index := at + 1; index < len(words); index++ {
+			if !static[index] || hereDocMentionsResolutionName(words[index]) {
 				b.resolution = true
 			}
 		}
+	case "export", "declare", "typeset", "local", "readonly":
+		// A declaration the parser reads as a plain call (export PA\TH=x):
+		// each NAME=value word, after the shell removes its backslashes, or
+		// any name for a word made at run time.
+		operands, _, groups := hereDocParse(words, static, at+1, "", false)
+		if hereDocDeclaresLocal(words[at]) {
+			for _, group := range groups {
+				b.namerefOption(group)
+			}
+		}
+		for _, index := range operands {
+			name, _, assigned := strings.Cut(words[index], "=")
+			if static[index] && !assigned && !hereDocDeclaresLocal(words[at]) {
+				// export PATH, readonly PATH: no new value.
+				continue
+			}
+			b.bind(name, static[index])
+		}
 	case "alias":
-		for _, index := range operands("") {
-			if name, _, cut := strings.Cut(words[index], "="); cut {
+		operands, _, _ := hereDocParse(words, static, at+1, "", false)
+		unresolvedOperands(operands)
+		for _, index := range operands {
+			if name, _, cut := strings.Cut(words[index], "="); cut && static[index] {
 				b.names[name] = true
 			}
 		}
 	case "hash":
 		// hash -p FILE NAME makes NAME run FILE; hash NAME only looks NAME
 		// up on PATH.
+		operands, _, groups := hereDocParse(words, static, at+1, "pt", false)
+		unresolvedOperands(operands)
 		path := false
-		for index := at + 1; index < len(words); index++ {
-			path = path || static[index] && strings.HasPrefix(words[index], "-") && strings.ContainsRune(words[index], 'p')
+		for _, group := range groups {
+			path = path || strings.ContainsRune(group, 'p')
 		}
-		for _, index := range operands("pt") {
-			if path {
+		for _, index := range operands {
+			if path && static[index] {
 				b.names[words[index]] = true
 			}
 		}
 	case "enable":
-		for index := at + 1; index < len(words); index++ {
-			if static[index] && strings.HasPrefix(words[index], "-") && strings.ContainsRune(words[index], 'f') {
+		operands, _, groups := hereDocParse(words, static, at+1, "", false)
+		unresolvedOperands(operands)
+		for _, group := range groups {
+			if strings.ContainsRune(group, 'f') {
 				b.unresolved = true
 			}
 		}
-		for _, index := range operands("") {
-			b.names[words[index]] = true
+		for _, index := range operands {
+			if static[index] {
+				b.names[words[index]] = true
+			}
 		}
 	case ".", "source":
 		b.unresolved = true
@@ -462,6 +686,14 @@ func (b *hereDocBindings) readCall(call *syntax.CallExpr, depth int) {
 		}
 		b.read(file, depth+1)
 	}
+}
+
+// hereDocMentionsResolutionName reports an arithmetic word (an argument of
+// let) that spells a name of hereDocResolutionName.
+func hereDocMentionsResolutionName(word string) bool {
+	return slices.ContainsFunc(strings.FieldsFunc(word, func(c rune) bool {
+		return c != '_' && (c < '0' || c > '9') && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z')
+	}), hereDocResolutionName)
 }
 
 // hereDocShellConsumer reads a shell's arguments as the shell does: options
