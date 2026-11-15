@@ -81,8 +81,12 @@ func launcherStatement(source string, words []layoutWord, depth int) bool {
 // empty words, a start title and the operand a flag takes; a word that follows
 // a flag is read as that operand and as the command both, since the flag's
 // arity is the wrapper's.
+//
+// cmd's start takes its first quoted word as the window title: in an argv,
+// which carries no quotes, the first word after start's switches may be the
+// title too (launcherStarts reads it both ways, rel-1-0-10:GAP-0857).
 func launcherCommand(source string, words []layoutWord, first, depth int) bool {
-	wrapped, afterFlag, wrapper := false, false, ""
+	wrapped, afterFlag, wrapper, titled := false, false, "", false
 	for index := first; index < len(words); index++ {
 		word := words[index]
 		if launcherWord(source, word) {
@@ -100,10 +104,13 @@ func launcherCommand(source string, words []layoutWord, first, depth int) bool {
 			if (name == "command" || name == "builtin") && queryOnlyCommand(words[index+1:]) {
 				return false
 			}
-			wrapped, afterFlag, wrapper = true, false, name
+			wrapped, afterFlag, wrapper, titled = true, false, name, false
 		case !wrapped:
 			return false
 		case launcherPrefix(word, wrapper):
+			if wrapper == "start" && (word.literal == "" || word.quoted) {
+				titled = true
+			}
 			afterFlag = launcherFlag(word)
 		case afterFlag:
 			// env -S takes a command text as its operand.
@@ -111,6 +118,8 @@ func launcherCommand(source string, words []layoutWord, first, depth int) bool {
 				return true
 			}
 			afterFlag = false
+		case wrapper == "start" && !titled:
+			titled = true
 		default:
 			return false
 		}

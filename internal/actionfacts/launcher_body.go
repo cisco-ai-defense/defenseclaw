@@ -65,17 +65,39 @@ type LauncherCall struct {
 // screen uses (launcherWrapper, launcherPrefix, launcherFlag in
 // host_launcher_scan.go), so the screen and this reader name the same
 // launcher (rel-1-0-10:GAP-0805). Then ShellLauncherBody's grammar reads the
-// script.
+// script. It is the first of ShellLauncherCalls.
 func ShellLauncherCall(argv []string) (LauncherCall, bool) {
-	start, ok := launcherAt(argv)
-	if !ok {
+	calls := ShellLauncherCalls(argv)
+	if len(calls) == 0 {
 		return LauncherCall{}, false
 	}
+	return calls[0], true
+}
+
+// ShellLauncherCalls is every launcher an argv may run, in word order: a
+// word that may be a wrapper flag's operand or a start title as well as the
+// launcher (sudo -u cmd, env -u pwsh, timeout -s sh, xargs -I bash, wsl -d
+// cmd, start "<title>") is read both ways, as the screen reads it, so a
+// launcher after it is read too (rel-1-0-10:GAP-0857). Each reading whose
+// launcher grammar gives a script is one call; the caller judges each and
+// keeps the strongest proven verdict.
+func ShellLauncherCalls(argv []string) []LauncherCall {
+	var calls []LauncherCall
+	for _, start := range launcherStarts(argv) {
+		if call, ok := shellLauncherCallAt(argv, start); ok {
+			calls = append(calls, call)
+		}
+	}
+	return calls
+}
+
+func shellLauncherCallAt(argv []string, start int) (LauncherCall, bool) {
 	call := LauncherCall{Start: start}
 	launcher := argv[start:]
 	if len(launcher) < 2 || strings.TrimSpace(launcher[0]) != launcher[0] || launcher[0] == "" {
 		return LauncherCall{}, false
 	}
+	ok := false
 	switch launcherProgram(launcher[0]) {
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
 		call.Dialect = DialectPowerShell
@@ -92,16 +114,37 @@ func ShellLauncherCall(argv []string) (LauncherCall, bool) {
 	return call, ok
 }
 
-// launcherAt is the index of the launcher word an argv runs (see
-// ShellLauncherCall). Leading assignments are skipped; a word that follows a
-// wrapper flag is read as the flag's operand unless it is a launcher (the
-// screen reads it as both). command -v and -V only print.
-func launcherAt(argv []string) (int, bool) {
-	wrapper, afterFlag := "", false
+// maxLauncherReadings bounds the launcher words one argv is read at. Each
+// one past the first follows a word read both ways (an operand or a title),
+// so a wrapper chain longer than this is a crafted one; the screen still
+// names it.
+const maxLauncherReadings = 4
+
+// launcherStarts are the indexes of the launcher words an argv may run (see
+// ShellLauncherCalls). Leading assignments are skipped. A word in an operand
+// slot (after a wrapper flag) or in the start title slot is read as the
+// launcher when it names one, and as the operand or title all the same, so
+// the walk goes on past it. cmd's start takes its first quoted word as the
+// window title and any other first word as the program: an argv carries no
+// quotes, so the first word after start's switches is read both ways, and
+// start has one title. command -v and -V only print.
+func launcherStarts(argv []string) []int {
+	var starts []int
+	wrapper, afterFlag, titled := "", false, false
 	for index := 0; index < len(argv) && index < maxLauncherTextWords; index++ {
 		literal := argv[index]
+		titleSlot := wrapper == "start" && !titled
 		if literal != "" && launcherProgramWord(literal) {
-			return index, true
+			starts = append(starts, index)
+			if !afterFlag && !titleSlot || len(starts) >= maxLauncherReadings {
+				return starts
+			}
+			if afterFlag {
+				afterFlag = false
+			} else {
+				titled = true
+			}
+			continue
 		}
 		word := layoutWord{literal: literal, plain: true, assign: assignmentNameAt(literal, 0) != ""}
 		name := ""
@@ -112,21 +155,26 @@ func launcherAt(argv []string) (int, bool) {
 		case name != "" && launcherWrapper(name):
 			if (name == "command" || name == "builtin") && index+1 < len(argv) &&
 				layoutOptions(argv[index+1]) && strings.ContainsAny(argv[index+1], "vV") {
-				return 0, false
+				return starts
 			}
-			wrapper, afterFlag = name, false
+			wrapper, afterFlag, titled = name, false, false
 		case wrapper == "" && word.assign:
 		case wrapper == "":
-			return 0, false
+			return starts
 		case launcherPrefix(word, wrapper):
+			if wrapper == "start" && literal == "" {
+				titled = true
+			}
 			afterFlag = launcherFlag(word)
 		case afterFlag:
 			afterFlag = false
+		case titleSlot:
+			titled = true
 		default:
-			return 0, false
+			return starts
 		}
 	}
-	return 0, false
+	return starts
 }
 
 // launcherProgramWord reports a shell launcher program at any path.
@@ -260,34 +308,43 @@ func ShellLauncherBodyOfText(text string) (body string, dialect Dialect, ok bool
 	return call.Body, call.Dialect, ok
 }
 
-// ShellLauncherCallOfText reads the first launcher a command string runs, in
-// any of its first statements, behind any wrapper ShellLauncherCall reads
-// (`echo x | xargs pwsh -c '...'`, `start "" powershell -Command '...'`):
-// each statement is split into words as PowerShell splits it (single
-// quotes, in which a doubled quote is one quote, and double quotes, in which
-// a backtick quote or a doubled quote is one quote) up to its statement or
-// redirect operator outside quotes (newline, ; | & < >). A leading call
-// operator & is skipped. words are the words of that statement and
-// statement its index.
+// ShellLauncherCallOfText is the first of ShellLauncherCallsOfText.
 func ShellLauncherCallOfText(text string) (call LauncherCall, words []string, statement int, ok bool) {
-	if text == "" || len(text) > maxLauncherTextBytes {
+	calls, words, statement, ok := ShellLauncherCallsOfText(text)
+	if !ok {
 		return LauncherCall{}, nil, 0, false
+	}
+	return calls[0], words, statement, true
+}
+
+// ShellLauncherCallsOfText reads the launchers a command string runs, in the
+// first of its first statements that runs one, behind any wrapper
+// ShellLauncherCalls reads (`echo x | xargs pwsh -c '...'`,
+// `start "" powershell -Command '...'`): each statement is split into words as
+// PowerShell splits it (single quotes, in which a doubled quote is one quote,
+// and double quotes, in which a backtick quote or a doubled quote is one
+// quote) up to its statement or redirect operator outside quotes (newline,
+// ; | & < >). A leading call operator & is skipped. words are the words of
+// that statement and statement its index.
+func ShellLauncherCallsOfText(text string) (calls []LauncherCall, words []string, statement int, ok bool) {
+	if text == "" || len(text) > maxLauncherTextBytes {
+		return nil, nil, 0, false
 	}
 	from := 0
 	for statement = 0; statement < maxLauncherTextStatements && from < len(text); statement++ {
 		var next int
 		words, next, ok = launcherTextWords(text, from)
 		if next < 0 {
-			return LauncherCall{}, nil, 0, false // unterminated quote
+			return nil, nil, 0, false // unterminated quote
 		}
 		if ok {
-			if call, ok = ShellLauncherCall(words); ok {
-				return call, words, statement, true
+			if calls = ShellLauncherCalls(words); len(calls) > 0 {
+				return calls, words, statement, true
 			}
 		}
 		from = next
 	}
-	return LauncherCall{}, nil, 0, false
+	return nil, nil, 0, false
 }
 
 func launcherTextWords(text string, from int) ([]string, int, bool) {

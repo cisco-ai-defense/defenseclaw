@@ -16,7 +16,8 @@ import (
 // tool spells it, as an argv array or as one string: at an install path with a
 // blank (rel-1-0-10:GAP-0804), behind a wrapper the over-limit screen reads
 // (start "", wsl, wsl -e, xargs, env -i, sudo -u, nohup, timeout;
-// rel-1-0-10:GAP-0805), and past the 64 KiB command bound
+// rel-1-0-10:GAP-0805; an operand spelled as a launcher name and a start
+// title, rel-1-0-10:GAP-0857), and past the 64 KiB command bound
 // (rel-1-0-10:GAP-0807). The attack unit is the authorized_keys redirect
 // fixture (overLimitWindowsRedirect). In every tier the redirect blocks, an
 // ordinary script is allowed, and argv and string agree.
@@ -37,6 +38,17 @@ var gap0805Wrappers = []gap0805Wrapper{
 	{"nohup", []string{"nohup"}, "nohup "},
 	{"timeout 5", []string{"timeout", "5"}, "timeout 5 "},
 	{"xargs", []string{"xargs"}, "echo x | xargs "},
+	// A wrapper operand spelled as a launcher name, and a start title, are
+	// read both ways: the launcher after them is read (rel-1-0-10:GAP-0857).
+	{"sudo -u cmd", []string{"sudo", "-u", "cmd"}, "sudo -u cmd "},
+	{"env -u pwsh", []string{"env", "-u", "pwsh"}, "env -u pwsh "},
+	{"timeout -s sh 5", []string{"timeout", "-s", "sh", "5"}, "timeout -s sh 5 "},
+	{"xargs -I bash", []string{"xargs", "-I", "bash"}, "xargs -I bash "},
+	{"wsl -d cmd.exe -e", []string{"wsl", "-d", "cmd.exe", "-e"}, "wsl -d cmd.exe -e "},
+	{"wsl -u powershell.exe --", []string{"wsl", "-u", "powershell.exe", "--"}, "wsl -u powershell.exe -- "},
+	{"nice -n cmd.exe", []string{"nice", "-n", "cmd.exe"}, "nice -n cmd.exe "},
+	{"start <title>", []string{"start", "My Title"}, `start "My Title" `},
+	{"start <title spelled as a launcher>", []string{"start", "pwsh"}, `start "pwsh" `},
 }
 
 var gap0805Launchers = []gap0711Launcher{

@@ -647,13 +647,14 @@ func dispatchTrustedAction(
 			defer func() { findings = withPowerShellCapPieces(parent, request, findings) }()
 		}
 		launcher := launcherBodyTwinRequest(request, facts)
-		if launcher.read {
+		for _, twin := range launcher.twins {
 			// The script of an argv shell launcher (powershell.exe -Command,
 			// cmd /c) is judged as the string command the same script is
 			// (rel-1-0-10:GAP-0711, GAP-0712): its findings count, the
-			// TRUNCATED floor of its own cap among them.
+			// TRUNCATED floor of its own cap among them. Each launcher the
+			// call may run is judged (rel-1-0-10:GAP-0857).
 			defer func() {
-				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcher.twin))
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 			}()
 		}
 		if launcher.depthCut {
@@ -664,7 +665,7 @@ func dispatchTrustedAction(
 		// A script past the input bound is not read in full, so the bound of the argv
 		// call still cuts it (rel-1-0-10:GAP-0712), and so do the words a POSIX -c
 		// script runs as its arguments and long wrapper words (rel-1-0-10:GAP-0803).
-		if cut := trustedReadingCut(request.Input, facts, launcher.read && launcher.fully && len(launcher.twin.Input.Command) <= actionfacts.MaxCommandBytes); cut.Any() {
+		if cut := trustedReadingCut(request.Input, facts, launcher.read && launcher.fully); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
 			// statement budget: the call is TRUNCATED (the one bound rule),
 			// never judged below the unknown tier of its pack, and what was

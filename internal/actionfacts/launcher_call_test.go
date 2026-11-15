@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,18 @@ func TestShellLauncherCallReadsWrappers(t *testing.T) {
 		{"ssh runs it elsewhere", []string{"ssh", "host", "pwsh", "-c", body}, 0, DialectNone, false, false},
 		{"an ordinary command", []string{"git", "commit", "-m", "pwsh -c x"}, 0, DialectNone, false, false},
 		{"echo names it as data", []string{"echo", "pwsh", "-c", body}, 0, DialectNone, false, false},
+		// A wrapper operand spelled as a launcher name is read both ways
+		// (rel-1-0-10:GAP-0857).
+		{"sudo -u <launcher name>", []string{"sudo", "-u", "cmd", "pwsh", "-c", body}, 3, DialectPowerShell, false, true},
+		{"env -u <launcher name>", []string{"env", "-u", "bash", "cmd", "/c", "dir"}, 3, DialectCMD, false, true},
+		{"timeout -s <launcher name>", []string{"timeout", "-s", "sh", "5", "pwsh", "-c", body}, 4, DialectPowerShell, false, true},
+		{"xargs -I <launcher name>", []string{"xargs", "-I", "bash", "cmd.exe", "/c", "dir"}, 3, DialectCMD, false, true},
+		{"wsl -d <launcher name>", []string{"wsl", "-d", "pwsh", "-e", "cmd", "/c", "dir"}, 4, DialectCMD, false, true},
+		{"nice -n <launcher name>", []string{"nice", "-n", "cmd.exe", "pwsh", "-c", body}, 3, DialectPowerShell, false, true},
+		{"the operand is the launcher", []string{"sudo", "-u", "pwsh", "-c", body}, 2, DialectPowerShell, false, true},
+		{"start title", []string{"start", "My Title", "pwsh", "-c", body}, 2, DialectPowerShell, false, true},
+		{"start title spelled as a launcher", []string{"start", "cmd", "pwsh", "-c", body}, 2, DialectPowerShell, false, true},
+		{"start one title only", []string{"start", "a", "b", "pwsh", "-c", body}, 0, DialectNone, false, false},
 	}
 	for _, tc := range tests {
 		call, ok := ShellLauncherCall(tc.argv)
@@ -51,6 +64,36 @@ func TestShellLauncherCallReadsWrappers(t *testing.T) {
 		if ok && (call.Dialect == DialectPowerShell || call.Dialect == DialectCMD) && !hostLauncherArgv(tc.argv, 0) {
 			t.Errorf("%s: the reader names a launcher the over-limit screen does not: %v", tc.name, tc.argv)
 		}
+	}
+}
+
+// ShellLauncherCalls reads a word that may be an operand or a title both
+// ways: each launcher reading whose grammar gives a script is one call
+// (rel-1-0-10:GAP-0857).
+func TestShellLauncherCallsReadsBothWays(t *testing.T) {
+	const body = "Get-ChildItem ."
+	tests := []struct {
+		name   string
+		argv   []string
+		starts []int
+	}{
+		{"operand that is no launcher call", []string{"sudo", "-u", "cmd", "pwsh", "-c", body}, []int{3}},
+		{"operand and launcher both run a script", []string{"sudo", "-u", "pwsh", "pwsh", "-c", body}, []int{2, 3}},
+		{"start title and program", []string{"start", "pwsh", "cmd", "/c", "dir"}, []int{1, 2}},
+		{"a plain launcher", []string{"pwsh", "-c", body}, []int{0}},
+	}
+	for _, tc := range tests {
+		var starts []int
+		for _, call := range ShellLauncherCalls(tc.argv) {
+			starts = append(starts, call.Start)
+		}
+		if strings.Trim(strings.Join(strings.Fields(fmt.Sprint(starts)), ","), "[]") != strings.Trim(strings.Join(strings.Fields(fmt.Sprint(tc.starts)), ","), "[]") {
+			t.Errorf("%s: starts %v, want %v", tc.name, starts, tc.starts)
+		}
+	}
+	calls, _, _, ok := ShellLauncherCallsOfText(`start "My Title" sudo -u cmd pwsh -c 'dir'`)
+	if !ok || len(calls) != 1 || calls[0].Body != "dir" {
+		t.Errorf("text: %+v %t, want one call with body dir", calls, ok)
 	}
 }
 
