@@ -144,6 +144,46 @@ type hookCall struct {
 	// linksUnproven is set when the budget cut short the ask of a share the
 	// link walk of a skill folder check needed (SkillLinksUnproven).
 	linksUnproven bool
+	// memo holds what the call has read of the file system: the paths it
+	// resolved and the protected set of each home (targets).
+	memo *TargetMemo
+	// stats are the answers of callStat, by path.
+	stats map[string]statAnswer
+}
+
+type statAnswer struct {
+	info os.FileInfo
+	err  error
+}
+
+// callStat is pathStat remembered for the hook call: a reach scan compares
+// the identity of the same resolved word with each protected file, for each
+// statement, and each pathStat asks the share check first. The file it names
+// is the same file for the whole decision (rel-1-0-10:GAP-0766). A caller
+// that reads a path again to see whether it changed uses pathStat.
+func callStat(name string) (os.FileInfo, error) {
+	call := currentHookCall()
+	if call == nil {
+		return pathStat(name)
+	}
+	if answer, ok := call.stats[name]; ok {
+		return answer.info, answer.err
+	}
+	info, err := pathStat(name)
+	if call.stats == nil {
+		call.stats = make(map[string]statAnswer)
+	}
+	call.stats[name] = statAnswer{info, err}
+	return info, err
+}
+
+// targets is the file system memory of the call, made on first use. The call
+// is run by one goroutine, so it needs no lock of its own.
+func (call *hookCall) targets() *TargetMemo {
+	if call.memo == nil {
+		call.memo = NewTargetMemo()
+	}
+	return call.memo
 }
 
 // shareWait is how long the call may wait for the next share: a full answer

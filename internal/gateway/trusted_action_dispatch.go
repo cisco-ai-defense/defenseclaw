@@ -403,6 +403,12 @@ func dispatchTrustedAction(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	// One dispatch is one hook call whichever surface carries the action (the
+	// hook request, an ACP frame, a direct evaluation): the file system reads
+	// of its reach scans are remembered for the decision (hookpaths.HookCall;
+	// nested in the handler's own call, or in a twin of this dispatch, it
+	// begins nothing more, rel-1-0-10:GAP-0766).
+	defer hookpaths.HookCall()()
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	defer recoverTrustedActionFault(request, &findings)
 	if trustedActionFaultHook != nil {
