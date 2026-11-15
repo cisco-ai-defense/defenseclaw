@@ -35,6 +35,10 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	}
 	pol := e.policyFor(req)
 	signals := e.matcher.Match(req.Text)
+	sens := e.beginSensitive(ctx, req, signals)
+	if sens != nil && sens.cancel != nil {
+		defer sens.cancel()
+	}
 	categories := make([]string, 0, len(pol.Categories))
 	for c := range pol.Categories {
 		categories = append(categories, c)
@@ -78,21 +82,9 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		}
 	}
 
-	// 3. Sensitive narrowing: guardrail severity or a sensitive signal
-	// (sensitive.go). A narrowed request has only local exits.
-	if s := e.sensitive; s != nil && len(s.Aliases) > 0 {
-		if src := e.sensitiveFloor(req, signals); src != "" || e.sensitiveSticky(req) {
-			if src == "" {
-				src = SensitiveSourceSticky
-			}
-			// Every narrowed turn renews the mark: the history the next turn
-			// carries still holds the sensitive turn.
-			e.markSensitiveSticky(req)
-			pol.AllowedAliases = intersectAliases(pol.AllowedAliases, s.Aliases)
-			d.FilteredBy = "sensitive"
-			d.Sensitive = SensitiveOutcome{Source: src, Reason: "positive"}
-		}
-	}
+	// 3. Sensitive narrowing: the guardrail or signal floor, else the
+	// decision-model check (sensitive.go).
+	e.applySensitive(&pol, &d, sens, req)
 	d.PolicyDigest = pol.Digest()
 
 	// 4. First eligible alias: Force, user override, classifier, defaults.
@@ -116,6 +108,16 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	}
 	narrowed := d.SensitiveNarrowed()
 	req.Narrowed = narrowed
+	if d.Sensitive.Soft {
+		// Prefer the local models (after admin Force); the usual order
+		// follows, so a request no local model can take is never refused.
+		soft := make([]cand, 0, len(e.sensitive.Aliases))
+		for _, a := range e.sensitive.Aliases {
+			soft = append(soft, cand{a, SourceSensitive})
+		}
+		n := len(verdict.Force)
+		order = append(order[:n:n], append(soft, order[n:]...)...)
+	}
 	if narrowed {
 		// A sensitive request tries the local models even when the
 		// classifier and the defaults name only cloud aliases, and even
