@@ -255,10 +255,18 @@ func (r *sedBackupReader) run(words []string, scope sedBackupScope, implicit boo
 			inner.unknown = inner.unknown || exec.dirUnknown
 			r.run(exec.child, inner, false, depth)
 		}
-	case program == "eval" && depth < sedBackupDepth && len(words) > 1:
+	case program == "eval" && len(words) > 1:
+		if depth >= sedBackupDepth {
+			r.unresolved = true // the depth cap: the body is not read (bound rule, rel-1-0-10:GAP-0738)
+			return
+		}
 		r.read(strings.Join(words[1:], " "), scope, depth+1)
-	case posixShellProgram(program) && depth < sedBackupDepth:
+	case posixShellProgram(program):
 		if body, ok := actionShellCommandBody(words); ok {
+			if depth >= sedBackupDepth {
+				r.unresolved = true // as for eval above
+				return
+			}
 			r.read(body, scope, depth+1)
 		}
 	}
@@ -880,10 +888,15 @@ func (r *sedBackupReader) readsShellStdin(call *syntax.CallExpr, values actionVa
 // stdinBody reads the program a shell takes from a heredoc or a herestring.
 func (r *sedBackupReader) stdinBody(stmt *syntax.Stmt, values actionValues, scope sedBackupScope, depth int) {
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) == 0 || len(stmt.Redirs) == 0 || depth >= sedBackupDepth || !r.readsShellStdin(call, values) {
+	if !ok || len(call.Args) == 0 || len(stmt.Redirs) == 0 || !r.readsShellStdin(call, values) {
 		return
 	}
-	for _, text := range sedRedirectBodies(stmt, values, r.cwd, r.home) {
+	bodies := sedRedirectBodies(stmt, values, r.cwd, r.home)
+	if depth >= sedBackupDepth && len(bodies) > 0 {
+		r.unresolved = true // the depth cap: the heredoc is not read (bound rule)
+		return
+	}
+	for _, text := range bodies {
 		r.read(text, scope, depth+1)
 	}
 }
@@ -928,12 +941,15 @@ func (r *sedBackupReader) pipeline(top *syntax.BinaryCmd, seen map[*syntax.Binar
 	seen[top] = true
 	flatten(top.X)
 	flatten(top.Y)
-	if depth >= sedBackupDepth {
-		return
-	}
 	for at, stage := range stages {
 		reader, ok := stage.Cmd.(*syntax.CallExpr)
 		if !ok || len(reader.Args) == 0 || !r.readsShellStdin(reader, values) {
+			continue
+		}
+		if depth >= sedBackupDepth {
+			if at > 0 {
+				r.unresolved = true // the depth cap: what the earlier stages print is not read (bound rule)
+			}
 			continue
 		}
 		for _, producer := range stages[:at] {
