@@ -850,7 +850,77 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 		routeOnlySendError(w, err, msg)
 		return
 	}
+	if o := routed.sensitive; o != nil && o.Route != nil && o.Route.Backend != nil {
+		if msg, refused := routeOnlySensitiveLocalRefusal(resp, o.Route.Backend.Alias); refused {
+			// Recorded as the routing.sensitive refusal it is, like an
+			// unreachable local model (code and path only, no provider text).
+			out := *o
+			out.Result, out.Decision = SemanticRouteDenied, nil
+			out.Deny = engine.SensitiveLocalDeny(o.Route.Sensitive.Source, "the local model refused the request")
+			amendRoutingDecision(r.Context(), out)
+			auditRouteDeny(r.Context(), s.router.logger, r.URL.Path, out.Deny)
+			call.End(errRouteOnlySensitiveLocalRefused)
+			routeOnlyErrorFor(w, routeOnlyAPIFamily(routed.native), http.StatusBadRequest, "invalid_request_error", msg)
+			return
+		}
+	}
 	call.End(copyRouteOnlyResponse(w, resp, call, routed.usage.Streaming))
+}
+
+var errRouteOnlySensitiveLocalRefused = errors.New("the local model of a sensitive request refused it")
+
+// routeOnlySensitiveLocalRefusal is the DefenseClaw message for a request
+// routing.sensitive kept on a local model that refused it (HTTP 400 JSON);
+// the caller answers it in the agent API shape. It names routing.sensitive,
+// the alias and the model's own reason (bounded), says nothing went to the
+// cloud and how to fix it.
+// Before, the agent printed the raw provider body, for example Ollama's
+// "unknown input item type additional_tools" for a Codex catalog entry in
+// the Responses lite tool mode (rel-1-0-10:GAP-0757). Fail closed is
+// unchanged: the cloud model is never tried.
+func routeOnlySensitiveLocalRefusal(resp *http.Response, alias string) (string, bool) {
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "json") {
+		return "", false
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	msg := "routing.sensitive kept this request on the local model " + boundedRouterLabel(alias, 64) + ", and that model refused it"
+	if reason := routeOnlyProviderErrorText(raw); reason != "" {
+		msg += " (" + reason + ")"
+	}
+	msg += ". Nothing was sent to the cloud model. Use a local model that accepts this request (Codex: a model catalog entry without use_responses_lite for the model), or send it without the sensitive data."
+	return msg, true
+}
+
+// routeOnlyProviderErrorText is the error message of a provider error body
+// ({"error":{"message"}}, {"error":"..."} or {"message"}), printable ASCII
+// only and at most 160 bytes; "" when there is none.
+func routeOnlyProviderErrorText(raw []byte) string {
+	var body struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+	}
+	if json.Unmarshal(raw, &body) != nil {
+		return ""
+	}
+	text := body.Message
+	var nested struct {
+		Message string `json:"message"`
+	}
+	var plain string
+	switch {
+	case json.Unmarshal(body.Error, &nested) == nil && nested.Message != "":
+		text = nested.Message
+	case json.Unmarshal(body.Error, &plain) == nil && plain != "":
+		text = plain
+	}
+	out := make([]byte, 0, 160)
+	for i := 0; i < len(text) && len(out) < 160; i++ {
+		if c := text[i]; c >= 0x20 && c < 0x7f {
+			out = append(out, c)
+		}
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (s *routeOnlyServer) forward(w http.ResponseWriter, r *http.Request, a routeOnlyAttempt, body []byte, rest io.Reader) {
