@@ -5860,6 +5860,20 @@ var proxyNeutralCWD = sync.OnceValue(func() string {
 	return dir
 })
 
+// proxyBareReading is a tool call as the proxy read it before it was built
+// as the hook request (rel-1-0-10:GAP-0782): the tool name and arguments as
+// the model reply carries them. inspectToolCalls keeps the stronger of it
+// and the hook reading (rel-1-0-10:GAP-0872); it records no telemetry, the
+// hook reading does.
+func proxyBareReading(connectorName, toolName, args string) trustedActionRequest {
+	return trustedActionRequest{
+		Input:              actionfacts.Input{Tool: toolName, Args: json.RawMessage(args)},
+		LegacyText:         args,
+		Connector:          connectorName,
+		EnforcementCapable: true,
+	}
+}
+
 // proxyPOSIXReading is a tool call judged with the Windows shell dialect, as
 // it is read without it (the POSIX default); ok is false when the call has
 // no Windows dialect reading.
@@ -5935,6 +5949,13 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		if posix, ok := proxyPOSIXReading(action); ok {
 			findings = mergeBoundedFindings(findings, trustedToolCallFindings(ctx, posix, "", p.toolCallSecureClient(ctx)))
 		}
+		// The reading the proxy made before it built the hook request (the
+		// tool name and arguments as the reply carries them: no projection,
+		// working folder or home) is judged too, and the stronger is kept, so
+		// the route is never weaker than rel where that reading proved more
+		// than the hook projection does (a Windows-spelled home file, a
+		// credential path of another account's home; rel-1-0-10:GAP-0872).
+		findings = mergeBoundedFindings(findings, dispatchTrustedAction(ctx, proxyBareReading(p.connectorName(), toolName, args)))
 		// Stamp the tool's capability class (read_fs / exec_shell /
 		// network_fetch / …) onto each finding from this call so the
 		// sliding-window correlator can reason about operator-defined
