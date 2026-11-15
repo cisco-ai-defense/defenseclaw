@@ -15,7 +15,8 @@ import (
 // value, written as YAML, through the three loaders (LoadFromFile, the
 // gateway runtime load and the candidate check of a CLI save). A value is
 // accepted with its mode or refused with the lane key named; effects and
-// secret_flow are never on. A null lane, or an empty string for a string lane,
+// secret_flow are never on. Values are exact (cascade.go): another case or a
+// padded value is refused, never read as the value. A null lane, or an empty string for a string lane,
 // is refused by all three loaders: LoadFromFile runs no schema pass, so it
 // checks the lane values itself (GAP-0545).
 func TestCascadeLaneSpellingMatrix(t *testing.T) {
@@ -24,12 +25,14 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 		want map[string]string // lane -> mode; missing lane = refused
 	}{
 		{"on", map[string]string{"nonshell": "on"}},
-		{"ON", map[string]string{"nonshell": "on"}},
-		{"\"On\"", map[string]string{"nonshell": "on"}},
-		{"\" shadow \"", map[string]string{"nonshell": "shadow", "effects": "shadow", "secret_flow": "shadow"}},
-		{"Shadow", map[string]string{"nonshell": "shadow", "effects": "shadow", "secret_flow": "shadow"}},
-		{"Off", map[string]string{"nonshell": "off", "effects": "off", "secret_flow": "off"}},
+		{"\"on\"", map[string]string{"nonshell": "on"}},
+		{"shadow", map[string]string{"nonshell": "shadow", "effects": "shadow", "secret_flow": "shadow"}},
 		{"off", map[string]string{"nonshell": "off", "effects": "off", "secret_flow": "off"}},
+		{"ON", nil},
+		{"\"On\"", nil},
+		{"\" shadow \"", nil},
+		{"Shadow", nil},
+		{"Off", nil},
 		{"\"\"", nil},
 		{"\" \"", nil},
 		{"garbage", nil},
@@ -46,7 +49,8 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 		{"{on: on}", nil},
 	}
 	defaults := map[string]string{"nonshell": "on", "effects": "shadow", "secret_flow": "shadow"}
-	for _, lane := range CascadeLaneNames() {
+	// The shipped lanes (cascade_test.go registers test lanes the schema does not name).
+	for _, lane := range []string{CascadeLaneEffects, CascadeLaneNonShell, CascadeLaneSecretFlow} {
 		for _, s := range spellings {
 			dir := t.TempDir()
 			t.Setenv("DEFENSECLAW_HOME", dir)
@@ -71,7 +75,7 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 					if err == nil {
 						got := ""
 						if cfg != nil {
-							got = cfg.Guardrail.Cascade.Lanes.value(lane)
+							got = cfg.Guardrail.Cascade.Lanes.mode(lane)
 						}
 						t.Errorf("%s: accepted (mode %q), want refused", label, got)
 					} else if !strings.Contains(err.Error(), "cascade.lanes."+lane) {
@@ -86,7 +90,7 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 				if cfg == nil {
 					continue
 				}
-				got := cfg.Guardrail.Cascade.Lanes.value(lane)
+				got := cfg.Guardrail.Cascade.Lanes.mode(lane)
 				if got != wantMode {
 					t.Errorf("%s: mode %q, want %q", label, got, wantMode)
 				}
@@ -94,8 +98,8 @@ func TestCascadeLaneSpellingMatrix(t *testing.T) {
 					t.Errorf("%s: shadow-only lane is on", label)
 				}
 				for other, def := range defaults {
-					if other != lane && cfg.Guardrail.Cascade.Lanes.value(other) != def {
-						t.Errorf("%s: lane %s = %q, want its default %q", label, other, cfg.Guardrail.Cascade.Lanes.value(other), def)
+					if other != lane && cfg.Guardrail.Cascade.Lanes.mode(other) != def {
+						t.Errorf("%s: lane %s = %q, want its default %q", label, other, cfg.Guardrail.Cascade.Lanes.mode(other), def)
 					}
 				}
 			}

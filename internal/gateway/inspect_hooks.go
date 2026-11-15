@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
@@ -105,11 +106,13 @@ func scanToolResultWithTimeout(ctx context.Context, text, toolName string, timeo
 	}
 }
 
-func truncateInspectContent(s string, max int) string {
+// truncateInspectContent cuts s at max bytes and reports whether it did:
+// a cut input is not read in full (markContentCut).
+func truncateInspectContent(s string, max int) (string, bool) {
 	if len(s) <= max {
-		return s
+		return s, false
 	}
-	return s[:max]
+	return s[:max], true
 }
 
 func (a *APIServer) recordManagedAIDFailOpenForSelectedGenericResult(
@@ -170,7 +173,8 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	req.Content = truncateInspectContent(req.Content, maxInspectContentLen)
+	var contentCut bool
+	req.Content, contentCut = truncateInspectContent(req.Content, maxInspectContentLen)
 	managedAIDOnly := a.managedAIDOnly()
 	if req.Content == "" && !managedAIDOnly && !req.BoundedPrefixReview {
 		a.writeJSON(w, http.StatusOK, &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}})
@@ -199,9 +203,13 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		// demote.
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "prompt", false)
 	}
+	if contentCut {
+		verdict.markContentCut(bounded.Unknown(a.boundedTier(r.Context(), profileRequestConnector(r.Context()))).String())
+	}
 	if req.BoundedPrefixReview {
 		verdict.markOversizeUninspected()
 	}
+	verdict = a.applyCascadeFinal(r.Context(), profileRequestConnector(r.Context()), "prompt", "", "", verdict)
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 	// The strict tier refuses a prompt while an install or upgrade holds this
 	// account's data directory, as on the hook and tool routes (GAP-1438).
@@ -273,7 +281,8 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	req.Content = truncateInspectContent(req.Content, maxInspectContentLen)
+	var contentCut bool
+	req.Content, contentCut = truncateInspectContent(req.Content, maxInspectContentLen)
 	managedAIDOnly := a.managedAIDOnly()
 	if req.Content == "" && !managedAIDOnly && !req.BoundedPrefixReview {
 		a.writeJSON(w, http.StatusOK, &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}})
@@ -299,9 +308,13 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		}
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "completion", false)
 	}
+	if contentCut {
+		verdict.markContentCut(bounded.Unknown(a.boundedTier(r.Context(), profileRequestConnector(r.Context()))).String())
+	}
 	if req.BoundedPrefixReview {
 		verdict.markOversizeUninspected()
 	}
+	verdict = a.applyCascadeFinal(r.Context(), profileRequestConnector(r.Context()), "response", "", "", verdict)
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)
@@ -372,7 +385,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 			outputStr = semanticOutput
 		}
 	}
-	outputStr = truncateInspectContent(outputStr, maxInspectContentLen)
+	outputStr, contentCut := truncateInspectContent(outputStr, maxInspectContentLen)
 
 	fmt.Fprintf(os.Stderr, "[inspect] >>> post-tool tool=%q output_len=%d exit_code=%d\n",
 		req.Tool, len(outputStr), req.ExitCode)
@@ -418,9 +431,13 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	if contentCut {
+		verdict.markContentCut(bounded.Unknown(a.boundedTier(r.Context(), profileRequestConnector(r.Context()))).String())
+	}
 	if req.BoundedPrefixReview {
 		verdict.markOversizeUninspected()
 	}
+	verdict = a.applyCascadeFinal(r.Context(), profileRequestConnector(r.Context()), "tool_result", "", "", verdict)
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)

@@ -116,6 +116,13 @@ func ValidateCandidate(configFile string, raw []byte) error {
 	if err != nil {
 		return err
 	}
+	// The loader ignores a locked or invalid narrower-scope value and
+	// replaces an invalid top-level guardrail.cascade with its fallback; a
+	// writer refuses all of them before they land (the same check as
+	// `config validate`).
+	if err := CascadeCandidateError(cfg); err != nil {
+		return err
+	}
 	return ValidateManagedStandaloneLiteralCandidate(cfg, raw)
 }
 

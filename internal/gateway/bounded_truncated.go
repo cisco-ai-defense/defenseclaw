@@ -64,15 +64,18 @@ const boundedTruncatedTitle = "Input exceeds policy evaluation limit, judged as 
 // a member of its profile meet that enforces on the hook path is
 // (shareBodyStrictTier, as the shell limit and share-body paths read it),
 // else the posture of the connector's pack.
+//
+// guardrail.cascade.unknown replaces the pack's tier when it is set (alert,
+// confirm, block; cascadeBoundedTier).
 func (a *APIServer) boundedTier(ctx context.Context, connectorName string) bounded.Tier {
-	if a.shareBodyStrictTier(ctx, connectorName) {
-		return bounded.TierStrict
-	}
 	cfg := a.decisionConfig(ctx)
+	if a.shareBodyStrictTier(ctx, connectorName) {
+		return cascadeBoundedTier(cfg, connectorName, bounded.TierStrict)
+	}
 	if cfg == nil {
 		return bounded.TierDefault
 	}
-	return bounded.TierOf(cfg.HookPolicyTierForConnector(connectorName))
+	return cascadeBoundedTier(cfg, connectorName, bounded.TierOf(cfg.HookPolicyTierForConnector(connectorName)))
 }
 
 // boundedTruncatedFinding is the evaluation-limit finding of an input read up
@@ -107,10 +110,13 @@ func withBoundedReason(finding *RuleFinding, reason string) {
 }
 
 // boundedLimitIndex is the index of the evaluation-limit finding in
-// findings, or -1.
+// findings, or -1. The detection-only record of a data word
+// (RuleFinding.dataWordRecord) is not a limit the call hit and is skipped:
+// only an enforcing cap or a truncated reading counts, so a record never
+// makes a call capped or stands in for its limit finding (rel-1-0-10:GAP-0760).
 func boundedLimitIndex(findings []RuleFinding) int {
 	return slices.IndexFunc(findings, func(finding RuleFinding) bool {
-		return canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
+		return !finding.dataWordRecord && canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
 	})
 }
 
@@ -119,7 +125,8 @@ func boundedLimitIndex(findings []RuleFinding) int {
 // maps the result to at least the unknown tier of the pack and never below
 // those findings (guardrailActionForProfile). An evaluation-limit finding the
 // call already carries is kept, title included, and gains the bounded reason,
-// so a call has one limit finding. The caller's slice is not changed. No cap
+// so a call has one limit finding; a data-word record beside it is not one
+// and stays detection-only (GAP-0760). The caller's slice is not changed. No cap
 // hit: findings as they are, without allocation.
 func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request trustedActionRequest) []RuleFinding {
 	if !set.Any() {

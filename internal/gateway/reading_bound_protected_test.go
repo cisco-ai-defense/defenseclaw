@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,8 +39,17 @@ func readingBoundNest(levels int, body string) string {
 type readingBoundRow struct {
 	name, tool, command string
 	// want is the action in the default tier; the strict tier blocks every
-	// row whose default action is not allow.
+	// row whose default action is not allow (readingBoundFloorBlocks lists
+	// the cells where the cap floor makes a row block).
 	want string
+}
+
+// readingBoundFloorBlocks lists, by row name, the cells (connector/tier/user
+// kind) where the cap floor proves a protected write on its own statement
+// and the row blocks in the default tier (rel-1-0-10:GAP-0435). Each cell is
+// pinned, so a floor regression shows.
+var readingBoundFloorBlocks = map[string][]string{
+	"protected ~/.ssh/authorized_keys": {"codex/default/managed"},
 }
 
 // readingBoundCells judges each row through the hook client evidence and
@@ -87,6 +97,9 @@ func readingBoundCellsIn(t *testing.T, rows []readingBoundRow, window time.Durat
 		name := cell.connector + "/" + cell.tier + map[bool]string{false: "/per-user", true: "/managed"}[cell.managed]
 		for _, row := range rows {
 			want := row.want
+			if slices.Contains(readingBoundFloorBlocks[row.name], name) {
+				want = guardrailActionBlock
+			}
 			if cell.tier == config.HookPolicyTierStrict && want != guardrailActionAllow {
 				want = guardrailActionBlock
 			}
@@ -173,7 +186,10 @@ func TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget(t *testing.T) {
 		row  readingBoundRow
 		cell readingBoundCell
 	}{
-		{readingBoundRow{"ordinary under the bound", "Bash", readingBoundNest(3, "rm -rf ~/project/output"+comment), guardrailActionAllow}, perUserDefault},
+		// GAP-0382: the 9,000-byte comment is one word past the string bound of
+		// the analysis (4 KiB), whose commands it never read: the call is
+		// TRUNCATED (an alert in the default tier), no longer allowed.
+		{readingBoundRow{"ordinary under the bound", "Bash", readingBoundNest(3, "rm -rf ~/project/output"+comment), guardrailActionAlert}, perUserDefault},
 		{readingBoundRow{"known protected value under the bound", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(3, "rm -rf \"$protected\""+comment), guardrailActionAlert}, managedDefault},
 	} {
 		if got := trustedActionCommandBound(actionfacts.Input{Tool: "Bash", Command: row.row.command}); got != shellReadingNestedProof {
