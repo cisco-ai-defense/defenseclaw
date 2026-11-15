@@ -403,6 +403,20 @@ func (b *hereDocBindings) readCall(call *syntax.CallExpr, depth int) {
 		return found
 	}
 	switch words[at] {
+	case "export", "declare", "typeset", "local", "readonly":
+		// A declaration the parser reads as a plain call (export PA\TH=x):
+		// each NAME=value word, after the shell removes its backslashes,
+		// or any name for a word made at run time.
+		for index := at + 1; index < len(words); index++ {
+			if !static[index] {
+				b.resolution = true
+				continue
+			}
+			if name, _, cut := strings.Cut(words[index], "="); cut && !strings.HasPrefix(name, "-") &&
+				hereDocResolutionName(strings.ReplaceAll(name, `\`, "")) {
+				b.resolution = true
+			}
+		}
 	case "alias":
 		for _, index := range operands("") {
 			if name, _, cut := strings.Cut(words[index], "="); cut {
