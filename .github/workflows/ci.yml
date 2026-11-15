@@ -205,7 +205,11 @@ jobs:
         # -race on #1456 push 14, split into one test per pack); weighed, the
         # 40 shards would plan 447 s, over the 440 s that keeps 1.5x headroom
         # under the 720 s cap. 42 shards plan at most 426 s.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41]
+        # 2026-11-15: feat/substrate (PR #1456) adds Substrate, secret-read
+        # marker and A+B gateway tests that weigh about 705 s more; with them
+        # every one of 42 shards plans over the 720 s cap, and 44 shards plan
+        # at most 704 s. rel takes 44 first so feat and rel keep one count.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -221,7 +225,7 @@ jobs:
       - name: Run gateway race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 42
+          GO_TEST_SHARDS: 44
         run: |
           set -euo pipefail
           plan=(python3 scripts/go_test_shards.py
@@ -674,9 +678,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 42 gateway + 4 audit + 19 remaining-package shards, plus the
+          # 44 gateway + 4 audit + 19 remaining-package shards, plus the
           # frozen-gateway job.
-          test "${#coverage_parts[@]}" -eq 66
+          test "${#coverage_parts[@]}" -eq 68
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
