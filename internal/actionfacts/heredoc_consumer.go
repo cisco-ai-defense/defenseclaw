@@ -307,14 +307,16 @@ func (b *hereDocBindings) renames(word string) bool {
 // word runs or the file a shell reads first: PATH and the other resolution
 // variables (resolutionVariable: IFS, ENV, BASH_ENV, LD_*, DYLD_*), the zsh
 // path array and the function path, the tables bash keeps of the program
-// and the alias of a name (BASH_CMDS, BASH_ALIASES), and the zsh startup
-// directory (rel-1-0-10:GAP-0927).
+// and the alias of a name, the corresponding zsh command, alias and function
+// tables, and the zsh startup directory (rel-1-0-10:GAP-0927, GAP-0978).
+var hereDocLookupNames = map[string]bool{
+	"path": true, "fpath": true, "FPATH": true, "ZDOTDIR": true,
+	"BASH_CMDS": true, "BASH_ALIASES": true,
+	"commands": true, "aliases": true, "functions": true,
+}
+
 func hereDocResolutionName(name string) bool {
-	switch name {
-	case "path", "fpath", "FPATH", "BASH_CMDS", "BASH_ALIASES", "ZDOTDIR":
-		return true
-	}
-	return resolutionVariable(name)
+	return hereDocLookupNames[name] || resolutionVariable(name)
 }
 
 // hereDocCallBindings reads statements with the parser and the shared
@@ -372,6 +374,22 @@ func (b *hereDocBindings) read(node syntax.Node, depth int) {
 				b.bind(name, static)
 			}
 		case *syntax.DeclClause:
+			// The same builtin option table used by readCall also validates
+			// declaration words that the shell parser represents as a clause.
+			if typed.Variant != nil {
+				words, static := []string{}, []bool{}
+				for _, arg := range typed.Args {
+					if arg.Name != nil {
+						words, static = append(words, arg.Name.Value), append(static, true)
+					} else if arg.Value != nil {
+						word, known := simpleStaticWord(arg.Value, nil)
+						words, static = append(words, word), append(static, known)
+					}
+				}
+				if _, _, _, unknown := hereDocParse(words, static, 0, typed.Variant.Value); unknown {
+					b.unresolved = true
+				}
+			}
 			if typed.Variant != nil && typed.Variant.Value == "nameref" {
 				b.unresolved = true
 			}
@@ -486,42 +504,80 @@ type hereDocOption struct {
 	static bool
 }
 
+type hereDocBuiltinOptions struct {
+	letters          string
+	valued           string
+	ambiguous        string
+	firstOperandEnds bool
+}
+
+// hereDocBuiltinOptionTable and hereDocLookupNames drive the rebind reading.
+// These are the union of the bash and zsh builtin spellings; an option with
+// dialect-dependent operand boundaries is ambiguous and uses the unknown tier.
+var hereDocBuiltinOptionTable = map[string]hereDocBuiltinOptions{
+	"read":      {letters: "aAdeniNptursEkclqz", valued: "aAdinNptu", ambiguous: "k"},
+	"mapfile":   {letters: "dnOstuCc", valued: "dnOsuCc"},
+	"readarray": {letters: "dnOstuCc", valued: "dnOsuCc"},
+	"hash":      {letters: "dlprtfmvL", valued: "p"},
+	"declare":   {letters: "aAfFgiIlnrtuxEHLRUTZmp", valued: "EFLRZip", ambiguous: "EFLRZipT"},
+	"typeset":   {letters: "aAfFgiIlnrtuxEHLRUTZmp", valued: "EFLRZip", ambiguous: "EFLRZipT"},
+	"local":     {letters: "aAfFgiIlnrtuxEHLRUTZmp", valued: "EFLRZip", ambiguous: "EFLRZipT"},
+	"readonly":  {letters: "aAfFgiIlnrtuxEHLRUTZmp", valued: "EFLRZip", ambiguous: "EFLRZipT"},
+	"export":    {letters: "fnpT", ambiguous: "T"},
+	"printf":    {letters: "v", valued: "v", firstOperandEnds: true},
+	"wait":      {letters: "fnp", valued: "p"},
+	"getopts":   {},
+	"unset":     {letters: "fvnm"},
+	"alias":     {letters: "gLmr"},
+	"enable":    {letters: "adfnps", valued: "f"},
+}
+
 // hereDocParse splits the words of a builtin call from index from into its
-// operands (indexes) and the values of the options in valued, the way the
+// operands (indexes) and the values of the options in its table, the way the
 // builtins read them: a word that starts with - is a group of letters up to
 // the first that takes a value, the rest of the word is the value, or the
 // next word when the letter ends the group; -- ends the options. A word made
-// at run time is an operand. firstOperandEnds stops at the first operand
-// (printf: what follows the format is data).
-func hereDocParse(words []string, static []bool, from int, valued string, firstOperandEnds bool) (operands []int, options []hereDocOption, groups []string) {
+// at run time is an operand. An unrecognized, incomplete or ambiguous option
+// uses the unknown tier. printf stops at its format operand.
+func hereDocParse(words []string, static []bool, from int, builtin string) (operands []int, options []hereDocOption, groups []string, unknown bool) {
+	spec, exists := hereDocBuiltinOptionTable[builtin]
+	if !exists {
+		return nil, nil, nil, true
+	}
 	flags := true
 	for index := from; index < len(words); index++ {
 		word := words[index]
 		switch {
-		case !static[index] || !flags || len(word) < 2 || word[0] != '-':
+		case !static[index] || !flags || len(word) < 2 || word[0] != '-' && word[0] != '+':
 			operands = append(operands, index)
-			if firstOperandEnds {
-				return operands, options, groups
+			if spec.firstOperandEnds {
+				return operands, options, groups, unknown
 			}
 		case word == "--":
 			flags = false
 		default:
 			groups = append(groups, word)
 			for at := 1; at < len(word); at++ {
-				if strings.IndexByte(valued, word[at]) < 0 {
+				letter := word[at]
+				if !strings.ContainsRune(spec.letters, rune(letter)) || strings.ContainsRune(spec.ambiguous, rune(letter)) {
+					unknown = true
+				}
+				if strings.IndexByte(spec.valued, letter) < 0 {
 					continue
 				}
 				if at+1 < len(word) {
-					options = append(options, hereDocOption{word[at], word[at+1:], true})
+					options = append(options, hereDocOption{letter, word[at+1:], true})
 				} else if index+1 < len(words) {
 					index++
-					options = append(options, hereDocOption{word[at], words[index], static[index]})
+					options = append(options, hereDocOption{letter, words[index], static[index]})
+				} else {
+					unknown = true
 				}
 				break
 			}
 		}
 	}
-	return operands, options, groups
+	return operands, options, groups, unknown
 }
 
 // readCall adds what a call changes: a variable that controls command
@@ -573,27 +629,29 @@ func (b *hereDocBindings) readCall(call *syntax.CallExpr, depth int) {
 	switch words[at] {
 	case "printf":
 		// printf -v NAME FORMAT ARGS: only the options before the format.
-		_, options, _ := hereDocParse(words, static, at+1, "v", true)
+		_, options, _, unknown := hereDocParse(words, static, at+1, "printf")
+		b.unresolved = b.unresolved || unknown
 		for _, option := range options {
 			if option.letter == 'v' {
 				b.bind(option.text, option.static)
 			}
 		}
 	case "read", "mapfile", "readarray":
-		valued := "dinNptu"
-		if words[at] != "read" {
-			valued = "dnOsuCc"
-		}
-		operands, options, _ := hereDocParse(words, static, at+1, valued, false)
+		operands, options, _, unknown := hereDocParse(words, static, at+1, words[at])
+		b.unresolved = b.unresolved || unknown
 		target(operands)
 		for _, option := range options {
-			if option.letter == 'a' && words[at] == "read" {
-				// read -a NAME fills the array NAME.
+			if (option.letter == 'a' || option.letter == 'A') && words[at] == "read" {
+				// read -a/-A NAME fills the array NAME.
 				b.bind(option.text, option.static)
+			} else if option.letter == 'C' {
+				// The callback may run code before the consumer.
+				b.unresolved = true
 			}
 		}
 	case "wait":
-		_, options, _ := hereDocParse(words, static, at+1, "p", false)
+		_, options, _, unknown := hereDocParse(words, static, at+1, "wait")
+		b.unresolved = b.unresolved || unknown
 		for _, option := range options {
 			if option.letter == 'p' {
 				b.bind(option.text, option.static)
@@ -601,12 +659,14 @@ func (b *hereDocBindings) readCall(call *syntax.CallExpr, depth int) {
 		}
 	case "getopts":
 		// getopts OPTSTRING NAME: the second operand is the variable.
-		operands, _, _ := hereDocParse(words, static, at+1, "", false)
+		operands, _, _, unknown := hereDocParse(words, static, at+1, "getopts")
+		b.unresolved = b.unresolved || unknown
 		if len(operands) > 1 {
 			target(operands[1:2])
 		}
 	case "unset":
-		operands, _, _ := hereDocParse(words, static, at+1, "", false)
+		operands, _, _, unknown := hereDocParse(words, static, at+1, "unset")
+		b.unresolved = b.unresolved || unknown
 		target(operands)
 	case "let":
 		// Every word is an arithmetic expression that may assign.
@@ -619,7 +679,8 @@ func (b *hereDocBindings) readCall(call *syntax.CallExpr, depth int) {
 		// A declaration the parser reads as a plain call (export PA\TH=x):
 		// each NAME=value word, after the shell removes its backslashes, or
 		// any name for a word made at run time.
-		operands, _, groups := hereDocParse(words, static, at+1, "", false)
+		operands, _, groups, unknown := hereDocParse(words, static, at+1, words[at])
+		b.unresolved = b.unresolved || unknown
 		if hereDocDeclaresLocal(words[at]) {
 			for _, group := range groups {
 				b.namerefOption(group)
@@ -634,7 +695,8 @@ func (b *hereDocBindings) readCall(call *syntax.CallExpr, depth int) {
 			b.bind(name, static[index])
 		}
 	case "alias":
-		operands, _, _ := hereDocParse(words, static, at+1, "", false)
+		operands, _, _, unknown := hereDocParse(words, static, at+1, "alias")
+		b.unresolved = b.unresolved || unknown
 		unresolvedOperands(operands)
 		for _, index := range operands {
 			if name, _, cut := strings.Cut(words[index], "="); cut && static[index] {
@@ -644,19 +706,34 @@ func (b *hereDocBindings) readCall(call *syntax.CallExpr, depth int) {
 	case "hash":
 		// hash -p FILE NAME makes NAME run FILE; hash NAME only looks NAME
 		// up on PATH.
-		operands, _, groups := hereDocParse(words, static, at+1, "pt", false)
+		operands, _, groups, unknown := hereDocParse(words, static, at+1, "hash")
+		b.unresolved = b.unresolved || unknown
 		unresolvedOperands(operands)
-		path := false
+		path, directory := false, false
 		for _, group := range groups {
 			path = path || strings.ContainsRune(group, 'p')
+			directory = directory || strings.ContainsRune(group, 'd')
+		}
+		if directory {
+			// Bash forgets a command entry; zsh writes its named-directory
+			// table. Either can change a later lookup.
+			b.unresolved = true
 		}
 		for _, index := range operands {
-			if path && static[index] {
+			if !static[index] {
+				continue
+			}
+			if name, _, assigned := strings.Cut(words[index], "="); assigned {
+				if !directory {
+					b.names[name] = true
+				}
+			} else if path {
 				b.names[words[index]] = true
 			}
 		}
 	case "enable":
-		operands, _, groups := hereDocParse(words, static, at+1, "", false)
+		operands, _, groups, unknown := hereDocParse(words, static, at+1, "enable")
+		b.unresolved = b.unresolved || unknown
 		unresolvedOperands(operands)
 		for _, group := range groups {
 			if strings.ContainsRune(group, 'f') {

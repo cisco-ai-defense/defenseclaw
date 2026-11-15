@@ -1,6 +1,7 @@
 package actionfacts
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -31,6 +32,39 @@ var gap0927Rebinds = []string{
 	"command alias cat=sh", "builtin enable cat", "command hash -p /bin/sh cat", "FPATH=/tmp/x", "export BASH_ENV=/tmp/x",
 	"read $v < /tmp/p", "printf -v $v x", "unset $v", "declare $n=1", "((${v}=5))", "nameref p=PATH", "declare -n",
 	"command declare -n p=PATH", "builtin local -n p=PATH", "ZDOTDIR=/tmp/x", "LD_PRELOAD=/tmp/x.so", "ENV=/tmp/x",
+}
+
+// GAP-0978: both option-value spellings and the zsh lookup tables must
+// reach the same binding reader. Values are local to the test run.
+func TestHereDocConsumerGAP0978Spellings(t *testing.T) {
+	value := filepath.Join(t.TempDir(), "program")
+	rows := []struct {
+		name, statement string
+	}{
+		{"read-attached", "read -aPATH <<< " + value},
+		{"read-cluster", "read -raPATH <<< " + value},
+		{"read-separate", "read -a PATH <<< " + value},
+		{"zsh-read-attached", "read -APATH <<< " + value},
+		{"zsh-read-separate", "read -A PATH <<< " + value},
+		{"zsh-commands", "commands[cat]=" + value},
+		{"zsh-aliases", "aliases[cat]=" + value},
+		{"zsh-functions", "functions[cat]=" + value},
+		{"zsh-hash", "hash cat=" + value},
+		{"hash-directory", "hash -d cat=" + value},
+		{"unknown-option", "read -rZ PATH <<< " + value},
+	}
+	doc := shellparse.SyntaxTailHereDoc{Consumer: "cat > notes.txt", ScriptKnown: true}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			if got := syntaxTailHereDocConsumerIn(doc, []string{row.statement}); got == hereDocData {
+				t.Fatal("statement stayed data")
+			}
+			doc.Script = row.statement + "; "
+			if got := syntaxTailHereDocConsumerIn(doc, nil); got == hereDocData {
+				t.Fatal("script stayed data")
+			}
+		})
+	}
 }
 
 // gap0927Keeps change no lookup: cat stays data after them. CDPATH changes

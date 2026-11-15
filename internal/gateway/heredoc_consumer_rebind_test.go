@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"testing"
 )
@@ -31,6 +32,40 @@ func TestGAP0927ConsumerRebindFormsAreNeverData(t *testing.T) {
 				out := gap0437Hook(t, hook, cwd, fmt.Sprintf("g927%s%s%d", p.name, id, index), gap0876Script(consumer, gap0486Blocked[id]))
 				if out["action"] == "allow" || (out["action"] != "block" && !gap0526Names(out, unresolvedBodyTitle)) {
 					t.Errorf("%s %s %q: action %v, want at least the unknown tier: %v", p.name, id, consumer, out["action"], out)
+				}
+			}
+		}
+	}
+}
+
+// GAP-0978: the B1/B3 hook path must carry each binding spelling to the
+// unknown tier in all five packs.
+func TestGAP0978ConsumerRebindSpellings(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fixtures are POSIX shell text")
+	}
+	value := filepath.Join(t.TempDir(), "program")
+	consumers := []struct{ name, text string }{
+		{"read-attached", "read -aPATH <<< " + value},
+		{"read-cluster", "read -raPATH <<< " + value},
+		{"read-separate", "read -a PATH <<< " + value},
+		{"zsh-read-attached", "read -APATH <<< " + value},
+		{"zsh-read-separate", "read -A PATH <<< " + value},
+		{"zsh-commands", "commands[cat]=" + value},
+		{"zsh-aliases", "aliases[cat]=" + value},
+		{"zsh-functions", "functions[cat]=" + value},
+		{"zsh-hash", "hash cat=" + value},
+		{"hash-directory", "hash -d cat=" + value},
+		{"unknown-option", "read -rZ PATH <<< " + value},
+	}
+	for _, p := range gap0437Packs {
+		hook := gap0437Server(t, p, "claudecode", "action")
+		cwd := t.TempDir()
+		for _, id := range []string{"B1", "B3"} {
+			for index, consumer := range consumers {
+				out := gap0437Hook(t, hook, cwd, fmt.Sprintf("g978%s%s%d", p.name, id, index), gap0876Script(consumer.text+"; cat > notes.txt", gap0486Blocked[id]))
+				if out["action"] == "allow" || (out["action"] != "block" && !gap0526Names(out, unresolvedBodyTitle)) {
+					t.Errorf("%s %s %s: action %v, want at least the unknown tier", p.name, id, consumer.name, out["action"])
 				}
 			}
 		}
