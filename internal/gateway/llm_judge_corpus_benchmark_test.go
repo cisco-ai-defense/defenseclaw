@@ -796,7 +796,7 @@ func runCorpusJudgeCase(
 		// Use a case-unique ID so the benchmark exercises the same bounded
 		// per-session history without allowing context to cross trajectories.
 		ctx = ContextWithSessionID(ctx, benchmarkCase.ID)
-		judge.ResetToolJudgeSession(benchmarkCase.ID)
+		judge.ResetToolJudgeSession(context.Background(), benchmarkCase.ID)
 		if strings.TrimSpace(benchmarkCase.Payload.Content) != "" {
 			judge.ObserveSessionPrompt(ctx, benchmarkCase.Payload.Content)
 		}

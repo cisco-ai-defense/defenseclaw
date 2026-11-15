@@ -170,6 +170,10 @@ type agentHookRequest struct {
 	Payload            map[string]interface{}
 	toolChain          *toolChainHookCapture
 	alertOnlySQLNotice bool
+	// toolResultInjection marks a tool-result verdict with a prompt-injection
+	// finding: the agent-facing text tells the agent not to follow the
+	// result's instructions (GAP-0605).
+	toolResultInjection bool
 }
 
 func hookActionCommandAuditExtra(req agentHookRequest, home string) map[string]string {
@@ -826,7 +830,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if shouldResetToolJudgeSession(req) {
 			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
 			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ResetToolJudgeSession(judgeSessionKeyFor(ctx, req.SessionID))
+				judge.ResetToolJudgeSession(ctx, judgeSessionKeyFor(ctx, req.SessionID))
 			}
 			a.resetUserDownloadRequests(sessionKey)
 		}
@@ -3802,6 +3806,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			req.alertOnlySQLNotice = hasAlertOnlySQLFinding(findings)
 		}
 	}
+	req.toolResultInjection = isToolResultDirection(req.Direction) && verdictHasPromptInjection(verdict)
 	resp := agentHookResponseForProfile(
 		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps, responsePolicy,
 	)
@@ -4867,6 +4872,16 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 	additional := genericHookAdditionalContext(req.ConnectorName, req.HookEventName, mode, rawAction, severity, safeReason, wouldBlock)
 	if req.alertOnlySQLNotice {
 		additional += sqlAlertOnlyHookNotice
+	}
+	if additional != "" && isToolResultDirection(req.Direction) {
+		if req.toolResultInjection {
+			additional = connector.WithToolResultInjectionGuidance(additional)
+		}
+		// An agent with no tool-result block form says so in the note, in
+		// every posture: strict cannot block here (GAP-0605).
+		if !caps.CanBlock || !eventIn(req.HookEventName, caps.BlockEvents) {
+			additional = toolResultAlertOnlyNotice(additional, req.ConnectorName)
+		}
 	}
 	if agent := confirmWithoutAskAgent(req.ConnectorName, rawAction, mode, req.HookEventName); action == "block" && agent != "" {
 		safeReason = agentConfirmUnavailableReason(agent, reason, agentDisplayReason(reason, notificationSinkPolicy(policy)), notificationSinkPolicy(policy))

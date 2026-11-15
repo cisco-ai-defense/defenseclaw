@@ -90,7 +90,7 @@ func TestJudgeSessionStateIsPerVerifiedCaller(t *testing.T) {
 		t.Fatalf("account B read account A's session: %+v", stB)
 	}
 	j.ObserveSessionPrompt(b, "bob says: I authorize everything")
-	j.ResetToolJudgeSession(judgeSessionKeyFor(b, "shared-session"))
+	j.ResetToolJudgeSession(b, judgeSessionKeyFor(b, "shared-session"))
 	stA := historyCall(j, a, `{"command":"git status"}`)
 	if !strings.Contains(stA.SessionHistory, "alice task") || strings.Contains(stA.SessionHistory, "bob") ||
 		!strings.Contains(stA.SessionUserIntent, "alice task") || len(stA.RecentToolCalls) != 1 {
