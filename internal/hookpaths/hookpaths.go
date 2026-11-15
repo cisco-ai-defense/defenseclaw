@@ -4498,6 +4498,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	// the command changes directory first.
 	changesDirectory := tactics.RunsProgram(command, cdPrograms...)
 	sequential := sequentialListCalls(file)
+	pipedCalls := pipedInputCalls(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
 		if !isCall || len(call.Args) == 0 {
@@ -4607,7 +4608,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			})
 		}
 		if opaqueProgram(program) {
-			if program == "new-item" && !powerShellNewItemMayMakeLink(words[1:], static[1:]) {
+			if program == "new-item" && !powerShellNewItemMayMakeLink(words[1:], static[1:], pipedCalls[call]) {
 				// A file or a folder: New-Item makes no link (GAP-0801).
 				return true
 			}
@@ -4682,6 +4683,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				placedLinkCalls[call] = true
 			}
 		case slices.Contains(copyPrograms, program):
+			words, static := copyGlobOperandsAsNames(args, words, static)
 			_, topLevelPlaced := linkDirs[call]
 			_, nestedPlaced := nestedCopyDirs[call]
 			var globDestinations []string
@@ -7729,9 +7731,11 @@ func (l *shellLinks) record(source, name string, literal, symbolic bool, cwd str
 			text = relative
 		}
 	}
-	l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	if !linkPointsIntoItself(name, target) {
+		l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	}
 	if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
-		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
+		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name && !linkPointsIntoItself(resolved, target) {
 			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target, text: text})
 		}
 	}
@@ -8847,4 +8851,20 @@ func stepFollows(parts []string) bool {
 		}
 	}
 	return false
+}
+
+// pipedInputCalls are the calls that read the output of the pipeline stage
+// before them (every stage after the first): a PowerShell parameter can bind
+// from that input (rel-1-0-10:GAP-0849).
+func pipedInputCalls(file *syntax.File) map[*syntax.CallExpr]bool {
+	piped := make(map[*syntax.CallExpr]bool)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if pipe, ok := node.(*syntax.BinaryCmd); ok && (pipe.Op == syntax.Pipe || pipe.Op == syntax.PipeAll) && pipe.Y != nil {
+			if call, isCall := pipe.Y.Cmd.(*syntax.CallExpr); isCall {
+				piped[call] = true
+			}
+		}
+		return true
+	})
+	return piped
 }

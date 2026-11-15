@@ -1260,7 +1260,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.MarkSecurityIncomplete("the gateway does not report the installed policy as applied")
 	}
 	l.describeHookContracts(ctx)
-	l.describeUnprotectedAgents()
+	l.describeUnprotectedAgents(record)
 	l.describeChangedGuardianFiles()
 	l.describeGuardianCleanups(ctx)
 	l.describeUnavailableEnrolledHomes()

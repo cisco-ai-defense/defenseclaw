@@ -212,7 +212,8 @@ func withPosixDataWordRecord(findings []RuleFinding) []RuleFinding {
 
 // posixArgvScriptReadAsText reports an argv shell launcher (["bash", "-lc",
 // SCRIPT], the Codex shell tool) whose script the launcher body reading
-// judges as the string command it is (launcherBodyTwinRequest): the script
+// judges as the string command it is, with nothing else the call runs
+// (launcherBodyTwinRequest, read and fully, rel-1-0-10:GAP-0803): the script
 // word past 4 KiB is then no cut of the call, and the reading of the script
 // decides with its own floor, a code word past the bound inside the script
 // truncated as in the text form. Truncating the argv form for the length of
@@ -223,6 +224,6 @@ func posixArgvScriptReadAsText(request trustedActionRequest, facts actionfacts.F
 	if _, text := trustedBashCommandInput(request.Input); text {
 		return false
 	}
-	twin, read := launcherBodyTwinRequest(request, facts)
-	return read && len(twin.Input.Command) <= actionfacts.MaxCommandBytes
+	launcher := launcherBodyTwinRequest(request, facts)
+	return launcher.read && launcher.fully && len(launcher.twin.Input.Command) <= actionfacts.MaxCommandBytes
 }

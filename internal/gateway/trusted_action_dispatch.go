@@ -283,6 +283,11 @@ type trustedActionRequest struct {
 	// (rel-1-0-10:GAP-0013). The operand is empty when no one operand was
 	// at fault (a directory walk or a pattern the shell expands).
 	unprovenTarget *unprovenWrite
+	// nonWriteMention, when set, is told that the target scan held the call
+	// only on words of statements that read a protected file, in a per-user
+	// default or permissive install (ActionMentionsNoWriteRole): the finding
+	// alerts, it does not block (rel-1-0-10:GAP-0018).
+	nonWriteMention *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -649,24 +654,30 @@ func dispatchTrustedAction(
 			// (GAP-0693).
 			defer func() { findings = withPowerShellCapPieces(parent, request, findings) }()
 		}
-		launcherTwin, launcherRead := launcherBodyTwinRequest(request, facts)
-		if launcherRead {
+		launcher := launcherBodyTwinRequest(request, facts)
+		if launcher.read {
 			// The script of an argv shell launcher (powershell.exe -Command,
 			// cmd /c) is judged as the string command the same script is
 			// (rel-1-0-10:GAP-0711, GAP-0712): its findings count, the
 			// TRUNCATED floor of its own cap among them.
 			defer func() {
-				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcherTwin))
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcher.twin))
 			}()
 		}
+		if launcher.depthCut {
+			// A launcher nested past maxLauncherBodyDepth is not read: TRUNCATED
+			// at the depth cap (the one bound rule, rel-1-0-10:GAP-0806).
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Depth), request) }()
+		}
 		// A script past the input bound is not read in full, so the bound of the argv
-		// call still cuts it (rel-1-0-10:GAP-0712). An argv call the POSIX
-		// reading judges past its byte bound as the text of its words
-		// (posixParseTruncation: a word in code position truncated, a data word
-		// judged as its twin) keeps that reading, which is the finer floor: a
-		// plain operand past 4 KiB of echo or dcx stays data, as in the text
-		// form (rel-1-0-10:GAP-0689). The argv cut covers every other argv call.
-		argvRead := launcherRead && len(launcherTwin.Input.Command) <= actionfacts.MaxCommandBytes ||
+		// call still cuts it (rel-1-0-10:GAP-0712), and so do the words a POSIX -c
+		// script runs as its arguments and long wrapper words (rel-1-0-10:GAP-0803).
+		// An argv call the POSIX reading judges past its byte bound as the text of
+		// its words (posixParseTruncation: a word in code position truncated, a data
+		// word judged as its twin) keeps that reading, which is the finer floor: a
+		// plain operand past 4 KiB of echo or dcx stays data, as in the text form
+		// (rel-1-0-10:GAP-0689). The argv cut covers every other argv call.
+		argvRead := launcher.read && launcher.fully && len(launcher.twin.Input.Command) <= actionfacts.MaxCommandBytes ||
 			posixByteBoundCommand(request, facts) != ""
 		if cut := trustedReadingCut(request.Input, facts, argvRead); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
