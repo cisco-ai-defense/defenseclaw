@@ -18,9 +18,11 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -118,6 +120,9 @@ func (a *APIServer) substrateDoctor(st *substrateState) http.HandlerFunc {
 		if st.cfg.Doctor != nil {
 			checks = st.cfg.Doctor(r.Context())
 		}
+		if st.cfg.SignInServer != nil {
+			checks = append(checks, st.checkSignIn(r.Context()))
+		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"checks": checks})
 	}
 }
@@ -134,6 +139,9 @@ func (a *APIServer) substrateInfo(st *substrateState) http.HandlerFunc {
 		info["attach"] = st.cfg.Relays != nil
 		if h, ok := st.tokens.report(time.Now()); ok {
 			info["actor_tokens"] = h
+		}
+		if h, ok := st.signIn.report(); ok {
+			info["sign_in_server"] = h
 		}
 		writeSubstrateJSON(w, http.StatusOK, info)
 	}
@@ -195,4 +203,144 @@ func (h *actorTokenHealth) report(now time.Time) (ActorTokenState, bool) {
 		return ActorTokenState{}, false
 	}
 	return ActorTokenState{State: "refusing", Reason: string(h.lastReason), Since: h.lastRefused.UTC().Format(time.RFC3339)}, true
+}
+
+// SubstrateSignInServer is the OIDC issuer people sign in with, as the
+// gateway's person verifier reaches it (identity.KeySet).
+type SubstrateSignInServer interface {
+	DiagnoseIssuer(ctx context.Context) identity.IssuerDiagnosis
+}
+
+// signInCheckEvery is how often the gateway checks its sign-in server.
+const signInCheckEvery = time.Minute
+
+// signInRetryAfter is the pause before a check that failed is made once
+// more: a failure is reported only when it repeats, so one discovery
+// timeout or server error does not say nobody can sign in (GAP-0279). A
+// real outage is reported by the first check that runs after it starts:
+// within signInCheckEvery plus this pause plus two fetch timeouts (about
+// 1 min 12 s). The administrators' doctor runs the same check with the same
+// retry: it hides a one-off failure too, and shows an outage within about
+// 12 s (the pause plus two fetches).
+var signInRetryAfter = 2 * time.Second
+
+// signInHealth is the last check of the sign-in server.
+type signInHealth struct {
+	mu    sync.Mutex
+	last  identity.IssuerDiagnosis
+	at    time.Time
+	since time.Time
+}
+
+func (h *signInHealth) record(d identity.IssuerDiagnosis, now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	switch {
+	case d.Cause == "":
+		h.since = time.Time{}
+	case h.last.Cause != d.Cause || h.since.IsZero():
+		h.since = now
+	}
+	h.last, h.at = d, now
+}
+
+// failing is the cause of the last check ("" when it passed or never ran).
+func (h *signInHealth) failing() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.last.Cause
+}
+
+// SignInServerState is the /info sign_in_server member: present only while
+// the last check failed. It names the cause class, never the detail, so a
+// person who cannot sign in learns why without the server's internals.
+type SignInServerState struct {
+	State  string `json:"state"` // failing
+	Reason string `json:"reason"`
+	Since  string `json:"since"`
+}
+
+func (h *signInHealth) report() (SignInServerState, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.last.Cause == "" {
+		return SignInServerState{}, false
+	}
+	return SignInServerState{State: "failing", Reason: h.last.Cause, Since: h.since.UTC().Format(time.RFC3339)}, true
+}
+
+// watchSignIn checks the sign-in server now and every signInCheckEvery,
+// and logs a change of cause.
+func (st *substrateState) watchSignIn(ctx context.Context) {
+	t := time.NewTicker(signInCheckEvery)
+	defer t.Stop()
+	for {
+		before := st.signIn.failing()
+		c := st.checkSignIn(ctx)
+		if after := st.signIn.failing(); after != before {
+			if after == "" {
+				fmt.Fprintf(os.Stderr, "[substrate] %s: %s\n", c.ID, c.Detail)
+			} else {
+				fmt.Fprintf(os.Stderr, "[substrate] %s: %s; fix: %s\n", c.ID, c.Detail, c.Fix)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// checkSignIn checks the sign-in server now, records the result, and
+// returns the doctor row (GET /api/v1/substrate/doctor, administrators).
+func (st *substrateState) checkSignIn(ctx context.Context) SubstrateCheck {
+	d := st.cfg.SignInServer.DiagnoseIssuer(ctx)
+	if d.Cause != "" {
+		// Once more before it counts (GAP-0279).
+		t := time.NewTimer(signInRetryAfter)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return SignInServerCheck(d)
+		case <-t.C:
+		}
+		d = st.cfg.SignInServer.DiagnoseIssuer(ctx)
+	}
+	st.signIn.record(d, time.Now())
+	return SignInServerCheck(d)
+}
+
+// SignInServerCheck is the doctor row for a sign-in server check, with a
+// fix for each cause (GAP-0262).
+func SignInServerCheck(d identity.IssuerDiagnosis) SubstrateCheck {
+	const id = "substrate.oidc_issuer"
+	c := SubstrateCheck{ID: id, Status: "fail", Detail: "the sign-in server " + d.Issuer + ": " + d.Detail}
+	switch d.Cause {
+	case "":
+		return SubstrateCheck{ID: id, Status: "pass",
+			Detail: fmt.Sprintf("the sign-in server %s answers from the gateway: TLS verifies, discovery names it, and its key set has %d keys", d.Issuer, d.Keys)}
+	case identity.IssuerUnreachable:
+		c.Detail = "the gateway cannot reach the sign-in server " + d.Issuer + " (" + d.Detail + "): nobody can sign in"
+		c.Fix = "check that substrate.identity.oidc.issuer is the address the sign-in server answers on now (its DNS name may have changed), and that the gateway's network and DNS reach it"
+	case identity.IssuerTLSName:
+		c.Detail = "the sign-in server's certificate does not name " + d.Issuer + " (" + d.Detail + "): nobody can sign in"
+		c.Fix = "issue the sign-in server a certificate whose names include the issuer host, or set substrate.identity.oidc.issuer to a name the certificate has"
+	case identity.IssuerTLSUntrusted:
+		c.Detail = "the sign-in server's certificate does not verify against the gateway's trust bundle (" + d.Detail + "): nobody can sign in"
+		c.Fix = "give the gateway the CA that signed it (chart value gateway.oidcCA, --oidc-ca-file), or renew an expired certificate"
+	case identity.IssuerHTTP:
+		c.Detail = "the sign-in server does not serve its discovery document (" + d.Detail + "): nobody can sign in"
+		c.Fix = "check substrate.identity.oidc.issuer: it is the address that ends before /.well-known (for Keycloak, .../realms/REALM)"
+	case identity.IssuerUnavailable:
+		c.Detail = "the sign-in server " + d.Issuer + " answers with server errors (" + d.Detail + "), twice in a row: sign-ins may fail"
+		c.Fix = "the address is right but the sign-in server is failing: check its health and logs (for Keycloak, the realm and its database), then run doctor again"
+	case identity.IssuerMismatch:
+		c.Detail = d.Detail + ": every sign-in is refused"
+		c.Fix = "set substrate.identity.oidc.issuer to exactly the issuer the discovery document names (scheme, host, port and path)"
+	case identity.IssuerKeys:
+		c.Detail = "the sign-in server's key set does not load (" + d.Detail + "): no sign-in can be verified"
+		c.Fix = "check the sign-in server's jwks_uri and that the gateway reaches it"
+	}
+	return c
 }

@@ -36,8 +36,8 @@
       "items": {
         "$ref": "#/$defs/check"
       },
-      "minItems": 9,
-      "maxItems": 9
+      "minItems": 10,
+      "maxItems": 10
     }
   },
   "$defs": {
@@ -90,6 +90,7 @@
             "substrate_version",
             "issuer_unique",
             "actor_keys",
+            "sign_in_server",
             "snapshot_bucket",
             "openfga_grants",
             "callout_registered",

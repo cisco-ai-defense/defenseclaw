@@ -76,7 +76,7 @@ func fakeKubectl(t *testing.T, fail error) {
 		case strings.HasPrefix(joined, "get leases.coordination.k8s.io"):
 			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-gateway-leader"},"spec":{"holderIdentity":"pod-1"}}]}`), nil
 		case strings.HasPrefix(joined, "get configmaps -n defenseclaw-system"):
-			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-store-state"},"data":{"schema_version":"1"}},{"metadata":{"name":"defenseclaw-config"},"data":{"config.yaml":"substrate:\n  supported_versions: \">=1.0.0 <1.1.0\"\n  identity:\n    issuer: https://idp.cluster-a.example.test\n  launcher_atespaces:\n    eng: [eng-web]\n"}}]}`), nil
+			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-store-state"},"data":{"schema_version":"1"}},{"metadata":{"name":"defenseclaw-config"},"data":{"config.yaml":"substrate:\n  supported_versions: \">=1.0.0 <1.1.0\"\n  identity:\n    issuer: https://idp.cluster-a.example.test\n    oidc:\n      issuer: https://kc.cluster-a.example.test/realms/dc\n  launcher_atespaces:\n    eng: [eng-web]\n"}}]}`), nil
 		case strings.HasPrefix(joined, "get nodes -l topology.kubernetes.io/region"):
 			return []byte(`{"items":[{"metadata":{"name":"n1","labels":{"topology.kubernetes.io/region":"us-east-1"}}}]}`), nil
 		// The idp Service through the API server's Service proxy
@@ -85,6 +85,10 @@ func fakeKubectl(t *testing.T, fail error) {
 			return []byte(`{"keys":[{"kty":"EC","kid":"k1"}]}`), nil
 		case joined == "get --raw /api/v1/namespaces/ate-system/services/https:idp:443/proxy/.well-known/openid-configuration":
 			return []byte(`{"issuer":"https://idp.cluster-a.example.test","jwks_uri":"https://idp.cluster-a.example.test/openid/v1/jwks"}`), nil
+		// The gateway's own sign-in server check, from its /info through
+		// the Service proxy (GAP-0262): healthy, so no sign_in_server member.
+		case joined == "get --raw /api/v1/namespaces/defenseclaw-system/services/https:defenseclaw-admin:443/proxy/api/v1/substrate/info":
+			return []byte(`{"sign_in":"oidc","issuer":"https://kc.cluster-a.example.test/realms/dc","attach":true}`), nil
 		case strings.HasPrefix(joined, "get deployments -n ate-system"):
 			return []byte(`{"items":[{"metadata":{"name":"ate-api-server"},"spec":{"template":{"spec":{"containers":[{"name":"api","image":"ghcr.io/agent-substrate/substrate:v1.0.0"}]}}}}]}`), nil
 		}

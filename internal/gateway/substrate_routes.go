@@ -249,10 +249,17 @@ func (a *APIServer) substrateAdminAuthenticate(st *substrateState, next http.Han
 		p, err := st.cfg.People.Verify(r.Context(), tok)
 		if err != nil {
 			status := http.StatusUnauthorized
+			reason := string(identity.ReasonOf(err))
 			if identity.Unavailable(err) {
 				status = http.StatusServiceUnavailable
+				// The gateway could not verify any sign-in: name the cause
+				// class of its last sign-in server check, never its detail
+				// (GAP-0262).
+				if cause := st.signIn.failing(); cause != "" {
+					reason = cause
+				}
 			}
-			writeSubstrateJSONError(w, status, string(identity.ReasonOf(err)))
+			writeSubstrateJSONError(w, status, reason)
 			return
 		}
 		r.Header.Del("Authorization")

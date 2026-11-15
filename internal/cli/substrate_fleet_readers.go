@@ -659,3 +659,42 @@ func readGCSBucket(ctx context.Context, b *fleet.Bucket, bucket, prefix string) 
 	}
 	b.RetentionDays = &days
 }
+
+// readSignInServer reads the gateway's own sign-in server check from its
+// unauthenticated /info, through the API server's Service proxy to the
+// admin Service (as readActorKeys does): the check runs from the gateway's
+// network, and this works when nobody can sign in (GAP-0262).
+func readSignInServer(ctx context.Context, f *substrateClusterFlags, o *fleet.Observed, adminService string) {
+	host := adminService
+	if host == "" {
+		host = "defenseclaw-admin." + f.namespace + ".svc"
+	}
+	proxy, ok := serviceProxyPath("https://" + host + "/api/v1/substrate/info")
+	if !ok {
+		o.SignInNote = "the admin Service " + host + " is not a Service of this cluster"
+		return
+	}
+	raw, err := substrateKubectl(ctx, f, "get", "--raw", proxy.keys)
+	if err != nil {
+		if strings.Contains(err.Error(), "forbidden") || strings.Contains(err.Error(), "Forbidden") {
+			o.SignInNote = "this identity may not use the Service proxy"
+			return
+		}
+		o.SignInNote = "the admin Service did not answer: " + firstLineOf(err.Error())
+		return
+	}
+	var info struct {
+		SignInServer *struct {
+			Reason string `json:"reason"`
+			Since  string `json:"since"`
+		} `json:"sign_in_server"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		o.SignInNote = "the gateway's /info answer is not understood"
+		return
+	}
+	o.SignInRead = true
+	if info.SignInServer != nil {
+		o.SignInCause, o.SignInSince = info.SignInServer.Reason, info.SignInServer.Since
+	}
+}
