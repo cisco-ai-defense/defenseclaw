@@ -114,6 +114,11 @@ type agentHookConfigGuard struct {
 	// placeCache holds the places of each spelling already resolved in this
 	// call: the owner checks walk the whole registration set per path.
 	placeCache map[string][]string
+	// gitIndexRedirected is set when the call names GIT_INDEX_FILE or GIT_DIR
+	// anywhere (a prefix, env, export, declare): the index git reads is then
+	// not <worktree>/.git/index, so a file the tree lacks is not known to be
+	// absent from the index (rel-1-0-10:GAP-0789).
+	gitIndexRedirected bool
 }
 
 // shellMentionsRegistryPath is a cheap prefilter. Every component comes from
@@ -1112,6 +1117,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	}
 	text := strings.ToLower(request.LegacyText + "\n" + request.Input.Command + "\n" + string(request.Input.Args) + "\n" + strings.Join(request.Input.Argv, "\n"))
 	rawCommand := agentHookConfigRawShellCommand(request.Input)
+	guard.gitIndexRedirected = agentHookConfigRedirectsGitIndex(rawCommand)
 	// A command that spells a link only through a variable (dest=LINK; then
 	// the variable as an operand) never names the registered file in its
 	// text; the shared reader resolves the values the command binds, as the
@@ -1133,6 +1139,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		partGuard := guard
 		if part.Dir != guard.cwd {
 			partGuard = newAgentHookConfigGuard(part.Dir, guard.home)
+			partGuard.gitIndexRedirected = guard.gitIndexRedirected
 		}
 		if hookpaths.RegistrationWriteCandidate(part.Command) {
 			registered := agentHookConfigRegistrationPaths(partGuard)
@@ -1464,6 +1471,14 @@ func agentHookConfigPathspecFolderHolds(folder, path, worktree string, fromIndex
 	return agentHookConfigGitIndexMayTrack(worktree, path)
 }
 
+// agentHookConfigRedirectsGitIndex reports a call that names GIT_INDEX_FILE
+// or GIT_DIR, the two variables that move the index git reads away from
+// <worktree>/.git/index (rel-1-0-10:GAP-0789). Their value is not read: the
+// index it names is not the one agentHookConfigGitIndexMayTrack opens.
+func agentHookConfigRedirectsGitIndex(command string) bool {
+	return strings.Contains(command, "GIT_INDEX_FILE") || strings.Contains(command, "GIT_DIR")
+}
+
 // agentHookConfigGitFromIndex reports a git checkout or restore whose
 // files come from the index: a checkout with no word before -- (a branch or
 // tree-ish, or the value of -b, -B, --orphan) and a restore with neither
@@ -1629,6 +1644,10 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 	// env -u drop what was assigned before them, as env does. Every pass
 	// consumes at least one word, so the peel ends with the argv.
 	rest, workTreeVar, gitDirVar := argv, "", ""
+	// GIT_INDEX_FILE or GIT_DIR before the command, or in an env wrapper,
+	// moves the index git reads (GAP-0789); so does one named elsewhere in
+	// the call (guard.gitIndexRedirected).
+	indexRedirected := guard.gitIndexRedirected
 	for len(rest) > 0 {
 		for len(rest) > 0 && agentHookConfigAssignment(rest[0]) {
 			name, value, _ := strings.Cut(rest[0], "=")
@@ -1637,6 +1656,9 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 				workTreeVar = value
 			case "GIT_DIR":
 				gitDirVar = value
+			}
+			if name == "GIT_INDEX_FILE" || name == "GIT_DIR" {
+				indexRedirected = true
 			}
 			rest = rest[1:]
 		}
@@ -1656,7 +1678,9 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 				if !filepath.IsAbs(directory) {
 					directory = filepath.Join(guard.cwd, directory)
 				}
+				redirected := guard.gitIndexRedirected
 				guard = newAgentHookConfigGuard(directory, guard.home)
+				guard.gitIndexRedirected = redirected
 			}
 			rest = child
 		} else if child, wrapper := agentHookConfigWrapperChild(rest); wrapper {
@@ -1808,7 +1832,7 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 			}
 			for _, file := range guard.files {
 				if file.Path == candidate || strings.HasPrefix(file.Path, candidate+string(filepath.Separator)) &&
-					agentHookConfigPathspecFolderHolds(candidate, file.Path, worktree, fromIndex) {
+					agentHookConfigPathspecFolderHolds(candidate, file.Path, worktree, fromIndex && !indexRedirected) {
 					return arg
 				}
 			}
