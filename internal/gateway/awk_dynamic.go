@@ -64,6 +64,11 @@ func awkCommandDynamic(facts actionfacts.Facts) bool {
 		if actionfacts.IsAwkCall(command) && actionfacts.AwkCall(command).Read().Dynamic {
 			return true
 		}
+		// The same awk call behind a wrapper (env, sudo, timeout, chroot,
+		// xargs ...) is as dynamic as the bare call (rel-1-0-10:GAP-0859).
+		if inner, ok := actionfacts.AwkCallBehindWrappers(command); ok && actionfacts.AwkCall(inner).Read().Dynamic {
+			return true
+		}
 	}
 	return false
 }

@@ -123,6 +123,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 
 	addPOSIXStructuralFlows(&out)
 	expandStaticPOSIXWrappers(&out, wrapperDepth)
+	expandStaticPOSIXWrappedAwkCalls(&out, wrapperDepth)
 	if posixMayRebindHome(parsedSource) {
 		for i := range out.commands {
 			for j := range out.commands[i].Arguments {
@@ -1526,24 +1527,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		default:
 			continue
 		}
-		for i := range child.commands {
-			if child.commands[i].ParentCommandID == 0 {
-				child.commands[i].ParentCommandID = command.ID
-				if posixDescriptorIsUnredirected(child.commands[i], 1) {
-					child.appendDataFlow(DataFlowFact{
-						FromCommandID: child.commands[i].ID,
-						ToCommandID:   command.ID,
-						From:          DataStdout,
-						To:            DataProcess,
-					})
-				}
-			}
-			child.commands[i].Wrappers = append(
-				[]WrapperFact{{Executable: command.Executable, Argv: cloneSlice(command.Argv)}},
-				child.commands[i].Wrappers...,
-			)
-		}
-		out.mergeNested(child)
+		mergeStaticPOSIXWrapperChild(out, command, child)
 	}
 }
 

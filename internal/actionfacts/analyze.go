@@ -492,6 +492,22 @@ func analyzeStructuredArgv(
 	wrapperDepth int,
 	dialect Dialect,
 ) parseOutput {
+	return analyzeStructuredArgvWords(argv, nil, startID, wrapperDepth, dialect)
+}
+
+// analyzeStructuredArgvWords is analyzeStructuredArgv for the words of a
+// command a static wrapper runs (expandStaticPOSIXWrappers): words are the
+// shell's word objects of argv, so the wrapped program sees which words
+// expand at run time exactly as the bare call does, and an interpreter case
+// (the awk program reading among them) answers as it answers the bare call
+// (rel-1-0-10:GAP-0859). nil words are the exact words of a structured argv.
+func analyzeStructuredArgvWords(
+	argv []string,
+	words []ArgumentFact,
+	startID int64,
+	wrapperDepth int,
+	dialect Dialect,
+) parseOutput {
 	if !validDialect(dialect) {
 		out := newParseOutput(DialectNone, startID)
 		out.markAmbiguous(IssueConflictingSources)
@@ -524,7 +540,13 @@ func analyzeStructuredArgv(
 	}
 
 	command := commandFromArgvAs(out.nextCommandID(), argv, dialect)
+	withShellWords(&command, words)
 	if !out.appendCommand(command) {
+		return out
+	}
+	if !command.ArgvComplete && !IsAwkCall(command) && !staticPOSIXWrappedAwkCall(command) {
+		// A word that expands at run time: the program is not read on, as the
+		// shell parser does not read it on for the bare call.
 		return out
 	}
 	program := command.Program
@@ -546,8 +568,9 @@ func analyzeStructuredArgv(
 			out.markLimit(IssueWrapperLimit)
 			return out
 		}
-		child = analyzeStructuredArgv(
+		child = analyzeStructuredArgvWords(
 			nestedArgv,
+			staticPOSIXWrappedWords(command.Arguments, argv, nestedArgv),
 			out.nextID,
 			wrapperDepth+1,
 			DialectPOSIX,
@@ -568,6 +591,22 @@ func analyzeStructuredArgv(
 		}
 		nestedDialect = DialectPOSIX
 		child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
+	case "awk", "gawk", "mawk", "nawk":
+		// An awk program behind an exact wrapper (env, sudo, ...) reaches here as
+		// argv: the shell commands it starts through system(), print | and
+		// | getline are judged as the hook running them directly, as in the
+		// shell parser (posix.go, GAP-0499). A command built at run time is
+		// answered by the gateway at the unknown tier (awkprog.DynamicReason).
+		body := AwkCall(command).Read().Body
+		if body == "" {
+			return out
+		}
+		if wrapperDepth >= maxWrapperDepth {
+			out.markLimit(IssueWrapperLimit)
+			return out
+		}
+		nestedDialect = DialectPOSIX
+		child = parsePOSIX(body, out.nextID, wrapperDepth+1)
 	case "eval":
 		if len(argv) < 2 {
 			return out
