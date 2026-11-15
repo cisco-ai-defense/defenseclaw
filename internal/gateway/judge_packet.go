@@ -28,6 +28,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
@@ -620,9 +621,12 @@ func redactToolResultCall(value string) string {
 }
 
 // sessionUserIntent is the user's request for the session's current turn,
-// as the connector's prompt event recorded it: the turn's task in the scope
-// table ("" after ClearSessionTask). The intent store cannot be read without
-// recording a call (intent_scope_session.go).
+// as the connector's prompt event recorded it, read from the intent store
+// the tool-call judge reads (intentstore.Reader), so every replica that shares
+// the store gives the same request (rel-1-0-10:GAP-0848). As in the tool-call
+// judge's sample, a turn whose task this process cleared (ClearSessionTask)
+// has none. A store that cannot be read without recording a call, or one that
+// fails, gives "" (unknown), never this process's own copy.
 func (j *LLMJudge) sessionUserIntent(ctx context.Context) string {
 	if j == nil {
 		return ""
@@ -631,8 +635,19 @@ func (j *LLMJudge) sessionUserIntent(ctx context.Context) string {
 	if sessionID == "" {
 		return ""
 	}
-	entry, _ := j.scopeSessions().get(sessionID)
-	return entry.task
+	reader, ok := j.intentStore().(intentstore.Reader)
+	if !ok {
+		return ""
+	}
+	entry, found, err := reader.Lookup(ctx, sessionID)
+	if err != nil {
+		j.warnIntentStore("Lookup", "the tool output is judged without the user's request", err)
+		return ""
+	}
+	if !found || j.sessionTaskCleared(sessionID) {
+		return ""
+	}
+	return entry.UserIntent
 }
 
 // toolResultJudgeHeader is the trusted context block for the tool-result
