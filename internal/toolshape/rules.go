@@ -216,3 +216,15 @@ func TextRules(text string) []string {
 	}
 	return out
 }
+
+// AlertOnly reports a rule of the table that is only ever an alert, in every
+// tier: the call shape is an ordinary task of an agent session as often as an
+// attack (a useradd in a container task, a reboot of a test host), so the
+// finding is recorded and never blocks, not even in the strict packs.
+func AlertOnly(ruleID string) bool {
+	t, err := load()
+	if err != nil {
+		return false
+	}
+	return containsStr(t.AlertOnly, ruleID)
+}

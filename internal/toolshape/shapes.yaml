@@ -177,6 +177,9 @@ path_rules:
   # autostart entry, a launchd agent, in any home (/home/bob, /mnt/home/alice, /Users/carol, /root). The system-wide unit and launchd folders (/etc/systemd/system, /Library/LaunchDaemons) are not here: a root-owned unit there is routine administration (24 benign admin tasks in the s3 corpus wrote one), and the rule keeps its reading of the account's own folders.
   - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "(?i)^(?:/root|/(?:[^/]+/)*(?:home|homes|users)/[^/]+)/(?:[.]config/systemd/user/[^/]+[.](?:service|timer|socket|path|target)|[.]config/autostart/[^/]+[.]desktop|Library/LaunchAgents/[^/]+[.]plist)$"}
   - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "^/etc/(cron[.](d|daily|hourly|weekly|monthly)/|crontab$|sudoers[.]d/)|^/var/spool/cron/", text_re: "(?i)(^|[^a-z])root[[:space:]]+([^[:space:]]+[[:space:]]+)*(/home/|/tmp/|/var/tmp/|/dev/shm/|~/)"}
+# Rules of this table that never block: an account made or a host taken down from a call is the setup of a container task or a test host as
+# often as it is an attack, so the finding is an alert in every tier (the strict packs included).
+alert_only_rules: [CMD-ACCOUNT-CREATE, CMD-HOST-POWER]
 command_rules:
   - {id: CMD-SECRET-REVEAL, any_argv: ["--show-secrets", "--reveal"]}
   - {id: CMD-SECRET-LOOKUP, program: [vault], all_argv: [token, lookup]}

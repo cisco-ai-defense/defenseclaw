@@ -348,7 +348,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 		if !ok {
 			return
 		}
-		out = append(out, nonShellFinding(rule, note, request.Input.Tool, hard))
+		out = append(out, nonShellFinding(rule, note, request.Input.Tool, hard && !toolshape.AlertOnly(ruleID)))
 	}
 	if isShell {
 		for _, id := range toolshape.TextRules(command) {

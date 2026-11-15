@@ -149,6 +149,7 @@ type table struct {
 
 	PathRules     []PathRule          `yaml:"path_rules"`
 	CommandRules  []CommandRule       `yaml:"command_rules"`
+	AlertOnly     []string            `yaml:"alert_only_rules"`
 	ShellTriggers []string            `yaml:"shell_triggers"`
 	KnownRoles    map[string][]string `yaml:"known_roles"`
 	PathKeySuffix []string            `yaml:"path_key_suffixes"`
