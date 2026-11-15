@@ -35,6 +35,12 @@ type RouteOnlySetup struct {
 	// token, so another account that binds the port while the gateway
 	// restarts receives nothing it can use.
 	Custody bool
+	// Unavailable is set on the expected render of a verify path only: the
+	// connector is routed for this account, but its route credential cannot
+	// be derived (the cause, with no secret). Verify reports it as
+	// route_config_drift, so the guardian repairs and status says why,
+	// instead of reading it as "no route expected" (rel-1-0-10:GAP-0800).
+	Unavailable string
 }
 
 // RouteOnlyPlaceholderCredential is the fixed, non-secret value a custody

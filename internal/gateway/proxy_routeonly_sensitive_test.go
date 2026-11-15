@@ -326,3 +326,82 @@ func TestRouteOnlySensitiveUnreachableLocalIsRefusedAndAudited(t *testing.T) {
 		t.Fatalf("no audit row: %+v", events)
 	}
 }
+
+// rel-1-0-10:GAP-0757: the local model of a sensitive request refuses it
+// (Ollama does not know the Responses input item Codex sends in the lite tool
+// mode): the agent gets a DefenseClaw error naming routing.sensitive, the
+// alias and the model's reason, in the Responses error shape; the cloud model
+// is never tried.
+func TestRouteOnlySensitiveLocalRefusalIsNamed(t *testing.T) {
+	var localHits int32
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&localHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"input[0]: unknown input item type additional_tools","type":"invalid_request_error"}}`))
+	}))
+	t.Cleanup(local.Close)
+	f := sensitiveRouteOnlyFixture(t, config.RoutingModelBackend{Provider: "ollama", Model: "qwen2.5", APIs: []string{"responses"}, BaseURL: local.URL})
+	store, logger := testStoreAndLogger(t)
+	f.srv.router.SetAuditLogger(logger)
+	f.cfg.Routing.RouteOnly.Connectors = append(f.cfg.Routing.RouteOnly.Connectors, "codex")
+	f.cfg.Routing.RouteOnly.Upstreams["codex"] = config.RoutingUpstreamConfig{BaseURL: f.orig.URL, API: "responses"}
+	tok, err := f.srv.tokens.Token("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{"model": "openai.gpt-oss-120b", "input": []any{
+		map[string]any{"type": "additional_tools", "tools": []any{}},
+		map[string]any{"role": "user", "content": []any{map[string]any{"type": "input_text", "text": "the db password is hunter2"}}},
+	}}
+	rec := f.post(t, "/r/codex/responses", body, func(r *http.Request) {
+		r.Header.Del("X-Api-Key")
+		r.Header.Set("Authorization", "Bearer ABSKbedrock-short-term-key")
+		r.Header.Set(routeTokenHeader, tok)
+	})
+	if atomic.LoadInt32(&f.origHits) != 0 || atomic.LoadInt32(&localHits) != 1 {
+		t.Fatalf("local=%d cloud=%d", localHits, f.origHits)
+	}
+	var got struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if rec.Code != http.StatusBadRequest || json.Unmarshal(rec.Body.Bytes(), &got) != nil || got.Error.Type != "invalid_request_error" {
+		t.Fatalf("refusal = %d %s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"[DefenseClaw]", "routing.sensitive", "local", "additional_tools", "Nothing was sent to the cloud model", "use_responses_lite"} {
+		if !strings.Contains(got.Error.Message, want) {
+			t.Fatalf("message %q lacks %q", got.Error.Message, want)
+		}
+	}
+	// Audited as a routing.sensitive refusal, with no provider text.
+	events, _ := store.ListEvents(20)
+	found := false
+	for _, e := range events {
+		if e.Target == "routing.sensitive" && strings.Contains(e.Details, engine.DenyCodeSensitiveLocal) {
+			found = true
+			if strings.Contains(e.Details, "additional_tools") {
+				t.Fatalf("the audit row carries the provider text: %s", e.Details)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no routing.sensitive audit row: %+v", events)
+	}
+}
+
+func TestRouteOnlyProviderErrorTextIsBounded(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"error":{"message":"bad item"}}`: "bad item",
+		`{"error":"model not found"}`:      "model not found",
+		`{"message":"nope"}`:               "nope",
+		`not json`:                         "",
+		`{"error":{"message":"a\u0000b\nc` + strings.Repeat("x", 300) + `"}}`: "abc" + strings.Repeat("x", 157),
+	} {
+		if got := routeOnlyProviderErrorText([]byte(raw)); got != want {
+			t.Fatalf("%.40s = %q, want %q", raw, got, want)
+		}
+	}
+}

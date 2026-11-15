@@ -51,6 +51,43 @@ def test_rows_and_summary() -> None:
     assert overview_tile({"enabled": False}) == "Routing: off"
 
 
+def test_routing_on_and_disabled_never_show_together() -> None:
+    """GAP-0756: right after the wizard turned routing on, config.yaml says on
+    and the gateway still says disabled for a few seconds."""
+    pending = {**STATUS, "health": {"state": "disabled"}}
+    model = loaded(pending)
+    assert model.applying
+    line = model.summary_line()
+    assert "Routing on" in line and "applying" in line and "disabled" not in line
+    assert "applying" in overview_tile(pending)
+    assert "· not applied" in overview_tile(pending, applying=False)
+    # The gateway reloaded: the plain state comes back and the counter resets.
+    model.apply_status_json(json.dumps(STATUS))
+    assert not model.applying and model.applying_reads == 0
+    assert model.summary_line().endswith("running")
+    # Routing off in config.yaml with the gateway disabled is simply off.
+    off = loaded({**STATUS, "enabled": False, "health": {"state": "disabled"}})
+    assert not off.applying and off.summary_line().startswith("Routing off")
+
+
+def test_applying_wait_is_bounded_then_says_it_did_not_apply() -> None:
+    from defenseclaw.tui.services.routing_state import APPLYING_MAX_POLLS
+
+    model = RoutingPanelModel()
+    pending = json.dumps({**STATUS, "health": {"state": "disabled"}})
+    for _ in range(APPLYING_MAX_POLLS):
+        model.apply_status_json(pending)
+        assert model.applying
+    model.apply_status_json(pending)
+    assert not model.applying
+    line = model.summary_line()
+    assert "not applied" in line and "defenseclaw-gateway restart" in line and "disabled" not in line
+    # A gateway that is down or reports a startup error is not "applying".
+    for state in ("unreachable", "error", "running"):
+        model.apply_status_json(json.dumps({**STATUS, "health": {"state": state}}))
+        assert not model.applying and model.summary_line().endswith(state)
+
+
 def test_bad_json_is_an_error_not_a_crash() -> None:
     model = RoutingPanelModel()
     model.apply_status_json("not json")
@@ -111,11 +148,26 @@ async def test_routing_panel_renders_at_80x24(tmp_path) -> None:
     app = snapshot_app(tmp_path)
     app.config.routing = SimpleNamespace(enabled=True, admin={})  # the tab shows only while routing is on
     app.routing_model, app._routing_model_injected = loaded(), True
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run(binary, args, *, stdin_input=None, env_overrides=None):
+        calls.append((binary, *args))
+        yield CommandEvent("start", " ".join((binary, *args)))
+        yield CommandEvent("done", exit_code=0, duration=0.01)
+
+    app.executor.run = fake_run
     async with app.run_test(size=(80, 24)) as pilot:
         app.action_switch_panel("routing")
         await pilot.pause()
         text = screen_text(app)
         assert "Routing on" in text and "fast" in text and "secrets-local" in text
+        # rel-1-0-10:GAP-0809: p (read-only price table) runs at once, with no confirm modal.
+        screens = len(app.screen_stack)
+        await pilot.press("p")
+        await pilot.pause()
+        assert len(app.screen_stack) == screens
+        await app.workers.wait_for_complete()
+    assert ("defenseclaw", "routing", "pricing", "show") in calls
 
 
 async def test_delete_journey_runs_the_remove_command(tmp_path) -> None:
