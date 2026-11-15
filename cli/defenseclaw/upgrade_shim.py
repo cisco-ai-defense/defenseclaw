@@ -594,7 +594,8 @@ def _active_config_path() -> str:
 # 1.0.9 refuses a cascade block under any scope, as it refuses
 # guardrail.cascade itself (GAP-0544, GAP-0583); a downgrade sets each
 # entry's block aside under its own dotted key. The decision_model keys are
-# System One's (s7/sysone); a profile's routing block is the router's.
+# System One's (s7/sysone); a profile's routing block is the router's; a
+# profile's sandbox keys past 1.0.9 are feat/substrate's (openshell.admin twins).
 NEWER_CONFIG_SUBTREES = (
     ("guardrail.connectors.*.cascade", (1, 0, 10)),
     ("guardrail.profiles.*.cascade", (1, 0, 10)),
@@ -605,6 +606,14 @@ NEWER_CONFIG_SUBTREES = (
     ("decision_model.history_tool_results", (1, 0, 10)),
     ("decision_model.history_turns", (1, 0, 10)),
     ("guardrail.profiles.*.routing", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.actor_secrets", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.ask_hosts", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.ask_timeout", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.idle_suspend_after", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.runtimes", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.sandbox_class", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.unattended_asks", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.url_rules", (1, 0, 10)),
 )
 
 
