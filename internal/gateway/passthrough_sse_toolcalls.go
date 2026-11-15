@@ -19,7 +19,9 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -60,7 +62,11 @@ func callTypeOfEvent(typ string) string {
 //   - Responses: every output item whose type is a call (function_call,
 //     custom_tool_call, local_shell_call, mcp_call, computer_call and the
 //     items that come after them), from response.output_item.added (open) to
-//     response.output_item.done (finished), and its argument deltas;
+//     response.output_item.done (finished). Its argument deltas and the full
+//     text of its *_call_*.done event are kept: an item that never gets its
+//     output_item.done is judged with them at response.completed (failed,
+//     incomplete) or at the end of the stream (GAP-0321), and so is a delta
+//     text that differs from the finished item;
 //   - Chat Completions: choices[].delta.tool_calls (and the older
 //     delta.function_call) fragments, finished by the choice's finish_reason
 //     or the end of the stream;
@@ -71,7 +77,8 @@ func callTypeOfEvent(typ string) string {
 // object with tool_calls, the snapshot in response.completed) is added with
 // AddCalls.
 type sseToolCalls struct {
-	open      map[string]bool // Responses item ids in progress
+	open      map[string]*sseRespCall // Responses call items in progress, by item id or output index
+	openOrder []string                // the keys of open, in the order the items opened
 	chat      map[int]*sseChatCall
 	chatOrder []int
 	blocks    map[int]*sseChatCall // Anthropic content blocks in progress
@@ -102,8 +109,32 @@ type sseChatCall struct {
 	args     strings.Builder
 }
 
+// sseRespCall is a Responses call item in progress: what its added item, its
+// argument deltas and its *_call_*.done event said.
+type sseRespCall struct {
+	id, name string
+	typ      string // the item type: function_call, custom_tool_call ...
+	outIdx   int    // output_index, -1 when unknown
+	args     strings.Builder
+	doneText string // the full text of the item's *_call_*.done event
+	hasDone  bool
+}
+
+// texts are the argument texts the item is judged with: its deltas, and the
+// text of its .done event when that differs.
+func (c *sseRespCall) texts() []string {
+	var out []string
+	if a := c.args.String(); a != "" {
+		out = append(out, a)
+	}
+	if c.hasDone && c.doneText != "" && (len(out) == 0 || out[0] != c.doneText) {
+		out = append(out, c.doneText)
+	}
+	return out
+}
+
 func newSSEToolCalls(maxValues int) *sseToolCalls {
-	return &sseToolCalls{maxValues: maxValues, open: map[string]bool{}, chat: map[int]*sseChatCall{}, blocks: map[int]*sseChatCall{}, serverBlocks: map[int]*sseChatCall{}, seen: map[string]bool{}}
+	return &sseToolCalls{maxValues: maxValues, open: map[string]*sseRespCall{}, chat: map[int]*sseChatCall{}, blocks: map[int]*sseChatCall{}, serverBlocks: map[int]*sseChatCall{}, seen: map[string]bool{}}
 }
 
 func (s *sseToolCalls) finished(c sseToolCall) {
@@ -118,6 +149,65 @@ func (s *sseToolCalls) AddCalls(calls []sseToolCall) {
 			s.finished(c)
 		}
 	}
+}
+
+// respItem is the open Responses item of key, opened when new.
+func (s *sseToolCalls) respItem(key string, outIdx int) *sseRespCall {
+	if c := s.open[key]; c != nil {
+		return c
+	}
+	c := &sseRespCall{outIdx: outIdx}
+	s.open[key] = c
+	s.openOrder = append(s.openOrder, key)
+	return c
+}
+
+// closeResp removes the open item of key and returns it (nil if none).
+func (s *sseToolCalls) closeResp(key string) *sseRespCall {
+	c := s.open[key]
+	if c == nil {
+		return nil
+	}
+	delete(s.open, key)
+	for i, k := range s.openOrder {
+		if k == key {
+			s.openOrder = append(s.openOrder[:i:i], s.openOrder[i+1:]...)
+			break
+		}
+	}
+	return c
+}
+
+// judgeResp adds the argument texts of the item c that no finished call
+// carries, as calls of its name (of its type when it has none, as
+// textWalker.callObject names a call).
+func (s *sseToolCalls) judgeResp(c *sseRespCall) {
+	name := c.name
+	if name == "" {
+		name = firstNonEmpty(c.typ, "function_call")
+		if name == "local_shell_call" {
+			name = "local_shell"
+		}
+	}
+	texts := c.texts()
+	if len(texts) == 0 {
+		texts = []string{"{}"}
+	}
+	for _, a := range texts {
+		tc := sseToolCall{ID: c.id, Type: "function"}
+		tc.Function.Name, tc.Function.Arguments = name, a
+		s.AddCalls([]sseToolCall{tc})
+	}
+}
+
+// finishOpen judges every open Responses item with what its deltas and its
+// .done event carried, and closes it: the response ended (or the stream did)
+// without the item's output_item.done (GAP-0321).
+func (s *sseToolCalls) finishOpen() {
+	for _, key := range s.openOrder {
+		s.judgeResp(s.open[key])
+	}
+	s.open, s.openOrder = map[string]*sseRespCall{}, nil
 }
 
 func jnodeInt(n *jnode) (int, bool) {
@@ -146,7 +236,24 @@ func (s *sseToolCalls) Feed(data string) {
 			s.nextIndex = outIdx + 1
 		}
 	}
+	idx := -1
+	if hasOutIdx {
+		idx = outIdx
+	}
+	// itemKey is the key of the item an event names: its id, else its
+	// output_index; an event without the id finds the open item of its
+	// output_index.
 	itemKey := func(id string) string {
+		if id != "" && s.open[id] != nil {
+			return id
+		}
+		if hasOutIdx {
+			for _, k := range s.openOrder {
+				if s.open[k].outIdx == outIdx {
+					return k
+				}
+			}
+		}
 		if id != "" {
 			return id
 		}
@@ -161,32 +268,73 @@ func (s *sseToolCalls) Feed(data string) {
 		key := itemKey(item.str("id"))
 		if typ == "response.output_item.added" {
 			if !serverCallType(item.str("type")) {
-				s.open[key] = true
+				c := s.respItem(key, idx)
+				fn := item.get("function")
+				c.id = firstNonEmpty(item.str("call_id"), item.str("id"))
+				c.name = firstNonEmpty(item.str("name"), fn.str("name"), item.str("tool_name"), item.str("toolName"))
+				c.typ = item.str("type")
 			}
 			break
 		}
-		delete(s.open, key)
+		open := s.closeResp(key)
 		w := &textWalker{reply: true}
 		w.callObject(item, "")
 		for _, c := range w.calls {
 			s.finished(c)
 		}
+		if open != nil && len(w.calls) > 0 {
+			// A delta text the finished item does not carry is judged too.
+			if open.name == "" {
+				open.name = w.calls[0].Function.Name
+			}
+			if len(open.texts()) > 0 {
+				s.judgeResp(open)
+			}
+		}
 		if len(s.open) == 0 && len(s.blocks) == 0 {
 			s.held = 0
 		}
-	case strings.HasPrefix(typ, "response.") && strings.HasSuffix(typ, ".delta") && strings.Contains(typ, "_call"):
+	case strings.HasPrefix(typ, "response.") && strings.Contains(typ, "_call") &&
+		(strings.HasSuffix(typ, ".delta") || strings.HasSuffix(typ, ".done")):
 		// function_call_arguments, custom_tool_call_input, mcp_call_arguments,
 		// code_interpreter_call_code ...: the item is open even if its
-		// output_item.added was not seen.
-		if serverCallType(callTypeOfEvent(typ)) {
+		// output_item.added was not seen. A .done event carries the item's
+		// whole text (arguments, input), and some providers end the item there.
+		ct := callTypeOfEvent(typ)
+		if serverCallType(ct) {
 			break
 		}
-		s.open[itemKey(root.str("item_id"))] = true
-		if d := root.get("delta"); d != nil && d.kind == 's' {
-			s.grow(len(d.s))
+		c := s.respItem(itemKey(root.str("item_id")), idx)
+		if c.typ == "" {
+			c.typ = ct
+		}
+		if strings.HasSuffix(typ, ".delta") {
+			if d := root.get("delta"); d != nil && d.kind == 's' {
+				s.grow(len(d.s))
+				if !s.broken {
+					c.args.WriteString(d.s)
+				}
+			}
+			break
+		}
+		if c.name == "" {
+			c.name = root.str("name")
+		}
+		for _, f := range []string{"arguments", "input", "code"} {
+			if v := root.get(f); v != nil && v.kind == 's' {
+				if c.args.Len() == 0 {
+					s.grow(len(v.s))
+				}
+				if !s.broken {
+					c.doneText, c.hasDone = v.s, true
+				}
+				break
+			}
 		}
 	case typ == "response.completed" || typ == "response.failed" || typ == "response.incomplete":
-		s.open = map[string]bool{}
+		// The response is over: an item still open is judged with what its
+		// deltas carried (the snapshot's own calls follow through AddCalls).
+		s.finishOpen()
 		s.held = 0
 	case typ == "content_block_start":
 		idx, _ := jnodeInt(root.get("index"))
@@ -297,12 +445,27 @@ func (s *sseToolCalls) finishChat() {
 
 // Finish ends the stream: Chat Completions calls with no finish_reason are
 // finished; an open Responses item or content block can no longer be
-// completed.
+// completed, so the stream is Broken, and the item or block is judged with
+// what it carried.
 func (s *sseToolCalls) Finish() {
 	s.finishChat()
-	if len(s.open) > 0 || len(s.blocks) > 0 {
-		s.broken = true
+	if len(s.open) == 0 && len(s.blocks) == 0 {
+		return
 	}
+	// Cut inside a call: the fail mode applies (Broken), and what the call
+	// carried so far still goes through the tool-call rules (GAP-0321).
+	s.broken = true
+	s.finishOpen()
+	for _, idx := range slices.Sorted(maps.Keys(s.blocks)) {
+		c := s.blocks[idx]
+		tc := sseToolCall{ID: c.id, Type: "function"}
+		tc.Function.Name, tc.Function.Arguments = c.name, c.args.String()
+		if tc.Function.Arguments == "" {
+			tc.Function.Arguments = "{}"
+		}
+		s.AddCalls([]sseToolCall{tc})
+	}
+	s.blocks = map[int]*sseChatCall{}
 }
 
 // Open reports a tool call in progress, whose bytes are held.
