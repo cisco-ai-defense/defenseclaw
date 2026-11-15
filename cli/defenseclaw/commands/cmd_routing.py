@@ -371,6 +371,20 @@ def _cause_fix(cause: str) -> str:
     return "run defenseclaw doctor, then restart the gateway: defenseclaw-gateway restart"
 
 
+def _routing_not_applied(error: str) -> bool:
+    """Whether a gateway answer says routing is off or not running there yet
+    (the gateway answers 503 until it has reloaded config.yaml)."""
+    return "routing is" in error
+
+
+def _with_cause(app: AppContext, error: str) -> str:
+    """error, plus the startup cause and fix the gateway reports for it."""
+    cause = _startup_cause(app) if _routing_not_applied(error) else ""
+    if not cause:
+        return error
+    return f"{error}\nThe gateway reports: {cause}\nFix: {_cause_fix(cause)}"
+
+
 def _docker_problem() -> str:
     """Why the managed vllm_sr router cannot run here (no Docker CLI, or its
     daemon does not answer); empty when Docker is up. The wording is doctor's
@@ -1280,10 +1294,7 @@ def routing_test(app: AppContext, prompt: str, connector: str, as_profile: str, 
     payload = {"prompt": prompt, "connector": connector, "profile": as_profile, "user": as_user}
     answer, error = _ask_gateway(app, "POST", "/api/v1/routing/test", json=payload, timeout=10)
     if error:
-        cause = _startup_cause(app) if "routing is" in error else ""
-        if cause:
-            raise click.ClickException(f"{error}\nThe gateway reports: {cause}\nFix: {_cause_fix(cause)}")
-        raise click.ClickException(error)
+        raise click.ClickException(_with_cause(app, error))
     if as_json:
         _emit_json(answer)
         return
@@ -1386,6 +1397,46 @@ def routing_usage(app: AppContext, group_by: str, since: str, as_json: bool) -> 
 
 
 # ---------------- setup (guided)
+
+
+# How long routing setup waits for a running gateway to reload config.yaml and
+# turn routing on before it runs the test (the gateway answers 503 until then).
+SETUP_TEST_WAIT_SECONDS = 12.0
+SETUP_TEST_POLL_SECONDS = 1.0
+
+
+def _setup_test(app: AppContext) -> tuple[Any, str]:
+    """(answer, error) of the setup test prompt. While the gateway has not
+    applied the change yet it is asked again for a bounded time, stopping at
+    once when the gateway reports why routing cannot start; a gateway that is
+    not running is not waited for."""
+    import time
+
+    deadline = time.monotonic() + SETUP_TEST_WAIT_SECONDS
+    waited = False
+    while True:
+        answer, error = _ask_gateway(
+            app,
+            "POST",
+            "/api/v1/routing/test",
+            json={"prompt": "Write a Python function that reverses a list."},
+            timeout=10,
+        )
+        if not error or not _routing_not_applied(error):
+            return answer, error
+        if _startup_cause(app) or time.monotonic() >= deadline:
+            break
+        waited = True
+        time.sleep(SETUP_TEST_POLL_SECONDS)
+    cause = _startup_cause(app)
+    if cause:
+        return None, f"{error} ({cause}); {_cause_fix(cause)}"
+    seconds = int(SETUP_TEST_WAIT_SECONDS)
+    return None, (
+        f"the gateway has not applied the change yet ({error}"
+        + (f"; waited {seconds} s" if waited else "")
+        + "); it reloads config.yaml by itself, or restart it: defenseclaw-gateway restart"
+    )
 
 
 @routing_cmd.command("setup")
@@ -1495,13 +1546,7 @@ def routing_setup(
             f"No route rules yet: every request goes to {default}. Send a kind of work elsewhere: "
             f"defenseclaw routing setup --route coding={other} (also reasoning and summarize)."
         )
-    answer, error = _ask_gateway(
-        app,
-        "POST",
-        "/api/v1/routing/test",
-        json={"prompt": "Write a Python function that reverses a list."},
-        timeout=10,
-    )
+    answer, error = _setup_test(app)
     if error:
         click.echo(f'Test skipped: {error}. Run later: defenseclaw routing test "<prompt>"')
     elif isinstance(answer, dict):

@@ -51,6 +51,43 @@ def test_rows_and_summary() -> None:
     assert overview_tile({"enabled": False}) == "Routing: off"
 
 
+def test_routing_on_and_disabled_never_show_together() -> None:
+    """GAP-0756: right after the wizard turned routing on, config.yaml says on
+    and the gateway still says disabled for a few seconds."""
+    pending = {**STATUS, "health": {"state": "disabled"}}
+    model = loaded(pending)
+    assert model.applying
+    line = model.summary_line()
+    assert "Routing on" in line and "applying" in line and "disabled" not in line
+    assert "applying" in overview_tile(pending)
+    assert "· not applied" in overview_tile(pending, applying=False)
+    # The gateway reloaded: the plain state comes back and the counter resets.
+    model.apply_status_json(json.dumps(STATUS))
+    assert not model.applying and model.applying_reads == 0
+    assert model.summary_line().endswith("running")
+    # Routing off in config.yaml with the gateway disabled is simply off.
+    off = loaded({**STATUS, "enabled": False, "health": {"state": "disabled"}})
+    assert not off.applying and off.summary_line().startswith("Routing off")
+
+
+def test_applying_wait_is_bounded_then_says_it_did_not_apply() -> None:
+    from defenseclaw.tui.services.routing_state import APPLYING_MAX_POLLS
+
+    model = RoutingPanelModel()
+    pending = json.dumps({**STATUS, "health": {"state": "disabled"}})
+    for _ in range(APPLYING_MAX_POLLS):
+        model.apply_status_json(pending)
+        assert model.applying
+    model.apply_status_json(pending)
+    assert not model.applying
+    line = model.summary_line()
+    assert "not applied" in line and "defenseclaw-gateway restart" in line and "disabled" not in line
+    # A gateway that is down or reports a startup error is not "applying".
+    for state in ("unreachable", "error", "running"):
+        model.apply_status_json(json.dumps({**STATUS, "health": {"state": state}}))
+        assert not model.applying and model.summary_line().endswith(state)
+
+
 def test_bad_json_is_an_error_not_a_crash() -> None:
     model = RoutingPanelModel()
     model.apply_status_json("not json")

@@ -13,6 +13,7 @@ from __future__ import annotations
 from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.screens.field_editor import FieldEditorScreen
 from defenseclaw.tui.services.routing_state import (
+    APPLYING_POLL_SECONDS,
     VIEW_USAGE,
     RoutingPanelAction,
     RoutingPanelModel,
@@ -79,10 +80,15 @@ class RoutingPanelMixin:
             self._routing_load_running = False
         overview = getattr(self, "overview_model", None)
         if overview is not None and hasattr(overview, "set_routing_tile"):
-            overview.set_routing_tile(overview_tile(model.status) if model.enabled else "")
+            overview.set_routing_tile(overview_tile(model.status, model.applying) if model.enabled else "")
         if self._routing_load_pending:
             self._routing_load_pending = False
             self._schedule_routing_load()
+        elif model.applying and not getattr(self, "_app_shutting_down", False):
+            # Routing is on in config.yaml and the gateway has not reloaded
+            # yet: read again shortly (bounded by the model) instead of
+            # leaving "on" and "disabled" side by side.
+            self.set_timer(APPLYING_POLL_SECONDS, self._schedule_routing_load)  # type: ignore[attr-defined]
         if getattr(self, "active_panel", "") == "routing":
             self._update_body_only()  # type: ignore[attr-defined]
 
