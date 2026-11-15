@@ -107,6 +107,27 @@ This is the 1.0.9 flow: DefenseClaw runs a pinned vLLM Semantic Router container
 
    To use a router you run yourself, set `routing.remote.endpoint` (HTTPS for non-loopback endpoints) instead of starting the container.
 
+## Route on the conversation
+
+By default the router reads only the newest message the user typed. In an agent loop most requests end with a tool result, so the router sees the last thing the user said and nothing of the loop. `routing.context` lets the `rules` and `systemone` classifiers read a little more. It is off by default.
+
+```yaml title="~/.defenseclaw/config.yaml"
+routing:
+  classifier: rules
+  context:
+    recent_user_turns: 2          # older user messages, 0 to 8
+    include_first_user_turn: true # the message that started the conversation
+    max_bytes: 8192               # older messages together, at most 65536
+    per_turn_bytes: 2048          # one older message, at most max_bytes
+    include_tool_names: true      # names of the tools the loop called
+```
+
+- Read: user messages. Left out: tool results, assistant replies, system prompts, and user-role text that starts with a marker agents write: `<system-reminder>`, `<environment_context>`, `<user_instructions>`, command, hook and IDE tags (`<bash-stdout>`, `<local-command-stdout>`, `<command-name>`, `<user-prompt-submit-hook>`, `<ide_selection>` and similar), `# AGENTS.md instructions`, `# CLAUDE.md`, `Contents of `, compaction summaries (Claude Code and Codex), skill loads, `<user_shell_command>`, the OpenClaw context message, its `Sender (untrusted metadata):` envelope and its heartbeat and session-startup prompts. Each content block is checked on its own, so a typed prompt in the same message as agent blocks is still read. For a custom slash command the router reads what you typed after the command name (`<command-args>`) and skips the next block of that message, the expanded command file. Text an agent writes without such a marker can still be read. Tool names are read without their arguments or results; MCP tool names are chosen by the tool server.
+- The newest message keeps its 8 KiB limit; `per_turn_bytes` and `max_bytes` bound the older messages.
+- Keyword signals match the newest message and the context, newest first, one message per paragraph, with no recency weighting: an older message can match a higher-priority rule than the newest one. With `include_tool_names` they also see a line such as `tools: Bash,Read`, and the request condition `tool_loop` matches when the conversation called a tool. `routing.sensitive.signals` match the context too.
+- `systemone` gets the same context, at most 8 KiB. `vllm_sr` reads the newest message only, so validation refuses `routing.context` with it.
+- When a limit cuts the context, the decision carries the warning `context_truncated:bytes` (`items` past 32 tool names), shown by `defenseclaw routing explain`. The newest message is never dropped, and a cut never removes a signal the newest message matched.
+
 ## Verify the running state
 
 ```bash

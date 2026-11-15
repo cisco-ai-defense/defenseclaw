@@ -77,6 +77,15 @@ type Request struct {
 	SensitiveText      string
 	SensitiveTruncated bool
 	StrictTier         bool
+	// ContextTurns, FirstTurn, ToolNames and ToolLoop are the
+	// routing.context facts (ContextCollector.Fill): older human-typed user
+	// turns newest first, the first turn when the window does not hold it,
+	// the names of the tools the loop called, and whether it called any.
+	// Empty unless routing.context is on.
+	ContextTurns []string
+	FirstTurn    string
+	ToolNames    []string
+	ToolLoop     bool
 	// Profiles are the guardrail profiles the caller resolved to, in
 	// assignment order (several when the profile meet combined them).
 	Profiles      []string
@@ -191,6 +200,8 @@ func (d Decision) SensitiveNarrowed() bool { return d.Sensitive.Source != "" && 
 
 // ClassifyInput is what a classifier sees: no identity, no credentials.
 type ClassifyInput struct {
+	// Text is the newest human-typed user turn, or with routing.context
+	// the bounded context text (ClassifierTextLimit at most).
 	Text           string
 	APIFamily      string
 	Connector      string
@@ -199,7 +210,9 @@ type ClassifyInput struct {
 	ToolTurn       bool
 	HasImages      bool
 	LongContext    bool
-	// Signals are the keyword signals that matched Text.
+	ToolLoop       bool
+	// Signals are the keyword signals that matched Text (and, with
+	// routing.context, the tool-name line).
 	Signals map[string]bool
 	// Categories are the category names of the effective policy, sorted
 	// (the choices a category classifier such as systemone picks from).

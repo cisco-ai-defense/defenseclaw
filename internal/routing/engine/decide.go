@@ -34,8 +34,18 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		return Decision{Outcome: OutcomePassthrough, FailureCode: FailureNone}
 	}
 	pol := e.policyFor(req)
-	signals := e.matcher.Match(req.Text)
-	sens := e.beginSensitive(ctx, req, signals)
+	// The classifier reads routing.context (older turns, tool names); the
+	// routing.sensitive floor and check keep reading the newest turn only,
+	// as documented (merge of s1b/route-context and s1c/pii-local).
+	text, signals, contextWarning := e.classifierText(req)
+	if contextWarning != "" {
+		d.Warnings = append(d.Warnings, contextWarning)
+	}
+	newest := signals
+	if text != req.Text {
+		newest = e.matcher.Match(req.Text)
+	}
+	sens := e.beginSensitive(ctx, req, newest)
 	if sens != nil && sens.cancel != nil {
 		defer sens.cancel()
 	}
@@ -45,8 +55,9 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	}
 	slices.Sort(categories)
 	in := ClassifyInput{
-		Text: req.Text, APIFamily: req.APIFamily, Connector: req.Connector, RequestedModel: req.RequestedModel,
+		Text: text, APIFamily: req.APIFamily, Connector: req.Connector, RequestedModel: req.RequestedModel,
 		HasTools: req.HasTools, ToolTurn: req.ToolTurn, HasImages: req.HasImages, LongContext: req.LongContext, Signals: signals,
+		ToolLoop:   req.ToolLoop && e.context.ToolNames,
 		Categories: categories,
 	}
 
@@ -72,7 +83,7 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		d.Warnings = append(d.Warnings, verdict.Warnings...)
 		d.RuleIDs, d.ChargeKeys = verdict.RuleIDs, verdict.ChargeKeys
 		if verdict.Deny != nil && e.managed {
-			if e.SensitiveConfigured() && e.sensitiveFloor(req, signals) != "" {
+			if e.SensitiveConfigured() && e.sensitiveFloor(req, newest) != "" {
 				// The refused turn may stay in the agent history: keep the
 				// conversation narrowed (GAP-0576 review r3).
 				e.markSensitiveSticky(req)

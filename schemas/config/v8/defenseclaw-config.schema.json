@@ -2165,7 +2165,8 @@
               "on_classifier_error",
               "sensitive",
               "systemone",
-              "route_only"
+              "route_only",
+              "context"
             ]
           }
         }
@@ -5945,6 +5946,34 @@
         },
         "admin": {
           "$ref": "#/$defs/routingAdmin"
+        },
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Bounded recent context for the router: older human-typed user turns and tool names (never tool results, assistant or system text). Absent or zero = the newest user turn only.",
+          "properties": {
+            "recent_user_turns": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8
+            },
+            "include_first_user_turn": {
+              "type": "boolean"
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "per_turn_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536
+            },
+            "include_tool_names": {
+              "type": "boolean"
+            }
+          }
         },
         "enabled": {
           "type": "boolean"
