@@ -172,7 +172,10 @@ func TestAwkCommandBuiltAtRunTimeIsTheUnknownTier(t *testing.T) {
 // "depth", at the cap it is read in full.
 func init() {
 	registerBoundedLane(boundedLaneCap{lane: "awk command in nested shell strings", cap: bounded.Depth,
-		limit: actionfacts.MaxAwkNestedShellStrings,
+		// The facts analysis stops at its own wrapper depth first (cap-floor
+		// reports it as depth, rel-1-0-10:GAP-0688), one string before the awk
+		// reading would: the largest nest read in full is the smaller bound.
+		limit: min(actionfacts.MaxAwkNestedShellStrings, actionfacts.MaxWrapperDepth-1),
 		gen: func(size int, shape boundedShape) (boundedLaneCall, bool) {
 			if shape.nested || shape.multi {
 				return boundedLaneCall{}, false
