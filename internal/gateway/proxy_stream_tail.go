@@ -26,13 +26,22 @@ import (
 // whether or not the upstream goes on sending (no final event, an idle
 // connection), so it never waits for the final event. In bytes: held bytes
 // whose text was read are checked and sent at streamHoldMaxBytes. The bytes
-// of one SSE line or eventstream frame that has not ended (their text cannot
-// be read, and they are no event to the client yet either) are held until
-// it ends, up to streamHoldMaxLine bytes, and while the upstream goes on
-// sending: streamHoldMaxPartialAge without a new byte ends the hold. Past
-// either the stream is TRUNCATED: the text read so far is still checked,
-// then the unknown tier of the pack decides (alert and send in the default
-// and permissive packs, block in the strict pack), never a silent release.
+// of one SSE event or eventstream frame that has not ended (their text
+// cannot be read, and they are no event to the client yet either) are held
+// until it ends, while the upstream goes on sending: streamHoldMaxPartialAge
+// without a new byte ends the hold, and the stream is TRUNCATED: the text
+// read so far is still checked, then the unknown tier of the pack decides
+// (alert and send in the default and permissive packs, block in the strict
+// pack), never a silent release. In size an unfinished event is bounded by
+// its framer: an SSE event at streamHoldMaxLine (the framer's sseEventMax)
+// is TRUNCATED the same way and also takes the fail mode, since it can
+// never be read whole (a managed or strict install refuses; whichever rule
+// refuses wins); an eventstream frame over bedrockStreamMaxFrame breaks
+// framing, which takes the fail mode.
+//
+// On the passthrough these bounds apply to the events the tool-call hold
+// (substrate-1 GAP-0189, GAP-0098) has let out; an open tool call waits for
+// its verdict (passthroughStream).
 //
 // The text bound applies to the text the check reads, not to the raw bytes
 // (rel-1-0-10:GAP-0624): a line or frame that carries a large payload the
@@ -43,7 +52,7 @@ import (
 const (
 	streamHoldMaxAge        = 100 * time.Millisecond
 	streamHoldMaxBytes      = 64 << 10
-	streamHoldMaxLine       = bedrockStreamMaxFrame
+	streamHoldMaxLine       = sseEventMax
 	streamLineMaxText       = 1 << 20
 	streamHoldMaxPartialAge = 5 * time.Second
 )
