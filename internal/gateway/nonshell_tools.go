@@ -283,33 +283,20 @@ func nonShellFinding(rule *PatternRule, note, tool string, hard bool) RuleFindin
 	return f
 }
 
-// nonShellCredentialFindingMayRise reports whether a stronger finding of a
-// credential-file rule may replace the one the call carries: the call names a
-// home credential file (otherHomeCredentialFile) of an account home that is
-// not the active one, or it copies a home credential file (a copy took the
-// table finding on delta 4 already, rel-1-0-10:GAP-0834). A plain read of the
-// active home's own file keeps the finding it carries (rel-1-0-10:GAP-0888);
-// with no active home only a copy tells it apart.
-func nonShellCredentialFindingMayRise(facts actionfacts.Facts) bool {
-	homeCredential := func(candidate actionfacts.PathFact) bool {
-		shape, ok := actionfacts.MatchCredentialFileShape(canonicalSemanticPath(semanticPathValue(candidate)))
-		return ok && otherHomeCredentialFile(facts, candidate, shape.Class, "")
-	}
-	for _, command := range facts.Commands {
-		if command.Effect != actionfacts.EffectExecute || !hasOperation(command, actionfacts.OperationCopy) {
-			continue
-		}
-		for _, candidate := range facts.Paths {
-			if candidate.CommandID == command.ID && candidate.Access == actionfacts.PathAccessRead && homeCredential(candidate) {
-				return true
-			}
-		}
-	}
+// nonShellNamesOtherAccountCredential reports whether the call names a home
+// credential file (otherHomeCredentialFile) of an account home that is not the
+// active one. With no active home nothing tells the two apart, and the call
+// keeps the findings it carries.
+func nonShellNamesOtherAccountCredential(facts actionfacts.Facts) bool {
 	if canonicalSemanticPath(facts.ActiveHome) == "" {
 		return false
 	}
 	for _, candidate := range facts.Paths {
-		if _, own := activeHomeRelative(facts, candidate); !own && homeCredential(candidate) {
+		if _, own := activeHomeRelative(facts, candidate); own {
+			continue
+		}
+		shape, ok := actionfacts.MatchCredentialFileShape(canonicalSemanticPath(semanticPathValue(candidate)))
+		if ok && otherHomeCredentialFile(facts, candidate, shape.Class, "") {
 			return true
 		}
 	}
@@ -430,7 +417,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	request.Input.CWD = managedClientCWD(ctx, request.Input.CWD, request.ResolvedWriteTargets)
 	facts := actionfacts.Analyze(request.Input)
 	hard := request.StrictPolicy || request.ManagedInstall
-	mayRise := nonShellCredentialFindingMayRise(facts)
+	otherAccount := nonShellNamesOtherAccountCredential(facts)
 	out := append([]RuleFinding(nil), findings...)
 	add := func(ruleID, note string) {
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
@@ -438,17 +425,17 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			return
 		}
 		finding := nonShellFinding(rule, note, request.Input.Tool, hard)
-		// A finding of the same rule the call already carries is kept unless
-		// the call may rise (nonShellCredentialFindingMayRise) and this one
-		// is stronger: the regex fallback judges another account's home at a
+		// A finding of the same rule the call already carries is kept. When
+		// the call names a credential file in another account's home, a
+		// stronger one replaces it: the regex fallback judges that home at a
 		// lower severity and alert-only, so an upload of another account's
 		// .git-credentials or .netrc was weaker than an upload of one's own
-		// (rel-1-0-10:GAP-0834, GAP-0835). A plain read of the active home's
-		// own files keeps the finding it carries, as on rel: a read of one's
-		// own .git-credentials, .netrc or .pgpass is judged like a read of
-		// one's own AWS or kube credentials (rel-1-0-10:GAP-0888).
+		// (rel-1-0-10:GAP-0834, GAP-0835). The active home's own files keep
+		// the finding they carry, as on rel: a read of one's own
+		// .git-credentials, .netrc or .pgpass is judged like a read of one's
+		// own AWS or kube credentials (rel-1-0-10:GAP-0888).
 		if index := slices.IndexFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }); index >= 0 {
-			if mayRise && nonShellFindingStronger(finding, out[index]) {
+			if otherAccount && nonShellFindingStronger(finding, out[index]) {
 				out[index] = finding
 			}
 			return
