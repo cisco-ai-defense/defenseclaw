@@ -36,6 +36,21 @@ type nativeFileShape struct {
 	args map[string]nativeFileRole
 }
 
+var antigravityLabels = map[string]nativeFileRole{
+	"toolAction": nativeFileLabel, "toolSummary": nativeFileLabel,
+}
+
+func withLabels(base map[string]nativeFileRole, labels map[string]nativeFileRole) map[string]nativeFileRole {
+	out := make(map[string]nativeFileRole, len(base)+len(labels))
+	for key, role := range labels {
+		out[key] = role
+	}
+	for key, role := range base {
+		out[key] = role
+	}
+	return out
+}
+
 // nativeFileShapes are the native file write, edit and read tools whose
 // argument names differ from the reviewed shapes ActionFacts and CodeGuard
 // read (Claude Code Write {file_path, content}, Edit {file_path, old_string,
@@ -46,6 +61,19 @@ type nativeFileShape struct {
 // argument (GAP-0781). Each shape is exact: any other argument, a mistyped
 // one or a missing target leaves the call as it was.
 var nativeFileShapes = map[string]nativeFileShape{
+	// Antigravity (agy) write_to_file {TargetFile, CodeContent, EmptyFile}.
+	"write_to_file": {tool: "Write", args: withLabels(map[string]nativeFileRole{
+		"TargetFile": nativeFilePath, "CodeContent": nativeFileContent, "EmptyFile": nativeFileEmpty,
+	}, antigravityLabels)},
+	// agy replace_file_content {TargetFile, TargetContent, ReplacementContent, AllowMultiple}.
+	"replace_file_content": {tool: "Edit", args: withLabels(map[string]nativeFileRole{
+		"TargetFile": nativeFilePath, "TargetContent": nativeFileOld, "ReplacementContent": nativeFileNew,
+		"AllowMultiple": nativeFileReplaceAll, "Instruction": nativeFileLabel,
+	}, antigravityLabels)},
+	// agy view_file {AbsolutePath, StartLine, EndLine}.
+	"view_file": {tool: "Read", args: withLabels(map[string]nativeFileRole{
+		"AbsolutePath": nativeFilePath, "StartLine": nativeFileNumber, "EndLine": nativeFileNumber,
+	}, antigravityLabels)},
 	// Amp edit_file {path, old_str, new_str, replace_all}.
 	"edit_file": {tool: "Edit", args: map[string]nativeFileRole{
 		"path": nativeFilePath, "old_str": nativeFileOld, "new_str": nativeFileNew, "replace_all": nativeFileReplaceAll,
