@@ -474,6 +474,52 @@
 {"id": "g596c-b16", "dialect": "", "command": "diff <(cat <<'EOF'\nstep: defenseclaw stop\nEOF\n) old.txt", "want": ""}
 {"id": "g596d3-c01", "dialect": "", "command": "defenseclaw guardrail cascade explain", "want": ""}
 {"id": "g596d3-c02", "dialect": "", "command": "defenseclaw guardrail cascade explain --json --last 5", "want": ""}
+{"id": "sub18b-01", "dialect": "", "command": "defenseclaw substrate run claudecode", "want": "substrate"}
+{"id": "sub18b-02", "dialect": "", "command": "defenseclaw substrate connect fix-tests", "want": "substrate"}
+{"id": "sub18b-03", "dialect": "", "command": "defenseclaw substrate pull fix-tests", "want": "substrate"}
+{"id": "sub18b-04", "dialect": "", "command": "defenseclaw substrate checkpoint fix-tests", "want": "substrate"}
+{"id": "sub18b-05", "dialect": "", "command": "defenseclaw substrate undo fix-tests", "want": "substrate"}
+{"id": "sub18b-06", "dialect": "", "command": "defenseclaw substrate delete fix-tests", "want": "substrate"}
+{"id": "sub18b-07", "dialect": "", "command": "defenseclaw substrate migrate fix-tests", "want": "substrate"}
+{"id": "sub18b-08", "dialect": "", "command": "defenseclaw substrate approve a1b2", "want": "substrate"}
+{"id": "sub18b-09", "dialect": "", "command": "defenseclaw substrate reject a1b2", "want": "substrate"}
+{"id": "sub18b-10", "dialect": "", "command": "defenseclaw substrate login", "want": "substrate"}
+{"id": "sub18b-11", "dialect": "", "command": "defenseclaw substrate logout", "want": "substrate"}
+{"id": "sub18b-12", "dialect": "", "command": "defenseclaw substrate setup", "want": "substrate"}
+{"id": "sub18b-13", "dialect": "", "command": "defenseclaw substrate secrets set GITHUB_TOKEN --from-env GH", "want": "substrate"}
+{"id": "sub18b-14", "dialect": "", "command": "defenseclaw substrate secrets rm GITHUB_TOKEN", "want": "substrate"}
+{"id": "sub18b-15", "dialect": "", "command": "defenseclaw substrate secrets test GITHUB_TOKEN", "want": "substrate"}
+{"id": "sub18b-16", "dialect": "", "command": "defenseclaw substrate policy reset eng-web/fix-tests", "want": "substrate"}
+{"id": "sub18b-17", "dialect": "", "command": "defenseclaw substrate bundle apply bundle.tar", "want": "substrate"}
+{"id": "sub18b-18", "dialect": "", "command": "defenseclaw substrate bundle rollback", "want": "substrate"}
+{"id": "sub18b-19", "dialect": "", "command": "defenseclaw substrate template build --connector claudecode --from r/base:1 --to r/actor:1", "want": "substrate"}
+{"id": "sub18b-20", "dialect": "", "command": "defenseclaw substrate template publish r/a@sha256:00 r/b:1", "want": "substrate"}
+{"id": "sub18b-21", "dialect": "", "command": "defenseclaw substrate template keygen --out ./keys", "want": "substrate"}
+{"id": "sub18b-22", "dialect": "", "command": "defenseclaw substrate frobnicate", "want": "substrate"}
+{"id": "sub18b-23", "dialect": "", "command": "defenseclaw-gateway substrate-controller", "want": "substrate"}
+{"id": "sub18b-24", "dialect": "", "command": "defenseclaw-gateway substrate-extproc", "want": "substrate"}
+{"id": "sub18b-25", "dialect": "", "command": "defenseclaw-gateway substrate-datadir --path /data", "want": "substrate"}
+{"id": "sub18b-26", "dialect": "", "command": "defenseclaw-gateway substrate-bundle apply", "want": "substrate"}
+{"id": "sub18b-27", "dialect": "", "command": "defenseclaw substrate status", "want": ""}
+{"id": "sub18b-28", "dialect": "", "command": "defenseclaw substrate status fix-tests --json", "want": ""}
+{"id": "sub18b-29", "dialect": "", "command": "defenseclaw substrate list", "want": ""}
+{"id": "sub18b-30", "dialect": "", "command": "defenseclaw substrate logs fix-tests", "want": ""}
+{"id": "sub18b-31", "dialect": "", "command": "defenseclaw substrate usage", "want": ""}
+{"id": "sub18b-32", "dialect": "", "command": "defenseclaw substrate whoami", "want": ""}
+{"id": "sub18b-33", "dialect": "", "command": "defenseclaw substrate approvals", "want": ""}
+{"id": "sub18b-34", "dialect": "", "command": "defenseclaw substrate verify --install-file install.yaml", "want": ""}
+{"id": "sub18b-35", "dialect": "", "command": "defenseclaw substrate doctor --cluster --json", "want": ""}
+{"id": "sub18b-36", "dialect": "", "command": "defenseclaw substrate secrets list --mine", "want": ""}
+{"id": "sub18b-37", "dialect": "", "command": "defenseclaw substrate policy explain fix-tests", "want": ""}
+{"id": "sub18b-38", "dialect": "", "command": "defenseclaw substrate policy show", "want": ""}
+{"id": "sub18b-39", "dialect": "", "command": "defenseclaw substrate policy test fix-tests --host api.github.com", "want": ""}
+{"id": "sub18b-40", "dialect": "", "command": "defenseclaw substrate bundle status", "want": ""}
+{"id": "sub18b-41", "dialect": "", "command": "defenseclaw substrate template verify r/a@sha256:00 --anchors a.pub", "want": ""}
+{"id": "sub18b-42", "dialect": "", "command": "defenseclaw substrate template scan r/a@sha256:00", "want": ""}
+{"id": "sub18b-43", "dialect": "", "command": "defenseclaw substrate", "want": ""}
+{"id": "sub18b-44", "dialect": "", "command": "defenseclaw substrate secrets", "want": ""}
+{"id": "sub18b-45", "dialect": "", "command": "defenseclaw substrate run --help", "want": ""}
+{"id": "sub18b-46", "dialect": "", "command": "defenseclaw-gateway substrate-bundle test", "want": ""}
 {"id": "g596c-b18", "dialect": "", "command": "cat > /tmp/w1.sh <<'EOF'\ndefenseclaw-gateway stop\nEOF\n\"/dcx-put\" /tmp/w1.sh /tmp/w1.sh", "want": ""}
 {"id": "g596c-b19", "dialect": "", "command": "cat > job.sh <<'EOF'\ndefenseclaw stop\nEOF\nscp job.sh host:/tmp/job.sh", "want": ""}
 {"id": "g596c-e56", "dialect": "", "command": "cat > job.sh <<'EOF'\ndefenseclaw stop\nEOF\nsource job.sh", "want": "stop"}
@@ -487,3 +533,6 @@
 {"id": "g923-c18", "dialect": "", "command": "defenseclaw config set '' false", "want": "config"}
 {"id": "g923-c19", "dialect": "", "command": "defenseclaw config set ' routing.enabled' false", "want": "config"}
 {"id": "g923-c20", "dialect": "", "command": "defenseclaw config unset routing.enabled '[\"guardrail\"]'", "want": "config"}
+{"id": "sub19-01", "dialect": "", "command": "defenseclaw config set substrate.chain_egress_action alert", "want": "config"}
+{"id": "sub19-02", "dialect": "", "command": "defenseclaw config set substrate.require_attested_templates false", "want": "config"}
+{"id": "sub19-03", "dialect": "", "command": "defenseclaw config get substrate.chain_egress_action", "want": ""}

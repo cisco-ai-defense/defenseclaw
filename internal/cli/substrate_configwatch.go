@@ -1,0 +1,177 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"reflect"
+	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/configwatch"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
+)
+
+// substrateConfigMap is the ConfigMap the chart renders config.yaml into
+// (templates/configmap.yaml).
+const substrateConfigMap = "defenseclaw-config"
+
+// substrateConfigWatcher is the config.yaml source every Substrate
+// component follows (GAP-0276): in a cluster the defenseclaw-config
+// ConfigMap through the API (each component's Role may get it), else, and
+// when that read fails, the file at path.
+func substrateConfigWatcher(path string, boot *config.Config) (*configwatch.Watcher, error) {
+	if strings.TrimSpace(path) == "" {
+		path = config.ConfigPath()
+	}
+	w, err := configwatch.Start(path, boot)
+	if err != nil {
+		return nil, err
+	}
+	ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
+	if ns == "" || os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
+		return w, nil
+	}
+	kube, err := setup.NewInClusterKube(setup.InClusterDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[substrate] config.yaml changes are read from the mounted file only (the kubelet updates it on its own schedule): %v\n", err)
+		return w, nil
+	}
+	w.Fetch = substrateConfigMapFetch(kube, ns, substrateConfigMap)
+	return w, nil
+}
+
+// configMapGetter is the part of setup.Kube the watcher uses.
+type configMapGetter interface {
+	GetConfigMap(ctx context.Context, namespace, name string) (*setup.ConfigMap, error)
+}
+
+func substrateConfigMapFetch(kube configMapGetter, ns, name string) configwatch.Fetch {
+	return func(ctx context.Context) ([]byte, bool, error) {
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		cm, err := kube.GetConfigMap(ctx, ns, name)
+		if err != nil || cm == nil {
+			return nil, false, err
+		}
+		v, ok := cm.Data[configwatch.ConfigMapKey]
+		return []byte(v), ok, nil
+	}
+}
+
+// substrateRoleDeployment is the chart's Deployment of each role
+// (templates/gateway.yaml, templates/leader.yaml; defenseclaw-leader is the
+// leader's Service, not its Deployment).
+var substrateRoleDeployment = map[string]string{"gateway": "defenseclaw-gateway", "leader": "defenseclaw-gateway-leader"}
+
+// substrateFollower keeps a gateway or leader pod on config.yaml: on a
+// change it applies the parts this pod takes live (apply) and names the
+// ones that wait for the pod's next start (substrateRestartOnly).
+type substrateFollower struct {
+	w     *configwatch.Watcher
+	role  string
+	out   io.Writer
+	apply func(*config.Config) error
+	// boot is the config the pod started with (the restart-only parts
+	// are still its); applied the digest in force.
+	boot    *config.Config
+	applied string
+}
+
+func newSubstrateFollower(w *configwatch.Watcher, role string, out io.Writer, apply func(*config.Config) error) *substrateFollower {
+	boot, d := w.Current()
+	return &substrateFollower{w: w, role: role, out: out, apply: apply, boot: boot, applied: d}
+}
+
+// run reads the source every configwatch.DefaultInterval until ctx ends.
+func (f *substrateFollower) run(ctx context.Context) {
+	t := time.NewTicker(configwatch.DefaultInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		f.step(ctx)
+	}
+}
+
+// step is one read (tests call it).
+func (f *substrateFollower) step(ctx context.Context) {
+	ch := f.w.Refresh(ctx)
+	if ch.FetchWarning != "" {
+		fmt.Fprintf(f.out, "[substrate] %s: %s\n", f.role, ch.FetchWarning)
+	}
+	if ch.Refused != nil {
+		fmt.Fprintf(f.out, "[substrate] %s: config.yaml change not applied: %v\n", f.role, ch.Refused)
+	}
+	if ch.Config == nil || ch.Digest == f.applied {
+		return
+	}
+	prev := f.applied
+	f.applied = ch.Digest
+	if err := f.apply(ch.Config); err != nil {
+		fmt.Fprintf(f.out, "[substrate] %s: config.yaml %s: not applied live: %v\n", f.role, ch.Digest, err)
+		return
+	}
+	msg := fmt.Sprintf("[substrate] %s: config.yaml %s in force (was %s)", f.role, ch.Digest, prev)
+	if pending := substrateRestartOnly(f.boot, ch.Config); len(pending) > 0 {
+		msg += "; these keys changed and apply when this pod restarts: " + strings.Join(pending, ", ") +
+			" (helm upgrade rolls the pods; after a direct ConfigMap edit run kubectl rollout restart deploy/" + substrateRoleDeployment[f.role] + ")"
+	}
+	fmt.Fprintln(f.out, msg)
+}
+
+// substrateRestartOnly names the config keys that differ between boot and
+// cur and that a running gateway or leader reads only at start. The rest
+// (the egress allow list, profiles and their assignments, launcher
+// atespaces, secrets bindings, templates, the chain egress action,
+// unattended asks, sandbox classes) is applied live (GAP-0276).
+func substrateRestartOnly(boot, cur *config.Config) []string {
+	if boot == nil || cur == nil {
+		return nil
+	}
+	b, c := boot.Substrate, cur.Substrate
+	var out []string
+	for _, k := range []struct {
+		key  string
+		a, b any
+	}{
+		{"deployment_mode", boot.DeploymentMode, cur.DeploymentMode},
+		{"llm_providers", boot.LLMProviders, cur.LLMProviders},
+		{"substrate.api", b.API, c.API},
+		{"substrate.identity", b.Identity, c.Identity},
+		{"substrate.services", b.Services, c.Services},
+		{"substrate.rate_limits", b.RateLimits, c.RateLimits},
+		{"substrate.llm", b.LLM, c.LLM},
+		{"substrate.workspace_max_bytes", b.WorkspaceMaxBytes, c.WorkspaceMaxBytes},
+		{"substrate.secrets (the gateway's injection; the egress bindings apply live)", b.Secrets, c.Secrets},
+		{"substrate.extproc (the callout: helm upgrade only)", b.Extproc, c.Extproc},
+		{"substrate.unattended.ask_timeout (the leader)", b.Unattended.AskTimeout, c.Unattended.AskTimeout},
+		{"substrate.bundles", b.Bundles, c.Bundles},
+	} {
+		if !reflect.DeepEqual(k.a, k.b) {
+			out = append(out, k.key)
+		}
+	}
+	return out
+}

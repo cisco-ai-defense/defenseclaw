@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
 // watchRetry paces restarting a watch that ended with an error.
@@ -807,7 +808,7 @@ func (m *Manager) hostAliasPortLocked(b *box, port int) bool {
 	return b.rec.HostAlias != nil && slices.Contains(b.rec.HostAlias.Ports, port)
 }
 
-const openshellHostAlias = "host.openshell.internal"
+const openshellHostAlias = sandboxruntime.OpenShellHostAlias
 
 // ownHostName reports the workload's own host name: the one the workload
 // check read in the sandbox (recorded), or the one Docker gives a

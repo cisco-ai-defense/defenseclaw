@@ -94,6 +94,12 @@ func NewJSONL(config JSONLConfig) (*JSONL, error) {
 		int64(config.MaxSizeMB) > (int64(^uint64(0)>>1))/(1024*1024) {
 		return nil, newError(ErrorInvalidConfig)
 	}
+	// A directory at the path is refused on every platform, before any open:
+	// Windows opens a directory without the error POSIX gives, so the
+	// destination was deferred instead of refused (GAP-0329).
+	if info, err := os.Lstat(config.Path); err == nil && info.IsDir() {
+		return nil, newError(ErrorUnsafePath)
+	}
 	prepareErr := prepareSecureParent(config.Path)
 	if prepareErr != nil {
 		if isUnsafeFailure(prepareErr) {

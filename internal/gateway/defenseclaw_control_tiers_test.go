@@ -90,7 +90,7 @@ func TestDefenseClawControlFiveTiers(t *testing.T) {
 			named := strings.Contains(string(raw), "tamper.defenseclaw_control")
 			where := p.name + " " + r.ID
 			switch r.Want {
-			case "stop", "disable", "uninstall", "config":
+			case "stop", "disable", "uninstall", "config", "substrate":
 				want := "block"
 				if p.pack != "strict" && !p.managed {
 					want = "alert"

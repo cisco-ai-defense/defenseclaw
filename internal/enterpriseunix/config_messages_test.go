@@ -405,7 +405,7 @@ func TestManagedConfigNamesMissingKeyAndSizeLimit(t *testing.T) {
 	base := "config_version: 9\nguardrail:\n  profiles:\n    engineering: {}\n"
 	for doc, want := range map[string]string{
 		base + "  profile_assignments:\n    - profile: engineering\n": "guardrail.profile_assignments[0] is missing match (required); " +
-			"add match: a mapping that sets at least one of agents, connectors, groups, users",
+			"add match: a mapping that sets at least one of agents, connectors, groups, substrate, users",
 		base + "    contractors:\n      sandbox:\n        request_access: " + strings.Repeat("x", 600) + "\n": "guardrail.profiles.contractors.sandbox.request_access " +
 			"must be a string of at most 512 characters (it has 600)",
 	} {
