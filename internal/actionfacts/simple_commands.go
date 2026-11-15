@@ -2108,10 +2108,14 @@ func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState, 
 // the folders of /home). The name of the active account is
 // left to ActiveUserTildeTwin, which also reads the logins of the OS identity.
 // A home that does not sit in such a folder tells nothing, and the prefix stays
-// unresolved.
+// unresolved. The directory-stack forms (~N, ~+N, ~-N, ~+, ~-) are never an
+// account name: bash takes them from the dirs list, PWD and OLDPWD
+// (directoryStackTildeName, rel-1-0-10:GAP-0887). macOS keeps root's home in
+// /var/root, not beside the others in /Users.
 func simpleOtherAccountHome(name, activeHome string) (string, bool) {
 	home := strings.TrimRight(activeHome, "/")
-	if home == "" || !activeUserTildeName.MatchString(name) || strings.EqualFold(name, path.Base(home)) {
+	if home == "" || directoryStackTildeName(name) || !activeUserTildeName.MatchString(name) ||
+		strings.EqualFold(name, path.Base(home)) {
 		return "", false
 	}
 	parent := path.Dir(home)
@@ -2125,11 +2129,31 @@ func simpleOtherAccountHome(name, activeHome string) (string, bool) {
 			return "/root", true
 		}
 	case lower == "/users":
+		if name == "root" {
+			return "/var/root", true
+		}
 	case len(parent) >= 3 && parent[1] == ':' && lower[2:] == "/users":
 	default:
 		return "", false
 	}
 	return parent + "/" + name, true
+}
+
+// directoryStackTildeName reports whether name, the text after the ~ of a
+// tilde-prefix, is a bash directory-stack form: empty, + or - (HOME, PWD,
+// OLDPWD), or N, +N or -N with N all digits (an entry of the dirs list).
+// bash expands these before it consults the password database, so after
+// pushd ~/.ssh the word ~1 is a folder of the active home, never the home of
+// an account named 1 (rel-1-0-10:GAP-0887).
+func directoryStackTildeName(name string) bool {
+	switch name {
+	case "", "+", "-":
+		return true
+	}
+	if name[0] == '+' || name[0] == '-' {
+		name = name[1:]
+	}
+	return name != "" && strings.Trim(name, "0123456789") == ""
 }
 
 // simpleNestedScript returns a static shell -c or eval body. eval shares the
