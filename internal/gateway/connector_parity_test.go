@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
@@ -252,6 +253,9 @@ func TestWindowsHostShellDialectEveryRoute(t *testing.T) {
 		agy := gap0437Server(t, p, "antigravity", "action")
 		installToolCallCorpusProfileConnector(t, "antigravity", p.pack)
 		inspect := gap0437Server(t, p, "openclaw", "action")
+		// The generic route caps its scan at 200 ms; a loaded native box
+		// answers past it, which is not the reading under test.
+		inspect.inspectToolScanTimeout = time.Minute
 		installToolCallCorpusProfileConnector(t, "openclaw", p.pack)
 		var proxy *GuardrailProxy
 		if !p.managed {

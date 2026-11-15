@@ -5872,6 +5872,18 @@ func (p *GuardrailProxy) toolCallCodeGuardFindings(ctx context.Context, action t
 	return codeGuardRuleFindings(scan, true, action.EnforcementCapable)
 }
 
+// proxyPOSIXReading is a tool call judged with the Windows shell dialect, as
+// it is read without it (the POSIX default); ok is false when the call has
+// no Windows dialect reading.
+func proxyPOSIXReading(action trustedActionRequest) (trustedActionRequest, bool) {
+	if !action.windowsShellDialect || action.Input.DialectHint == actionfacts.DialectPOSIX {
+		return action, false
+	}
+	action.Input.DialectHint = ""
+	action.windowsShellDialect, action.windowsDialectReadings, action.windowsPowerShellReading = false, false, nil
+	return action, true
+}
+
 // toolCallStrictTier reports whether the proxy judges its connector's tool
 // calls in the strict tier: the request's policy configuration when it has
 // one, else the proxy's own rule pack (the posture toolCallVerdictAction
@@ -5927,6 +5939,14 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 
 		action := p.toolCallAction(ctx, toolName, args)
 		findings := trustedToolCallFindings(ctx, action, "", p.toolCallSecureClient(ctx))
+		// A model reply does not say which shell runs a call on a Windows
+		// host (Git Bash for a Bash tool, PowerShell for another agent): the
+		// call is also judged in the POSIX reading the proxy used before the
+		// Windows dialect, and the verdict takes the stronger
+		// (rel-1-0-10:GAP-0784: never weaker than either reading).
+		if posix, ok := proxyPOSIXReading(action); ok {
+			findings = mergeBoundedFindings(findings, trustedToolCallFindings(ctx, posix, "", p.toolCallSecureClient(ctx)))
+		}
 		// CodeGuard reads the file content a write call carries, as on the
 		// hook routes (rel-1-0-10:GAP-0776: the proxy never ran it).
 		findings = append(findings, p.toolCallCodeGuardFindings(ctx, action)...)
