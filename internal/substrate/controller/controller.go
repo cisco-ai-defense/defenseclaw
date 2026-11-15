@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -132,11 +133,22 @@ type Options struct {
 	ConflictReverts                        int
 
 	Now func() time.Time
+
+	// Config, when set, is config.yaml as it is now; Live builds the
+	// config-decided options from it. A change applies at the start of the
+	// next pass, and in EnsurePolicy (GAP-0276). Without Config the
+	// options above stay as given.
+	Config ConfigSource
+	Live   func(*config.Config) Live
 }
 
 // Controller reconciles actors with their DefenseClaw policy.
 type Controller struct {
 	o Options
+	// cur is the config-decided part of the options (Live), replaced
+	// whole on a config change; reloadMu orders the replacements.
+	cur      atomic.Pointer[Live]
+	reloadMu sync.Mutex
 
 	mu        sync.Mutex
 	actors    map[string]*actorState // by actor UID
@@ -151,6 +163,10 @@ type Controller struct {
 	lifeRetry []*actorState
 	// uidByKey is the last UID seen per atespace/name (GAP-0133).
 	uidByKey map[string]string
+	// retired are atespaces a config change stopped managing, listed once
+	// more by a scoped controller; listed is what the last scoped pass
+	// listed (GAP-0295).
+	retired, listed map[string]bool
 }
 
 type recreatedActor struct {
@@ -251,8 +267,18 @@ func New(o Options) (*Controller, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
-		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}}, nil
+	if o.Config != nil && o.Live == nil {
+		return nil, errors.New("controller: Config needs Live")
+	}
+	c := &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
+		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}, retired: map[string]bool{}}
+	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
+		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter}
+	if o.Config != nil {
+		_, lv.Digest = o.Config.Current()
+	}
+	c.cur.Store(lv)
+	return c, nil
 }
 
 // Run polls until ctx ends: every IdleInterval, or every FastInterval for
@@ -279,6 +305,7 @@ func (c *Controller) Run(ctx context.Context) error {
 // Reconcile is one pass over every actor. New and resuming actors go first
 // so their policy lands before they reach the network.
 func (c *Controller) Reconcile(ctx context.Context) error {
+	c.reloadConfig(ctx)
 	c.applyResets(ctx)
 	c.retryLifecycle(ctx)
 	actors, err := c.listActors(ctx)
@@ -297,7 +324,7 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 		if !known {
 			key := ateapi.Key(ateapi.RefOf(a.GetMetadata()))
 			c.actors[uid] = &actorState{uid: uid, key: key, firstSeen: now}
-			if prev, ok := c.uidByKey[key]; ok && prev != uid && c.o.LauncherAtespaces[a.GetMetadata().GetAtespace()] {
+			if prev, ok := c.uidByKey[key]; ok && prev != uid && c.live().LauncherAtespaces[a.GetMetadata().GetAtespace()] {
 				recreated = append(recreated, recreatedActor{a: a, prev: prev})
 			}
 			if len(c.uidByKey) >= maxNameHistory {
@@ -317,6 +344,12 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 		ns, _, _ := strings.Cut(st.key, "/")
 		if !seen[uid] && c.unlisted[ns] {
 			continue // not listed this pass, not known to be deleted
+		}
+		if !seen[uid] && c.scoped && !c.listed[ns] {
+			// Its atespace is no longer managed and was not listed: the
+			// actor is not deleted, it left DefenseClaw's view (GAP-0295).
+			delete(c.actors, uid)
+			continue
 		}
 		if !seen[uid] {
 			gone = append(gone, st)
@@ -385,15 +418,13 @@ func (c *Controller) listActors(ctx context.Context) ([]*ateapi.Actor, error) {
 		c.emit(Event{Type: EventWarning, Severity: SeverityWarn,
 			Message: "no global viewer role on ate-api-server: listing only the managed atespaces; inventory and shadow AI cover only those"})
 	}
-	set := map[string]bool{}
-	for ns := range c.o.LauncherAtespaces {
+	set := managedSet(c.live())
+	c.mu.Lock()
+	for ns := range c.retired {
 		set[ns] = true
 	}
-	if l, ok := c.o.Resolver.(AtespaceLister); ok {
-		for _, ns := range l.ManagedAtespaces() {
-			set[ns] = true
-		}
-	}
+	c.listed = set
+	c.mu.Unlock()
 	names := make([]string, 0, len(set))
 	for ns := range set {
 		names = append(names, ns)
@@ -405,6 +436,9 @@ func (c *Controller) listActors(ctx context.Context) ([]*ateapi.Actor, error) {
 		actors, err := ateapi.AllActors(ctx, c.o.Client, ns, c.o.PageSize)
 		if err == nil {
 			c.listOK(ns)
+			c.mu.Lock()
+			delete(c.retired, ns)
+			c.mu.Unlock()
 			out = append(out, actors...)
 			continue
 		}
@@ -503,6 +537,7 @@ func createdAt(md *ateapi.ResourceMetadata, st *actorState) time.Time {
 // policy. The create path wrote the actor's registration just before, so a
 // registration the leader does not show yet is waited for briefly.
 func (c *Controller) EnsurePolicy(ctx context.Context, ref *ateapi.ObjectRef) error {
+	c.reloadConfig(ctx)
 	for try := 1; ; try++ {
 		a, err := c.o.Client.GetActor(ctx, ref)
 		if err != nil {
@@ -658,7 +693,9 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 	c.flushLifecycle(ctx, st, base)
 
 	st.hold = ""
-	_, launcher := c.o.LauncherAtespaces[md.GetAtespace()]
+	// One config snapshot for the whole decision (Live).
+	lv := c.live()
+	_, launcher := lv.LauncherAtespaces[md.GetAtespace()]
 	reg, refuse, err := c.attribution(ctx, a, st, launcher, base)
 	if err != nil {
 		return err
@@ -692,7 +729,7 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 		c.emit(ev)
 	}
 	if refuse == "" {
-		res, err := c.o.Resolver.Resolve(reg, launcher)
+		res, err := lv.Resolver.Resolve(reg, launcher)
 		if err != nil {
 			return fmt.Errorf("%s: resolve profile: %w", st.key, err)
 		}
@@ -734,7 +771,7 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 			if err := c.apply(ctx, a, st, reg, res.Profile, base); err != nil {
 				return err
 			}
-			return c.idle(ctx, a, st, reg, base, res.idleAfter(c.o.IdleSuspendAfter))
+			return c.idle(ctx, a, st, reg, base, res.idleAfter(lv.IdleSuspendAfter))
 		}
 	}
 	// Refused: no policy, so the actor falls to default deny.
@@ -876,7 +913,8 @@ func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState,
 		c.refuseOnce(st, base, EventTemplateUnverified, "template could not be read: "+err.Error(), "", "")
 		return "template_unreadable"
 	}
-	if !att.Attested && c.o.RequireAttestation {
+	lv := c.live()
+	if !att.Attested && lv.RequireAttestation {
 		reason := att.Reason
 		if reason == "" {
 			reason = "no DefenseClaw attestation"
@@ -891,7 +929,7 @@ func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState,
 		for _, ct := range tmpl.GetContainers() {
 			repos = append(repos, imageRepo(ct.GetImage()))
 		}
-		if repo, ok := ImagesAllowed(c.o.Templates, profile, repos); !ok {
+		if repo, ok := ImagesAllowed(lv.Templates, profile, repos); !ok {
 			c.refuseOnce(st, base, EventTemplateUnverified, fmt.Sprintf("image %s is not allowed for profile %s (substrate.templates.allowed_images / profile_images)", repo, profile), SignalUnattestedTemplate, att.Digest)
 			return "image_not_allowed"
 		}
@@ -931,7 +969,7 @@ func (c *Controller) bootedTemplate(ctx context.Context, a *ateapi.Actor, st *ac
 	case ateapi.IsNotFound(err):
 	case err != nil:
 		return false, fmt.Errorf("%s: get policy (holding, no policy change): %w", st.key, err)
-	case render.IsDefenseClaw(cur, c.o.Settings):
+	case render.IsDefenseClaw(cur, c.live().Settings):
 		return true, nil
 	}
 	c.refuseOnce(st, base, EventTemplateUnverified, "template "+k+" changed after the actor was created, so the actor's image is not known to be the attested one; delete the actor and create it again",
@@ -964,7 +1002,7 @@ func (c *Controller) template(ctx context.Context, ref *ateapi.ObjectRef, fresh 
 	// revoked key, rotated anchors or a raised policy generation must reach
 	// templates admitted before (GAP-0054). The attestor caches the
 	// registry work itself.
-	att, err := c.o.Attestor.Attest(ctx, tmpl)
+	att, err := c.live().Attestor.Attest(ctx, tmpl)
 	if err != nil {
 		att = Attestation{Reason: "attestation check failed: " + err.Error(), Retryable: true}
 	}
@@ -1004,8 +1042,9 @@ func sameTemplateVersion(a, b *ateapi.ActorTemplate) bool {
 	return a.GetMetadata().GetUid() == b.GetMetadata().GetUid() && a.GetMetadata().GetVersion() == b.GetMetadata().GetVersion()
 }
 
-// Attestor is the template admission the controller runs (wiring tests).
-func (c *Controller) Attestor() Attestor { return c.o.Attestor }
+// Attestor is the template admission the controller runs now (wiring
+// tests); LiveAttestor follows config changes.
+func (c *Controller) Attestor() Attestor { return c.live().Attestor }
 
 // refuseOnce records why an actor gets no policy, emitting the event (and
 // a shadow AI signal when signalID is set) once per reason.
@@ -1047,7 +1086,7 @@ func (c *Controller) dropForeignPolicy(ctx context.Context, a *ateapi.Actor, st 
 	if err != nil {
 		return fmt.Errorf("%s: get policy: %w", st.key, err)
 	}
-	if render.IsDefenseClaw(cur, c.o.Settings) {
+	if render.IsDefenseClaw(cur, c.live().Settings) {
 		return nil
 	}
 	if _, err := c.o.Client.DeleteActorEgressPolicy(ctx, ref, &ateapi.DeleteOptions{Uid: cur.GetMetadata().GetUid(), Version: cur.GetMetadata().GetVersion()}); err != nil && !ateapi.IsNotFound(err) {
@@ -1083,13 +1122,14 @@ func (c *Controller) removePolicy(ctx context.Context, a *ateapi.Actor, st *acto
 func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, profile render.Profile, base Event) error {
 	st.refused, st.refusedMsg = "", ""
 	ref := ateapi.RefOf(a.GetMetadata())
-	res, err := render.EgressPolicy(render.Input{Settings: c.o.Settings, Profile: profile, Person: reg.Person, Approved: reg.Approved, Secrets: c.o.Secrets})
+	lv := c.live()
+	res, err := render.EgressPolicy(render.Input{Settings: lv.Settings, Profile: profile, Person: reg.Person, Approved: reg.Approved, Secrets: lv.Secrets})
 	if err != nil {
 		c.fail(base, "render: "+err.Error())
 		return fmt.Errorf("%s: render: %w", st.key, err)
 	}
 	full := res.Policy
-	deny, err := render.DenyOnly(c.o.Settings)
+	deny, err := render.DenyOnly(lv.Settings)
 	if err != nil {
 		c.fail(base, "render: "+err.Error())
 		return fmt.Errorf("%s: render deny-only: %w", st.key, err)
@@ -1224,7 +1264,8 @@ func (c *Controller) wrote(st *actorState, p *ateapi.EgressPolicy, base Event, s
 		bound = append(bound, b.Secret+"@"+b.Host)
 	}
 	ev.Detail = map[string]any{"how": how, "version": p.GetMetadata().GetVersion(), "rules": len(p.GetRules()),
-		"actor_state": state.String(), "policy_lag_ms": c.o.Now().Sub(st.firstSeen).Milliseconds(), "dropped": drops, "secrets_bound": bound}
+		"actor_state": state.String(), "policy_lag_ms": c.o.Now().Sub(st.firstSeen).Milliseconds(), "dropped": drops, "secrets_bound": bound,
+		"config_digest": c.live().Digest}
 	c.emit(ev)
 }
 
@@ -1305,7 +1346,7 @@ func (c *Controller) unmanaged(ctx context.Context, a *ateapi.Actor, st *actorSt
 	if err != nil {
 		return fmt.Errorf("%s: get policy: %w", st.key, err)
 	}
-	if !st.written && !render.IsDefenseClaw(cur, c.o.Settings) {
+	if !st.written && !render.IsDefenseClaw(cur, c.live().Settings) {
 		st.unmanagedChecked = true
 		return nil
 	}

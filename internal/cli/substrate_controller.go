@@ -65,7 +65,9 @@ reverts foreign policy changes (three reverts in ten minutes mark the actor
 policy_conflict: it keeps only the DefenseClaw rule until its policy is
 DefenseClaw's again), admits only attested, digest-pinned templates, adopts forks, suspends idle actors and reports inventory.
 It reads substrate: from config.yaml and runs as one replica in the
-DefenseClaw namespace; events go to stdout as JSON lines.
+DefenseClaw namespace; events go to stdout as JSON lines. A change of
+the defenseclaw-config ConfigMap is read within 2 seconds and every actor's
+policy is rendered again from it on the next pass (GAP-0276).
 
   --check   connect to ate-api-server, print what it sees as JSON and exit
   --once    run one reconcile pass and exit`,
@@ -190,7 +192,13 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	ctl, err := newSubstrateController(cfg, client, reg, act, cpu, sink, true, resets, ns, resolver)
+	// One config.yaml source for every pass (GAP-0276): the ConfigMap
+	// through the API, else the mounted file.
+	src, err := substrateConfigWatcher(path, cfg)
+	if err != nil {
+		return err
+	}
+	ctl, err := newSubstrateController(cfg, client, reg, act, cpu, sink, true, resets, ns, resolver, src)
 	if err == nil {
 		// The leader's chain state gets the actors' lifecycle events: forks,
 		// reverts, deletes, crashes, and suspends for retention (A13). Its

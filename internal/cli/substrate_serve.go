@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/asks"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/configwatch"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity/ateactors"
@@ -229,7 +230,17 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if err := applyGatewayChainEgress(cfg); err != nil {
 			return err
 		}
-		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
+		// config.yaml changes reach this pod without a restart (GAP-0276):
+		// the chain egress action here, and the create path's policy
+		// writer, profiles and unattended asks through the same watcher.
+		src, err := substrateConfigWatcher("", cfg)
+		if err != nil {
+			return err
+		}
+		followCtx, stopFollow := substrateContext(cmd)
+		defer stopFollow()
+		go newSubstrateFollower(src, "gateway", os.Stderr, applyGatewayChainEgress).run(followCtx)
+		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, src, &ready)
 		return runSidecar(cmd, args)
 	}
 	return fmt.Errorf("serve: unknown --substrate-role %q (gateway or leader)", serveFlags.role)
@@ -425,7 +436,13 @@ func substrateOIDCPeople(c *config.Config) (*identity.PersonVerifier, error) {
 	return identity.NewPersonVerifier(issuers, nil)
 }
 
-func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.SubstrateBuilder {
+func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *atomic.Bool) gateway.SubstrateBuilder {
+	// live is config.yaml in force (GAP-0276); c is the boot config, which
+	// the restart-only parts keep (substrateRestartOnly).
+	live := func() *config.Config {
+		cur, _ := src.Current()
+		return cur
+	}
 	return func(api *gateway.APIServer, llmProxy http.Handler) (gateway.SubstrateConfig, error) {
 		var out gateway.SubstrateConfig
 		ks, err := substrateActorKeySet(c)
@@ -500,7 +517,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		go recorder.Run(context.Background())
 		// The create path's policy writer: the controller's own admission,
 		// profiles and render, run before the first resume.
-		ctl, err := newSubstrateController(c, ate, &controller.LeaderRegistry{Store: regs}, nil, nil, &controller.JSONSink{W: os.Stderr}, false, nil, "", nil)
+		ctl, err := newSubstrateController(c, ate, &controller.LeaderRegistry{Store: regs}, nil, nil, &controller.JSONSink{W: os.Stderr}, false, nil, "", nil, src)
 		if err != nil {
 			return out, fmt.Errorf("serve: controller for the create path: %w", err)
 		}
@@ -512,7 +529,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			Chains: &chainstate.Client{Leader: toLeader},
 			Asks:   &asks.Client{Leader: toLeader}, Policies: ate,
 			UnattendedAsk: func(profile string) gateway.SubstrateUnattendedAsk {
-				return gateway.SubstrateUnattendedAskFor(c, profile)
+				return gateway.SubstrateUnattendedAskFor(live(), profile)
 			},
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
 			Relays: relayDialer(router),
@@ -522,7 +539,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			// GAP-0039: an unscanned skill folder is refused where hooks fail
 			// closed (managed, strict tier) and alerted on elsewhere; scan
 			// receipts hold on every replica that shares the chain key.
-			BlockUnscannedSkills: substrateBlocksUnscannedSkills(c),
+			BlockUnscannedSkills: func(connector string) bool { return substrateBlocksUnscannedSkills(live())(connector) },
 			SkillReceiptKey:      substrateSkillReceiptKey(chainKey),
 			TemplateSkills:       substrateTemplateSkills(ctl),
 			Info:                 substrateInfo(c),
@@ -536,9 +553,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
 					substrateRouterCheck(ctx, router, routerErr), substrateActorKeysCheck(ctx, ks)}
 			},
-			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.Attestor())},
+			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.LiveAttestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.
-			SandboxClass: gateway.SubstrateSandboxClassFor(c),
+			SandboxClass: func(profile string) string { return gateway.SubstrateSandboxClassFor(live())(profile) },
 			Limiter: ratelimit.New(ratelimit.Config{
 				PerActorRPS: c.Substrate.RateLimits.PerActorRPS, PerAtespaceRPS: c.Substrate.RateLimits.PerAtespaceRPS,
 			}),
@@ -571,7 +588,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				}
 				return false
 			}
-			out.Profiles = gateway.SubstrateLauncherProfiles(c)
+			out.Profiles = func(p identity.Person, requested, connector string, admin bool) (string, string, error) {
+				return gateway.SubstrateLauncherProfiles(live())(p, requested, connector, admin)
+			}
 			if out.Bundles, err = substrateBundleStore(c); err != nil {
 				return out, err
 			}
@@ -694,6 +713,17 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 		return err
 	}
 	defer chains.Close()
+	if cfg != nil {
+		// The chain egress action follows config.yaml (GAP-0276).
+		src, err := substrateConfigWatcher("", cfg)
+		if err != nil {
+			return err
+		}
+		go newSubstrateFollower(src, "leader", os.Stderr, func(c *config.Config) error {
+			action, _ := leaderChainEgressAction(c)
+			return chains.SetEgressAction(action)
+		}).run(ctx)
+	}
 	chains.Register(srv)
 	// A crashed or deleted actor asks nothing any more (E16): its open asks
 	// close when the controller reports the lifecycle event.

@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
@@ -31,21 +33,44 @@ import (
 
 // newSubstrateController builds the controller the controller deployment
 // runs and the gateway's create path uses for EnsurePolicy: the same
-// admission, profiles and render in both.
+// admission, profiles and render in both. With src, a config.yaml change
+// replaces the config-decided options (substrateControllerLive) before the
+// next pass or create (GAP-0276).
 func newSubstrateController(cfg *config.Config, client ateapi.Client, reg controller.Registry,
 	act controller.ActivitySource, cpu controller.CPUSource, sink controller.Sink, idleAfter bool,
-	resets controller.ResetStore, namespace string, resolver controller.ProfileResolver) (*controller.Controller, error) {
+	resets controller.ResetStore, namespace string, resolver controller.ProfileResolver, src controller.ConfigSource) (*controller.Controller, error) {
+	if act == nil {
+		act = controller.NoActivity{}
+	}
+	// No CPU source: never suspend on silence alone (E4).
+	idle := idleAfter && cpu != nil
+	live := substrateControllerLiveFunc(cfg, idle, resolver, sink)
+	lv := live(cfg)
+	o := controller.Options{
+		Client: client, Attestor: lv.Attestor, Activity: act, CPU: cpu,
+		Registry: reg, Resolver: lv.Resolver,
+		Sink:     sink,
+		Settings: lv.Settings, Secrets: lv.Secrets,
+		LauncherAtespaces: lv.LauncherAtespaces, RequireAttestation: lv.RequireAttestation, Templates: lv.Templates,
+		KitVersion: appVersion, IdleSuspendAfter: lv.IdleSuspendAfter, Resets: resets, Namespace: namespace,
+	}
+	if src != nil {
+		o.Config, o.Live = src, live
+	}
+	return controller.New(o)
+}
+
+// substrateControllerLive is the part of the controller config.yaml
+// decides (controller.Live), built the same way at start and on every
+// config change. resolver, when set (bundle mode), is kept as it is.
+func substrateControllerLive(cfg *config.Config, idle bool, resolver controller.ProfileResolver, sink controller.Sink) controller.Live {
 	sub := cfg.Substrate
 	if resolver == nil {
 		resolver = &controller.ConfigResolver{Config: cfg}
 	}
-
-	if act == nil {
-		act = controller.NoActivity{}
-	}
-	idle := sub.EffectiveIdleSuspendAfter()
-	if !idleAfter || cpu == nil {
-		idle = 0 // no CPU source: never suspend on silence alone (E4)
+	var after time.Duration
+	if idle {
+		after = sub.EffectiveIdleSuspendAfter()
 	}
 	// Both the controller and the create path admit only attested,
 	// digest-pinned templates (GAP-0053): the anchors come from the
@@ -60,14 +85,11 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 		}
 		attestor = &controller.TemplateAttestor{Verifier: ver, VolumeImages: sub.Templates.VolumeImages, Registries: controller.AllowedRegistries(sub.Templates)}
 	}
-	return controller.New(controller.Options{
-		Client: client, Attestor: attestor, Activity: act, CPU: cpu,
-		Registry: reg, Resolver: resolver,
-		Sink:     sink,
+	return controller.Live{
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
 		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(), Templates: sub.Templates,
-		KitVersion: appVersion, IdleSuspendAfter: idle, Resets: resets, Namespace: namespace,
-	})
+		Attestor: attestor, Resolver: resolver, IdleSuspendAfter: after,
+	}
 }
 
 // substrateTemplateKit reads what a template was built with from its
@@ -152,4 +174,58 @@ func substrateTemplateSkills(ctl *controller.Controller) func(ctx context.Contex
 		}
 		return digests, nil
 	}
+}
+
+// substrateControllerLiveFunc builds controller.Live for each config.yaml in
+// force. The restart-only render inputs (substrate.identity: audience and
+// token lifetime; substrate.services; substrate.extproc mcp_hosts and the
+// llm_providers hosts) keep their boot values, as the gateway and the
+// callout keep them (GAP-0297, GAP-0306). In bundle mode the stage bundles keep the boot profiles.
+func substrateControllerLiveFunc(boot *config.Config, idle bool, resolver controller.ProfileResolver, sink controller.Sink) func(*config.Config) controller.Live {
+	bootSettings := controller.SettingsFromConfig(boot)
+	return func(c *config.Config) controller.Live {
+		if c != boot && resolver != nil {
+			sink.Emit(controller.Event{Type: controller.EventWarning, Severity: controller.SeverityWarn,
+				Message: "substrate.bundles: the stage bundles are layered over the profiles config.yaml had when the controller started; " +
+					"a profile change in config.yaml applies when the controller restarts (the egress allow list, secrets, launcher atespaces and template rules apply now)"})
+		}
+		lv := substrateControllerLive(c, idle, resolver, sink)
+		if c == boot {
+			return lv
+		}
+		if keys := substrateControllerRestartOnly(boot, c); len(keys) > 0 {
+			sink.Emit(controller.Event{Type: controller.EventWarning, Severity: controller.SeverityWarn,
+				Message: "config.yaml changed " + strings.Join(keys, ", ") + ": applies when the pods restart (helm upgrade, or kubectl rollout restart " +
+					"deploy/defenseclaw-gateway deploy/defenseclaw-gateway-leader deploy/defenseclaw-controller); until then the values the pods started with stay"})
+		}
+		lv.Settings.ActorService, lv.Settings.AdminService = bootSettings.ActorService, bootSettings.AdminService
+		lv.Settings.Audience, lv.Settings.TokenLifetimeSeconds = bootSettings.Audience, bootSettings.TokenLifetimeSeconds
+		// The callout reads substrate.extproc (mcp_hosts) and the gateway the
+		// LLM providers only at helm upgrade or restart: rendering their hosts
+		// live would open egress before the callout inspects it (GAP-0306).
+		lv.Settings.MCPHosts, lv.Settings.ProviderHosts = bootSettings.MCPHosts, bootSettings.ProviderHosts
+		return lv
+	}
+}
+
+// substrateControllerRestartOnly names the render inputs that changed from
+// boot to cur and that the controller keeps at their boot values.
+func substrateControllerRestartOnly(boot, cur *config.Config) []string {
+	var out []string
+	if !reflect.DeepEqual(boot.Substrate.Identity, cur.Substrate.Identity) {
+		out = append(out, "substrate.identity")
+	}
+	if !reflect.DeepEqual(boot.Substrate.Services, cur.Substrate.Services) {
+		out = append(out, "substrate.services")
+	}
+	if !reflect.DeepEqual(boot.Substrate.API, cur.Substrate.API) {
+		out = append(out, "substrate.api")
+	}
+	if !reflect.DeepEqual(boot.Substrate.Extproc, cur.Substrate.Extproc) {
+		out = append(out, "substrate.extproc (helm upgrade only: it renders the callout's ConfigMap)")
+	}
+	if !reflect.DeepEqual(boot.LLMProviders, cur.LLMProviders) {
+		out = append(out, "llm_providers")
+	}
+	return out
 }

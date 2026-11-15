@@ -205,6 +205,10 @@ const (
 	EventIdleSuspend        = "sandbox.idle_suspend"
 	EventTaskEndSuspend     = "sandbox.task_end_suspend"
 	EventWarning            = "sandbox.warning"
+	// EventConfigReloaded: a config.yaml change is in force (GAP-0276);
+	// EventConfigRefused: a change that does not load was not applied.
+	EventConfigReloaded = "sandbox.config.reloaded"
+	EventConfigRefused  = "sandbox.config.refused"
 )
 
 // Severities.

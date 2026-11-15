@@ -640,6 +640,8 @@ rules:
 # Source: defenseclaw-substrate/templates/rbac.yaml
 # The gateway leader and the controller hold a Lease each; the leader records
 # the store schema in defenseclaw-store-state (read by the rollback check).
+# Every component may get defenseclaw-config: a config.yaml change is read
+# through the API within seconds, without a restart (GAP-0276).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -667,10 +669,15 @@ rules:
   resources: [configmaps]
   resourceNames: [defenseclaw-store-state, defenseclaw-policy-resets]
   verbs: [get, update, patch]
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-config]
+  verbs: [get]
 ---
 # Source: defenseclaw-substrate/templates/rbac.yaml
 # The controller reads and clears admin policy_conflict resets (the gateway
-# admin route writes them into defenseclaw-policy-resets).
+# admin route writes them into defenseclaw-policy-resets), and follows
+# config.yaml in defenseclaw-config (GAP-0276).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -688,6 +695,10 @@ rules:
   resources: [configmaps]
   resourceNames: [defenseclaw-policy-resets]
   verbs: [get, update]
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-config]
+  verbs: [get]
 ---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1

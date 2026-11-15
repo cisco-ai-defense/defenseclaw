@@ -128,6 +128,9 @@ type Options struct {
 // rows (GAP-0089), and everything an actor holds is removed with it.
 type Service struct {
 	opts Options
+	// action is the chain egress action in force: opts.EgressAction at
+	// start, then SetEgressAction (a config.yaml change, GAP-0276).
+	action atomic.Pointer[string]
 
 	mu      sync.Mutex
 	actors  map[string]*actorEntry // atespace/uid
@@ -305,6 +308,7 @@ func New(opts Options) (*Service, error) {
 		}
 	}
 	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}, gone: map[string]bool{}}
+	s.action.Store(&opts.EgressAction)
 	if err := s.load(); err != nil {
 		return nil, err
 	}
@@ -1422,7 +1426,7 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 		return EgressVerdict{}, err
 	}
 	s.touch(e)
-	v, ok := e.memo.verdict(s.stateOf(e).running(s.opts.Now()), s.opts.EgressAction)
+	v, ok := e.memo.verdict(s.stateOf(e).running(s.opts.Now()), s.EgressAction())
 	switch {
 	case !ok:
 		s.egress.push(egressRecord{actor: e.actor, sync: true})
@@ -1589,4 +1593,22 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// EgressAction is the chain egress action in force.
+func (s *Service) EgressAction() string { return *s.action.Load() }
+
+// SetEgressAction changes the chain egress action (a config.yaml change,
+// GAP-0276). The memo keeps no verdict of the old action: the next check
+// answers with the new one.
+func (s *Service) SetEgressAction(action string) error {
+	switch action {
+	case "":
+		action = EgressBlock
+	case EgressBlock, EgressAlert:
+	default:
+		return fmt.Errorf("chainstate: egress action %q is not block or alert", action)
+	}
+	s.action.Store(&action)
+	return nil
 }
