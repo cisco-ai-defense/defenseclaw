@@ -466,9 +466,10 @@ func tokenScan(text string, visit func(at int, quote byte)) (pieces []tokenPiece
 		switch {
 		case quote == ansiQuote:
 			// $'...': a backslash escapes the next byte, a quote closes it.
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == '\'' {
+			case '\'':
 				quote = 0
 			}
 			continue
