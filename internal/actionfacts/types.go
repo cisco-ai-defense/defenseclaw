@@ -152,6 +152,10 @@ type Facts struct {
 	Paths                                    []PathFact
 	Network                                  []NetworkFact
 	DataFlows                                []DataFlowFact
+	// sendSources are the shell values and argv of a call whose projection
+	// is not complete, for the sender reader (ReadSenders) to read what the
+	// projection did not. Private, in process only.
+	sendSources []sendSource
 	// SensitiveEgressArtifactWrites contains only exact local artifact paths.
 	// An entry proves that a closed structured-write schema created source text
 	// containing both a protected credential/secret path and a non-local literal

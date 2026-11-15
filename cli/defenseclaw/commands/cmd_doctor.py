@@ -13301,18 +13301,106 @@ def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _systemone_endpoint(routing, cfg) -> str:
+    """The endpoint routing.classifier systemone calls: its own base_url, or
+    the decision model when routing.systemone.use_decision_model is on (the
+    default)."""
+    own = getattr(routing, "systemone", None) or {}
+    own = own if isinstance(own, dict) else {}
+    if own.get("use_decision_model", True) is False:
+        return str(own.get("base_url") or "").strip()
+    return str(getattr(getattr(cfg, "decision_model", None), "base_url", "") or "").strip()
+
+
+def _endpoint_origin(url: str) -> str:
+    """scheme://host[:port] of url: no path, query or credentials in a row."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}" if parts.scheme and host else "the configured endpoint"
+
+
+def _check_systemone_reachable(routing, cfg, r: _DoctorResult) -> None:
+    """One real request to the System One endpoint (any HTTP answer means it
+    is up; the classifier has its own breaker, so a healthy gateway can still
+    be routing on the rules fallback: GAP-0591)."""
+    endpoint = _systemone_endpoint(routing, cfg)
+    if not endpoint:
+        _emit(
+            "warn",
+            "System One classifier",
+            "no endpoint: every request takes the classifier-failure path",
+            remediation=(
+                "set decision_model.base_url and decision_model.model, or set "
+                "routing.systemone.use_decision_model false with routing.systemone.base_url and model"
+            ),
+            r=r,
+        )
+        return
+    code, _detail = _http_probe(endpoint, timeout=2.0)
+    mode = getattr(routing, 'on_classifier_error', '') or 'original'
+    origin = _endpoint_origin(endpoint)
+    if code > 0:
+        _emit("pass", "System One classifier", f"{origin} answers (HTTP {code})", r=r)
+        return
+    _emit(
+        "fail",
+        "System One classifier",
+        f"{origin} is not reachable: routing uses on_classifier_error ({mode}) for every request",
+        remediation=(
+            "start the System One endpoint, or check its URL with defenseclaw setup decision-model --ping; "
+            "routing.on_classifier_error rules keeps keyword routing while it is down"
+        ),
+        r=r,
+    )
+
+
+def _check_inprocess_routing(routing, classifier: str, models: list, r: _DoctorResult, cfg=None) -> None:
+    """The rules and systemone classifiers run inside the gateway: there is no
+    container or router endpoint to probe (GAP-0567). A rules classifier with
+    no routing.decisions sends every request to default_alias (GAP-0565)."""
+    default = str(getattr(routing, "default_alias", "") or "")
+    label = "rules classifier, in process" if classifier == "rules" else f"{classifier} classifier"
+    detail = f"{label}; {len(models)} model(s)" + (f"; default {default}" if default else "")
+    decisions = getattr(routing, "decisions", []) or []
+    if classifier == "rules" and not decisions:
+        first = default or (str(models[0].get("name") or "") if models and isinstance(models[0], dict) else "")
+        first = first or "the default model"
+        _emit(
+            "warn",
+            "Semantic routing",
+            f"{detail}; no route rules (routing.decisions is empty), so every request goes to "
+            f"{first}",
+            remediation=(
+                "add rules: defenseclaw routing setup --route coding=ALIAS (and reasoning, summarize), "
+                "or write routing.signals and routing.decisions in config.yaml"
+            ),
+            r=r,
+        )
+        return
+    _emit("pass", "Semantic routing", detail, r=r)
+    if classifier == "systemone":
+        _check_systemone_reachable(routing, cfg, r)
+
+
 def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     routing = getattr(cfg, "routing", None)
     if routing is None or not bool(getattr(routing, "enabled", False)):
         _emit("skip", "Semantic routing", "disabled", r=r)
         return
 
+    classifier = str(getattr(routing, "classifier", "") or "vllm_sr").strip()
     remote = getattr(routing, "remote", {}) or {}
     remote_endpoint = str(remote.get("endpoint") or "").strip() if isinstance(remote, dict) else ""
     port = int(getattr(routing, "port", 0) or 8080)
     endpoint = remote_endpoint or f"http://127.0.0.1:{port}"
-    mode = "remote" if remote_endpoint else "managed Docker"
     models = getattr(routing, "models", []) or []
+    if classifier != "vllm_sr":
+        _check_inprocess_routing(routing, classifier, models, r, cfg)
+        return
+    mode = "remote" if remote_endpoint else "managed Docker"
 
     live = live_health.get("routing") if isinstance(live_health, dict) else None
     if isinstance(live, dict):
@@ -18663,6 +18751,72 @@ def _prompt_block_capability(connector: str) -> str:
     return _PROMPT_UNKNOWN
 
 
+# Tool-result hook events whose block answer the agent honours (contract
+# block_events, compared without case and punctuation): Claude Code and Codex
+# PostToolUse, Amp tool.result (rel-1-0-10 GAP-0605).
+_TOOL_RESULT_BLOCK_EVENTS = frozenset({"posttooluse", "toolresult"})
+
+
+def tool_result_block_capability(connector: str) -> str:
+    """Whether *connector* has a block form for a tool result, from the hook contract manifest.
+
+    A proxy connector refuses the model call that would carry the output. A
+    hook connector has one when every contract lists a tool-result event in
+    ``block_events``. Every other connector can only alert on a tool-result
+    finding (a prompt injection in a file, page or command output): the
+    output reaches the model. Returns the _PROMPT_* values.
+    """
+    name = normalize_connector(connector)
+    if name in PROXY_CONNECTORS:
+        return _PROMPT_BLOCKS
+    event_sets = [contract.capabilities.get("block_events") for contract in HOOK_CONTRACTS.get(name, ())]
+    if not event_sets:
+        spec = (HOOK_CONTRACT_MANIFEST.get("connectors") or {}).get(name)
+        inventory = spec.get("native_hook_inventory") if isinstance(spec, dict) else None
+        if isinstance(inventory, dict):
+            event_sets = [inventory.get("block_events")]
+    answers = {
+        any(
+            isinstance(event, str) and "".join(ch for ch in event.lower() if ch.isalnum()) in _TOOL_RESULT_BLOCK_EVENTS
+            for event in events
+        )
+        for events in event_sets
+        if isinstance(events, list)
+    }
+    if answers == {True}:
+        return _PROMPT_BLOCKS
+    if answers == {False}:
+        return _PROMPT_NO_HOOK
+    return _PROMPT_UNKNOWN
+
+
+def tool_result_injection_limit(connector: str) -> str:
+    """The documented limit line for a connector with no tool-result block form, else ""."""
+    if tool_result_block_capability(connector) != _PROMPT_NO_HOOK:
+        return ""
+    label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+    return f"tool-result injection: alert only on {label}"
+
+
+def _emit_tool_result_row(connector: str, r: _DoctorResult) -> None:
+    """One row: what a prompt injection in this connector's tool results gets (GAP-0605)."""
+    capability = tool_result_block_capability(connector)
+    label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+    if capability == _PROMPT_BLOCKS:
+        _emit(
+            "pass", "Tool-result injection",
+            "alerts in default and permissive, blocks in strict; the agent is told not to follow it",
+            r=r,
+        )
+    elif capability == _PROMPT_NO_HOOK:
+        _emit(
+            "skip", "Tool-result injection",
+            f"{tool_result_injection_limit(connector)}: {label} has no hook that can block a tool result, "
+            "so the output reaches the model in every posture (see defenseclaw alerts)",
+            r=r,
+        )
+
+
 def _detection_only_prompt_clause(connector: str) -> str:
     """The prompt half of the detection-only rule-pack warning for *connector*.
 
@@ -19135,6 +19289,8 @@ def _check_connector_inventory(
                     "built-in defaults (data_dir unresolved)",
                     r=r,
                 )
+
+    _emit_tool_result_row(connector, r)
 
     # Detection strategy + judge gating for this connector (read-only). This
     # is root #4 in the doctor fix-plan made visible: the judge can be

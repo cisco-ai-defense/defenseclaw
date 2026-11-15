@@ -141,6 +141,12 @@ type ToolInspectRequest struct {
 	// rules read more than the judge takes (messageJudgeText). Set only by the
 	// message lane, never from the wire.
 	judgeContent string
+	// sendDestination marks the routing values of a message call that carries
+	// text (inspectMessageCall): the recipient, target and channel the text is
+	// sent to. The tool-policy lane judges them as it judges the destination
+	// of any send tool, whatever the tool is named (trustedActionSendsMessage).
+	// Set only by the message lane, never from the wire.
+	sendDestination bool
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
@@ -889,6 +895,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		LegacyText:         string(req.Args),
 		Connector:          req.Connector,
 		EnforcementCapable: true,
+		sendDestination:    req.sendDestination,
 	}
 	if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, req.Args); ok {
 		// OpenClaw's exec tool sends execution controls (yieldMs, timeout,
@@ -1162,6 +1169,10 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
 		ruleFindings = agentHookConfigFindings(ctx, action, ruleFindings)
 	}
+	// An MCP or app tool is read as effects (internal/toolshape): the path it
+	// names, its SQL, code, settings and send destinations (rel-1-0-10:GAP-0016).
+	ruleFindings = nonShellToolFindings(ctx, action, ruleFindings, req.MCPServerName)
+	ruleFindings = shellToolFindings(ctx, action, ruleFindings)
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
 		cgScan = waitCodeGuard()

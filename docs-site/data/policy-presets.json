@@ -2130,8 +2130,7 @@
                   "tags": [
                     "credential",
                     "exfiltration",
-                    "exact-file",
-                    "detection-only"
+                    "exact-file"
                   ]
                 },
                 {
@@ -2489,6 +2488,180 @@
                     "execution",
                     "network",
                     "opaque-code"
+                  ]
+                },
+                {
+                  "id": "CMD-SECRET-REVEAL",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Command prints a stored secret",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "credential",
+                    "secret-reveal"
+                  ]
+                },
+                {
+                  "id": "CMD-SECRET-LOOKUP",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Command reads a stored secret or issues a credential",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "credential",
+                    "secret-reveal"
+                  ]
+                },
+                {
+                  "id": "CMD-GIT-SHOW-SECRET",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "git show prints a committed secret file",
+                  "severity": "HIGH",
+                  "confidence": 0.75,
+                  "tags": [
+                    "credential",
+                    "secret-reveal"
+                  ]
+                },
+                {
+                  "id": "CMD-PERSIST-SYSTEM-SCHEDULE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Write to a system schedule or sudoers drop-in",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "persistence",
+                    "privilege-escalation"
+                  ]
+                },
+                {
+                  "id": "CMD-PRIV-SETUID",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Set-id bit set with chmod",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "privilege-escalation"
+                  ]
+                },
+                {
+                  "id": "CMD-PRIV-PATH-HIJACK",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Privileged program run with a writable directory first in PATH",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "privilege-escalation"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-DESTRUCTIVE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Destructive SQL in a tool call",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "destructive",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-PRIVILEGE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Privilege-changing SQL in a tool call",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "privilege-escalation",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-AUDIT-OFF",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "SQL switches an audit or logging setting off",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "defense-evasion",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-CREDENTIAL",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "SQL sets a credential column",
+                  "severity": "MEDIUM",
+                  "confidence": 0.7,
+                  "tags": [
+                    "credential",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SEND-REDIRECT",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Tool call copies or redirects its output to another party",
+                  "severity": "HIGH",
+                  "confidence": 0.75,
+                  "tags": [
+                    "exfiltration",
+                    "network",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SEND-COLLECTOR",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Tool call sends to a paste, file-drop or webhook-catcher host",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "exfiltration",
+                    "network",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SETTING-DOWNGRADE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Tool call turns a security control off",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "defense-evasion",
+                    "configuration",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-CODE-DECODE-EXEC",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Code tool runs decoded text",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "execution",
+                    "obfuscation",
+                    "mcp"
                   ]
                 }
               ]
@@ -2911,6 +3084,26 @@
                   ]
                 },
                 {
+                  "id": "SEC-BEARER-BARE",
+                  "pattern": "(?i)\\bbearer\\s+[A-Za-z0-9\\-_.~+/]{20,}=*",
+                  "title": "Bearer credential",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
+                  "id": "SEC-PASSWORD-ASSIGN",
+                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+                  "title": "Password assigned to a password-named key",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
                   "id": "SEC-SENDGRID",
                   "pattern": "SG\\.[a-zA-Z0-9\\-_]{10,}\\.[a-zA-Z0-9\\-_]{10,}",
                   "title": "SendGrid API key",
@@ -3118,6 +3311,42 @@
                   "title": "Git credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "PATH-K8S-CLUSTER-CRED",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Kubernetes cluster credential file",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "PATH-CRED-STORE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "System credential store file",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "PATH-CRED-STORE-USER",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Credential file in a home directory",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
                   "tags": [
                     "credential",
                     "file-sensitive"
@@ -6132,8 +6361,7 @@
                   "tags": [
                     "credential",
                     "exfiltration",
-                    "exact-file",
-                    "detection-only"
+                    "exact-file"
                   ]
                 },
                 {
@@ -6568,6 +6796,180 @@
                     "network",
                     "opaque-code"
                   ]
+                },
+                {
+                  "id": "CMD-SECRET-REVEAL",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Command prints a stored secret",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "credential",
+                    "secret-reveal"
+                  ]
+                },
+                {
+                  "id": "CMD-SECRET-LOOKUP",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Command reads a stored secret or issues a credential",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "credential",
+                    "secret-reveal"
+                  ]
+                },
+                {
+                  "id": "CMD-GIT-SHOW-SECRET",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "git show prints a committed secret file",
+                  "severity": "HIGH",
+                  "confidence": 0.75,
+                  "tags": [
+                    "credential",
+                    "secret-reveal"
+                  ]
+                },
+                {
+                  "id": "CMD-PERSIST-SYSTEM-SCHEDULE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Write to a system schedule or sudoers drop-in",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "persistence",
+                    "privilege-escalation"
+                  ]
+                },
+                {
+                  "id": "CMD-PRIV-SETUID",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Set-id bit set with chmod",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "privilege-escalation"
+                  ]
+                },
+                {
+                  "id": "CMD-PRIV-PATH-HIJACK",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Privileged program run with a writable directory first in PATH",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "privilege-escalation"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-DESTRUCTIVE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Destructive SQL in a tool call",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "destructive",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-PRIVILEGE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Privilege-changing SQL in a tool call",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "privilege-escalation",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-AUDIT-OFF",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "SQL switches an audit or logging setting off",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "defense-evasion",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-CREDENTIAL",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "SQL sets a credential column",
+                  "severity": "MEDIUM",
+                  "confidence": 0.7,
+                  "tags": [
+                    "credential",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SEND-REDIRECT",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Tool call copies or redirects its output to another party",
+                  "severity": "HIGH",
+                  "confidence": 0.75,
+                  "tags": [
+                    "exfiltration",
+                    "network",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SEND-COLLECTOR",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Tool call sends to a paste, file-drop or webhook-catcher host",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "exfiltration",
+                    "network",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SETTING-DOWNGRADE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Tool call turns a security control off",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "defense-evasion",
+                    "configuration",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-CODE-DECODE-EXEC",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Code tool runs decoded text",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "execution",
+                    "obfuscation",
+                    "mcp"
+                  ]
                 }
               ]
             },
@@ -6998,6 +7400,26 @@
                   ]
                 },
                 {
+                  "id": "SEC-BEARER-BARE",
+                  "pattern": "(?i)\\bbearer\\s+[A-Za-z0-9\\-_.~+/]{20,}=*",
+                  "title": "Bearer credential",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
+                  "id": "SEC-PASSWORD-ASSIGN",
+                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+                  "title": "Password assigned to a password-named key",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
                   "id": "SEC-SENDGRID",
                   "pattern": "SG\\.[a-zA-Z0-9\\-_]{10,}\\.[a-zA-Z0-9\\-_]{10,}",
                   "title": "SendGrid API key",
@@ -7206,6 +7628,42 @@
                   "title": "Git credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "PATH-K8S-CLUSTER-CRED",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Kubernetes cluster credential file",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "PATH-CRED-STORE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "System credential store file",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "PATH-CRED-STORE-USER",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Credential file in a home directory",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
                   "tags": [
                     "credential",
                     "file-sensitive"
@@ -10026,8 +10484,7 @@
                   "tags": [
                     "credential",
                     "exfiltration",
-                    "exact-file",
-                    "detection-only"
+                    "exact-file"
                   ]
                 },
                 {
@@ -10385,6 +10842,180 @@
                     "execution",
                     "network",
                     "opaque-code"
+                  ]
+                },
+                {
+                  "id": "CMD-SECRET-REVEAL",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Command prints a stored secret",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "credential",
+                    "secret-reveal"
+                  ]
+                },
+                {
+                  "id": "CMD-SECRET-LOOKUP",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Command reads a stored secret or issues a credential",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "credential",
+                    "secret-reveal"
+                  ]
+                },
+                {
+                  "id": "CMD-GIT-SHOW-SECRET",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "git show prints a committed secret file",
+                  "severity": "HIGH",
+                  "confidence": 0.75,
+                  "tags": [
+                    "credential",
+                    "secret-reveal"
+                  ]
+                },
+                {
+                  "id": "CMD-PERSIST-SYSTEM-SCHEDULE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Write to a system schedule or sudoers drop-in",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "persistence",
+                    "privilege-escalation"
+                  ]
+                },
+                {
+                  "id": "CMD-PRIV-SETUID",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Set-id bit set with chmod",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "privilege-escalation"
+                  ]
+                },
+                {
+                  "id": "CMD-PRIV-PATH-HIJACK",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Privileged program run with a writable directory first in PATH",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "privilege-escalation"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-DESTRUCTIVE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Destructive SQL in a tool call",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "destructive",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-PRIVILEGE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Privilege-changing SQL in a tool call",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "privilege-escalation",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-AUDIT-OFF",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "SQL switches an audit or logging setting off",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "defense-evasion",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SQL-CREDENTIAL",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "SQL sets a credential column",
+                  "severity": "MEDIUM",
+                  "confidence": 0.7,
+                  "tags": [
+                    "credential",
+                    "database",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SEND-REDIRECT",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Tool call copies or redirects its output to another party",
+                  "severity": "HIGH",
+                  "confidence": 0.75,
+                  "tags": [
+                    "exfiltration",
+                    "network",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SEND-COLLECTOR",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Tool call sends to a paste, file-drop or webhook-catcher host",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "exfiltration",
+                    "network",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-SETTING-DOWNGRADE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Tool call turns a security control off",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "defense-evasion",
+                    "configuration",
+                    "mcp"
+                  ]
+                },
+                {
+                  "id": "MCP-CODE-DECODE-EXEC",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Code tool runs decoded text",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "execution",
+                    "obfuscation",
+                    "mcp"
                   ]
                 }
               ]
@@ -10811,6 +11442,26 @@
                   ]
                 },
                 {
+                  "id": "SEC-BEARER-BARE",
+                  "pattern": "(?i)\\bbearer\\s+[A-Za-z0-9\\-_.~+/]{20,}=*",
+                  "title": "Bearer credential",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
+                  "id": "SEC-PASSWORD-ASSIGN",
+                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+                  "title": "Password assigned to a password-named key",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
                   "id": "SEC-SENDGRID",
                   "pattern": "SG\\.[a-zA-Z0-9\\-_]{10,}\\.[a-zA-Z0-9\\-_]{10,}",
                   "title": "SendGrid API key",
@@ -11018,6 +11669,42 @@
                   "title": "Git credentials file",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "PATH-K8S-CLUSTER-CRED",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Kubernetes cluster credential file",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "PATH-CRED-STORE",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "System credential store file",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "PATH-CRED-STORE-USER",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Credential file in a home directory",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
                   "tags": [
                     "credential",
                     "file-sensitive"

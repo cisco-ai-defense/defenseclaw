@@ -1551,11 +1551,13 @@
     },
     "cascadeLane": {
       "type": "string",
-      "description": "A cascade lane switch: off, or shadow (compute and record beside today's rules, never change the answer). The lane ships shadow-only in 1.0.10, so on is refused (internal/config/cascade_lanes.go lists the open gaps).",
-      "enum": [
-        "off",
-        "shadow"
-      ]
+      "description": "A cascade lane switch: off, or shadow (compute and record beside today's rules, never change the answer), in any case. The lane ships shadow-only in 1.0.10, so on is refused (internal/config/cascade_lanes.go lists the open gaps).",
+      "pattern": "^\\s*([Oo][Ff][Ff]|[Ss][Hh][Aa][Dd][Oo][Ww])\\s*$"
+    },
+    "cascadeLiveLane": {
+      "type": "string",
+      "description": "A cascade lane switch that ships live: on, shadow or off, in any case. Only on is live; shadow and off add nothing, so the verdicts are those of a build without the lane.",
+      "pattern": "^\\s*([Oo][Nn]|[Ss][Hh][Aa][Dd][Oo][Ww]|[Oo][Ff][Ff])\\s*$"
     },
     "cascade": {
       "type": "object",
@@ -1565,7 +1567,7 @@
         "lanes": {
           "type": "object",
           "additionalProperties": false,
-          "description": "One switch per lane. A lane that ships shadow-only takes off or shadow.",
+          "description": "One switch per lane, read in any case. A lane that ships shadow-only takes off or shadow; nonshell takes on, shadow or off.",
           "properties": {
             "effects": {
               "$ref": "#/$defs/cascadeLane",
@@ -1574,6 +1576,11 @@
             "secret_flow": {
               "$ref": "#/$defs/cascadeLane",
               "default": "shadow"
+            },
+            "nonshell": {
+              "$ref": "#/$defs/cascadeLiveLane",
+              "default": "on",
+              "description": "The MCP and app tool lane (tool-call effects and the table rules on shell and native file-tool calls). on (default) judges them; shadow and off compute nothing and add nothing, so the verdicts are those of a build without the lane. Any other value is refused at load."
             }
           }
         }

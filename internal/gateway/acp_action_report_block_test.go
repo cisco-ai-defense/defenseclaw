@@ -18,7 +18,7 @@ func acpIDOnlyPermission(t *testing.T) []byte {
 		map[string]any{"sessionId": "s", "options": []any{}, "toolCall": map[string]any{"toolCallId": "t", "title": "Run"}})
 }
 
-// TestACPPermissionAfterABlockedReportIsNeverBelowTheBlock: the fixtures' shell
+// TestACPPermissionAfterABlockedReportIsNeverBelowTheBlock{Default,Permissive,Strict}: the fixtures' shell
 // commands the hook blocks, padded so that the finding is past the prefix the
 // guard keeps. The gateway judges the whole report a block (an alert that would
 // have blocked); the guard keeps that mark with the call, so the permission that
@@ -31,102 +31,115 @@ func acpIDOnlyPermission(t *testing.T) []byte {
 // titles a shell call. The guard cuts the title as it cuts the input and keeps
 // the update's mark, never the stale `ls` state: the permission is a block
 // wherever the update was judged one, and at least the unknown tier otherwise.
-func TestACPPermissionAfterABlockedReportIsNeverBelowTheBlock(t *testing.T) {
+//
+// One top-level test per pack: the three packs cost about the same, and under
+// -race the whole test ran 11 minutes in one shard (rel-1-0-10:GAP-0612), where
+// each pack is a third of it and the shards can take them apart. The checks are
+// the same for every pack.
+func TestACPPermissionAfterABlockedReportIsNeverBelowTheBlockDefault(t *testing.T) {
+	acpPermissionAfterABlockedReport(t, "default")
+}
+
+func TestACPPermissionAfterABlockedReportIsNeverBelowTheBlockPermissive(t *testing.T) {
+	acpPermissionAfterABlockedReport(t, "permissive")
+}
+
+func TestACPPermissionAfterABlockedReportIsNeverBelowTheBlockStrict(t *testing.T) {
+	acpPermissionAfterABlockedReport(t, "strict")
+}
+
+func acpPermissionAfterABlockedReport(t *testing.T, pack string) {
 	pairs, _ := acpParityPairs(t, loadACPParityCases(t))
-	for _, pack := range []string{"default", "permissive", "strict"} {
-		t.Run(pack, func(t *testing.T) {
-			env := newACPActionEnv(t, pack)
-			permission := func(state json.RawMessage) acp.Verdict {
-				env.toolCallState = state
+	env := newACPActionEnv(t, pack)
+	permission := func(state json.RawMessage) acp.Verdict {
+		env.toolCallState = state
+		defer func() { env.toolCallState = nil }()
+		return env.evaluate(t, acp.AgentToClient, acpIDOnlyPermission(t))
+	}
+	var tried, reportBlocks, permissionBlocks, f3Blocks, f3UpdateBlocks int
+	example, f3Example := "", ""
+	for _, pair := range pairs {
+		if pair.method != "terminal/create" || pair.noCWD {
+			continue
+		}
+		command, _ := pair.hookInput["command"].(string)
+		if hook, _ := env.kiroHook(t, pair.hookTool, pair.hookInput, true); !acpBlocked(hook) || len(command) > 4<<10 {
+			continue
+		}
+		tried++
+		padded := "# " + strings.Repeat("x", 9<<10) + "\n" + command + "\n# " + strings.Repeat("y", acp.MaxToolCallStateBytes)
+		report := acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": map[string]any{
+			"sessionUpdate": "tool_call", "toolCallId": "t", "kind": "execute", "title": "Run", "rawInput": map[string]any{"command": padded}}})
+		// GAP-0462/F3, through the guard's own flow (Peek, evaluate, Commit).
+		{
+			var tracker acp.ToolCallTracker
+			forward := func(frame []byte) acp.Verdict {
+				msg := acpParsedFrame(t, frame)
+				env.toolCallState = tracker.Peek(msg)
 				defer func() { env.toolCallState = nil }()
-				return env.evaluate(t, acp.AgentToClient, acpIDOnlyPermission(t))
+				verdict := env.evaluate(t, acp.AgentToClient, frame)
+				tracker.Commit(msg, verdict.JudgedBlock())
+				return verdict
 			}
-			var tried, reportBlocks, permissionBlocks, f3Blocks, f3UpdateBlocks int
-			example, f3Example := "", ""
-			for _, pair := range pairs {
-				if pair.method != "terminal/create" || pair.noCWD {
-					continue
-				}
-				command, _ := pair.hookInput["command"].(string)
-				if hook, _ := env.kiroHook(t, pair.hookTool, pair.hookInput, true); !acpBlocked(hook) || len(command) > 4<<10 {
-					continue
-				}
-				tried++
-				padded := "# " + strings.Repeat("x", 9<<10) + "\n" + command + "\n# " + strings.Repeat("y", acp.MaxToolCallStateBytes)
-				report := acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": map[string]any{
-					"sessionUpdate": "tool_call", "toolCallId": "t", "kind": "execute", "title": "Run", "rawInput": map[string]any{"command": padded}}})
-				// GAP-0462/F3, through the guard's own flow (Peek, evaluate, Commit).
-				{
-					var tracker acp.ToolCallTracker
-					forward := func(frame []byte) acp.Verdict {
-						msg := acpParsedFrame(t, frame)
-						env.toolCallState = tracker.Peek(msg)
-						defer func() { env.toolCallState = nil }()
-						verdict := env.evaluate(t, acp.AgentToClient, frame)
-						tracker.Commit(msg, verdict.JudgedBlock())
-						return verdict
-					}
-					forward(acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": map[string]any{
-						"sessionUpdate": "tool_call", "toolCallId": "t", "kind": "execute", "title": "Run", "rawInput": map[string]any{"command": "ls"}}}))
-					updateJudged := forward(acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": map[string]any{
-						"sessionUpdate": "tool_call_update", "toolCallId": "t", "title": "`" + padded + "`", "rawInput": map[string]any{"command": padded}}}))
-					state := tracker.Peek(acpParsedFrame(t, acpIDOnlyPermission(t)))
-					if !strings.Contains(string(state), `"truncated":true`) || strings.Contains(string(state), `"command":"ls"`) {
-						t.Fatalf("GAP-0462/F3 %s: the oversized update was not kept cut: %.200s", pair.id, state)
-					}
-					got := permission(state)
-					if updateJudged.JudgedBlock() {
-						f3UpdateBlocks++
-					}
-					switch {
-					case acpBlocked(got.RawAction):
-						f3Blocks++
-					case updateJudged.JudgedBlock() || got.RawAction != "alert" || pack == "strict":
-						t.Errorf("GAP-0462/F3 %s: %s %s after an update judged a block %v, want a block (or the unknown tier when it was not)",
-							pair.id, got.RawAction, got.Severity, updateJudged.JudgedBlock())
-					case f3Example == "":
-						f3Example = fmt.Sprintf("%s: %s %s", pair.id, got.RawAction, got.Severity)
-					}
-				}
-				judged := env.evaluate(t, acp.AgentToClient, report)
-				if !judged.JudgedBlock() {
-					continue
-				}
-				reportBlocks++
-				var tracker acp.ToolCallTracker
-				tracker.Commit(acpParsedFrame(t, report), judged.JudgedBlock())
-				state := tracker.Peek(acpParsedFrame(t, acpIDOnlyPermission(t)))
-				if !strings.Contains(string(state), `"truncated":true`) {
-					t.Fatalf("%s: the padded command was not cut (%d bytes of state)", pair.id, len(state))
-				}
-				if got := permission(state); acpBlocked(got.RawAction) {
-					permissionBlocks++
-				} else if example == "" {
-					example = fmt.Sprintf("%s: %s %s", pair.id, got.RawAction, got.Severity)
-				}
+			forward(acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": map[string]any{
+				"sessionUpdate": "tool_call", "toolCallId": "t", "kind": "execute", "title": "Run", "rawInput": map[string]any{"command": "ls"}}}))
+			updateJudged := forward(acpFrameJSON(t, 0, "session/update", map[string]any{"sessionId": "s", "update": map[string]any{
+				"sessionUpdate": "tool_call_update", "toolCallId": "t", "title": "`" + padded + "`", "rawInput": map[string]any{"command": padded}}}))
+			state := tracker.Peek(acpParsedFrame(t, acpIDOnlyPermission(t)))
+			if !strings.Contains(string(state), `"truncated":true`) || strings.Contains(string(state), `"command":"ls"`) {
+				t.Fatalf("GAP-0462/F3 %s: the oversized update was not kept cut: %.200s", pair.id, state)
 			}
-			t.Logf("%s: %d padded commands, %d reports judged a block, %d id-only permissions blocked", pack, tried, reportBlocks, permissionBlocks)
-			t.Logf("%s: GAP-0462/F3: %d of %d id-only permissions blocked after an oversized update with a padded title (%d updates judged a block; e.g. %s)",
-				pack, f3Blocks, tried, f3UpdateBlocks, f3Example)
-			if f3UpdateBlocks < tried-2 || f3Blocks < f3UpdateBlocks || pack == "strict" && f3Blocks != tried {
-				t.Errorf("GAP-0462/F3: %d of %d blocked, %d updates judged a block", f3Blocks, tried, f3UpdateBlocks)
+			got := permission(state)
+			if updateJudged.JudgedBlock() {
+				f3UpdateBlocks++
 			}
-			if tried < 25 || reportBlocks < tried-2 || permissionBlocks != reportBlocks {
-				t.Errorf("%d of %d permissions after a report judged a block are blocked (e.g. %s)", permissionBlocks, reportBlocks, example)
+			switch {
+			case acpBlocked(got.RawAction):
+				f3Blocks++
+			case updateJudged.JudgedBlock() || got.RawAction != "alert" || pack == "strict":
+				t.Errorf("GAP-0462/F3 %s: %s %s after an update judged a block %v, want a block (or the unknown tier when it was not)",
+					pair.id, got.RawAction, got.Severity, updateJudged.JudgedBlock())
+			case f3Example == "":
+				f3Example = fmt.Sprintf("%s: %s %s", pair.id, got.RawAction, got.Severity)
 			}
-			// A dropped call keeps the mark; without it a dropped call is still the unknown tier.
-			if got := permission(json.RawMessage(`{"dropped":true,"flagged":true}`)); !acpBlocked(got.RawAction) {
-				t.Errorf("a dropped call whose report was judged a block: %+v, want a block", got)
-			}
-			got := permission(json.RawMessage(`{"dropped":true}`))
-			if pack == "strict" && !acpBlocked(got.RawAction) || pack != "strict" && got.RawAction != "alert" {
-				t.Errorf("a dropped call: %+v, want the unknown tier", got)
-			}
-			// The mark decides on its own: the kept call may show nothing else.
-			if got := permission(json.RawMessage(`{"kind":"execute","rawInput":{"command":"ls"},"flagged":true}`)); !acpBlocked(got.RawAction) {
-				t.Errorf("a permission for a call whose report was judged a block: %+v", got)
-			}
-		})
+		}
+		judged := env.evaluate(t, acp.AgentToClient, report)
+		if !judged.JudgedBlock() {
+			continue
+		}
+		reportBlocks++
+		var tracker acp.ToolCallTracker
+		tracker.Commit(acpParsedFrame(t, report), judged.JudgedBlock())
+		state := tracker.Peek(acpParsedFrame(t, acpIDOnlyPermission(t)))
+		if !strings.Contains(string(state), `"truncated":true`) {
+			t.Fatalf("%s: the padded command was not cut (%d bytes of state)", pair.id, len(state))
+		}
+		if got := permission(state); acpBlocked(got.RawAction) {
+			permissionBlocks++
+		} else if example == "" {
+			example = fmt.Sprintf("%s: %s %s", pair.id, got.RawAction, got.Severity)
+		}
+	}
+	t.Logf("%s: %d padded commands, %d reports judged a block, %d id-only permissions blocked", pack, tried, reportBlocks, permissionBlocks)
+	t.Logf("%s: GAP-0462/F3: %d of %d id-only permissions blocked after an oversized update with a padded title (%d updates judged a block; e.g. %s)",
+		pack, f3Blocks, tried, f3UpdateBlocks, f3Example)
+	if f3UpdateBlocks < tried-2 || f3Blocks < f3UpdateBlocks || pack == "strict" && f3Blocks != tried {
+		t.Errorf("GAP-0462/F3: %d of %d blocked, %d updates judged a block", f3Blocks, tried, f3UpdateBlocks)
+	}
+	if tried < 25 || reportBlocks < tried-2 || permissionBlocks != reportBlocks {
+		t.Errorf("%d of %d permissions after a report judged a block are blocked (e.g. %s)", permissionBlocks, reportBlocks, example)
+	}
+	// A dropped call keeps the mark; without it a dropped call is still the unknown tier.
+	if got := permission(json.RawMessage(`{"dropped":true,"flagged":true}`)); !acpBlocked(got.RawAction) {
+		t.Errorf("a dropped call whose report was judged a block: %+v, want a block", got)
+	}
+	got := permission(json.RawMessage(`{"dropped":true}`))
+	if pack == "strict" && !acpBlocked(got.RawAction) || pack != "strict" && got.RawAction != "alert" {
+		t.Errorf("a dropped call: %+v, want the unknown tier", got)
+	}
+	// The mark decides on its own: the kept call may show nothing else.
+	if got := permission(json.RawMessage(`{"kind":"execute","rawInput":{"command":"ls"},"flagged":true}`)); !acpBlocked(got.RawAction) {
+		t.Errorf("a permission for a call whose report was judged a block: %+v", got)
 	}
 }
 

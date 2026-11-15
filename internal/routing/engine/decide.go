@@ -25,8 +25,8 @@ func upper(s string) string {
 }
 
 // Decide picks the backend of one request. It never fails: every problem
-// is an OutcomeFallback (send the original request) or, on a managed host
-// only, an OutcomeDenied.
+// is an OutcomeFallback (send the original request) or an OutcomeDenied (a
+// managed admin rule, or a sensitive request no local model can serve).
 func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	started := time.Now()
 	defer func() { d.Latency = time.Since(started) }()
@@ -68,20 +68,29 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		d.Warnings = append(d.Warnings, verdict.Warnings...)
 		d.RuleIDs, d.ChargeKeys = verdict.RuleIDs, verdict.ChargeKeys
 		if verdict.Deny != nil && e.managed {
+			if e.SensitiveConfigured() && e.sensitiveFloor(req, signals) != "" {
+				// The refused turn may stay in the agent history: keep the
+				// conversation narrowed (GAP-0576 review r3).
+				e.markSensitiveSticky(req)
+			}
 			d.Outcome, d.Deny, d.FailureCode, d.verdict = OutcomeDenied, verdict.Deny, FailureFiltered, verdict
 			return d
 		}
 	}
 
-	// 3. Sensitive narrowing: guardrail severity or a sensitive signal.
+	// 3. Sensitive narrowing: guardrail severity or a sensitive signal
+	// (sensitive.go). A narrowed request has only local exits.
 	if s := e.sensitive; s != nil && len(s.Aliases) > 0 {
-		hit := s.SeverityAtLeast != "" && req.Severity != "" && rankOf(req.Severity) >= rankOf(s.SeverityAtLeast)
-		for _, name := range s.Signals {
-			hit = hit || signals[name]
-		}
-		if hit {
+		if src := e.sensitiveFloor(req, signals); src != "" || e.sensitiveSticky(req) {
+			if src == "" {
+				src = SensitiveSourceSticky
+			}
+			// Every narrowed turn renews the mark: the history the next turn
+			// carries still holds the sensitive turn.
+			e.markSensitiveSticky(req)
 			pol.AllowedAliases = intersectAliases(pol.AllowedAliases, s.Aliases)
 			d.FilteredBy = "sensitive"
+			d.Sensitive = SensitiveOutcome{Source: src, Reason: "positive"}
 		}
 	}
 	d.PolicyDigest = pol.Digest()
@@ -105,6 +114,16 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 			order = append(order, cand{a, classifierSource})
 		}
 	}
+	narrowed := d.SensitiveNarrowed()
+	req.Narrowed = narrowed
+	if narrowed {
+		// A sensitive request tries the local models even when the
+		// classifier and the defaults name only cloud aliases, and even
+		// when the classifier failed (GAP-0576).
+		for _, a := range e.sensitive.Aliases {
+			order = append(order, cand{a, SourceSensitive})
+		}
+	}
 	for _, c := range order {
 		if c.source != SourceForce {
 			d.Candidate = c.alias
@@ -114,6 +133,7 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	if !classifierFailed {
 		order = append(order, cand{pol.DefaultAlias, SourceDefault}, cand{e.unconditional, SourceDefault})
 	}
+	localWhy := ""
 	for _, c := range order {
 		if c.alias == "" {
 			continue
@@ -122,6 +142,9 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		if why != "" {
 			if d.FilteredBy == "" {
 				d.FilteredBy = why
+			}
+			if narrowed && localWhy == "" && slices.Contains(e.sensitive.Aliases, c.alias) {
+				localWhy = "local model " + c.alias + " cannot serve it (" + why + ")"
 			}
 			continue
 		}
@@ -134,6 +157,16 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	// binding rule refuses it there, with its own reason), so only the S1
 	// floor (routing.admin.denied_providers) denies here, managed only.
 	d.verdict = verdict
+	if narrowed {
+		// Fail closed: a sensitive request never falls back to the
+		// original (cloud) request, on OSS and managed hosts alike.
+		if localWhy == "" {
+			localWhy = "no routing.sensitive.aliases model is allowed for this caller"
+		}
+		d.Outcome, d.FailureCode, d.Source = OutcomeDenied, FailureFiltered, SourceSensitive
+		d.Deny = SensitiveLocalDeny(d.Sensitive.Source, localWhy)
+		return d
+	}
 	if e.managed && e.providerDenied(pol, req.RequestedProvider) {
 		d.Outcome, d.FailureCode = OutcomeDenied, FailureFiltered
 		d.Deny = &DenyReason{Code: "routing_admin_denied", Message: "routing.admin does not allow this model for you, and no allowed model can serve this request"}
@@ -174,9 +207,21 @@ func (e *Engine) classifyWithSticky(ctx context.Context, req Request, in Classif
 }
 
 // Gate checks a forwarded exit (the routed backend or the original request)
-// against the admin verdict of the decision.
+// against the decision: a sensitive decision allows only the
+// routing.sensitive.aliases models (every host; the original request is
+// never one), then the admin verdict judges the exit.
 func (e *Engine) Gate(d Decision, target GateTarget) *DenyReason {
-	if e == nil || e.admin == nil || !e.admin.Active() {
+	if e == nil {
+		return nil
+	}
+	if d.SensitiveNarrowed() && (e.sensitive == nil || target.Alias == "" || !slices.Contains(e.sensitive.Aliases, target.Alias)) {
+		exit := "the original model request"
+		if target.Alias != "" {
+			exit = "model " + target.Alias
+		}
+		return SensitiveLocalDeny(d.Sensitive.Source, exit+" is not a local model")
+	}
+	if e.admin == nil || !e.admin.Active() {
 		return nil
 	}
 	return e.admin.Gate(d.verdict, target, e.managed)

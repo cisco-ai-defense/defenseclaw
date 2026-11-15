@@ -251,6 +251,7 @@ func overLimitCommandBoundedTwinRequest(request trustedActionRequest, facts acti
 	}
 	twin := request
 	twin.Input = input
+	twin.Input.DialectHint = overLimitTwinDialect(request, input)
 	twin.LegacyText = string(input.Args)
 	if len(input.Args) == 0 {
 		twin.LegacyText = input.Command
@@ -258,6 +259,31 @@ func overLimitCommandBoundedTwinRequest(request trustedActionRequest, facts acti
 	twin.conflictSource = nil
 	twin.record, twin.recordTelemetry = nil, nil
 	return twin, true
+}
+
+// overLimitTwinDialect is the shell dialect the bounded twin of a
+// limit-exceeded command is read in. A Windows hook chooses the dialect from
+// the command it was sent, and cannot choose one for a command over the
+// string limit (the reading is not complete, so the choice is empty): the
+// twin, which is within the limits, is placed in the dialect the same call
+// without its padding gets, so a Windows path in it is read as a Windows path
+// and not as a POSIX word. Left in no dialect, a PowerShell redirect to the
+// Windows authorized_keys file named no write target and the padded call was
+// allowed in every pack (rel-1-0-10:GAP-0611). A hook that placed the call,
+// or a host that places no call (not a Windows hook, a sandbox, Secure
+// Client), keeps its hint.
+func overLimitTwinDialect(request trustedActionRequest, input actionfacts.Input) actionfacts.Dialect {
+	if input.DialectHint != "" || !request.windowsDialectReadings {
+		return input.DialectHint
+	}
+	if request.Connector == "claudecode" {
+		return claudeCodeWindowsShellDialect(input)
+	}
+	if len(input.Args) == 0 {
+		dialect, _ := selectWindowsShellDialectReading(input.Tool, input.Command, input)
+		return dialect
+	}
+	return agentHookWindowsShellDialect(input)
 }
 
 // withOverLimitTwinFindings adds the findings of a bounded twin: its blocks

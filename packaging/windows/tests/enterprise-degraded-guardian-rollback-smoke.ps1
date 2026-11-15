@@ -44,8 +44,6 @@ foreach ($name in @(
         'Get-DefenseClawGuardianReadinessProbe',
         'Invoke-DefenseClawGuardianReadinessCommand',
         'Get-DefenseClawGuardianFailedTargets',
-        'Test-DefenseClawGuardianFailedTargetsWithinSIDs',
-        'Get-DefenseClawAllowedFailedTargetSIDs',
         'Get-DefenseClawGuardianPendingTargets',
         'Write-DefenseClawGuardianDegradedTargets',
         'Get-DefenseClawVerifyFailedTargetKeys'
@@ -111,7 +109,7 @@ function New-Report([int]$Failures, [int]$Rows = 3, [bool]$WithState = $true, [s
     }
     return ($report | ConvertTo-Json -Depth 6 | ConvertFrom-Json)
 }
-function Test-Coverage($Report, [string]$Digest = '', [switch]$Allow, [string[]]$AllowedSIDs) {
+function Test-Coverage($Report, [string]$Digest = '', [switch]$Allow) {
     return Test-DefenseClawGuardianCoverageReport `
         -Report $Report `
         -PriorReconcileID '' `
@@ -120,8 +118,7 @@ function Test-Coverage($Report, [string]$Digest = '', [switch]$Allow, [string[]]
         -CurrentStateIdentity 'new' `
         -ExpectedManifestSHA256 $Digest `
         -StartedAfter $startedAfter `
-        -AllowFailedTargets:$Allow `
-        -AllowedFailedTargetSIDs $AllowedSIDs
+        -AllowFailedTargets:$Allow
 }
 function Assert-Result($Result, [bool]$Ok, [string]$Label) {
     if ([bool]$Result.ok -ne $Ok) {
@@ -162,14 +159,39 @@ try {
     Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@Dana Smith (S-1-5-21-1-2-3-1003)') -Allow) $true 'Secure Client: degraded reconcile with a spaced Windows account label'
     Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@dana (S-1-5-21-1-2-3-1001)') -Allow) $false 'Secure Client: degraded reconcile naming another SID'
     Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel)) $false 'Secure Client: user (SID) row without -AllowFailedTargets'
+    # The signed-out wording is read on Secure Client too (GAP-0601): it
+    # only ever excuses a row that already failed.
+    $signedOut = New-Report -Failures 1
+    $signedOut.errors = @($signedOut.errors | Where-Object { -not ([string]$_).StartsWith('last guardian reconcile failed for') }) +
+        'claudecode for dana (S-1-5-21-1-2-3-1003) is pending until that account signs in: an earlier DefenseClaw release protected it'
+    Assert-Result (Test-Coverage $signedOut -Allow) $true 'Secure Client: signed-out line for the failed row'
+    $signedOut.errors = @($signedOut.errors | Select-Object -SkipLast 1) +
+        'claudecode for dana (S-1-5-21-1-2-3-1001) is pending until that account signs in: x'
+    Assert-Result (Test-Coverage $signedOut -Allow) $false 'Secure Client: signed-out line for a healthy SID'
 }
 finally {
     $script:SmokeStandalone = $true
 }
-$skippedSID = 'S-1-5-21-1-2-3-1003'
-$otherSID = 'S-1-5-21-1-2-3-1001'
-Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest -Allow -AllowedSIDs @($skippedSID)) $true 'failed skipped account'
-Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest -Allow -AllowedSIDs @($otherSID)) $false 'failed unlisted account'
+# GAP-0601: a signed-out account's row is worded by the gateway, not as
+# "last guardian reconcile failed for". The status of 1.0.9 and 1.0.10 uses
+# the same three lines; without them no rollback or recovery accepted the
+# restored release's degraded reconcile while an account was signed out.
+foreach ($case in @(
+        @{ line = 'the guardian cannot repair claudecode for DCFC-X\dana (S-1-5-21-1-2-3-1003) while that account is signed out: have the account sign in, or remove it with its profile, then run repair again. The guardian repairs DefenseClaw hooks only in the account''s own Windows session'; ok = $true; label = 'signed-out repair, user (SID)' },
+        @{ line = 'the guardian cannot repair claudecode for S-1-5-21-1-2-3-1003 while that account is signed out: have the account sign in'; ok = $true; label = 'signed-out repair, SID only' },
+        @{ line = 'claudecode for DCFC-X\dana (S-1-5-21-1-2-3-1003) is pending until that account signs in: an earlier DefenseClaw release protected it'; ok = $true; label = 'pending until sign-in' },
+        @{ line = 'claudecode for DCFC-X\dana (S-1-5-21-1-2-3-1003) is enrolled with the hook matrix of an earlier DefenseClaw release (upgrade pending at the account''s next connect)'; ok = $true; label = 'earlier hook matrix' },
+        @{ line = 'the guardian cannot repair codex for DCFC-X\dana (S-1-5-21-1-2-3-1003) while that account is signed out: x'; ok = $false; label = 'signed-out line for a connector that did not fail' },
+        @{ line = 'the guardian cannot repair claudecode for DCFC-X\erin (S-1-5-21-1-2-3-1001) while that account is signed out: x'; ok = $false; label = 'signed-out line for a healthy SID' },
+        @{ line = 'claudecode for DCFC-X\dana (S-1-5-21-1-2-3-1003) is protected'; ok = $false; label = 'an unknown line about the failed row' }
+    )) {
+    $report = New-Report -Failures 1
+    $report.errors = @($report.errors | Where-Object { -not ([string]$_).StartsWith('last guardian reconcile failed for') }) + $case.line
+    Assert-Result (Test-Coverage $report -Allow) $case.ok "rollback lane: $($case.label)"
+    $activation = New-Report -Failures 1 -ActivationDigest $digest
+    $activation.errors = $report.errors
+    Assert-Result (Test-Coverage $activation -Digest $digest -Allow) $case.ok "activation lane: $($case.label)"
+}
 
 # A restarted guardian's first publication inside the same UTC second as the
 # one before it (GAP-0931). The no-digest recovery and Reconcile callers prove
@@ -213,25 +235,14 @@ function Get-DefenseClawGuardianVerificationFailureDiagnostic { param($Probe) 'g
 # The live-verify probe picks its verb by profile; this lane is Secure Client.
 $script:StandaloneProfile = $false
 function Test-DefenseClawStandaloneProfile { $script:StandaloneProfile }
-function Get-DefenseClawTargetRuntimeSkippedProfiles {
-    param($Plan)
-    return @($Plan.skipped_profiles)
-}
-$plan = [pscustomobject]@{
-    skipped_profiles = @([pscustomobject]@{ sid = $otherSID })
-}
-$secureClientSIDs = [string[]](Get-DefenseClawAllowedFailedTargetSIDs -Plan $plan)
-if ($secureClientSIDs.Count -ne 0 -or
-    -not [bool](Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) `
-        -Digest $digest -Allow -AllowedSIDs $secureClientSIDs).ok) {
-    throw 'Secure Client rejected an unrelated failed target after one skipped profile'
-}
-$script:StandaloneProfile = $true
-$standaloneSIDs = [string[]](Get-DefenseClawAllowedFailedTargetSIDs -Plan $plan)
-if ($standaloneSIDs.Count -ne 1 -or $standaloneSIDs[0] -cne $otherSID -or
-    [bool](Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) `
-        -Digest $digest -Allow -AllowedSIDs $standaloneSIDs).ok) {
-    throw 'standalone accepted a failure outside its skipped account'
+# GAP-0601: both profiles accept a degraded activation for any failed user
+# target; standalone used to accept only accounts the target runtime plan
+# skipped, so one signed-out or foreign-file account failed the upgrade.
+foreach ($standalone in @($false, $true)) {
+    $script:StandaloneProfile = $standalone
+    if (-not [bool](Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest -Allow).ok) {
+        throw "standalone=${standalone}: a degraded activation was rejected"
+    }
 }
 $script:StandaloneProfile = $false
 $probeArgs = @{ Layout = @{ ManifestPath = 'C:\targets.yaml' }; GatewayServiceName = 'gw'; GuardianServiceName = 'guardian' }
@@ -245,13 +256,6 @@ if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets 
     throw 'live verification accepted a degraded Guardian without a per-target verify report'
 }
 $script:VerifyOutput = @('{"ok":false,"results":[{"connector":"claudecode","sid":"S-1-5-21-1-2-3-1003","ok":false,"error":"hook missing"},{"connector":"codex","sid":"S-1-5-21-1-2-3-1001","ok":true}]}')
-$script:Events.Clear()
-if (-not [bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify -AllowedFailedTargetSIDs @($skippedSID)).ready) {
-    throw 'live verification rejected the failed skipped account'
-}
-if ([bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify -AllowedFailedTargetSIDs @($otherSID)).ready) {
-    throw 'live verification accepted a failure outside the skipped account'
-}
 $script:Events.Clear()
 if (-not [bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets -LiveVerify).ready) {
     throw 'live verification rejected a failure confined to the Guardian-failed target'
