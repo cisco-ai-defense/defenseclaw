@@ -98,3 +98,27 @@ func TestDecodePowerShellEncodedCommand(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10 GAP-0794: before a downgrade to 1.0.9, `hook-image retire`
+// makes every writer name the transition image, so the guardian rewrites
+// the Local hook file for it. 1.0.9 owns only its own exact render, so this
+// release must render, for the transition image, the very bytes 1.0.9
+// wrote (testdata: the file 1.0.9 left on dc-ent-win); otherwise the 1.0.9
+// guardian keeps the file as foreign, fails the account and the downgrade.
+func TestCopilotVSCodeTransitionRenderIsThe109Render(t *testing.T) {
+	const transition = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	released, err := os.ReadFile(filepath.Join("testdata", "copilot-vscode-1.0.9", "windows-hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, _, _ := strings.Cut(connector.CopilotVSCodeLocalManagedHookCommand("windows", transition, "Stop"), " -NoLogo")
+	released = bytes.ReplaceAll(released, []byte(`C:\\Windows\\system32\\WindowsPowerShell\\v1.0\\powershell.exe`),
+		[]byte(strings.ReplaceAll(exe, `\`, `\\`)))
+	got, err := RenderCopilotVSCodeLocalHooks("windows", transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(bytes.TrimSpace(got), bytes.TrimSpace(released)) {
+		t.Fatalf("the transition render is not the 1.0.9 render:\n%s\nwant\n%s", got, released)
+	}
+}
