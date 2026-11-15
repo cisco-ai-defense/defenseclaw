@@ -148,11 +148,26 @@ async def test_routing_panel_renders_at_80x24(tmp_path) -> None:
     app = snapshot_app(tmp_path)
     app.config.routing = SimpleNamespace(enabled=True, admin={})  # the tab shows only while routing is on
     app.routing_model, app._routing_model_injected = loaded(), True
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run(binary, args, *, stdin_input=None, env_overrides=None):
+        calls.append((binary, *args))
+        yield CommandEvent("start", " ".join((binary, *args)))
+        yield CommandEvent("done", exit_code=0, duration=0.01)
+
+    app.executor.run = fake_run
     async with app.run_test(size=(80, 24)) as pilot:
         app.action_switch_panel("routing")
         await pilot.pause()
         text = screen_text(app)
         assert "Routing on" in text and "fast" in text and "secrets-local" in text
+        # rel-1-0-10:GAP-0809: p (read-only price table) runs at once, with no confirm modal.
+        screens = len(app.screen_stack)
+        await pilot.press("p")
+        await pilot.pause()
+        assert len(app.screen_stack) == screens
+        await app.workers.wait_for_complete()
+    assert ("defenseclaw", "routing", "pricing", "show") in calls
 
 
 async def test_delete_journey_runs_the_remove_command(tmp_path) -> None:
