@@ -361,6 +361,7 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 	if fleet != nil {
 		if rows, err = fleet.Totals(ctx, epoch, since, fleetWanted(ledger, keys)); err == nil {
 			ledger.ApplyRemote(ids, maxRows(fromFleet(rows, keys), localRows), time.Now())
+			ledger.MarkFleetRead(time.Now())
 			if localErr != nil {
 				ledger.SyncFailed(localErr)
 			}

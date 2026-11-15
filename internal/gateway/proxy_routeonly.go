@@ -54,6 +54,10 @@ type routeOnlyServer struct {
 	// APIServer.SetRouteOnly); goos selects the credential custody rule.
 	api  *APIServer
 	goos string
+	// metrics is the generated-metric runtime of the sidecar (nil until it
+	// is wired): the route-only listener records its routing decisions
+	// through it like the guardrail proxy does.
+	metrics func() hookLifecycleMetricV8Runtime
 
 	mu        sync.Mutex
 	inflight  map[string]int
@@ -335,6 +339,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if routedOutcome.Result == SemanticRouteDenied {
 		auditRouteDeny(r.Context(), s.router.logger, "/r/"+connector, routedOutcome.Deny)
+		s.recordDecision(r, connector, routedOutcome, false)
 		routeOnlyErrorFor(w, family, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
 		return
 	}
@@ -355,6 +360,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.recordDecision(r, connector, routedOutcome, attempt != nil)
 	if attempt == nil {
 		s.forward(w, r, original, body, nil)
 		return
@@ -384,6 +390,17 @@ func (s *routeOnlyServer) sensitiveConfigured(ctx context.Context) bool {
 // the route-only read cap: it cannot be checked, so it is not sent.
 func routeOnlyTooLargeToCheck(w http.ResponseWriter) {
 	routeOnlyError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "the request is larger than DefenseClaw can check for sensitive data (routing.sensitive), so it was not sent")
+}
+
+// recordDecision records the routing decision metric of one request with
+// what the listener finally did: routed is true only when the call goes to the
+// routed model. A request the router never looked at (no outcome) records
+// nothing.
+func (s *routeOnlyServer) recordDecision(r *http.Request, connector string, outcome SemanticRouteOutcome, routed bool) {
+	if outcome.Result == "" || s.metrics == nil {
+		return
+	}
+	recordSemanticRoutingDecisionMetricsV8(r.Context(), s.metrics(), connector, "route_only", routedMetricOutcome(outcome, routed))
 }
 
 // routeOnlyOverloaded answers a signed call the buffer budget cannot hold.
