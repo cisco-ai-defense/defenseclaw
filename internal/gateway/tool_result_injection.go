@@ -7,6 +7,7 @@ package gateway
 import (
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
@@ -84,45 +85,53 @@ var (
 const toolResultVerbs = `(?:send|transfer|forward|delete|remove|call|invoke|use|run|execute|create|update|change|modify|email|share|post|invite|add|visit|download|upload|pay|book|reserve|write|open|reply|ignore|disregard|forget|say|tell|print|output|reveal|include|insert|append|summari[sz]e|respond|answer|stop|do)`
 
 const (
-	// toolResultInjectionMaxScan bounds the text the checks read. Tool output
-	// is capped upstream; this keeps a worst case linear and small.
+	// toolResultInjectionMaxScan bounds the text the checks read; text past
+	// it is a truncated input under the bound rule (bounded.Bytes).
 	toolResultInjectionMaxScan = 256 << 10
 	// toolResultDirectiveWindow is how far after an addressee the directive
 	// may start (and a short lead before it, for "Please, assistant, ...").
 	toolResultDirectiveWindow = 300
 	toolResultDirectiveLead   = 80
-	// toolResultMaxAnchors bounds the addressee/role matches examined.
+	// toolResultMaxAnchors bounds the addressee/role matches examined; more is
+	// a truncated input (bounded.Items).
 	toolResultMaxAnchors = 64
 )
 
 // toolResultInjectionFindings runs the structural checks over text, the
 // tool-result view (escapes decoded, confusables folded). At most one finding
-// per rule.
-func toolResultInjectionFindings(text string) []RuleFinding {
+// per rule. The caps it hit come back as a CapSet (ONE BOUND RULE,
+// rel-1-0-10:GAP-0639): what was read before them still decides, and the
+// caller adds the evaluation-limit finding, so a cut output is never a silent
+// allow.
+func toolResultInjectionFindings(text string) ([]RuleFinding, bounded.CapSet) {
 	if strings.TrimSpace(text) == "" {
-		return nil
+		return nil, bounded.CapSet{}
 	}
-	if len(text) > toolResultInjectionMaxScan {
-		text = text[:toolResultInjectionMaxScan]
+	var cut bounded.Truncated
+	if !cut.Within(bounded.Bytes, len(text), toolResultInjectionMaxScan) {
+		text = utf8SafePrefix(text, toolResultInjectionMaxScan)
 	}
 	var out []RuleFinding
 	if loc := toolResultDiscardRe.Regexp().FindStringIndex(text); loc != nil {
 		out = append(out, toolResultFinding(toolResultRuleDiscard, "Tool output tells the agent to discard its instructions", text, loc[0], loc[1]))
 	}
-	if loc, ok := toolResultAnchoredDirective(toolResultAddresseeRe, text); ok {
+	if loc, ok := toolResultAnchoredDirective(&cut, toolResultAddresseeRe, text); ok {
 		out = append(out, toolResultFinding(toolResultRuleAddressed, "Tool output gives the agent an instruction", text, loc[0], loc[1]))
 	}
-	if loc, ok := toolResultAnchoredDirective(toolResultRoleRe, text); ok {
+	if loc, ok := toolResultAnchoredDirective(&cut, toolResultRoleRe, text); ok {
 		out = append(out, toolResultFinding(toolResultRuleRole, "Tool output opens a chat role and gives an instruction", text, loc[0], loc[1]))
 	}
-	return out
+	return out, cut.Set()
 }
 
 // toolResultAnchoredDirective finds the first anchor match of re that a
 // directive follows within the window, and returns the span from the anchor
 // to the end of the directive.
-func toolResultAnchoredDirective(re *lazyregexp.Regexp, text string) ([2]int, bool) {
-	anchors := re.Regexp().FindAllStringIndex(text, toolResultMaxAnchors)
+func toolResultAnchoredDirective(cut *bounded.Truncated, re *lazyregexp.Regexp, text string) ([2]int, bool) {
+	anchors := re.Regexp().FindAllStringIndex(text, toolResultMaxAnchors+1)
+	if !cut.Within(bounded.Items, len(anchors), toolResultMaxAnchors) {
+		anchors = anchors[:toolResultMaxAnchors]
+	}
 	directive := toolResultDirectiveRe.Regexp()
 	for _, a := range anchors {
 		lo := max(0, a[0]-toolResultDirectiveLead)

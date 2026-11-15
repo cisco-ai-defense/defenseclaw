@@ -24,7 +24,7 @@ import (
 
 // These tests directly pin the per-provider branches in
 // extractPassthroughResponseContent, extractPassthroughToolCalls, and
-// extractSSEChunkText. Before this PR, those three functions only handled
+// streamEventPieces. Before this PR, those three functions only handled
 // OpenAI Chat Completions, so Anthropic / Gemini / Bedrock Converse / Ollama
 // passthrough responses surfaced empty completion text — the inspector
 // short-circuited on empty content and the response forwarded unscanned.
@@ -36,13 +36,14 @@ func TestExtractPassthroughResponseContent_Anthropic(t *testing.T) {
 	body := []byte(`{
       "content": [
         {"type": "text", "text": "hello "},
-        {"type": "thinking", "text": "should-be-ignored"},
+        {"type": "thinking", "thinking": "the plan"},
         {"type": "text", "text": "world"}
       ]
     }`)
+	// The answer stays one run of text; thinking is read beside it (GAP-0370).
 	got := extractPassthroughResponseContent(body, "anthropic")
-	if got != "hello world" {
-		t.Fatalf("anthropic content: got %q, want %q", got, "hello world")
+	if got != "hello world\nthe plan" {
+		t.Fatalf("anthropic content: got %q, want %q", got, "hello world\nthe plan")
 	}
 }
 
@@ -232,66 +233,71 @@ func TestExtractPassthroughToolCalls_NoCallsReturnsNil(t *testing.T) {
 	}
 }
 
-// --- SSE chunk extractors --------------------------------------------------
+// --- stream event readers ---------------------------------------------------
 
-func TestExtractSSEChunkText_Anthropic(t *testing.T) {
+// eventText is the text the completion checks read from one stream event.
+func eventText(data, provider string) string {
+	return responsePiecesText(streamEventPieces(data, provider))
+}
+
+func TestStreamEventText_Anthropic(t *testing.T) {
 	chunk := `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}`
-	got := extractSSEChunkText(chunk, "anthropic")
+	got := eventText(chunk, "anthropic")
 	if got != "hello" {
 		t.Fatalf("anthropic SSE: got %q, want %q", got, "hello")
 	}
 }
 
-func TestExtractSSEChunkText_Gemini(t *testing.T) {
+func TestStreamEventText_Gemini(t *testing.T) {
 	chunk := `{"candidates":[{"content":{"parts":[{"text":"alpha"},{"text":"-beta"}]}}]}`
-	got := extractSSEChunkText(chunk, "gemini")
+	got := eventText(chunk, "gemini")
 	if got != "alpha-beta" {
 		t.Fatalf("gemini SSE: got %q, want %q", got, "alpha-beta")
 	}
 }
 
-func TestExtractSSEChunkText_BedrockConverse(t *testing.T) {
+func TestStreamEventText_BedrockConverse(t *testing.T) {
 	chunk := `{"contentBlockDelta":{"delta":{"text":"bed"}}}`
-	got := extractSSEChunkText(chunk, "bedrock")
+	got := eventText(chunk, "bedrock")
 	if got != "bed" {
 		t.Fatalf("bedrock SSE: got %q, want %q", got, "bed")
 	}
 }
 
-func TestExtractSSEChunkText_OllamaChat(t *testing.T) {
+func TestStreamEventText_OllamaChat(t *testing.T) {
 	chunk := `{"message":{"role":"assistant","content":"frag"}}`
-	got := extractSSEChunkText(chunk, "ollama")
+	got := eventText(chunk, "ollama")
 	if got != "frag" {
 		t.Fatalf("ollama chat SSE: got %q, want %q", got, "frag")
 	}
 }
 
-func TestExtractSSEChunkText_OllamaGenerate(t *testing.T) {
+func TestStreamEventText_OllamaGenerate(t *testing.T) {
 	chunk := `{"response":"gen-frag"}`
-	got := extractSSEChunkText(chunk, "ollama")
+	got := eventText(chunk, "ollama")
 	if got != "gen-frag" {
 		t.Fatalf("ollama generate SSE: got %q, want %q", got, "gen-frag")
 	}
 }
 
-func TestExtractSSEChunkText_OpenAIResponses(t *testing.T) {
+func TestStreamEventText_OpenAIResponses(t *testing.T) {
 	chunk := `{"type":"response.output_text.delta","delta":"chunk-text"}`
-	got := extractSSEChunkText(chunk, "openai")
+	got := eventText(chunk, "openai")
 	if got != "chunk-text" {
 		t.Fatalf("openai responses SSE: got %q, want %q", got, "chunk-text")
 	}
 }
 
-func TestExtractSSEChunkText_OpenAIChatFallback(t *testing.T) {
+func TestStreamEventText_OpenAIChatFallback(t *testing.T) {
 	chunk := `{"choices":[{"delta":{"content":"chat-frag"}}]}`
-	got := extractSSEChunkText(chunk, "openai")
+	got := eventText(chunk, "openai")
 	if got != "chat-frag" {
 		t.Fatalf("openai chat SSE: got %q, want %q", got, "chat-frag")
 	}
 }
 
-func TestExtractSSEChunkText_UnknownChunkReturnsEmpty(t *testing.T) {
-	got := extractSSEChunkText(`{"unrelated":"frame"}`, "anthropic")
+func TestStreamEventText_UnknownChunkReturnsEmpty(t *testing.T) {
+	got := eventText(`{"unrelated":"frame"}`, "anthropic")
 	if got != "" {
 		t.Fatalf("unknown chunk should yield empty; got %q", got)
 	}

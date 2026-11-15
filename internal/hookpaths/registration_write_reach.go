@@ -43,7 +43,7 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 			continue
 		}
 		entry := protectedFile{path: filepath.Clean(name)}
-		if info, err := pathStat(entry.path); err == nil {
+		if info, err := callStat(entry.path); err == nil {
 			entry.info = info
 		} else if !os.IsNotExist(err) {
 			entry.unknown = true

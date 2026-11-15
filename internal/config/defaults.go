@@ -204,7 +204,6 @@ func DefaultConfig() *Config {
 			HookSelfHealDebounceMs:      500,
 			DetectionStrategy:           "regex_judge",
 			DetectionStrategyCompletion: "regex_only",
-			Cascade:                     CascadeConfig{Lanes: CascadeLanes{Effects: "shadow", SecretFlow: "shadow"}},
 			EffectsRulesTier:            "restricted",
 			SecretFlow: SecretFlowConfig{
 				Reencodings: true,

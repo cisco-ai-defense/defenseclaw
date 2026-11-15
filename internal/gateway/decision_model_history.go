@@ -318,32 +318,6 @@ func writeDecisionSection(b *strings.Builder, nonce, name, attrs, body string) {
 	fmt.Fprintf(b, "\n</%s nonce=%q>\n", name, nonce)
 }
 
-// DropSessionPrompt removes a prompt the rules blocked from the decision
-// model's history, so it is not sent again with every later call (review
-// round 5, P3-2). It removes the latest matching prompt of the session.
-func (j *LLMJudge) DropSessionPrompt(ctx context.Context, content string) {
-	if j == nil || j.decision == nil || j.decision.historyTurns <= 0 {
-		return
-	}
-	sessionID := judgeSessionKey(ctx)
-	if sessionID == "" {
-		return
-	}
-	text, _ := cutDecisionHistory(strings.TrimSpace(content), decisionHistoryPromptBytes)
-	j.historyMu.Lock()
-	defer j.historyMu.Unlock()
-	s := j.history[sessionID]
-	if s == nil {
-		return
-	}
-	for i := len(s.events) - 1; i >= 0; i-- {
-		if s.events[i].kind == 'u' && s.events[i].text == text {
-			s.events = append(s.events[:i:i], s.events[i+1:]...)
-			return
-		}
-	}
-}
-
 // ObserveToolResult records a tool's result in the decision model's session
 // history when decision_model.history_tool_results is on (off by default).
 func (j *LLMJudge) ObserveToolResult(ctx context.Context, result string) {
@@ -351,15 +325,4 @@ func (j *LLMJudge) ObserveToolResult(ctx context.Context, result string) {
 		return
 	}
 	j.recordDecisionHistory(ctx, decisionHistoryEvent{kind: 'r', text: result})
-}
-
-// forgetBlockedPrompt drops a prompt the rules blocked from every hook
-// judge's decision-model history (review round 5, P3-2).
-func (a *APIServer) forgetBlockedPrompt(ctx context.Context, content string, verdict *ToolInspectVerdict) {
-	if verdict == nil || normalizedGuardrailAction(verdict.Action) != guardrailActionBlock {
-		return
-	}
-	for _, j := range a.hookSessionJudges(ctx) {
-		j.DropSessionPrompt(ctx, content)
-	}
 }

@@ -39,12 +39,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -219,8 +221,8 @@ func init() {
 	stopCmd.Flags().Bool(rotationCleanupFlag, false, "allow authenticated rollback cleanup before readiness")
 	_ = startCmd.Flags().MarkHidden(rotationTransactionFlag)
 	_ = startCmd.Flags().MarkHidden(rotationConnectorStateFlag)
-	startCmd.Flags().Bool(hookColdStartFlag, false, "start requested by a connector hook after a refused connection")
-	_ = startCmd.Flags().MarkHidden(hookColdStartFlag)
+	startCmd.Flags().Bool(hookcli.HookColdStartFlag, false, "start requested by a connector hook after a refused connection")
+	_ = startCmd.Flags().MarkHidden(hookcli.HookColdStartFlag)
 	startCmd.Flags().Bool(requireEveryConnectorFlag, false, "exit 3 unless every configured connector is guarded")
 	_ = startCmd.Flags().MarkHidden(requireEveryConnectorFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationTransactionFlag)
@@ -377,7 +379,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 			// GAP-1342: a hung gateway; status and start pointed at each other.
 			fmt.Println("It does not answer /health. If it stays that way, restart it with: defenseclaw-gateway restart")
 			if requireEveryConnectorRequested(cmd) {
-				return withExitCode(errors.New("gateway does not answer /health, so no connector is proven guarded"),
+				return cliusage.WithExitCode(errors.New("gateway does not answer /health, so no connector is proven guarded"),
 					gatewayStartAdmissionRefusedExitCode)
 			}
 			return nil
@@ -536,7 +538,7 @@ func hookContractAdmissionStartError(connectors []string, detail string) error {
 	for _, name := range connectors {
 		commands = append(commands, "defenseclaw setup guardrail --connector "+name)
 	}
-	return withExitCode(fmt.Errorf(
+	return cliusage.WithExitCode(fmt.Errorf(
 		"gateway is running, but hook-contract admission refused %s: %s; "+
 			"verify the updated agent, then re-run `%s` to refresh the hook contract",
 		strings.Join(connectors, ", "), strings.TrimSpace(detail), strings.Join(commands, "` and `"),
@@ -652,7 +654,7 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		// Stop watchdog first since it monitors the gateway. Ordinary operator
 		// stop keeps the historical best-effort behavior after identity preflight.
 		_ = stopWatchdogForGateway()
-		if hookColdStartSupported() && !secureClientHost() {
+		if hookColdStartSupported() && !hookcli.SecureClientHost() {
 			// The watchdog can be waiting for an independent cold-start child
 			// when it exits. Wait for that child's start lock before taking the
 			// final running snapshot and publishing the stop marker. A start
@@ -1214,7 +1216,7 @@ func daemonConfigLoadError(verb string, err error) error {
 	if err == nil {
 		return nil
 	}
-	if !secureClientHost() {
+	if !hookcli.SecureClientHost() {
 		if _, statErr := os.Stat(config.ConfigPath()); errors.Is(statErr, os.ErrNotExist) {
 			return fmt.Errorf("cannot %s the gateway: no config.yaml exists yet; run defenseclaw init first", verb)
 		}

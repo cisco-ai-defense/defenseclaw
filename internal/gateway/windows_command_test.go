@@ -200,7 +200,10 @@ func TestWindowsCommandHookParityObserveAndAction(t *testing.T) {
 		{`Remove-Item C:\ -re -fo`, false},
 		{`Remove-Item C:\ -rec -Recurse -fo`, false},
 		{`powershell.exe -NoProfile -Command "REMOVE-ITEM C:\ -fOrCe -rEcUrSe"`, true},
-		{`pwsh -c 'ri -fo C:\ -rec'`, false},
+		// The script a static launcher runs is read as a second reading of the
+		// call (hostScriptTwinRequest): the wrapped alias form is the recursive
+		// forced delete of a drive root, enforced like the bare one.
+		{`pwsh -c 'ri -fo C:\ -rec'`, true},
 		{`Remove-Item C:\ -Recurse:$true -Force:$true`, true},
 		// The script of a CMD launcher is read as the CMD command it is
 		// (rel-1-0-10:GAP-0711): this recursive root delete blocks.

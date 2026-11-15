@@ -97,8 +97,83 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 				return true
 			}
 		}
+		// A value PowerShell reads at run time (a here-string, a variable)
+		// leaves the statement partial, although it names none of the files
+		// the cmdlet writes: Set-Content -Path <state> -Value @" ... "@ was
+		// allowed in every pack (rel-1-0-10:GAP-0750). Each such word is read
+		// as a plain one.
+		opaque, bounded := psOpaqueValueReadings(form)
+		variants += len(opaque)
+		if bounded || variants > maxVariants {
+			return true
+		}
+		for _, variant := range opaque {
+			if proven(variant) {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// psMaxOpaqueValues bounds the words of one statement that
+// psOpaqueValueReadings reads: past it the statement is bounded.
+const psMaxOpaqueValues = 8
+
+// psOpaqueValueReadings returns the readings of a statement with, in each,
+// one word that PowerShell evaluates at run time (a here-string or a
+// variable, never the cmdlet name) replaced by the plain word x. The value
+// of such a word cannot name another file of a cmdlet that writes the path
+// it is given, but it leaves the statement partial, and a partial statement
+// proves no mutation of the active state. A reading whose other words prove
+// the mutation is the mutation: no value changes which file Set-Content,
+// Add-Content or Out-File opens. bounded reports more words than
+// psMaxOpaqueValues, or a statement past the reading budget.
+func psOpaqueValueReadings(form string) (readings []string, bounded bool) {
+	budget := &psBudget{}
+	r := []rune(form)
+	scan := newPSScan(r, budget)
+	type span struct{ start, end int }
+	var spans []span
+	for i, word := 0, 0; i < len(r) && budget.step(); word++ {
+		if r[i] == ' ' || r[i] == '\t' || r[i] == '\r' || r[i] == '\n' {
+			i++
+			word--
+			continue
+		}
+		start := i
+		opaque := r[i] == '$'
+		if r[i] == '@' && i+1 < len(r) && (psSingleQuote(r[i+1]) || psDoubleQuote(r[i+1])) && scan.hereStringOpen(i+2) {
+			i = scan.hereString(i)
+			opaque = true
+		} else {
+			for i < len(r) && r[i] != ' ' && r[i] != '\t' && r[i] != '\r' && r[i] != '\n' && budget.step() {
+				switch {
+				case r[i] == '`':
+					i += 2
+				case psSingleQuote(r[i]):
+					i = scan.singleQuoted(i)
+				case psDoubleQuote(r[i]):
+					i = scan.doubleQuoted(i)
+				default:
+					i++
+				}
+			}
+		}
+		if i > len(r) {
+			i = len(r)
+		}
+		if opaque && word > 0 {
+			spans = append(spans, span{start, i})
+		}
+	}
+	if budget.over || len(spans) > psMaxOpaqueValues {
+		return nil, true
+	}
+	for _, at := range spans {
+		readings = append(readings, string(r[:at.start])+"x"+string(r[at.end:]))
+	}
+	return readings, false
 }
 
 // clientStateSpellings returns the spellings (psLinkKey) of the paths the

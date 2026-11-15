@@ -4,10 +4,13 @@
 
 """guardrail.cascade.lanes.nonshell in the CLI (GAP-0472).
 
-One cascade type: the lane is a field of ``CascadeLanesConfig`` (mirrors
-internal/config.CascadeLanes). A config without the key keeps it absent (the
-gateway reads that as on); a CLI save writes on and off as strings, never as
-the YAML 1.1 booleans the gateway refuses.
+One cascade type: ``GuardrailConfig.cascade`` keeps guardrail.cascade as
+written (the gateway validates it and reads the lane through its registry,
+internal/config/cascade_lanes.go). A config without the key keeps it absent
+(the gateway reads that as on); a value is kept as written, so a spelling the
+gateway refuses (it takes exact values) is refused there with the key named;
+a CLI save writes on and off as strings, never as the YAML 1.1 booleans the
+gateway refuses.
 """
 
 import os
@@ -47,18 +50,18 @@ def _load_save(tmpdir: str, mutate=None):
 
 class TestCascadeLaneNonShell(unittest.TestCase):
     def test_parse_keeps_lane_values_as_strings(self):
-        for raw, want in (("on", "on"), ("OFF", "off"), ("Shadow", "shadow"), ("off", "off"), ("' On '", "on")):
+        for raw, want in (("on", "on"), ("OFF", "OFF"), ("Shadow", "Shadow"), ("off", "off"), ("' On '", " On ")):
             doc = parse_config_yaml(f"config_version: 8\nguardrail:\n  cascade:\n    lanes:\n      nonshell: {raw}\n")
             self.assertIsInstance(doc["guardrail"]["cascade"]["lanes"]["nonshell"], str, raw)
-            self.assertEqual(_merge_cascade(doc["guardrail"]["cascade"]).lanes.nonshell, want, raw)
+            self.assertEqual(_merge_cascade(doc["guardrail"]["cascade"])["lanes"]["nonshell"], want, raw)
 
     def test_absent_key_stays_absent_and_is_on_for_the_gateway(self):
-        self.assertIsNone(_merge_cascade(None).lanes.nonshell)
-        self.assertIsNone(_merge_cascade({"lanes": {"effects": "shadow"}}).lanes.nonshell)
+        self.assertNotIn("nonshell", _merge_cascade(None).get("lanes") or {})
+        self.assertNotIn("nonshell", _merge_cascade({"lanes": {"effects": "shadow"}}).get("lanes") or {})
         with tempfile.TemporaryDirectory() as tmpdir:
             path = _write(tmpdir, None)
             cfg = _load_save(tmpdir)
-            self.assertIsNone(cfg.guardrail.cascade.lanes.nonshell)
+            self.assertNotIn("nonshell", cfg.guardrail.cascade.get("lanes") or {})
             with open(path, encoding="utf-8") as stream:
                 persisted = yaml.safe_load(stream)
             lanes = ((persisted.get("guardrail") or {}).get("cascade") or {}).get("lanes") or {}
@@ -70,7 +73,7 @@ class TestCascadeLaneNonShell(unittest.TestCase):
                 path = _write(tmpdir, start)
 
                 def set_lane(cfg, value=value):
-                    cfg.guardrail.cascade.lanes.nonshell = value
+                    cfg.guardrail.cascade.setdefault("lanes", {})["nonshell"] = value
 
                 _load_save(tmpdir, set_lane)
                 with open(path, encoding="utf-8") as stream:
@@ -81,7 +84,9 @@ class TestCascadeLaneNonShell(unittest.TestCase):
                 self.assertEqual(got, value)
 
     def test_unrelated_save_keeps_a_written_value(self):
-        for start, want in (("on", "on"), ("OFF", "off"), ("Shadow", "shadow")):
+        # Exact values only: another spelling is refused by the gateway, so no save
+        # starts from one.
+        for start, want in (("on", "on"), ("off", "off"), ("shadow", "shadow")):
             with tempfile.TemporaryDirectory() as tmpdir:
                 path = _write(tmpdir, start)
                 _load_save(tmpdir)
@@ -92,8 +97,8 @@ class TestCascadeLaneNonShell(unittest.TestCase):
                 self.assertEqual(got.strip().lower(), want)
 
     def test_a_refused_value_is_kept_for_the_gateway_to_refuse(self):
-        self.assertEqual(_merge_cascade({"lanes": {"nonshell": ""}}).lanes.nonshell, "")
-        self.assertEqual(_merge_cascade({"lanes": {"nonshell": "Enabled"}}).lanes.nonshell, "enabled")
+        self.assertEqual(_merge_cascade({"lanes": {"nonshell": ""}})["lanes"]["nonshell"], "")
+        self.assertEqual(_merge_cascade({"lanes": {"nonshell": "Enabled"}})["lanes"]["nonshell"], "Enabled")
 
 
 if __name__ == "__main__":

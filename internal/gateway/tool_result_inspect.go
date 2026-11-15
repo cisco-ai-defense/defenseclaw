@@ -132,7 +132,8 @@ func toolResultChecks(generation *compiledRulePackCategories, content, toolName 
 			}
 		}
 	}
-	for _, f := range toolResultInjectionFindings(view) {
+	structural, cut := toolResultInjectionFindings(view)
+	for _, f := range structural {
 		if seen[f.RuleID] {
 			continue
 		}
@@ -146,6 +147,12 @@ func toolResultChecks(generation *compiledRulePackCategories, content, toolName 
 		injection = append(injection, f)
 	}
 	out := append(findings, injection...)
+	if cut.Any() {
+		// The output was read up to a cap: the unknown tier of the pack (an
+		// alert in default and permissive, a block in strict), never below
+		// what was read before the cap (rel-1-0-10:GAP-0639).
+		out = append(out, boundedTruncatedFinding(cut, true))
+	}
 	for i := range out {
 		if strings.EqualFold(out[i].Severity, "CRITICAL") {
 			out[i].Severity = "HIGH"
@@ -249,4 +256,33 @@ func decodeUnicodeEscape(s string) (rune, int) {
 		return utf8.RuneError, 6
 	}
 	return r, 6
+}
+
+// verdictHasPromptInjection reports a prompt-injection finding (the
+// trust-exploit rules, the structural tool-result checks) in a verdict.
+func verdictHasPromptInjection(verdict *ToolInspectVerdict) bool {
+	if verdict == nil {
+		return false
+	}
+	for _, f := range verdict.DetailedFindings {
+		if hasTag(f.Tags, "prompt-injection") {
+			return true
+		}
+	}
+	return false
+}
+
+// toolResultAlertOnlyNotice ends a tool-result note on a connector with no
+// tool-result block form with the documented limit (docs guardrail/
+// tool-results; doctor and status print the same line).
+func toolResultAlertOnlyNotice(additional, connectorName string) string {
+	limit := "Tool-result injection is alert only on " + connectorName + ": DefenseClaw cannot block a tool result there, and the output reached the agent."
+	additional = strings.TrimSpace(additional)
+	if strings.Contains(additional, limit) {
+		return additional
+	}
+	if additional == "" {
+		return limit
+	}
+	return additional + " " + limit
 }

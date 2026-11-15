@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -40,11 +41,7 @@ import (
 // the DefenseClaw event log and the lifecycle log. Only the standalone
 // profile writes any of these.
 const (
-	// WindowsEnterpriseMarkerKey is read by the per-user installers
-	// (scripts/install.ps1, `defenseclaw upgrade`) to refuse a per-user
-	// install on a managed host.
-	WindowsEnterpriseMarkerKey = managed.WindowsEnterpriseMarkerKey
-	windowsEnterpriseARPKey    = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\CiscoDefenseClawEnterprise`
+	windowsEnterpriseARPKey = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\CiscoDefenseClawEnterprise`
 	// windowsEnterprisePolicyKey holds the DisableSelfUpdate policy every
 	// shipped per-user installer and update notice already honors. The
 	// standalone lifecycle sets it only when absent and records that it
@@ -198,7 +195,7 @@ func refreshWindowsEnterpriseRegisteredVersion(result *enterprisestatus.Result) 
 		return nil
 	}
 	return refreshWindowsEnterpriseRegistrationVersion(
-		windowsEnterpriseMachineRegistry, WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey, version)
+		windowsEnterpriseMachineRegistry, hookcli.WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey, version)
 }
 
 // windowsEnterpriseInstalledVersionToRecord is the installed version a run
@@ -297,7 +294,7 @@ func windowsEnterpriseMarkerTrustMode(opts *windowsEnterpriseLifecycleOptions) s
 }
 
 func writeWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) error {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return err
 	}
@@ -312,7 +309,7 @@ func writeWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *w
 	}
 	now := windowsEnterpriseNow().UTC()
 
-	marker, _, err := registry.CreateKey(windowsEnterpriseMachineRegistry, WindowsEnterpriseMarkerKey, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	marker, _, err := registry.CreateKey(windowsEnterpriseMachineRegistry, hookcli.WindowsEnterpriseMarkerKey, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		return fmt.Errorf("create the enterprise marker key: %w", err)
 	}
@@ -408,7 +405,7 @@ func reconcileWindowsEnterpriseSelfUpdatePolicy(marker registry.Key, disable boo
 }
 
 func releaseWindowsEnterpriseSelfUpdatePolicy() error {
-	marker, err := registry.OpenKey(windowsEnterpriseMachineRegistry, WindowsEnterpriseMarkerKey, registry.QUERY_VALUE|registry.WOW64_64KEY)
+	marker, err := registry.OpenKey(windowsEnterpriseMachineRegistry, hookcli.WindowsEnterpriseMarkerKey, registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		return nil
 	}
@@ -502,14 +499,14 @@ func removeWindowsEnterpriseRegistration() error {
 	if err := releaseWindowsEnterpriseSelfUpdatePolicy(); err != nil {
 		failures = append(failures, err)
 	}
-	for _, key := range []string{WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey} {
+	for _, key := range []string{hookcli.WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey} {
 		err := registry.DeleteKey(windowsEnterpriseMachineRegistry, key)
 		if err != nil && !errors.Is(err, registry.ErrNotExist) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
 			failures = append(failures, fmt.Errorf("remove %s: %w", key, err))
 		}
 	}
 	// The marker's parents, created with the marker, go once empty.
-	for _, key := range []string{filepath.Dir(WindowsEnterpriseMarkerKey), filepath.Dir(filepath.Dir(WindowsEnterpriseMarkerKey))} {
+	for _, key := range []string{filepath.Dir(hookcli.WindowsEnterpriseMarkerKey), filepath.Dir(filepath.Dir(hookcli.WindowsEnterpriseMarkerKey))} {
 		if err := removeEmptyWindowsRegistryKey(key); err != nil {
 			failures = append(failures, err)
 		}
@@ -544,7 +541,7 @@ func removeEmptyWindowsRegistryKey(path string) error {
 // remove any empty Cisco folder there by name. A folder that holds anything,
 // or fails the purge's ownership checks, stays with its record.
 var removeEmptyWindowsEnterpriseInstallParent = func() {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
 		return
 	}
@@ -559,7 +556,7 @@ var removeEmptyWindowsEnterpriseInstallParent = func() {
 // enterprise.coexistence.disable_self_update from the installed config;
 // managed hosts disable self-update unless the administrator opts out.
 func readWindowsEnterpriseSelfUpdateDisabled() bool {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return true
 	}
@@ -736,7 +733,7 @@ func windowsEnterprisePurgeRemovedMachineDeployment(result *enterprisestatus.Res
 // windowsEnterpriseInstallRootGone reports that the standalone install root
 // does not exist. A seam for tests.
 var windowsEnterpriseInstallRootGone = func() bool {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
 		return false
 	}

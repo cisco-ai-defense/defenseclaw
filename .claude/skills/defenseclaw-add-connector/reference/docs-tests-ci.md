@@ -115,7 +115,7 @@ These hand-kept lists don't fail when a connector is missing, so nothing reminds
 | `TestPlatformHookContractsPreservePR655Bands` (every contract band per OS) | `internal/gateway/connector/hook_contract_test.go` |
 | `TestLLMTrafficModeForConnector` | `internal/gateway/connector/llm_traffic_mode_test.go` |
 | `TestSwitchConnector_PerConnectorPersistsState` | `internal/gateway/proxy_connector_parity_test.go` |
-| `TestHookConnectorFromArgsAcceptsStandalonePerUserHookConnectors` (Windows standalone) | `internal/cli/hook_standalone_peruser_windows_test.go` |
+| `TestHookConnectorFromArgsAcceptsStandalonePerUserHookConnectors` (Windows standalone) | `internal/hookcli/hook_standalone_peruser_windows_test.go` |
 | `test_calls_gateway_teardown_for_every_native_connector_receipt` | `cli/tests/test_cmd_doctor_residue.py` |
 | `_CONNECTORS` and the label map | `cli/tests/test_cmd_guardrail_matrix.py` |
 | `CONNECTORS` | `cli/tests/test_install_smoke.py` |
