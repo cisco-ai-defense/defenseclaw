@@ -94,14 +94,15 @@ func TestSimpleCommandsReadTheShellOptionAsTheShellSeesIt(t *testing.T) {
 
 // rel-1-0-10:GAP-0876: the command of a quoted here-document decides what its
 // body is: shell code only for a command that runs its standard input as
-// code, data for any other, and unknown when the command is not known.
+// code, data for a program on the closed data list, and unknown for any
+// other (an interpreter, ls), rel-1-0-10:GAP-0902.
 func TestSyntaxTailHereDocConsumer(t *testing.T) {
 	for consumer, want := range map[string]hereDocConsumer{
 		"cat > notes.txt":  hereDocData,
 		"cat $f":           hereDocData,
 		"tee -a log":       hereDocData,
-		"python3 -":        hereDocData,
-		"bash -c ls":       hereDocData,
+		"python3 -":        hereDocUnknown,
+		"bash -c ls":       hereDocUnknown,
 		"bash":             hereDocRunsCode,
 		"sh -s":            hereDocRunsCode,
 		"/bin/zsh":         hereDocRunsCode,

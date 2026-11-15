@@ -18,6 +18,7 @@ package actionfacts
 
 import (
 	"path"
+	"regexp"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -30,13 +31,19 @@ import (
 type hereDocConsumer uint8
 
 const (
-	// hereDocData: every command of the opener line is a known, trusted
-	// program that is neither a shell nor a launcher; the body is its data.
+	// hereDocData: every command of the opener line is a program of
+	// hereDocDataPrograms, a closed list of programs that never run their
+	// standard input as code, named by a bare word with no PATH change and
+	// no function, alias or hash entry of that name in the call, or by a
+	// trusted path, after the full launcher unwrap. The body is its data.
 	hereDocData hereDocConsumer = iota
-	// hereDocUnknown: a command is not known (no command text, a text that
-	// does not parse, a word made at run time, a launcher or option the
-	// reading does not follow, an untrusted path, a variable that changes
-	// which program a word names). The unknown tier of the pack.
+	// hereDocUnknown: any other command. No command text, a text that does
+	// not parse, a word made at run time, an interpreter (python3 -, perl,
+	// awk, sed), a launcher, shell or program not on the list, an untrusted
+	// path of the program or of a wrapper, a name spelled in another case,
+	// an assignment that changes which program a word names (PATH=, env
+	// PATH=, BASH_ENV=, LD_PRELOAD=), or a name the call may redefine. The
+	// unknown tier of the pack (ONE BOUND rule).
 	hereDocUnknown
 	// hereDocRunsCode: a command runs its standard input as shell code: a
 	// shell reading its script from stdin, through any chain of launchers
@@ -45,17 +52,53 @@ const (
 	hereDocRunsCode
 )
 
-// syntaxTailHereDocConsumer reads the command of a quoted here-document
-// (shellparse.SyntaxTailHereDoc.Consumer). Each simple command of the text is
-// one that may get the body (cat <<'EOF' | sh pipes it on); the reading of
-// the line is the strongest of its commands. Data is the narrow case: a
-// command that the reading cannot place is the unknown tier, never data
-// (rel-1-0-10:GAP-0876, GAP-0889).
-func syntaxTailHereDocConsumer(consumer string) hereDocConsumer {
-	return hereDocTextConsumer(consumer, 0)
+// hereDocDataPrograms are the programs whose standard input is data and is
+// never run as code, whatever their options (except sort's compress program,
+// hereDocDataOptions). Interpreters, pagers (less and more run commands and
+// input preprocessors), stream editors with a command language (sed, awk),
+// and every launcher or shell are not on it (rel-1-0-10:GAP-0902, the 1.0.10
+// lead's ruling: data is a closed allowlist; everything else is unknown).
+var hereDocDataPrograms = map[string]bool{
+	"cat": true, "tac": true, "tee": true, "head": true, "tail": true, "wc": true,
+	"sort": true, "uniq": true, "cut": true, "tr": true, "paste": true, "fold": true,
+	"nl": true, "rev": true, "column": true, "expand": true, "unexpand": true,
+	"grep": true, "egrep": true, "fgrep": true,
+	"base64": true, "base32": true, "od": true, "xxd": true, "hexdump": true,
+	"md5sum": true, "md5": true, "sha1sum": true, "sha224sum": true, "sha256sum": true,
+	"sha384sum": true, "sha512sum": true, "b2sum": true, "shasum": true, "cksum": true, "sum": true,
+	"diff": true, "cmp": true,
+	// Builtins that never read their standard input as code.
+	"read": true, "echo": true, "printf": true, "true": true, "false": true, ":": true,
 }
 
-func hereDocTextConsumer(consumer string, depth int) hereDocConsumer {
+// hereDocExtraShells are POSIX-family shells the shared shell sets
+// (posixShellProgram, layoutShells, shellProgram) do not list. Each reads
+// its script from the standard input when no script operand is given.
+var hereDocExtraShells = map[string]bool{
+	"yash": true, "posh": true, "oksh": true, "loksh": true, "lksh": true,
+	"pdksh": true, "ksh93": true, "bosh": true,
+}
+
+// syntaxTailHereDocConsumer reads the command of a quoted here-document
+// (shellparse.SyntaxTailHereDoc.Consumer). Each simple command of the text is
+// one that may get the body (cat <<'EOF' | sh pipes it on, cat <<'EOF' > f &&
+// sh f runs it); the reading of the line is the strongest of its commands.
+// Data is the narrow case: a command that is not positively known to never
+// run its input is the unknown tier, never data (rel-1-0-10:GAP-0876,
+// GAP-0889, GAP-0902).
+func syntaxTailHereDocConsumer(consumer string) hereDocConsumer {
+	return syntaxTailHereDocConsumerIn(consumer, "")
+}
+
+// syntaxTailHereDocConsumerIn is syntaxTailHereDocConsumer for a consumer
+// of the call text command: a bare data name the text may redefine (a
+// function, alias or hash entry of that name, or any PATH assignment) is
+// the unknown tier.
+func syntaxTailHereDocConsumerIn(consumer, command string) hereDocConsumer {
+	return hereDocTextConsumer(consumer, command, 0)
+}
+
+func hereDocTextConsumer(consumer, command string, depth int) hereDocConsumer {
 	if strings.TrimSpace(consumer) == "" || depth > maxControlNesting {
 		return hereDocUnknown
 	}
@@ -74,7 +117,20 @@ func hereDocTextConsumer(consumer string, depth int) hereDocConsumer {
 		for index, arg := range call.Args {
 			words[index], static[index] = simpleStaticWord(arg, nil)
 		}
-		verdict = max(verdict, hereDocArgvConsumer(words, static, depth))
+		reading := hereDocArgvConsumer(words, static, command, depth)
+		if reading == hereDocData {
+			for _, assign := range call.Assigns {
+				if assign.Name != nil && resolutionVariable(assign.Name.Value) {
+					// PATH=/tmp/x cat, BASH_ENV=/tmp/x bash -c cat: another
+					// program, or another file's code, may get the body.
+					reading = hereDocUnknown
+				}
+			}
+			if hereDocRedefined(command, words[0]) {
+				reading = hereDocUnknown
+			}
+		}
+		verdict = max(verdict, reading)
 		return verdict != hereDocRunsCode
 	})
 	return verdict
@@ -85,7 +141,7 @@ func hereDocTextConsumer(consumer string, depth int) hereDocConsumer {
 // its standard input. Launchers are followed with the shared resolution
 // (StaticPrefixWrapperChild, then launcherInner); the program they reach
 // decides.
-func hereDocArgvConsumer(words []string, static []bool, depth int) hereDocConsumer {
+func hereDocArgvConsumer(words []string, static []bool, command string, depth int) hereDocConsumer {
 	if depth > maxControlNesting {
 		return hereDocUnknown
 	}
@@ -96,9 +152,10 @@ func hereDocArgvConsumer(words []string, static []bool, depth int) hereDocConsum
 		return hereDocRunsCode
 	}
 	if run, wrapped := StaticPrefixWrapperChild(words, static); wrapped {
-		child := hereDocArgvConsumer(words[run.Index:], static[run.Index:], depth+1)
-		if run.ChangesResolution && child == hereDocData {
-			// env PATH=... cat: the word may name another program.
+		child := hereDocArgvConsumer(words[run.Index:], static[run.Index:], command, depth+1)
+		if child == hereDocData && (run.ChangesResolution || hereDocUntrustedPathWord(words[:run.Index])) {
+			// env PATH=... cat, or /tmp/x/nohup cat: the program that runs
+			// may not be the one the words name.
 			return hereDocUnknown
 		}
 		return child
@@ -109,7 +166,7 @@ func hereDocArgvConsumer(words []string, static []bool, depth int) hereDocConsum
 		// is read by its name for code, and is never data.
 		program, trusted = strings.ToLower(path.Base(strings.ReplaceAll(words[0], `\`, "/"))), false
 	}
-	verdict := hereDocProgramConsumer(program, words, static, depth)
+	verdict := hereDocProgramConsumer(program, words, static, command, depth)
 	if !trusted && verdict == hereDocData {
 		return hereDocUnknown
 	}
@@ -118,37 +175,101 @@ func hereDocArgvConsumer(words []string, static []bool, depth int) hereDocConsum
 
 // hereDocProgramConsumer reads the program word of one simple command after
 // the static prefix wrappers.
-func hereDocProgramConsumer(program string, words []string, static []bool, depth int) hereDocConsumer {
+func hereDocProgramConsumer(program string, words []string, static []bool, command string, depth int) hereDocConsumer {
 	switch {
-	case program == "busybox":
-		// busybox APPLET ...: the applet is the program.
-		return hereDocArgvConsumer(words[1:], static[1:], depth+1)
-	case posixShellProgram(program) || layoutShells[program]:
-		return hereDocShellConsumer(words, static, depth)
+	case program == "busybox" || program == "toybox":
+		// busybox APPLET ..., toybox APPLET ...: the applet is the program.
+		return hereDocArgvConsumer(words[1:], static[1:], command, depth+1)
+	case posixShellProgram(program) || layoutShells[program] || shellProgram(program) || hereDocExtraShells[program]:
+		return hereDocShellConsumer(words, static, command, depth)
 	case program == "source" || program == ".":
 		return hereDocSourceConsumer(words, static)
 	case program == "eval":
 		if !allStatic(static) {
 			return hereDocUnknown
 		}
-		return hereDocTextConsumer(strings.Join(words[1:], " "), depth+1)
+		return hereDocTextConsumer(strings.Join(words[1:], " "), command, depth+1)
 	}
 	if inner := launcherInner(words); inner != nil {
 		at := len(words) - len(inner)
-		return hereDocArgvConsumer(words[at:], static[at:], depth+1)
+		return hereDocArgvConsumer(words[at:], static[at:], command, depth+1)
 	}
-	if _, _, interpreter := inlineInterpreterRow(program); interpreter {
-		// An interpreter (python3 -, perl) runs its standard input as its own
-		// language, not as shell: the body is its data, which the strict and
-		// managed raw scan still reads (GAP-0876 ruling).
+	if hereDocDataPrograms[program] && path.Base(strings.ReplaceAll(words[0], `\`, "/")) == program && hereDocDataOptions(program, words) {
+		// Named as it is installed: CAT is another file on a case-sensitive
+		// disk.
 		return hereDocData
 	}
-	if overLimitCodeProgram(program) || simpleNestedWrapper(program) || launcherWrapper(program) {
-		// A launcher, a shell runner or an option layout the reading does not
-		// follow to the program it starts.
-		return hereDocUnknown
+	// An interpreter, a launcher, a shell runner, an option layout the
+	// reading does not follow, or a program not known to keep its input as
+	// data.
+	return hereDocUnknown
+}
+
+// hereDocDataOptions reports the options of a data program that keep its
+// input data: sort --compress-program=PROG pipes the input through PROG (any
+// --c... long option, which GNU getopt may expand to it, is not data).
+func hereDocDataOptions(program string, words []string) bool {
+	if program != "sort" {
+		return true
 	}
-	return hereDocData
+	for _, word := range words[1:] {
+		if word == "--" {
+			break
+		}
+		if strings.HasPrefix(word, "--c") {
+			return false
+		}
+	}
+	return true
+}
+
+// hereDocUntrustedPathWord reports a wrapper chain word with a path outside
+// the trusted directories (commandProgram is empty for it): the wrapper
+// that runs may not be the one its name says. An env assignment word
+// (FOO=/x) names no program; PATH= is ChangesResolution.
+func hereDocUntrustedPathWord(words []string) bool {
+	for _, word := range words {
+		if strings.ContainsAny(word, `/\`) && !strings.HasPrefix(word, "-") &&
+			!hereDocAssignmentWord.MatchString(word) && commandProgram(word) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hereDocAssignmentWord is an env assignment word NAME=value: its NAME is
+// an identifier, so a path word (/tmp/a=b/nohup) never matches.
+var hereDocAssignmentWord = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// hereDocPathAssignment matches a PATH (or zsh path array) assignment
+// anywhere in a call text: it changes the program every bare name names.
+var hereDocPathAssignment = regexp.MustCompile(`(?:^|[^\w])(?:PATH|path)\+?=`)
+
+// hereDocRedefined reports a bare command word that the call text command
+// may make name another program: a PATH assignment, or a function, alias or
+// hash -p entry of that name. A word with a path is not looked up as a
+// function, alias or hash entry.
+func hereDocRedefined(command, word string) bool {
+	if command == "" || word == "" || strings.ContainsAny(word, `/\`) {
+		return false
+	}
+	if hereDocPathAssignment.MatchString(command) {
+		return true
+	}
+	if !strings.Contains(command, word) {
+		return false
+	}
+	name := regexp.QuoteMeta(word)
+	start := `(?:^|[\s;&|(){}'"])`
+	end := `(?:$|[\s;&|(){}'"])`
+	pattern := start + `(?:` +
+		`(?:function\s+)?` + name + `\s*\(\s*\)` + `|` +
+		`function\s+` + name + end + `|` +
+		`alias(?:\s[^\n;&|]*)?[\s'"]` + name + `=` + `|` +
+		`hash\s[^\n;&|]*[\s'"]` + name + end +
+		`)`
+	matched, err := regexp.MatchString(pattern, command)
+	return err != nil || matched
 }
 
 // hereDocShellConsumer reads a shell's arguments as the shell does: options
@@ -156,7 +277,7 @@ func hereDocProgramConsumer(program string, words []string, static []bool, depth
 // first operand the script, whose commands get the body; -s, or no operand,
 // reads the script from the standard input (the body); any other operand is
 // a script file whose reading of the body is not known.
-func hereDocShellConsumer(words []string, static []bool, depth int) hereDocConsumer {
+func hereDocShellConsumer(words []string, static []bool, command string, depth int) hereDocConsumer {
 	script, stdin, operand := false, false, -1
 options:
 	for index := 1; index < len(words); index++ {
@@ -188,7 +309,7 @@ options:
 		if operand < 0 || !static[operand] {
 			return hereDocUnknown
 		}
-		return hereDocTextConsumer(words[operand], depth+1)
+		return hereDocTextConsumer(words[operand], command, depth+1)
 	case stdin || operand < 0:
 		return hereDocRunsCode
 	default:

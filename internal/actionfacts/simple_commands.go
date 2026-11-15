@@ -143,7 +143,7 @@ func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, inte
 	statements := slices.Clone(tail.Statements)
 	unknownBody := false
 	for _, doc := range tail.HereDocs {
-		switch syntaxTailHereDocConsumer(doc.Consumer) {
+		switch syntaxTailHereDocConsumerIn(doc.Consumer, input.Command) {
 		case hereDocRunsCode:
 			statements = append(statements, doc.Statements...)
 		case hereDocUnknown:
