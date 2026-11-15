@@ -87,7 +87,9 @@ func TestGAP0568StatementBudgetWork(t *testing.T) {
 		{gap0568Assignments(129), 129, []string{limit}},
 		{gap0568Assignments(1100), 1100, []string{limit}},
 		{gap0568Assignments(3000), 3000, []string{limit}},
-		{gap0568Assignments(600) + "; echo k >> ~/.ssh/authorized_keys", 601, []string{limit}},
+		// The keys write after the budget is judged on its own statement
+		// (the cap floor, rel-1-0-10:GAP-0435) and keeps its rule.
+		{gap0568Assignments(600) + "; echo k >> ~/.ssh/authorized_keys", 601, []string{limit, "persistence.ssh_authorized_keys_command"}},
 		{strings.Repeat("echo x | ", 200) + "cat", 201, []string{limit}},
 		{gap0568Assignments(200) + stateTail, 201, []string{limit, tamper}},
 		{gap0568Assignments(3000) + stateTail, 3001, []string{limit, tamper}},
@@ -168,7 +170,8 @@ func BenchmarkGAP0568HookAssignmentChain(b *testing.B) {
 // call is; only the whole-call state check runs (linear work), so a state
 // tail also takes tamper.detector_state_write. Before, no reading finished, no budget applied, and the call was
 // allowed after about 4 s of reading on Windows. One long PowerShell
-// statement past the bound is not over the statement budget.
+// statement past the bound is not over the statement budget: it is
+// TRUNCATED at the input bound (cap=bytes, rel-1-0-10:GAP-0611).
 func TestGAP0318StatementBudgetOnEveryDialectRoute(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -231,7 +234,6 @@ func TestGAP0318StatementBudgetOnEveryDialectRoute(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: "codex", EnforcementCapable: true, targetMemo: memo,
 			})
-			limited := findingWithID(findings, "ACTION-COMPOUND-LIMIT") != nil
 			ids := findingIDs(findings)
 			slices.Sort(ids)
 			ids = slices.Compact(ids)
@@ -239,8 +241,14 @@ func TestGAP0318StatementBudgetOnEveryDialectRoute(t *testing.T) {
 			switch {
 			case tc.over && (!slices.Equal(ids, tc.want) || walked > 2*3001+64 || candidates > 2*3001+64):
 				t.Errorf("%s: 3000 statements: findings %v after %d walked and %d candidate units of work, want %v with linear work", route.name, ids, walked, candidates, tc.want)
-			case !tc.over && limited:
-				t.Errorf("%s: one long statement took the statement budget: %v", route.name, findingIDs(findings))
+			case !tc.over:
+				// One long statement is under the statement budget; past the
+				// input bound it is TRUNCATED at cap=bytes (the one bound
+				// rule, rel-1-0-10:GAP-0611), not refused by the budget.
+				limit := findingWithID(findings, "ACTION-COMPOUND-LIMIT")
+				if limit == nil || !strings.HasPrefix(limit.Title, boundedTruncatedTitle) || !strings.Contains(limit.Evidence, "cap=bytes") {
+					t.Errorf("%s: one long statement past the input bound is not TRUNCATED at cap=bytes (or took the statement budget): %v", route.name, findingIDs(findings))
+				}
 			}
 		}
 	}

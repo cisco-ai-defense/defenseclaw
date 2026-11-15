@@ -144,18 +144,17 @@ var boundedLanes []boundedLaneCap
 
 func registerBoundedLane(caps ...boundedLaneCap) { boundedLanes = append(boundedLanes, caps...) }
 
-// The shell reading bounds on rel/1.0.10. Nesting and statements (lane
-// s7/parselimits) still take the evaluation-limit path
-// (trustedActionLimitFindings); the operand bound goes through
-// withBoundedTruncation (rel-1-0-10:GAP-0313).
+// The shell reading bounds on rel/1.0.10. Nesting and statements still take
+// the evaluation-limit path (trustedActionLimitFindings), and the cap floor
+// (withCapFloor) keeps a write proven before or after the cap a block
+// (rel-1-0-10:GAP-0312); the operand bound goes through withBoundedTruncation
+// (rel-1-0-10:GAP-0313).
 func init() {
 	registerBoundedLane(
 		boundedLaneCap{lane: "shell-parse nesting", cap: bounded.Depth, limit: shellparse.MaxNestingDepth,
-			gen:  boundedShellLane(boundedNestedSubshells, boundedNestedAssignments),
+			gen:  boundedShellLane(boundedNestedBrackets, boundedNestedAssignments),
 			seen: boundedShellSeenCall,
-			path: boundedLegacyShellReading,
-			open: map[string]string{"default/seen": "rel-1-0-10:GAP-0312", "permissive/seen": "rel-1-0-10:GAP-0312",
-				"managed/seen": "rel-1-0-10:GAP-0312"}},
+			path: boundedLegacyShellReading},
 		boundedLaneCap{lane: "shell-parse statements", cap: bounded.Items, limit: boundedShellStatements,
 			gen:  boundedShellLane(gap0568Assignments, boundedListStatements),
 			seen: boundedShellSeenCall,
@@ -206,6 +205,14 @@ func boundedShellLane(fill, multi func(size int) string) func(int, boundedShape)
 // boundedNestedSubshells is a true command nested in size subshells.
 func boundedNestedSubshells(size int) string {
 	return strings.Repeat("(", size) + "true" + strings.Repeat(")", size)
+}
+
+// boundedNestedBrackets is a word of size nested brackets: nesting the
+// shell reading budget counts that the action analysis reads in full (size
+// nested subshells meet its syntax depth bound first, the lane "shell
+// analysis depth", rel-1-0-10:GAP-0547).
+func boundedNestedBrackets(size int) string {
+	return "echo " + strings.Repeat("[", size) + "true" + strings.Repeat("]", size)
 }
 
 // boundedNestedAssignments nests past the statement budget too (depth and
@@ -362,14 +369,6 @@ func boundedTierConnectors() []string {
 	return connectors
 }
 
-// boundedValidateLanes checks the lane table itself.
-func boundedValidateLanes(t *testing.T) {
-	t.Helper()
-	for _, err := range boundedLaneTableErrors(boundedLanes) {
-		t.Error(err)
-	}
-}
-
 // boundedLaneTableErrors are the misuses of a lane table.
 func boundedLaneTableErrors(lanes []boundedLaneCap) []string {
 	var errs []string
@@ -413,18 +412,154 @@ func boundedLaneTableErrors(lanes []boundedLaneCap) []string {
 	return errs
 }
 
-func TestBoundRuleEveryLaneCap(t *testing.T) {
+// TestBoundRuleEveryLaneCap* run the property test above, one top-level test
+// per lane group. Batch 11 grew the table from 10 to 22 caps and the one test
+// to about 435 s under -race (GOMAXPROCS=4), past the 720 s go test -timeout
+// of a CI gateway shard on a hosted runner; as separate tests the shards can
+// take the groups apart (the GAP-0612 split did the same for the ACP
+// permission test). Every group runs every tier, and the checks are the same
+// for every lane. A lane that matches no named group runs in
+// TestBoundRuleEveryLaneCapOther, so a new lane is still covered by adding
+// its own file; TestBoundRuleLaneGroupsCoverTheTable checks that each lane
+// runs in exactly one group.
+//
+// The cost of a group is about its number of decided calls times their size:
+// the MCP mapper's 1 MiB byte caps and its 64 Ki node cap decide 2 MiB and
+// 128 Ki inputs in each of the five tiers, so the nonshell lanes are split by
+// cap kind.
+var boundedLaneGroups = []struct {
+	name  string
+	match func(lane string) bool
+}{
+	{"Shell", boundedLaneNames("shell-parse nesting", "shell-parse statements", "shell operands")},
+	{"ACP", func(lane string) bool { return strings.HasPrefix(lane, "s7/acp ") }},
+	{"OpenClawMessage", func(lane string) bool { return strings.HasPrefix(lane, "openclaw message ") }},
+	{"NonShellStringBytes", boundedLaneNames("s7/nonshell mcp-string-bytes", "s7/nonshell mcp-path-bytes")},
+	{"NonShellContentBytes", boundedLaneNames("s7/nonshell mcp-content-bytes")},
+	{"NonShellSQLBytes", boundedLaneNames("s7/nonshell mcp-sql-bytes")},
+	{"NonShellNodes", boundedLaneNames("s7/nonshell mcp-nodes", "s7/nonshell mcp-depth", "s7/nonshell mcp-json-string")},
+	{"NonShellItems", boundedLaneNames("s7/nonshell mcp-twins", "s7/nonshell mcp-array", "s7/nonshell mcp-effects",
+		"s7/nonshell mcp-address-list", "s7/nonshell mcp-address-array")},
+}
+
+func boundedLaneNames(names ...string) func(string) bool {
+	return func(lane string) bool { return slices.Contains(names, lane) }
+}
+
+// boundedGroupLanes are the registered lanes of group name, in table order;
+// "Other" is every lane no named group matches.
+func boundedGroupLanes(name string) []boundedLaneCap {
+	var lanes []boundedLaneCap
+	for _, lane := range boundedLanes {
+		group := "Other"
+		for _, g := range boundedLaneGroups {
+			if g.match(lane.lane) {
+				group = g.name
+				break
+			}
+		}
+		if group == name {
+			lanes = append(lanes, lane)
+		}
+	}
+	return lanes
+}
+
+// Every registered lane matches at most one named group (the rest run in
+// Other), and every named group still has a lane: a renamed lane cannot
+// leave a group empty and a test passing on nothing.
+func TestBoundRuleLaneGroupsCoverTheTable(t *testing.T) {
 	if len(boundedLanes) == 0 {
 		t.Fatal("no lane registered a cap")
 	}
+	for _, lane := range boundedLanes {
+		var in []string
+		for _, g := range boundedLaneGroups {
+			if g.match(lane.lane) {
+				in = append(in, g.name)
+			}
+		}
+		if len(in) > 1 {
+			t.Errorf("%s/%s: in groups %v, want one", lane.lane, lane.cap, in)
+		}
+	}
+	runs := 0
+	for _, g := range boundedLaneGroups {
+		lanes := boundedGroupLanes(g.name)
+		if len(lanes) == 0 {
+			t.Errorf("group %s matches no registered lane: fix its names or delete it", g.name)
+		}
+		runs += len(lanes)
+	}
+	if runs += len(boundedGroupLanes("Other")); runs != len(boundedLanes) {
+		t.Errorf("the groups run %d lane caps, the table has %d", runs, len(boundedLanes))
+	}
+}
+
+func TestBoundRuleEveryLaneCapShell(t *testing.T) {
+	boundRuleEveryLaneCap(t, "Shell")
+}
+
+func TestBoundRuleEveryLaneCapACP(t *testing.T) {
+	boundRuleEveryLaneCap(t, "ACP")
+}
+
+func TestBoundRuleEveryLaneCapOpenClawMessage(t *testing.T) {
+	boundRuleEveryLaneCap(t, "OpenClawMessage")
+}
+
+func TestBoundRuleEveryLaneCapNonShellStringBytes(t *testing.T) {
+	boundRuleEveryLaneCap(t, "NonShellStringBytes")
+}
+
+func TestBoundRuleEveryLaneCapNonShellContentBytes(t *testing.T) {
+	boundRuleEveryLaneCap(t, "NonShellContentBytes")
+}
+
+func TestBoundRuleEveryLaneCapNonShellSQLBytes(t *testing.T) {
+	boundRuleEveryLaneCap(t, "NonShellSQLBytes")
+}
+
+func TestBoundRuleEveryLaneCapNonShellNodes(t *testing.T) {
+	boundRuleEveryLaneCap(t, "NonShellNodes")
+}
+
+func TestBoundRuleEveryLaneCapNonShellItems(t *testing.T) {
+	boundRuleEveryLaneCap(t, "NonShellItems")
+}
+
+func TestBoundRuleEveryLaneCapOther(t *testing.T) {
+	boundRuleEveryLaneCap(t, "Other")
+}
+
+func boundRuleEveryLaneCap(t *testing.T, group string) {
+	lanes := boundedGroupLanes(group)
+	if len(lanes) == 0 {
+		if group != "Other" {
+			t.Fatalf("group %s: no lane registered a cap", group)
+		}
+		return // every lane is in a named group
+	}
+	boundedCheckLanes(t, lanes)
+}
+
+// boundedCheckLanes is the property test of the bound rule over lanes, in
+// every tier.
+func boundedCheckLanes(t *testing.T, lanes []boundedLaneCap) {
 	env := boundedLaneEnv(t)
-	if boundedValidateLanes(t); t.Failed() {
+	for _, err := range boundedLaneTableErrors(lanes) {
+		t.Error(err)
+	}
+	if t.Failed() {
 		return
 	}
+	// A lane that ships in shadow does not decide: it has its own contract
+	// (bounded_shadow_lanes_test.go).
+	t.Run("shadow lanes", func(t *testing.T) { boundedCheckShadowLanes(t) })
 	for _, tier := range boundedTestTiers {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		floor := bounded.Unknown(tier.tier)
-		for _, lane := range boundedLanes {
+		for _, lane := range lanes {
 			name := tier.name + "/" + lane.lane + "/" + lane.cap.String()
 			decide := lane.decide
 			if decide == nil {
@@ -446,9 +581,16 @@ func TestBoundRuleEveryLaneCap(t *testing.T) {
 					}
 					continue
 				}
-				atAction, atFindings := decide(t, api, env, at)
-				if s.shape == (boundedShape{}) && boundedHasLimit(atFindings, lane.cap, false) {
-					t.Errorf("%s: the input at the cap (%d) is already truncated: %v", name, lane.limit, atFindings)
+				// Only the plain shape reads the answer at the cap: it is not
+				// truncated, and past the cap the plain call is at least that
+				// action. The other shapes are judged past the cap only.
+				var atAction string
+				if s.shape == (boundedShape{}) {
+					var atFindings []string
+					atAction, atFindings = decide(t, api, env, at)
+					if boundedHasLimit(atFindings, lane.cap, false) {
+						t.Errorf("%s: the input at the cap (%d) is already truncated: %v", name, lane.limit, atFindings)
+					}
 				}
 				for _, size := range []int{lane.limit + 1, 2 * lane.limit} {
 					call, _ := lane.gen(size, s.shape)

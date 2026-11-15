@@ -242,3 +242,7 @@ class Counts:
     alerts: int | None = 0
     total_scans: int = 0
     blocked_egress_calls: int = 0
+    # Tool calls the gateway could read only in part (ACTION-PARSE-FAILURE
+    # records: a shell syntax error, a shell body it could not resolve).
+    # None: not counted in time (see Store.get_counts).
+    unread_calls: int | None = 0
