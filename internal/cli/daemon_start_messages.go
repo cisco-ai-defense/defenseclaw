@@ -69,10 +69,11 @@ func gatewayLogSize(path string) int64 {
 // gatewayLogExitReason returns the last "Error: " line the gateway wrote to
 // gateway.log after offset (the error it exited on), or "".
 // The line the gateway logs for a destination that refused the start: its
-// name, path and rule (destinations factory, GAP-0890).
+// name, the cause and the fix (destinations factory, GAP-0890). Every
+// refusal, not only a jsonl path, ends with the same remedy (GAP-0272).
 const (
 	gatewayLogDestinationRefusal = "defenseclaw: observability destination "
-	gatewayLogDestinationRemedy  = "fix the path or remove the destination"
+	gatewayLogDestinationRemedy  = "or remove the destination"
 )
 
 func gatewayLogExitReason(path string, offset int64) string {
@@ -106,8 +107,8 @@ func gatewayLogExitReason(path string, offset int64) string {
 		}
 	}
 	if destination != "" {
-		// The destination, its path and the rule it breaks, which the
-		// gateway logs before it exits on runtime_unavailable (GAP-0097).
+		// The destination, the cause and the fix, which the gateway logs
+		// before it exits on runtime_unavailable (GAP-0097, GAP-0272).
 		if reason == "" {
 			reason = destination
 		} else {

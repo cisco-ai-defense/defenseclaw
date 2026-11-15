@@ -121,6 +121,17 @@ NEWER_CONFIG_KEYS = (
     ("routing.route_only", (1, 0, 10)),
     ("routing.sensitive", (1, 0, 10)),
     ("routing.systemone", (1, 0, 10)),
+    ("guardrail.history_seen_max", (1, 0, 10)),
+    ("guardrail.max_body_values", (1, 0, 10)),
+    ("openshell.admin.actor_secrets", (1, 0, 10)),
+    ("openshell.admin.ask_hosts", (1, 0, 10)),
+    ("openshell.admin.ask_timeout", (1, 0, 10)),
+    ("openshell.admin.idle_suspend_after", (1, 0, 10)),
+    ("openshell.admin.runtimes", (1, 0, 10)),
+    ("openshell.admin.sandbox_class", (1, 0, 10)),
+    ("openshell.admin.unattended_asks", (1, 0, 10)),
+    ("openshell.admin.url_rules", (1, 0, 10)),
+    ("substrate", (1, 0, 10)),
 )
 # More keys added after 1.0.9, in the same path language: a "*" segment is
 # one entry of a map of named entries (a connector, a profile). 1.0.9
@@ -134,6 +145,16 @@ NEWER_CONFIG_SUBTREES = (
     ("guardrail.profiles.*.connectors.*.cascade", (1, 0, 10)),
     ("application_protection.guardrail.cascade", (1, 0, 10)),
     ("application_protection.connectors.*.guardrail.cascade", (1, 0, 10)),
+    # A profile's sandbox keys past 1.0.9 are feat/substrate's (the
+    # openshell.admin twins in NEWER_CONFIG_KEYS).
+    ("guardrail.profiles.*.sandbox.actor_secrets", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.ask_hosts", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.ask_timeout", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.idle_suspend_after", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.runtimes", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.sandbox_class", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.unattended_asks", (1, 0, 10)),
+    ("guardrail.profiles.*.sandbox.url_rules", (1, 0, 10)),
 )
 # Values an older release refuses or cannot run, under keys it has
 # (rel-1-0-10:GAP-0767, GAP-0769), with the first release that has them:
@@ -148,10 +169,19 @@ OLDER_DECISION_CONDITION_TYPES = ("keyword",)
 NEWER_DECISION_CONDITIONS_SINCE = (1, 0, 10)
 IN_PROCESS_CLASSIFIERS = ("rules", "systemone")
 IN_PROCESS_CLASSIFIERS_SINCE = (1, 0, 10)
+# Keys inside a list item an older release refuses where setting the key aside alone would
+# change what the item means, with the first release that has them: the whole item is set
+# aside (by its index) and migrate puts it back in its place.
+# - guardrail.profile_assignments[].match.substrate: 1.0.9's match is closed and needs one
+#   key, and its keys combine with AND, so without substrate the match is empty (1.0.9
+#   refuses config.yaml) or selects the host subjects of its other keys, which a Substrate
+#   assignment never selects.
+NEWER_ITEM_KEYS = (("guardrail.profile_assignments[].match.substrate", (1, 0, 10)),)
 # Where a downgrade keeps the keys it set aside, in the data folder:
 # {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value},
 #  "items": {"<list item key>": "<its name>"},  (keys inside a list item)
 #  "decisions": [{"index": N, "value": {...}}],  (routing.decisions items set aside whole)
+#  "assignments": [{"index": N, "profile": "<profile>", "value": {...}}],  (NEWER_ITEM_KEYS)
 #  "switched": {"routing.enabled": true}}        (values switched off for the older release)
 SET_ASIDE_FILE = "config-set-aside.json"
 _TIMEOUT = 30
@@ -714,6 +744,22 @@ def _newer_decisions(raw: object, target: tuple[int, int, int]) -> list[dict[str
     return out
 
 
+def _newer_assignments(raw: object, target: tuple[int, int, int]) -> list[dict[str, object]]:
+    """The guardrail.profile_assignments items the older release ``target`` refuses: a match on
+    Substrate actors (NEWER_ITEM_KEYS), set aside whole, never narrowed to its other keys."""
+
+    if target >= NEWER_ITEM_KEYS[0][1]:
+        return []
+    guardrail = raw.get("guardrail") if isinstance(raw, dict) else None
+    assignments = guardrail.get("profile_assignments") if isinstance(guardrail, dict) else None
+    out: list[dict[str, object]] = []
+    for index, item in enumerate(assignments if isinstance(assignments, list) else []):
+        match = item.get("match") if isinstance(item, dict) else None
+        if isinstance(match, dict) and "substrate" in match:
+            out.append({"index": index, "profile": item.get("profile"), "value": item})
+    return out
+
+
 def _switched_off(raw: object, target: tuple[int, int, int]) -> dict[str, object]:
     """Values the older release ``target`` cannot run, to switch off for it: routing on with an
     in-process classifier it does not have (it would start the Docker vLLM Semantic Router)."""
@@ -771,17 +817,21 @@ def _set_aside_newer_keys(version: str) -> None:
         found.update(values)
         items.update(names)
     decisions = _newer_decisions(raw, target)
+    assignments = _newer_assignments(raw, target)
     switched = _switched_off(raw, target)
-    if not found and not decisions and not switched:
+    if not found and not decisions and not assignments and not switched:
         return
     names = ", ".join(
         [*found]
         + [f"routing decision {d['value'].get('name')}" for d in decisions if isinstance(d["value"], dict)]
+        + [f"the Substrate profile assignment of {a['profile']}" for a in assignments]
         + (["routing on with the classifier " + str(raw["routing"]["classifier"])] if switched else [])
     )
     # In the order the validated writer accepts: a decision of a newer condition type needs
     # the classifier that is about to go.
     fixes = ["remove the routing.decisions entries whose conditions are not keyword ones"] if decisions else []
+    if assignments:
+        fixes.append("remove the guardrail.profile_assignments entries that match substrate")
     if switched:
         fixes.append("defenseclaw routing disable")
     if found:
@@ -809,6 +859,7 @@ def _set_aside_newer_keys(version: str) -> None:
         document = {}
     kept, kept_items = document.get("keys"), document.get("items")
     kept_decisions, kept_switched = document.get("decisions"), document.get("switched")
+    kept_assignments = document.get("assignments")
     keys = dict(kept) if isinstance(kept, dict) else {}
     keys.update(found)
     record: dict[str, object] = {"version": 1, "for": version, "keys": keys}
@@ -820,6 +871,12 @@ def _set_aside_newer_keys(version: str) -> None:
     held_decisions += decisions
     if held_decisions:
         record["decisions"] = held_decisions
+    held_assignments = (
+        [a for a in kept_assignments if isinstance(a, dict)] if isinstance(kept_assignments, list) else []
+    )
+    held_assignments += assignments
+    if held_assignments:
+        record["assignments"] = held_assignments
     held_switched = dict(kept_switched) if isinstance(kept_switched, dict) else {}
     held_switched.update(switched)
     if held_switched:
@@ -829,6 +886,11 @@ def _set_aside_newer_keys(version: str) -> None:
         drop = {d["index"] for d in decisions}
         left = [item for index, item in enumerate(raw["routing"]["decisions"]) if index not in drop]
         changes.append(Change("routing.decisions", left) if left else Change("routing.decisions", unset=True))
+    if assignments:
+        drop = {a["index"] for a in assignments}
+        left = [item for index, item in enumerate(raw["guardrail"]["profile_assignments"]) if index not in drop]
+        path = "guardrail.profile_assignments"
+        changes.append(Change(path, left) if left else Change(path, unset=True))
     changes += [Change(key, False) for key in switched]
     try:
         _write_private_json(held, record)

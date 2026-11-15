@@ -14,12 +14,13 @@ import (
 )
 
 // defenseClawNeutralConfigRoots are the sections of config.yaml whose change
-// is not a change to the guard: telemetry sinks, routing, webhooks,
-// notifications, the update channel and AI discovery (GAP-0753). Reviewed
-// with defenseClawGuardConfigRoots: every section of the Config schema is in
+// is not a change to the guard: routing, webhooks, notifications, the update
+// channel and AI discovery (GAP-0753). observability is a guard section (the
+// audit and OTLP export are evidence). Reviewed with
+// defenseClawGuardConfigRoots: every section of the Config schema is in
 // exactly one of the two.
 var defenseClawNeutralConfigRoots = map[string]bool{
-	"observability": true, "webhooks": true, "notifications": true, "routing": true,
+	"webhooks": true, "notifications": true, "routing": true,
 	"update": true, "ai_discovery": true,
 }
 

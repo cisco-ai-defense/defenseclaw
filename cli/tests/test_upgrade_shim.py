@@ -1790,17 +1790,19 @@ _SCHEMA_1_0_9 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.9.sche
 
 
 def _missing_from_newer_config_keys(new_paths: set[str], old_paths: set[str]) -> list[str]:
-    """Keys in the new schema, absent from 1.0.9, that NEWER_CONFIG_KEYS (a key or a block above it) does not list."""
+    """Keys in the new schema, absent from 1.0.9, that NEWER_CONFIG_KEYS (a key or a block above it) does not list.
+    A listed list key holds the keys of its items (``url_rules`` holds ``url_rules[].hosts``): the
+    whole list is set aside."""
 
     listed = [
         key
-        for key, since in (*upgrade_shim.NEWER_CONFIG_KEYS, *upgrade_shim.NEWER_CONFIG_SUBTREES)
+        for key, since in (*upgrade_shim.NEWER_CONFIG_KEYS, *upgrade_shim.NEWER_CONFIG_SUBTREES, *upgrade_shim.NEWER_ITEM_KEYS)
         if since > (1, 0, 9)
     ]
     return sorted(
         path
         for path in new_paths - old_paths
-        if not any(path == key or path.startswith(key + ".") for key in listed)
+        if not any(path == key or path.startswith((key + ".", key + "[")) for key in listed)
     )
 
 
@@ -1927,6 +1929,136 @@ def test_downgrade_to_1_0_9_sets_aside_a_newer_decision_and_switches_routing_off
     assert record["switched"] == {"routing.enabled": True}
     out = capsys.readouterr().out
     assert "routing decision codex-fast" in out and "Routing is switched off for 1.0.9" in out
+
+
+# A profile assignment that matches Substrate actors (upgrade_shim.NEWER_ITEM_KEYS): 1.0.9's
+# match is closed, needs one key and ANDs its keys, so the item is set aside whole on a
+# downgrade, never narrowed to its other keys, and migrate puts it back in its place.
+_CI_ONLY = {"profile": "ci", "match": {"substrate": {"atespaces": ["ci-runs"]}}}
+_ENG_GROUPS = {"profile": "eng", "match": {"groups": ["eng"]}}
+_OPS_SUBSTRATE_AND_GROUPS = {"profile": "ops", "match": {"groups": ["ops"], "substrate": {"templates": ["ci-runs/claude"]}}}
+_ENG_USERS = {"profile": "eng", "match": {"users": ["alice"]}}
+
+
+def _assignments_config(assignments: list[dict]) -> str:
+    import yaml
+
+    return yaml.safe_dump(
+        {
+            "config_version": 9,
+            "guardrail": {"profiles": {"ci": {}, "eng": {}, "ops": {}}, "profile_assignments": assignments},
+        },
+        sort_keys=False,
+    )
+
+
+def _downgrade_and_restore(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, assignments: list[dict]
+) -> tuple[dict, dict, dict]:
+    """config.yaml after the downgrade to 1.0.9, the set-aside record, and config.yaml after migrate."""
+    import jsonschema
+    import yaml
+    from defenseclaw import migrations
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    config_path = home / "config.yaml"
+    config_path.write_text(_assignments_config(assignments), encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    downgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    schema = json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8"))
+    jsonschema.validators.validator_for(schema)(schema).validate(downgraded)  # 1.0.9 starts with it
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    migrations._restore_set_aside_keys(str(home), str(config_path))
+    restored = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert not _set_aside(home).exists()
+    return downgraded, record, restored
+
+
+def test_a_substrate_only_profile_assignment_is_set_aside_and_put_back(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    downgraded, record, restored = _downgrade_and_restore(home, tmp_path, monkeypatch, [_CI_ONLY])
+
+    assert "profile_assignments" not in downgraded["guardrail"]
+    assert record["assignments"] == [{"index": 0, "profile": "ci", "value": _CI_ONLY}]
+    assert record["keys"] == {}
+    assert restored["guardrail"]["profile_assignments"] == [_CI_ONLY]
+    assert "the Substrate profile assignment of ci" in capsys.readouterr().out
+
+
+def test_a_substrate_and_groups_profile_assignment_is_set_aside_whole_not_narrowed(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downgraded, record, restored = _downgrade_and_restore(home, tmp_path, monkeypatch, [_OPS_SUBSTRATE_AND_GROUPS])
+
+    # Never {"profile": "ops", "match": {"groups": ["ops"]}}: that would give the host
+    # subjects of group ops a profile only Substrate actors had.
+    assert "profile_assignments" not in downgraded["guardrail"]
+    assert record["assignments"] == [{"index": 0, "profile": "ops", "value": _OPS_SUBSTRATE_AND_GROUPS}]
+    assert restored["guardrail"]["profile_assignments"] == [_OPS_SUBSTRATE_AND_GROUPS]
+
+
+def test_a_mixed_profile_assignment_list_keeps_its_order_through_a_downgrade(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = [_CI_ONLY, _ENG_GROUPS, _OPS_SUBSTRATE_AND_GROUPS, _ENG_USERS]
+    downgraded, record, restored = _downgrade_and_restore(home, tmp_path, monkeypatch, original)
+
+    assert downgraded["guardrail"]["profile_assignments"] == [_ENG_GROUPS, _ENG_USERS]
+    assert [(a["index"], a["profile"]) for a in record["assignments"]] == [(0, "ci"), (2, "ops")]
+    assert restored["guardrail"]["profile_assignments"] == original
+
+
+def _valid_for_1_0_9(config: dict) -> bool:
+    """config.yaml as 1.0.9's own validator reads it: the schema 1.0.9 published (a byte copy)."""
+    import jsonschema
+
+    schema = json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8"))
+    return jsonschema.validators.validator_for(schema)(schema).is_valid(config)
+
+
+@pytest.mark.parametrize(
+    "assignments",
+    [[_CI_ONLY], [_OPS_SUBSTRATE_AND_GROUPS], [_CI_ONLY, _ENG_GROUPS, _OPS_SUBSTRATE_AND_GROUPS, _ENG_USERS]],
+    ids=["substrate-only", "substrate-and-groups", "mixed"],
+)
+def test_1_0_9_accepts_the_downgraded_profile_assignments_and_refuses_the_others(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, assignments: list[dict]
+) -> None:
+    import yaml
+
+    before = yaml.safe_load(_assignments_config(assignments))
+    # The validator bites: 1.0.9 refuses the config as 1.0.10 wrote it (a substrate match
+    # key), and the match a key-only set-aside would leave on a substrate-only item ({}).
+    assert not _valid_for_1_0_9(before)
+    emptied = yaml.safe_load(_assignments_config([{"profile": "ci", "match": {}}]))
+    assert not _valid_for_1_0_9(emptied)
+    assert _valid_for_1_0_9(yaml.safe_load(_assignments_config([_ENG_GROUPS])))
+
+    downgraded, _record, restored = _downgrade_and_restore(home, tmp_path, monkeypatch, assignments)
+
+    assert _valid_for_1_0_9(downgraded)
+    left = (downgraded.get("guardrail") or {}).get("profile_assignments") or []
+    assert all("substrate" not in a["match"] for a in left)
+    assert [a for a in assignments if "substrate" not in a["match"]] == left
+    assert restored["guardrail"]["profile_assignments"] == assignments
+
+
+def test_an_upgrade_to_1_0_10_keeps_substrate_profile_assignments(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    body = _assignments_config([_CI_ONLY, _ENG_GROUPS])
+    (home / "config.yaml").write_text(body, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.10")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 0
+
+    assert (home / "config.yaml").read_text(encoding="utf-8") == body
+    assert not _set_aside(home).exists()
 
 
 def test_downgrade_keeps_routing_on_with_the_vllm_classifier(

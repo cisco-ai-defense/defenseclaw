@@ -82,6 +82,7 @@ from defenseclaw.commands.cmd_settings import settings_cmd
 from defenseclaw.commands.cmd_setup import setup
 from defenseclaw.commands.cmd_skill import skill
 from defenseclaw.commands.cmd_status import status
+from defenseclaw.commands.cmd_substrate import substrate
 from defenseclaw.commands.cmd_tool import tool
 from defenseclaw.commands.cmd_tui import tui
 from defenseclaw.commands.cmd_uninstall import reset_cmd, uninstall_cmd
@@ -100,6 +101,7 @@ SKIP_LOAD_COMMANDS = {
     "quickstart",
     "rollback",
     "sandbox",
+    "substrate",
     "tui",
     "uninstall",
     "reset",
@@ -134,7 +136,7 @@ LEGACY_CONFIG_BOUNDARY_COMMANDS = {
 # First-run/read-only groups may run before config.yaml exists, but must reject
 # an existing non-v8 document. The actual write boundary is independently
 # protected by Config.save().
-ALLOW_MISSING_V8_PREFLIGHT = {"agent", "config", "observability", "quickstart", "tui"}
+ALLOW_MISSING_V8_PREFLIGHT = {"agent", "config", "observability", "quickstart", "substrate", "tui"}
 
 
 def _cli_audit_db(cfg) -> str:
@@ -602,6 +604,7 @@ cli.add_command(doctor)
 cli.add_command(edge_connector_group, "edge-connector")
 cli.add_command(guardrail)
 cli.add_command(sandbox)
+cli.add_command(substrate)
 cli.add_command(upgrade)
 cli.add_command(rollback)
 cli.add_command(migrate_cmd, "migrate")

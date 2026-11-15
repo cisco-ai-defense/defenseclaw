@@ -1,0 +1,11 @@
+# The admin listener behind an Ingress for laptops (GAP-0086): TLS at the
+# ingress, re-encrypted to the admin listener; never the actor listener.
+admin:
+  expose:
+    type: Ingress
+    ingress:
+      className: nginx
+      host: defenseclaw.example.com
+      tlsSecretName: defenseclaw-admin-tls
+      annotations:
+        nginx.ingress.kubernetes.io/backend-protocol: HTTPS

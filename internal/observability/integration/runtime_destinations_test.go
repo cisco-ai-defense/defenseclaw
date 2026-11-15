@@ -663,7 +663,7 @@ func TestRuntimeRealDestinationBoundaryExactlyOnceAndReloadRemoval(t *testing.T)
 	}
 	if slowRequests.Load() != 1 || len(remoteRequests) != 0 ||
 		bytes.Count(mustReadFile(t, jsonlPath), []byte{'\n'}) != 1 ||
-		bytes.Count(console.Bytes(), []byte{'\n'}) != 1 {
+		consoleRecordLines(console.Bytes()) != 1 {
 		t.Fatal("reload/removal duplicated an optional destination path")
 	}
 	var totalRows int
@@ -926,4 +926,17 @@ func mustReadFile(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return value
+}
+
+// consoleRecordLines counts the console destination's records. The stream is
+// also the factory's stderr, which carries the line naming a refused
+// destination (here the rejected reload's, GAP-0272); that is not a record.
+func consoleRecordLines(output []byte) int {
+	count := 0
+	for _, line := range bytes.Split(output, []byte{'\n'}) {
+		if len(line) > 0 && !bytes.HasPrefix(line, []byte("defenseclaw: observability destination ")) {
+			count++
+		}
+	}
+	return count
 }

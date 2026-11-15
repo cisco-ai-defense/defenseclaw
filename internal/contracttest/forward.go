@@ -34,6 +34,8 @@ var forwardOf = map[string]string{
 	"bundle-status.schema.json":    "bundle-status-forward.schema.json",
 	"bundle-receipt.schema.json":   "bundle-receipt-forward.schema.json",
 	"identity-refresh.schema.json": "identity-refresh-forward.schema.json",
+	"substrate-status.schema.json": "substrate-status-forward.schema.json",
+	"substrate-verify.schema.json": "substrate-verify-forward.schema.json",
 }
 
 // KeepOnDevice are the member names a forward schema drops on purpose: they

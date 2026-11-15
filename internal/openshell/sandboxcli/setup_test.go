@@ -2412,6 +2412,84 @@ func TestTeardownDryRunSaysWhatItKnowsOfTheSandboxes(t *testing.T) {
 	has(t, ta.output(), "  sandboxes         dc-claude-kept (stopped), dc-claude-live\n")
 }
 
+// GAP-0917: with sandboxes off because another account runs the machine's
+// OpenShell gateway, an account that kept no sandbox record has no sandbox of
+// its own to lose, so the dry run says "none" (the uninstall then proceeds).
+// One that does keep a record stays unknown: it may have work to lose.
+func TestTeardownDryRunWithAnotherAccountsGatewayAndNoSandboxRecord(t *testing.T) {
+	setup := func(t *testing.T) *testApp {
+		ta := newTestApp(t, "")
+		writeConfig(t, ta, "")
+		if _, err := image.NewStore(ta.Cfg.DataDir).Owner(); err != nil {
+			t.Fatal(err)
+		}
+		ta.daemon.status = sandboxapi.Status{Enabled: false, GatewayElsewhere: "uid 1001"}
+		ta.daemon.errors["GET "+sandboxapi.PathSandboxes] = &sandboxapi.Error{Code: sandboxapi.CodeDisabled, Message: "sandboxes are off"}
+		ta.API = ta.daemon.client()
+		ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
+			return nil, nil, errors.New("permission denied: the gateway belongs to another account")
+		}
+		return ta
+	}
+	t.Run("no record", func(t *testing.T) {
+		ta := setup(t)
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), "  sandboxes         none\n")
+		lacks(t, ta.output(), "unknown (neither")
+	})
+	t.Run("a record is kept", func(t *testing.T) {
+		ta := setup(t)
+		writeFile(t, filepath.Join(ta.Cfg.DataDir, "sandboxes", "manager", "dc-claude-mine.json"),
+			`{"version":1,"name":"dc-claude-mine","harness":"claudecode"}`)
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), "  sandboxes         unknown (neither the sandbox daemon nor the OpenShell gateway listed them)\n")
+	})
+	// Anything short of "no sandbox state at all" stays unknown (clirev P3).
+	unknown := "  sandboxes         unknown (neither the sandbox daemon nor the OpenShell gateway listed them)\n"
+	t.Run("a malformed record", func(t *testing.T) {
+		ta := setup(t)
+		writeFile(t, filepath.Join(ta.Cfg.DataDir, "sandboxes", "manager", "dc-claude-mine.json"), "{not json")
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
+	t.Run("a record that is not a plain file", func(t *testing.T) {
+		ta := setup(t)
+		if err := os.MkdirAll(filepath.Join(ta.Cfg.DataDir, "sandboxes", "manager", "dc-claude-mine.json"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
+	t.Run("an orphaned sandbox folder", func(t *testing.T) {
+		ta := setup(t)
+		writeFile(t, filepath.Join(ta.Cfg.DataDir, "sandboxes", "dc-claude-left", "run-config", "settings.json"), "{}")
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
+	t.Run("an unreadable records folder", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("a folder cannot be made unreadable here")
+		}
+		ta := setup(t)
+		records := filepath.Join(ta.Cfg.DataDir, "sandboxes", "manager")
+		if err := os.MkdirAll(records, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(records, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(records, 0o755) })
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), unknown)
+	})
+	t.Run("sandboxes off without another account's gateway", func(t *testing.T) {
+		ta := setup(t)
+		ta.daemon.status = sandboxapi.Status{Enabled: false}
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+		has(t, ta.output(), "unknown (neither the sandbox daemon nor the OpenShell gateway listed them)")
+	})
+}
+
 // A teardown without the daemon also removes what the daemon's delete would
 // have (the ingress binding, the run files, the record), for the gone
 // sandboxes too; a daemon that is up but cannot list keeps its state.
