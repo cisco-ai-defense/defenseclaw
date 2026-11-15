@@ -303,7 +303,9 @@ func TestHookJudge_ToolResultRunsToolResultInjectionJudge(t *testing.T) {
 	if len(mock.captured) != 1 {
 		t.Fatalf("injection judge called %d time(s) on a tool result, want 1", len(mock.captured))
 	}
-	if sys := mock.captured[0].Messages[0].Content; sys != toolResultInjectionSystemPrompt {
+	// The tool-result prompt, then the note on the tool-result sections
+	// (rel-1-0-10:GAP-0847).
+	if sys := mock.captured[0].Messages[0].Content; !strings.HasPrefix(sys, toolResultInjectionSystemPrompt) || !strings.Contains(sys, "CONTEXT FROM DEFENSECLAW") {
 		t.Fatalf("tool result judged with another system prompt: %.80q", sys)
 	}
 	if v.Severity == "CRITICAL" || v.Action == guardrailActionBlock {
