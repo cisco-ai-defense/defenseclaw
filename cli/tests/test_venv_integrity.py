@@ -306,7 +306,7 @@ def test_import_error_reports_the_last_line_of_a_failed_import() -> None:
 # --- rel-1-0-10 GAP-0938: doctor remembers a passing import probe -----------
 
 _PROBE_STATEMENT = "from mcpscanner import Config, Scanner"
-_KEY = {"python": "/v/bin/python", "defenseclaw": "1.0.10", "package": [1, 2], "mcp": ["4.0", [3, 4]], "lite": ["1.1", [5, 6]]}
+_KEY = {"python": "/v/bin/python", "defenseclaw": "1.0.10", "package": [1, 2], "site": [7, 8], "mcp": ["4.0", [3, 4]], "lite": ["1.1", [5, 6]]}
 
 
 def _probe(cache: Path, key: dict, result: str | None = "") -> tuple[str | None, object]:
@@ -331,6 +331,9 @@ def test_a_passing_probe_is_remembered_and_skips_the_child(tmp_path: Path) -> No
         {"defenseclaw": "1.0.11"},
         {"package": [1, 3]},
         {"package": None},
+        {"site": [7, 9]},
+        {"site": [8, 8]},
+        {"site": None},
         {"mcp": ["4.1", [3, 4]]},
         {"mcp": ["4.0", [9, 4]]},
         {"mcp": ["4.0", [3, 9]]},
@@ -363,33 +366,39 @@ def test_a_cache_with_the_wrong_field_types_runs_the_probe_again(tmp_path: Path)
     cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
     for record in (
         {"key": _KEY, "error": 3, "at": time.time()},
-        {"key": _KEY, "error": "", "at": "now"},
-        {"key": _KEY, "error": "", "at": True},
-        {"key": _KEY, "error": "", "at": time.time() + 3600},
+        {"key": _KEY, "at": "now"},
+        {"key": _KEY, "at": True},
+        {"key": _KEY, "at": time.time() + 3600},
     ):
         cache.write_text(json.dumps(record), encoding="utf-8")
         _, child = _probe(cache, _KEY)
         assert child.call_count == 1, record
 
 
-def test_a_broken_import_is_still_reported_and_a_key_change_clears_it(tmp_path: Path) -> None:
+def test_a_broken_import_is_reported_every_time_and_never_stored(tmp_path: Path) -> None:
     cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
     broken, child = _probe(cache, _KEY, _UNIMPORTABLE)
     assert broken == _UNIMPORTABLE and child.call_count == 1
-    again, child = _probe(cache, _KEY, "")
-    assert again == _UNIMPORTABLE and child.call_count == 0  # the failure is remembered
-    repaired, child = _probe(cache, {**_KEY, "lite": ["1.1", [8, 6]]}, "")
-    assert repaired == "" and child.call_count == 1  # a repair changes the key: probed again
-    assert _probe(cache, {**_KEY, "lite": ["1.1", [8, 6]]})[0] == ""
+    assert not cache.exists()
+    # a repair that changes no part of the key shows at once
+    repaired, child = _probe(cache, _KEY, "")
+    assert repaired == "" and child.call_count == 1
+    assert _probe(cache, _KEY)[1].call_count == 0
 
 
-def test_the_remembered_results_expire(tmp_path: Path) -> None:
+def test_a_remembered_failure_from_an_older_record_is_ignored(tmp_path: Path) -> None:
     cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
-    now = time.time()
-    cache.write_text(json.dumps({"key": _KEY, "error": "", "at": now - venv_integrity.PROBE_PASS_MAX_AGE - 5}))
+    cache.write_text(json.dumps({"key": _KEY, "error": _UNIMPORTABLE, "at": time.time()}), encoding="utf-8")
+    result, child = _probe(cache, _KEY, "")
+    assert result == "" and child.call_count == 1
+
+
+def test_a_pass_expires_after_a_day(tmp_path: Path) -> None:
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    cache.write_text(json.dumps({"key": _KEY, "at": time.time() - venv_integrity.PROBE_PASS_MAX_AGE - 5}))
     assert _probe(cache, _KEY)[1].call_count == 1
-    cache.write_text(json.dumps({"key": _KEY, "error": "boom", "at": now - venv_integrity.PROBE_FAIL_MAX_AGE - 5}))
-    assert _probe(cache, _KEY)[1].call_count == 1
+    cache.write_text(json.dumps({"key": _KEY, "at": time.time() - venv_integrity.PROBE_PASS_MAX_AGE + 600}))
+    assert _probe(cache, _KEY)[1].call_count == 0
 
 
 def test_a_timeout_and_an_unwritable_cache_are_not_remembered(tmp_path: Path) -> None:
@@ -404,10 +413,40 @@ def test_a_timeout_and_an_unwritable_cache_are_not_remembered(tmp_path: Path) ->
 @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
 def test_a_symlinked_cache_is_not_read(tmp_path: Path) -> None:
     real = tmp_path / "real.json"
-    real.write_text(json.dumps({"key": _KEY, "error": "", "at": time.time()}))
+    real.write_text(json.dumps({"key": _KEY, "at": time.time()}))
     cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
     cache.symlink_to(real)
     assert _probe(cache, _KEY)[1].call_count == 1
+
+
+def test_probe_key_follows_the_site_packages_folder(tmp_path: Path, monkeypatch) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "httpx").mkdir()
+    monkeypatch.setattr(venv_integrity, "site_packages", lambda: str(site))
+    first = venv_integrity.probe_key("no_such_pkg_xyz", (), "1")
+    assert first["site"] and first["site"][1] == 1
+    assert venv_integrity.probe_key("no_such_pkg_xyz", (), "1") == first
+    # a dependency outside the key (httpx) is removed or upgraded
+    (site / "httpx").rmdir()
+    (site / "httpx-0.28.dist-info").mkdir()
+    after = venv_integrity.probe_key("no_such_pkg_xyz", (), "1")
+    assert after["site"] != first["site"]
+    monkeypatch.setattr(venv_integrity, "site_packages", lambda: str(tmp_path / "gone"))
+    assert venv_integrity.probe_key("no_such_pkg_xyz", (), "1")["site"] is None
+
+
+def test_a_removed_dependency_outside_the_key_runs_the_probe_again(tmp_path: Path, monkeypatch) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "httpx").mkdir()
+    monkeypatch.setattr(venv_integrity, "site_packages", lambda: str(site))
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    key = venv_integrity.probe_key("no_such_pkg_xyz", (), "1")
+    assert _probe(cache, key)[1].call_count == 1
+    assert _probe(cache, venv_integrity.probe_key("no_such_pkg_xyz", (), "1"))[1].call_count == 0
+    (site / "httpx").rmdir()
+    assert _probe(cache, venv_integrity.probe_key("no_such_pkg_xyz", (), "1"))[1].call_count == 1
 
 
 def test_probe_key_follows_the_package_folder_and_the_distribution_record(tmp_path: Path, monkeypatch) -> None:
@@ -452,5 +491,7 @@ def test_doctor_runs_the_child_once_per_environment_and_still_fails_a_broken_one
     (tmp_path / venv_integrity.PROBE_CACHE_NAME).unlink()
     row, child = rows(_UNIMPORTABLE)
     assert row["status"] == "fail" and _UNIMPORTABLE in row["detail"] and child.call_count == 1
-    row, child = rows("")  # a remembered failure still fails (until its key changes or it expires)
-    assert row["status"] == "fail" and child.call_count == 0
+    row, child = rows(_UNIMPORTABLE)  # a failure is never remembered: probed and reported every run
+    assert row["status"] == "fail" and child.call_count == 1
+    row, child = rows("")  # and a repair shows at once
+    assert row["status"] == "pass" and child.call_count == 1
