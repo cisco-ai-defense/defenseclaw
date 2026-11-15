@@ -1490,6 +1490,20 @@ rules:
     severity: HIGH
     confidence: 0.85
     tags: [persistence, privilege-escalation]
+  - id: CMD-ACCOUNT-CREATE
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Local account created or its password set"
+    severity: HIGH
+    confidence: 0.8
+    tags: [persistence, account]
+  - id: CMD-HOST-POWER
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Host shutdown or restart"
+    severity: MEDIUM
+    confidence: 0.8
+    tags: [impact]
   - id: CMD-PRIV-SETUID
     tool_call_only: true
     pattern: 'a^'

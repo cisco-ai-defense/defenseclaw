@@ -70,7 +70,9 @@ var shippedToolCallRegexIDs = map[string]bool{
 	"exec.inline_code_network_and_exec":           true,
 	"source_control.clone_then_run_or_adhoc_push": true,
 	// Non-shell tool and command rules (s7/nonshell): selected by the toolshape and actionfacts proofs, regex inert.
+	"CMD-ACCOUNT-CREATE":          true,
 	"CMD-GIT-SHOW-SECRET":         true,
+	"CMD-HOST-POWER":              true,
 	"CMD-PERSIST-SYSTEM-SCHEDULE": true,
 	"CMD-PRIV-PATH-HIJACK":        true,
 	"CMD-PRIV-SETUID":             true,

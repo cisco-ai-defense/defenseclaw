@@ -182,9 +182,26 @@ command_rules:
   - {id: CMD-SECRET-LOOKUP, program: [vault], all_argv: [token, lookup]}
   - {id: CMD-SECRET-LOOKUP, program: [aws], any_argv: [create-access-key, get-access-key]}
   - {id: CMD-GIT-SHOW-SECRET, program: [git], all_argv: [show], colon_path_re: "(?i)(^|/)([.]env([.][a-z0-9_-]+)?|id_(rsa|ed25519|ecdsa|dsa)|[.](netrc|npmrc|pypirc|pgpass)|credentials([.](json|ya?ml|xml|ini|toml))?|secrets?[.](json|ya?ml|toml|env|ini|enc)|[^/]*[.](pem|key|p12|pfx|jks|keystore))$"}
+  # A local account created, or its password set from a script: persistence the way an authorized key is (an agent session has no reason to
+  # make an account; usermod -aG and userdel stay with the privileged-group rule and are not here).
+  - {id: CMD-ACCOUNT-CREATE, program: [useradd, adduser, newusers, chpasswd]}
+  - {id: CMD-ACCOUNT-CREATE, program: [usermod], any_argv: ["-p", "--password"]}
+  - {id: CMD-ACCOUNT-CREATE, program: [passwd], any_argv: ["--stdin"]}
+  - {id: CMD-ACCOUNT-CREATE, program: [dscl], any_argv: ["-create", "-passwd"]}
+  - {id: CMD-ACCOUNT-CREATE, program: [sysadminctl], any_argv: ["-addUser", "-adduser", "-resetPasswordFor"]}
+  - {id: CMD-ACCOUNT-CREATE, program: [net, net1, net.exe], all_argv: [user], any_argv: ["/add", "/ADD", "/Add"]}
+  - {id: CMD-ACCOUNT-CREATE, program: [new-localuser, new-aduser]}
+  # The host taken down or restarted from a call: the impact of a shutdown or reboot (T1529).
+  - {id: CMD-HOST-POWER, program: [shutdown, shutdown.exe, poweroff, halt, reboot, restart-computer, stop-computer]}
+  - {id: CMD-HOST-POWER, program: [systemctl], any_argv: [poweroff, reboot, halt, kexec]}
+  - {id: CMD-HOST-POWER, program: [init, telinit], any_argv: ["0", "6"]}
+  # The shell history switched off for the session (the pack's history rule already reads history -c and unset HISTFILE): the settings that
+  # keep no history. HISTCONTROL is left out (ignoreboth is an everyday setting).
+  - {id: integrity.history_tamper, program: [export, declare, typeset, readonly], any_argv: ["HISTSIZE=0", "HISTFILESIZE=0", "HISTFILE=/dev/null", "HISTFILE="]}
+  - {id: integrity.history_tamper, program: [set], all_argv: ["+o", "history"]}
   - {id: CMD-PRIV-SETUID, program: [chmod], any_argv: ["u+s", "g+s", "ug+s", "a+s", "+s", "u=rwxs", "4755", "6755", "2755", "4750", "4711", "4700", "4777", "4555"]}
 # Rules on the text of a shell call (a shape the parsed facts do not carry).
 text_rules:
   - {id: CMD-PRIV-PATH-HIJACK, re: "(?i)(^|[;&|][[:space:]]*)PATH=(/tmp|/var/tmp|/dev/shm)[^[:space:]:]*:[$][{]?PATH[}]?[[:space:]]+(sudo|pkexec|su|doas)([[:space:]]|$)"}
 # A shell text without one of these words is not parsed again for the rules above.
-shell_triggers: ["path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".git-credentials", ".netrc", "_netrc", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron", ".config/systemd", ".config/autostart", "launchagents", ".git/config", "/.git", "cd .git", "pushd .git"]
+shell_triggers: ["useradd", "adduser", "newusers", "chpasswd", "usermod", "--stdin", "dscl", "sysadminctl", "/add", "localuser", "aduser", "shutdown", "poweroff", "halt", "reboot", "restart-computer", "stop-computer", "init 0", "init 6", "telinit", "histsize=0", "histfilesize=0", "histfile=", "+o history", "path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".git-credentials", ".netrc", "_netrc", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron", ".config/systemd", ".config/autostart", "launchagents", ".git/config", "/.git", "cd .git", "pushd .git"]

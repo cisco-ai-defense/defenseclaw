@@ -1043,3 +1043,49 @@ func TestPathListInOneString(t *testing.T) {
 		t.Fatalf("over the items bound: truncated=%v, %d paths", m.Truncated, len(paths(m)))
 	}
 }
+
+// The account, host-power and history rows read the program and its words, in
+// the POSIX and the Windows spellings (the program name arrives lower-cased).
+func TestAccountPowerAndHistoryCommandRules(t *testing.T) {
+	for _, tc := range []struct {
+		program string
+		argv    []string
+		want    string
+	}{
+		{"useradd", []string{"useradd", "evil"}, "CMD-ACCOUNT-CREATE"},
+		{"chpasswd", []string{"chpasswd"}, "CMD-ACCOUNT-CREATE"},
+		{"usermod", []string{"usermod", "-p", "x", "bob"}, "CMD-ACCOUNT-CREATE"},
+		{"dscl", []string{"dscl", ".", "-create", "/Users/evil"}, "CMD-ACCOUNT-CREATE"},
+		{"net", []string{"net", "user", "evil", "pw", "/add"}, "CMD-ACCOUNT-CREATE"},
+		{"net1", []string{"net1", "user", "evil", "pw", "/ADD"}, "CMD-ACCOUNT-CREATE"},
+		{"new-localuser", []string{"New-LocalUser", "-Name", "evil"}, "CMD-ACCOUNT-CREATE"},
+		{"shutdown", []string{"shutdown", "/r", "/t", "0"}, "CMD-HOST-POWER"},
+		{"shutdown.exe", []string{"shutdown.exe", "/s"}, "CMD-HOST-POWER"},
+		{"restart-computer", []string{"Restart-Computer", "-Force"}, "CMD-HOST-POWER"},
+		{"stop-computer", []string{"Stop-Computer"}, "CMD-HOST-POWER"},
+		{"systemctl", []string{"systemctl", "poweroff"}, "CMD-HOST-POWER"},
+		{"init", []string{"init", "0"}, "CMD-HOST-POWER"},
+		{"export", []string{"export", "HISTSIZE=0"}, "integrity.history_tamper"},
+		{"set", []string{"set", "+o", "history"}, "integrity.history_tamper"},
+	} {
+		if got := CommandRules(tc.program, tc.argv); !slices.Contains(got, tc.want) {
+			t.Errorf("%v: rules %v, want %s", tc.argv, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		program string
+		argv    []string
+	}{
+		{"usermod", []string{"usermod", "-aG", "adm", "bob"}},
+		{"net", []string{"net", "user"}},
+		{"systemctl", []string{"systemctl", "status", "ssh"}},
+		{"init", []string{"init", "--help"}},
+		{"export", []string{"export", "HISTSIZE=1000"}},
+		{"export", []string{"export", "HISTCONTROL=ignoreboth"}},
+		{"set", []string{"set", "-e"}},
+	} {
+		if got := CommandRules(tc.program, tc.argv); len(got) != 0 {
+			t.Errorf("%v: rules %v, want none", tc.argv, got)
+		}
+	}
+}
