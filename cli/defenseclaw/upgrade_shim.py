@@ -81,6 +81,11 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 # Every key the schema has and the previous release's schema lacks is listed
 # (test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade); 1.0.9 refuses
 # each 1.0.10 key below, at gateway start and on every config write.
+# A key inside a list item or a map value is named with [] (every item of
+# the list) or * (every value of the map), for example routing.models[].bedrock
+# and guardrail.profiles.*.routing; the set-aside names each concrete key
+# (routing.models[0].bedrock) and the name of the item it came from, so
+# migrate puts it back only on that item (rel-1-0-10:GAP-0644).
 NEWER_CONFIG_KEYS = (
     ("openshell.trusted_ca_bundle", (1, 0, 3)),
     ("guardrail.internal_domains", (1, 0, 6)),
@@ -92,7 +97,11 @@ NEWER_CONFIG_KEYS = (
     ("guardrail.effects_rules_tier", (1, 0, 10)),
     ("decision_model.block_risk_score", (1, 0, 10)),
     ("decision_model.escalate_rule_flagged", (1, 0, 10)),
+    ("decision_model.flow_guard", (1, 0, 10)),
+    ("decision_model.history_tool_results", (1, 0, 10)),
+    ("decision_model.history_turns", (1, 0, 10)),
     ("decision_model.protocol", (1, 0, 10)),
+    ("guardrail.profiles.*.routing", (1, 0, 10)),
     ("observability.local.keep_rejected_records", (1, 0, 10)),
     ("observability.local.rejected_records_max_rows", (1, 0, 10)),
     ("observability.pricing", (1, 0, 10)),
@@ -103,13 +112,17 @@ NEWER_CONFIG_KEYS = (
     ("routing.classifier", (1, 0, 10)),
     ("routing.default_alias", (1, 0, 10)),
     ("routing.min_confidence", (1, 0, 10)),
+    ("routing.models[].apis", (1, 0, 10)),
+    ("routing.models[].bedrock", (1, 0, 10)),
+    ("routing.models[].credential", (1, 0, 10)),
     ("routing.on_classifier_error", (1, 0, 10)),
     ("routing.route_only", (1, 0, 10)),
     ("routing.sensitive", (1, 0, 10)),
     ("routing.systemone", (1, 0, 10)),
 )
 # Where a downgrade keeps the keys it set aside, in the data folder:
-# {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
+# {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value},
+#  "items": {"<list item key>": "<its name>"}} (items: keys inside a list item).
 SET_ASIDE_FILE = "config-set-aside.json"
 _TIMEOUT = 30
 
@@ -574,6 +587,82 @@ def _active_config_path() -> str:
     return os.path.expanduser(override) if override else os.path.join(_data_home(), "config.yaml")
 
 
+# Every item of a list ([]) in a NEWER_CONFIG_KEYS entry; * is every value of a map.
+_EVERY_ITEM = None
+
+
+def _path_segments(path: str) -> list[str | int | None]:
+    """``a.b[0].c`` as ``["a", "b", 0, "c"]``; ``[]`` is ``_EVERY_ITEM``."""
+
+    segments: list[str | int | None] = []
+    for part in path.split("."):
+        name, bracket, rest = part.partition("[")
+        if name:
+            segments.append(name)
+        while bracket:
+            index, _, after = rest.partition("]")
+            segments.append(int(index) if index.isdigit() else _EVERY_ITEM)
+            _, bracket, rest = after.partition("[")
+    return segments
+
+
+def config_value(raw: object, path: str) -> object:
+    """The value at a concrete key (``routing.models[0].bedrock``) of a loaded config.yaml, or None."""
+
+    node = raw
+    for segment in _path_segments(path):
+        if isinstance(segment, int):
+            node = node[segment] if isinstance(node, list) and segment < len(node) else None
+        else:
+            node = node.get(segment) if isinstance(node, dict) else None
+    return node
+
+
+def newer_config_key(path: str) -> tuple[str, tuple[int, int, int]] | None:
+    """The NEWER_CONFIG_KEYS entry a concrete key is, or None."""
+
+    concrete = _path_segments(path)
+    for pattern, since in NEWER_CONFIG_KEYS:
+        segments = _path_segments(pattern)
+        if len(segments) == len(concrete) and all(
+            (want is _EVERY_ITEM and isinstance(got, int))
+            or (want == "*" and isinstance(got, str))
+            or (isinstance(want, str) and want != "*" and want == got)
+            for want, got in zip(segments, concrete)
+        ):
+            return pattern, since
+    return None
+
+
+def _newer_key_values(raw: object, pattern: str) -> tuple[dict[str, object], dict[str, str]]:
+    """The concrete keys of ``raw`` a NEWER_CONFIG_KEYS entry names, set to a value, and the name of
+    every list item on the way to one (so it can be put back on the same item)."""
+
+    found: dict[str, object] = {}
+    items: dict[str, str] = {}
+
+    def walk(node: object, segments: list[str | int | None], path: str, names: dict[str, str]) -> None:
+        if not segments:
+            if node not in (None, ""):
+                found[path] = node
+                items.update(names)
+            return
+        head, rest = segments[0], segments[1:]
+        if head is _EVERY_ITEM:
+            for index, item in enumerate(node if isinstance(node, list) else []):
+                key = f"{path}[{index}]"
+                name = item.get("name") if isinstance(item, dict) else None
+                walk(item, rest, key, {**names, key: name} if isinstance(name, str) else names)
+        elif head == "*":
+            for name, value in dict(node).items() if isinstance(node, dict) else ():
+                walk(value, rest, f"{path}.{name}", names)
+        elif isinstance(node, dict):
+            walk(node.get(head), rest, f"{path}.{head}" if path else str(head), names)
+
+    walk(raw, _path_segments(pattern), "", {})
+    return found, items
+
+
 def _set_aside_newer_keys(version: str) -> None:
     """Take the keys DefenseClaw ``version`` does not have out of config.yaml.
 
@@ -594,14 +683,13 @@ def _set_aside_newer_keys(version: str) -> None:
     except Exception:  # noqa: BLE001 - no config or one that does not parse: the installer's check names it
         return
     found: dict[str, object] = {}
-    for dotted, since in NEWER_CONFIG_KEYS:
+    items: dict[str, str] = {}
+    for pattern, since in NEWER_CONFIG_KEYS:
         if target >= since:
             continue
-        node: object = raw
-        for part in dotted.split("."):
-            node = node.get(part) if isinstance(node, dict) else None
-        if node not in (None, ""):
-            found[dotted] = node
+        values, names = _newer_key_values(raw, pattern)
+        found.update(values)
+        items.update(names)
     if not found:
         return
     names = ", ".join(found)
@@ -615,18 +703,26 @@ def _set_aside_newer_keys(version: str) -> None:
     except Exception as exc:  # noqa: BLE001 - a broken install: say what to remove by hand
         raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
     previous: bytes | None = None
+    kept: object = None
+    kept_items: object = None
     try:
         with open(held, "rb") as stream:
             previous = stream.read()
-        kept = json.loads(previous.decode("utf-8")).get("keys")
+        document = json.loads(previous.decode("utf-8"))
+        kept, kept_items = document.get("keys"), document.get("items")
     except FileNotFoundError:
-        kept = None
+        pass
     except (OSError, ValueError, AttributeError):
-        kept = None
+        kept = kept_items = None
     keys = dict(kept) if isinstance(kept, dict) else {}
     keys.update(found)
+    record: dict[str, object] = {"version": 1, "for": version, "keys": keys}
+    named = dict(kept_items) if isinstance(kept_items, dict) else {}
+    named.update(items)
+    if named:
+        record["items"] = named
     try:
-        _write_private_json(held, {"version": 1, "for": version, "keys": keys})
+        _write_private_json(held, record)
     except OSError as exc:
         raise ShimError(f"{stop} (could not write {held}: {exc})") from None
     try:

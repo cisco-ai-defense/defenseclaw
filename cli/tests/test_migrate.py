@@ -928,6 +928,74 @@ def test_set_aside_keys_keep_a_value_set_again_and_a_later_release_key(data_dir:
     assert json.loads(record.read_text(encoding="utf-8"))["keys"] == {"openshell.future_key": True}
 
 
+_NESTED_SET_ASIDE = {
+    "version": 1,
+    "for": "1.0.9",
+    "keys": {
+        "routing.models[1].bedrock": {"region": "us-east-1"},
+        "routing.models[1].apis": ["converse"],
+        "guardrail.profiles.dev.routing": {"allowed_aliases": ["fast"]},
+    },
+    "items": {"routing.models[1]": "deep"},
+}
+_NESTED_AFTER_DOWNGRADE = """config_version: 9
+routing:
+  models:
+    - name: fast
+      provider: openai
+      model: gpt-5-mini
+    - name: deep
+      provider: bedrock
+      model: anthropic.claude-sonnet-5
+guardrail:
+  profiles:
+    dev:
+      mode: observe
+"""
+
+
+def test_set_aside_keys_inside_a_model_and_a_profile_are_put_back(data_dir: Path) -> None:
+    """rel-1-0-10:GAP-0644: keys inside a list item or a map value go back onto the same item."""
+    import yaml
+
+    config = _write_config(data_dir, _NESTED_AFTER_DOWNGRADE)
+    record = data_dir / "config-set-aside.json"
+    record.write_text(json.dumps(_NESTED_SET_ASIDE), encoding="utf-8")
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    restored = yaml.safe_load(config.read_text(encoding="utf-8"))
+    deep = restored["routing"]["models"][1]
+    assert deep["name"] == "deep" and deep["bedrock"] == {"region": "us-east-1"} and deep["apis"] == ["converse"]
+    assert "bedrock" not in restored["routing"]["models"][0]
+    assert restored["guardrail"]["profiles"]["dev"]["routing"] == {"allowed_aliases": ["fast"]}
+    assert not record.exists()
+
+
+def test_set_aside_model_keys_never_go_onto_another_model(data_dir: Path, capsys: pytest.CaptureFixture) -> None:
+    """The models were reordered and the profile removed on the older release: nothing is put on the wrong item."""
+    import yaml
+
+    reordered = _NESTED_AFTER_DOWNGRADE.replace(
+        "    - name: fast\n      provider: openai\n      model: gpt-5-mini\n    - name: deep\n      provider: bedrock\n      model: anthropic.claude-sonnet-5\n",
+        "    - name: deep\n      provider: bedrock\n      model: anthropic.claude-sonnet-5\n    - name: fast\n      provider: openai\n      model: gpt-5-mini\n",
+    ).replace("    dev:\n      mode: observe\n", "    ops:\n      mode: action\n")
+    config = _write_config(data_dir, reordered)
+    (data_dir / "config-set-aside.json").write_text(json.dumps(_NESTED_SET_ASIDE), encoding="utf-8")
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    restored = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert all("bedrock" not in model and "apis" not in model for model in restored["routing"]["models"])
+    assert restored["guardrail"]["profiles"] == {"ops": {"mode": "action"}}
+    captured = capsys.readouterr()
+    assert "bedrock of the routing model named deep" in captured.out + captured.err
+    # Nothing is lost: what could not go back stays in the record, with the model it belongs to.
+    kept = json.loads((data_dir / "config-set-aside.json").read_text(encoding="utf-8"))
+    assert kept["keys"] == {key: value for key, value in _NESTED_SET_ASIDE["keys"].items()}
+    assert kept["items"] == {"routing.models[1]": "deep"}
+
+
 def test_set_aside_key_that_cannot_be_put_back_is_named_with_its_command(
     data_dir: Path, capsys: pytest.CaptureFixture
 ) -> None:

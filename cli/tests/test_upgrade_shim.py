@@ -1513,6 +1513,72 @@ def test_downgrade_sets_aside_the_keys_the_older_release_lacks(
         assert _set_aside(home).stat().st_mode & 0o777 == 0o600
 
 
+# rel-1-0-10:GAP-0644: 1.0.9 refuses a 1.0.10 key inside a routing model or a
+# profile too, so a downgrade sets aside each one (with the model's name).
+_NESTED_CONFIG = """config_version: 9
+routing:
+  models:
+    - name: fast
+      provider: openai
+      model: gpt-5-mini
+    - name: deep
+      provider: bedrock
+      model: anthropic.claude-sonnet-5
+      apis: [converse]
+      bedrock:
+        region: us-east-1
+      credential: ROUTE_KEY
+guardrail:
+  profiles:
+    dev:
+      mode: observe
+      routing:
+        allowed_aliases: [fast]
+    ops:
+      mode: action
+"""
+
+
+def test_downgrade_to_1_0_9_sets_aside_keys_inside_models_and_profiles(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_NESTED_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    assert len(execs) == 1
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert config["routing"]["models"] == [
+        {"name": "fast", "provider": "openai", "model": "gpt-5-mini"},
+        {"name": "deep", "provider": "bedrock", "model": "anthropic.claude-sonnet-5"},
+    ]
+    assert config["guardrail"]["profiles"] == {"dev": {"mode": "observe"}, "ops": {"mode": "action"}}
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record == {
+        "version": 1,
+        "for": "1.0.9",
+        "keys": {
+            "routing.models[1].apis": ["converse"],
+            "routing.models[1].bedrock": {"region": "us-east-1"},
+            "routing.models[1].credential": "ROUTE_KEY",
+            "guardrail.profiles.dev.routing": {"allowed_aliases": ["fast"]},
+        },
+        "items": {"routing.models[1]": "deep"},
+    }
+
+
+def test_a_newer_key_pattern_names_concrete_keys_only() -> None:
+    assert upgrade_shim.newer_config_key("routing.models[3].bedrock") == ("routing.models[].bedrock", (1, 0, 10))
+    assert upgrade_shim.newer_config_key("guardrail.profiles.dev.routing") == ("guardrail.profiles.*.routing", (1, 0, 10))
+    assert upgrade_shim.newer_config_key("routing.models[].bedrock") is None
+    assert upgrade_shim.newer_config_key("routing.models[0].name") is None
+    assert upgrade_shim.newer_config_key("guardrail.secret_flow") == ("guardrail.secret_flow", (1, 0, 10))
+
+
 # guardrail.chains (1.0.6, root-scope chains, issue #1391): 1.0.5 and 1.0.4
 # refuse the block itself, so a downgrade sets it aside whole.
 @pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
@@ -1688,7 +1754,9 @@ _CONFIG_KEYS_1_0_9 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.9
 
 
 def _schema_key_paths(schema: dict) -> set[str]:
-    """Every dotted key the v8 config schema names (properties, through $ref and *Of)."""
+    """Every key the v8 config schema names (properties, through $ref and *Of), also inside list
+    items (``routing.models[].bedrock``) and map values (``guardrail.profiles.*.routing``):
+    1.0.9 refuses a 1.0.10 key there too (rel-1-0-10:GAP-0644)."""
 
     defs = schema.get("$defs", {})
     out: set[str] = set()
@@ -1708,6 +1776,11 @@ def _schema_key_paths(schema: dict) -> set[str]:
             dotted = f"{prefix}.{key}" if prefix else key
             out.add(dotted)
             walk(child, dotted, refs)
+        if isinstance(node.get("items"), dict):
+            walk(node["items"], f"{prefix}[]", refs)
+        for value in [node.get("additionalProperties"), *(node.get("patternProperties") or {}).values()]:
+            if isinstance(value, dict):
+                walk(value, f"{prefix}.*", refs)
 
     walk(schema, "", ())
     return out
@@ -1761,6 +1834,10 @@ def test_the_downgrade_guard_fails_on_a_key_the_list_does_not_cover() -> None:
     new = set(old) | {"guardrail.brand_new_switch", "guardrail.secret_flow.sink_action.default"}
     assert _missing_from_newer_config_keys(new, old) == ["guardrail.brand_new_switch"]
     assert _missing_from_newer_config_keys(old, old) == []
+    # It sees keys inside list items and map values too (rel-1-0-10:GAP-0644).
+    assert "routing.models[].name" in old and "guardrail.profiles.*.block_at" in old
+    nested = set(old) | {"routing.models[].brand_new", "guardrail.profiles.*.brand_new", "routing.models[].bedrock.region"}
+    assert _missing_from_newer_config_keys(nested, old) == ["guardrail.profiles.*.brand_new", "routing.models[].brand_new"]
 
 
 @pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])

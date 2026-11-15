@@ -4069,7 +4069,7 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
     """
 
     from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply, plain_error
-    from defenseclaw.upgrade_shim import NEWER_CONFIG_KEYS, SET_ASIDE_FILE
+    from defenseclaw.upgrade_shim import SET_ASIDE_FILE, config_value, newer_config_key
 
     path = os.path.join(data_dir, SET_ASIDE_FILE)
     try:
@@ -4084,17 +4084,32 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
     if not isinstance(keys, dict):
         ux.warn(f"{path} lists no keys; remove it")
         return
-    known = {key for key, _since in NEWER_CONFIG_KEYS}
+    items = record.get("items")
+    items = items if isinstance(items, dict) else {}
     current = yaml.safe_load(_read_config_text(config_path) or "") or {}
     put: dict[str, object] = {}
+    moved: dict[str, object] = {}
     for key, value in keys.items():
-        if key not in known:
+        entry = newer_config_key(key)
+        if entry is None or config_value(current, key) not in (None, ""):
             continue
-        node: object = current
-        for part in key.split("."):
-            node = node.get(part) if isinstance(node, dict) else None
-        if node in (None, ""):
-            put[key] = value
+        if entry[0] != key and not _set_aside_owner_is_there(current, key, items):
+            # A key inside a list item or a map value (rel-1-0-10:GAP-0644) goes back only onto
+            # the item it came from: same place, same name. Never onto another model.
+            moved[key] = value
+            continue
+        put[key] = value
+    if moved:
+        # Kept in the record (below), named by the item they belonged to, never by an index that moved.
+        for key, value in moved.items():
+            owner = next((name for item, name in items.items() if key.startswith(item + ".")), "")
+            where = f"the routing model named {owner}" if owner else "its block"
+            setting = key.rsplit(".", 1)[-1]
+            ux.warn(
+                f"Did not put back {setting} of {where} (set aside by the downgrade as {key}): it is gone or "
+                f"moved since then. Its value is kept in {path}: {json.dumps(value, sort_keys=True)}; add it "
+                f"to {where} in config.yaml, then run 'defenseclaw migrate' again or remove that entry"
+            )
     if put:
         try:
             apply(
@@ -4108,16 +4123,38 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
             ux.warn(f"Could not put back {', '.join(put)} ({plain_error(exc)}); set it again with: {commands}")
             return
         ux.ok(f"Put back {', '.join(put)}, set aside by the downgrade", indent="    ")
-    later = {key: value for key, value in keys.items() if key not in known}
+    later = {key: value for key, value in keys.items() if newer_config_key(key) is None or key in moved}
     try:
         if later:
             from defenseclaw.upgrade_shim import _write_private_json
 
-            _write_private_json(path, {**record, "keys": later})
+            kept = {key: value for key, value in record.items() if key != "items"}
+            kept["keys"] = later
+            later_items = {item: name for item, name in items.items() if any(k.startswith(item + ".") for k in later)}
+            if later_items:
+                kept["items"] = later_items
+            _write_private_json(path, kept)
         else:
             os.remove(path)
     except OSError as exc:
         ux.warn(f"Could not update {path} ({exc})")
+
+
+def _set_aside_owner_is_there(current: object, key: str, items: dict) -> bool:
+    """A set-aside key inside a list item or a map value can go back: its parent is still a
+    mapping, and every list item on the way has the name it had at the downgrade."""
+
+    from defenseclaw.upgrade_shim import config_value
+
+    parent = key.rsplit(".", 1)[0]
+    if not isinstance(config_value(current, parent), dict):
+        return False
+    for item, name in items.items():
+        if key.startswith(item + "."):
+            node = config_value(current, item)
+            if not isinstance(node, dict) or node.get("name") != name:
+                return False
+    return True
 
 
 def _seal_windows_hook_credentials(data_dir: str) -> None:
