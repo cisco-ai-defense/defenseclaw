@@ -493,6 +493,13 @@ func applyWindowsEnterpriseHookImage(result *enterprisestatus.Result) {
 		// An administrator retired the launch folders before a rollback to
 		// an older release: expected, and not a drift to repair.
 		result.AddWarning("hook_image_retired", image.Problem)
+		// A profile the administrator skipped (--skip-profile) stays
+		// listed until none of its configs names a launch folder.
+		if marker, err := os.ReadFile(filepath.Join(winpath.EnterpriseHookImagesRoot(bin), winpath.EnterpriseHookImagesRetiredMarker)); err == nil {
+			for _, line := range windowsHookImageSkippedProfilesNotRetired(marker, bin, readWindowsHookImageConfigFile) {
+				result.AddWarning("hook_image_profile_not_retired", line)
+			}
+		}
 		return
 	}
 	if problem := windowsHookImageVerifyProblem(image); problem != "" {

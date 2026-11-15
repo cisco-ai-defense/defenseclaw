@@ -47,6 +47,9 @@ type windowsHookImageConfigFile struct {
 	// ("not_admin_owned: <element>"); it is shown with a skipped line.
 	// Home is then ProgramData: the file is opened from ProgramData's handle.
 	Note string
+	// SID is the enrolled account an account file in its home belongs to
+	// (the profile `hook-image retire --skip-profile` names); "" otherwise.
+	SID string
 }
 
 // line is the Incomplete or Skipped line of file for err.
@@ -237,6 +240,9 @@ type windowsHookImageConfigScan struct {
 	Named map[string][]string
 	// UserFiles are the files of Named that are an account's own.
 	UserFiles map[string]bool
+	// FileSIDs maps an account file of Named (lower case) to the enrolled
+	// account's SID, when the file is in that account's home.
+	FileSIDs map[string]string
 	// Incomplete lists "<file>: <error>" for each machine file (written by
 	// DefenseClaw as SYSTEM) that exists but could not be read. A scan with
 	// any entry here proves nothing about the folders: prune removes none
@@ -393,7 +399,7 @@ func windowsHookImageScanSkipsName(path string) bool {
 // cannot be read is skipped (see windowsHookImageConfigScan). read gets the
 // whole entry: an account file is read only below its Home.
 func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin string, read func(windowsHookImageConfigFile) ([]byte, error)) windowsHookImageConfigScan {
-	scan := windowsHookImageConfigScan{Named: map[string][]string{}, UserFiles: map[string]bool{}}
+	scan := windowsHookImageConfigScan{Named: map[string][]string{}, UserFiles: map[string]bool{}, FileSIDs: map[string]string{}}
 	seen := map[string]bool{}
 	for _, file := range files {
 		key := strings.ToLower(strings.TrimSpace(file.Path))
@@ -415,9 +421,17 @@ func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin str
 			continue
 		}
 		for _, folder := range windowsHookImageFoldersNamedIn(body, bin) {
+			if folder == windowsHookImageUnknownFolder && !file.User {
+				// A machine file that may name a folder: nothing is known.
+				scan.Incomplete = append(scan.Incomplete, file.line(errWindowsHookImageUndecodable))
+				continue
+			}
 			scan.Named[folder] = append(scan.Named[folder], file.Path)
 			if file.User {
 				scan.UserFiles[key] = true
+				if file.SID != "" {
+					scan.FileSIDs[key] = file.SID
+				}
 			}
 		}
 	}
@@ -439,7 +453,8 @@ func windowsHookImageFoldersNamedIn(body []byte, bin string) []string {
 	// Copilot file that named a launch folder, and the 1.0.9 guardian failed
 	// that account (rel-1-0-10 GAP-0794); prune could remove such a folder.
 	raw := string(body)
-	for _, script := range windowsHookImageEncodedScripts(raw, windowsHookImageEncodedScriptDepth) {
+	scripts, undecodable := windowsHookImageEncodedScripts(raw, windowsHookImageEncodedScriptDepth)
+	for _, script := range scripts {
 		raw += "\n" + script
 	}
 	text := strings.ReplaceAll(strings.ToLower(raw), "/", `\`)
@@ -482,17 +497,47 @@ func windowsHookImageFoldersNamedIn(body []byte, bin string) []string {
 			found[location.Digest] = true
 		}
 	}
-	out := make([]string, 0, len(found))
+	out := make([]string, 0, len(found)+1)
 	for digest := range found {
 		out = append(out, digest)
 	}
 	sort.Strings(out)
+	if undecodable {
+		// A script that cannot be read may name any folder (GAP-0794
+		// review F4): unknown keeps retire pending; prune keeps what it
+		// keeps for an unreadable file.
+		out = append(out, windowsHookImageUnknownFolder)
+	}
 	return out
 }
 
-// windowsHookImageEncodedArgument is a PowerShell -EncodedCommand argument
-// (any abbreviation PowerShell accepts, from -e on) and its base64 value.
-var windowsHookImageEncodedArgument = lazyregexp.New(`(?i)(?:^|[\s"'])-(e[a-z]*)\s+([A-Za-z0-9+/]{4,}={0,2})`)
+// windowsHookImageEncodedArgument is a command-line switch; one followed by
+// a blank is read, and its value is the word after it (windowsHookImageSwitchValue). Only
+// a switch PowerShell reads as -EncodedCommand counts
+// (windowsHookImageEncodedSwitch), and only on a line that starts
+// powershell or pwsh.
+var windowsHookImageEncodedArgument = lazyregexp.New(`(?:^|[\s"'])(?:--?|/)([A-Za-z]+)`)
+
+// windowsHookImageSwitchValue is the word at text[at:] after blanks: up to
+// a blank, a quote, a comma or a semicolon.
+func windowsHookImageSwitchValue(text string, at int) string {
+	for at < len(text) && (text[at] == ' ' || text[at] == '\t') {
+		at++
+	}
+	end := at
+	for end < len(text) && !strings.ContainsRune(" \t\r\n\"',;", rune(text[end])) {
+		end++
+	}
+	return text[at:end]
+}
+
+// windowsHookImageUnknownFolder stands for the folders a file may name in a
+// PowerShell script that could not be decoded (too large, not base64 of
+// UTF-16LE): an account file holds retire back with it, a machine file
+// makes the scan incomplete.
+const windowsHookImageUnknownFolder = "unknown"
+
+var errWindowsHookImageUndecodable = errors.New("holds a PowerShell -EncodedCommand value that could not be decoded, so it is not known which hook it starts")
 
 // windowsHookImageEncodedScriptLimit bounds one base64 value the scan
 // decodes; windowsHookImageEncodedScriptDepth how deep a decoded script's
@@ -502,20 +547,49 @@ const (
 	windowsHookImageEncodedScriptDepth = 2
 )
 
-// windowsHookImageEncodedScripts returns the scripts (base64 of UTF-16LE)
-// of every -EncodedCommand argument in text and, to depth, in those scripts.
-// A value that is not such a script is skipped.
-func windowsHookImageEncodedScripts(text string, depth int) []string {
-	if depth <= 0 {
-		return nil
+// windowsHookImageEncodedSwitch reports a switch name PowerShell (5.1 and
+// 7) binds to -EncodedCommand: -e, -ec and every prefix of encodedcommand
+// from -e on, with one or two dashes or a slash.
+func windowsHookImageEncodedSwitch(name string) bool {
+	name = strings.ToLower(name)
+	return name == "ec" || strings.HasPrefix("encodedcommand", name)
+}
+
+// windowsHookImagePowerShellLine reports whether the line of text that holds
+// offset starts a PowerShell (powershell or pwsh) command before offset.
+func windowsHookImagePowerShellLine(text string, offset int) bool {
+	start := strings.LastIndexAny(text[:offset], "\r\n") + 1
+	if offset-start > 4096 {
+		start = offset - 4096
 	}
-	var scripts []string
-	for _, match := range windowsHookImageEncodedArgument.FindAllStringSubmatch(text, -1) {
-		if !strings.HasPrefix("encodedcommand", strings.ToLower(match[1])) || len(match[2]) > windowsHookImageEncodedScriptLimit {
+	line := strings.ToLower(text[start:offset])
+	return strings.Contains(line, "powershell") || strings.Contains(line, "pwsh")
+}
+
+// windowsHookImageEncodedScripts returns the scripts (base64 of UTF-16LE)
+// of every -EncodedCommand argument of a PowerShell command line in text
+// and, to depth, in those scripts, and whether any such value could not be
+// decoded.
+func windowsHookImageEncodedScripts(text string, depth int) (scripts []string, undecodable bool) {
+	if depth <= 0 {
+		return nil, false
+	}
+	for _, match := range windowsHookImageEncodedArgument.FindAllStringSubmatchIndex(text, -1) {
+		name := text[match[2]:match[3]]
+		if match[3] >= len(text) || (text[match[3]] != ' ' && text[match[3]] != '\t') ||
+			!windowsHookImageEncodedSwitch(name) || !windowsHookImagePowerShellLine(text, match[2]) {
 			continue
 		}
-		decoded, err := base64.StdEncoding.DecodeString(match[2])
+		value := windowsHookImageSwitchValue(text, match[3])
+		// A JSON writer may escape the slash.
+		value = strings.ReplaceAll(value, `\/`, "/")
+		if len(value) > windowsHookImageEncodedScriptLimit {
+			undecodable = true
+			continue
+		}
+		decoded, err := base64.StdEncoding.DecodeString(value)
 		if err != nil || len(decoded)%2 != 0 {
+			undecodable = true
 			continue
 		}
 		units := make([]uint16, len(decoded)/2)
@@ -524,9 +598,11 @@ func windowsHookImageEncodedScripts(text string, depth int) []string {
 		}
 		script := string(utf16.Decode(units))
 		scripts = append(scripts, script)
-		scripts = append(scripts, windowsHookImageEncodedScripts(script, depth-1)...)
+		nested, unknown := windowsHookImageEncodedScripts(script, depth-1)
+		scripts = append(scripts, nested...)
+		undecodable = undecodable || unknown
 	}
-	return scripts
+	return scripts, undecodable
 }
 
 // windowsHookImagePathStart finds where the absolute path that ends at end
