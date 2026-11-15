@@ -80,7 +80,7 @@ func withRoute(opts enterprisehooks.InstallOptions, route *connector.RouteOnlySe
 }
 
 func TestRollbackTargetLacksRouteOnly(t *testing.T) {
-	for target, want := range map[string]bool{"1.0.9": true, "1.0.0": true, "0.8.10": true, "": true, "junk": true, "1.0.10": false, "1.0.11": false, "1.1.0": false, "2.0.0": false, "v1.0.9": true} {
+	for target, want := range map[string]bool{"1.0.9": true, "1.0.0": true, "0.8.10": true, "": true, "junk": true, "1.0.10": false, "1.0.11": false, "1.1.0": false, "2.0.0": false, "v1.0.9": true, "1.0.11+abc": false, "1.0.11~rc1": false, "1.0.10-rc.1": false, "1.0.9+abc": true} {
 		if got := rollbackTargetLacksRouteOnly(target); got != want {
 			t.Fatalf("%q: %v, want %v", target, got, want)
 		}

@@ -5,6 +5,8 @@ package actionfacts
 
 import (
 	"strings"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // The network role of a command, read from what the projection already
@@ -274,6 +276,14 @@ var senderFileExtensions = map[string]bool{
 	"bin": true, "exe": true, "dll": true, "so": true, "orig": true, "old": true, "swp": true,
 }
 
+// specialUseDomainSuffix are the top-level names RFC 2606, 6761 and 8375
+// reserve for tests, documentation, local networks and onion services: they
+// name hosts though they are not in the public suffix list.
+var specialUseDomainSuffix = map[string]bool{
+	"invalid": true, "example": true, "test": true, "localhost": true,
+	"local": true, "internal": true, "onion": true,
+}
+
 // bareHostnameOperand is a dotted DNS name (example.com) whose last label is
 // alphabetic and not a file extension.
 func bareHostnameOperand(word string) bool {
@@ -296,6 +306,11 @@ func bareHostnameOperand(word string) bool {
 	}
 	tld := labels[len(labels)-1]
 	if len(tld) < 2 || senderFileExtensions[tld] {
+		return false
+	}
+	// a DNS name ends in a registered top-level domain: mime.types, a.out and
+	// a version like v1.final are file names or words, not hosts
+	if _, icann := publicsuffix.PublicSuffix(strings.ToLower(word)); !icann && !specialUseDomainSuffix[tld] {
 		return false
 	}
 	for _, c := range tld {

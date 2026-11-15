@@ -207,9 +207,11 @@ func removeCodexRouteTable(raw string) string {
 		}
 		off += len(l)
 	}
-	head := strings.TrimRight(raw[:start], "\r\n")
-	if head != "" {
-		head += lineEnding(raw)
+	// Cut exactly the one blank line the render added; blank lines the user
+	// had before the block stay (GAP-0727: a trailing blank line was lost).
+	head := raw[:start]
+	if eol := lineEnding(raw); strings.HasSuffix(head, eol+eol) {
+		head = head[:len(head)-len(eol)]
 	}
 	return head + raw[end:]
 }

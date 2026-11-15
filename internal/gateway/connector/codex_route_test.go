@@ -27,6 +27,14 @@ func TestCodexRouteOnlyRoundTripIsByteExact(t *testing.T) {
 		"built-in openai":     "model = \"gpt-5\"\n\n[hooks]\nenabled = true\n",
 		"bedrock provider":    "# my config\nmodel = \"openai.gpt-oss\"\nmodel_provider = \"bedrock\" # Luna\n\n[model_providers.bedrock]\nname = \"Bedrock\"\nbase_url = \"https://bedrock-mantle.example/v1\"\nenv_key = \"AWS_BEARER_TOKEN_BEDROCK\"\nwire_api = \"responses\"\n",
 		"no trailing newline": "model = \"gpt-5\"",
+		// GAP-0727: blank lines at the end of the file, and around the
+		// last table, are the user's and must come back untouched.
+		"one trailing blank line":     "model = \"gpt-5\"\n\n[hooks]\nenabled = true\n\n",
+		"several trailing blank":      "model = \"gpt-5\"\n\n[hooks]\nenabled = true\n\n\n\n",
+		"blank lines around a table":  "model = \"gpt-5\"\n\n\n[hooks]\n\nenabled = true\n\n\n[tui]\ntheme = \"dark\"\n\n",
+		"blank line only after model": "model = \"gpt-5\"\n\n",
+		"blank spaces line at end":    "model = \"gpt-5\"\n  \n",
+		"trailing blank no final eol": "model = \"gpt-5\"\n\n[hooks]\nenabled = true\n\n  ",
 	} {
 		t.Run(name, func(t *testing.T) {
 			path, opts := codexRouteFixture(t, original)

@@ -215,7 +215,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 					Options: enterpriseHookWorkerOptionsFrom(enterprisehooks.InstallOptions{
 						ConnectorName: row.Connector, UserHome: account.Home, OwnerUID: account.UID, OwnerGID: account.GID,
 						DataDir:   strings.TrimSpace(target.DataDir),
-						RouteOnly: enterpriseHookRouteOnly(row.Connector, account.User, strconv.Itoa(account.UID), apiAddr),
+						RouteOnly: enterpriseHookVerifyRouteOnly(row.Connector, account.User, strconv.Itoa(account.UID), apiAddr),
 					}),
 				})
 			default:
@@ -255,7 +255,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 			HookCredentialIdentity: identity,
 			ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 			ManagedHookBinary:      standaloneManagedHookBinary(),
-			RouteOnly:              enterpriseHookRouteOnly(target.Connector, account.User, identity, apiAddr),
+			RouteOnly:              enterpriseHookVerifyRouteOnly(target.Connector, account.User, identity, apiAddr),
 		}
 		index := len(run.Rows)
 		run.Rows = append(run.Rows, row)

@@ -163,6 +163,8 @@ func (c compiledCondition) matches(in ClassifyInput) bool {
 			return in.HasImages
 		case "long_context":
 			return in.LongContext
+		case config.RoutingRequestToolLoop:
+			return in.ToolLoop
 		}
 	}
 	return false

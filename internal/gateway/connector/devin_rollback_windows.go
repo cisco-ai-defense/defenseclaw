@@ -46,7 +46,8 @@ func (c *hookOnlyConnector) RestoreHooksAfterRollback(opts SetupOpts) (int, erro
 // copy of a file before a rollback conversion. Managed installs are left
 // alone: they write the direct form, which no release changed.
 func (c *hookOnlyConnector) convertDevinConfigHookForms(opts SetupOpts, toEarlier bool, keepCopy func(dataDir, name string, data []byte) error) (int, error) {
-	if opts.ManagedEnterprise {
+	// 1.0.9 and later write the guarded start themselves.
+	if opts.ManagedEnterprise || (toEarlier && rollbackTargetOwns(opts.RollbackTargetVersion, releaseLauncherStartAnswer)) {
 		return 0, nil
 	}
 	launchers := append([]string{strings.TrimSpace(opts.HookExecutable)}, nativeHookBinaryOwnershipCandidates()...)

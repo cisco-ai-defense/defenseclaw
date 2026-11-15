@@ -20,9 +20,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
-// routerClassifierTextLimit bounds the text a classifier sees.
-const routerClassifierTextLimit = 8 * 1024
-
 // engineRouter is the production ModelRouter: the routing engine of the
 // config generation a request pinned, built once per generation, so routing
 // policy changes apply without a restart (DESIGN 8.2). Only the vLLM
@@ -37,7 +34,10 @@ type engineRouter struct {
 	// admin, when set (tests), is used for every generation instead of
 	// the routing.admin evaluator compiled per generation (adminFor).
 	admin engine.AdminEvaluator
-	// logger writes the audit rows of routing refusals (route-only).
+	// judge returns the shared guardrail judge (the sensitivity check of
+	// routing.sensitive.check: judge); logger writes the audit rows of
+	// routing refusals and of a check that fired or could not answer. Both are set once at start.
+	judge  func() *LLMJudge
 	logger *audit.Logger
 
 	mu sync.Mutex
@@ -63,6 +63,22 @@ func (r *engineRouter) SetAdminEvaluator(a engine.AdminEvaluator) {
 	defer r.mu.Unlock()
 	r.admin = a
 	r.cache = [2]*engineCacheEntry{}
+}
+
+// SetJudgeSource installs the source of the guardrail judge model used by
+// routing.sensitive.check judge. Engines built after the call use it.
+func (r *engineRouter) SetJudgeSource(f func() *LLMJudge) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.judge = f
+	r.cache = [2]*engineCacheEntry{}
+}
+
+// SetAuditLogger installs the audit logger of sensitivity-check rows.
+func (r *engineRouter) SetAuditLogger(l *audit.Logger) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logger = l
 }
 
 // engineFor returns the engine and config of the generation ctx pinned
@@ -96,12 +112,13 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 	} else {
 		var err error
 		eng, err = engine.New(cfg, engine.Options{
-			Classifier:     classifier,
-			Admin:          r.adminFor(cfg),
-			Managed:        cfg != nil && cfg.StandaloneEnterprise(),
-			Sticky:         r.sticky,
-			SensitiveMarks: r.marks,
-			CredentialOK:   func(b engine.Backend, req engine.Request) bool { return r.backendCredentialOK(cfg, b, req) },
+			Classifier:       classifier,
+			Admin:            r.adminFor(cfg),
+			Managed:          cfg != nil && cfg.StandaloneEnterprise(),
+			Sticky:           r.sticky,
+			SensitiveMarks:   r.marks,
+			SensitiveChecker: r.sensitiveCheckerFor(cfg),
+			CredentialOK:     func(b engine.Backend, req engine.Request) bool { return r.backendCredentialOK(cfg, b, req) },
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[routing] policy build failed, routing off for this generation: %v\n", err)
@@ -110,13 +127,6 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 	}
 	r.cache[1], r.cache[0] = r.cache[0], &engineCacheEntry{gen: gen, cfg: cfg, eng: eng}
 	return eng, cfg
-}
-
-// SetAuditLogger installs the audit logger of routing refusal rows.
-func (r *engineRouter) SetAuditLogger(l *audit.Logger) {
-	if r != nil {
-		r.logger = l
-	}
 }
 
 // Gate checks a forwarded exit against the admin verdict of the outcome
@@ -251,7 +261,11 @@ func (r *engineRouter) RouteDetailed(ctx context.Context, in *ModelRouterInput) 
 		out.Latency = time.Since(started)
 		return normalizeSemanticRouteOutcome(out)
 	}
-	d := eng.Decide(ctx, engineRequest(in))
+	req := engineRequest(in)
+	sensitiveRequestFields(&req, in, cfg)
+	routeContext(eng, in, &req)
+	d := eng.Decide(ctx, req)
+	r.noteSensitiveDecision(ctx, in, &d)
 	out.recordCaller = recordRoutingDecision(ctx, in, &d, cfg != nil && cfg.StandaloneEnterprise())
 	out.Route = &d
 	out.Latency = time.Since(started)
@@ -279,7 +293,9 @@ func mergeEngineFacts(o SemanticRouteOutcome, d *engine.Decision, recordCaller s
 }
 
 // engineRequest turns the proxy input into the engine request. The
-// classifier text is the newest user turn (never tool output), bounded.
+// classifier text is the newest user turn the user typed (never tool
+// output, system reminders or agent-injected text), bounded. With
+// routing.context on, routeContext replaces it from the same extractor.
 func engineRequest(in *ModelRouterInput) engine.Request {
 	req := engine.Request{
 		APIFamily: in.APIFamily, Connector: in.Connector, Listener: in.Listener, Severity: in.Severity,
@@ -296,8 +312,11 @@ func engineRequest(in *ModelRouterInput) engine.Request {
 	if req.Listener == "" {
 		req.Listener = engine.ListenerGuardrail
 	}
-	text := in.Text
-	size := len(text)
+	text := ""
+	if in.Text != "" {
+		text = routerUserText(in.Text)
+	}
+	size := len(in.Text)
 	for _, m := range in.Messages {
 		size += len(m.Content)
 		if !req.HasImages && bytes.Contains(m.RawContent, []byte("image")) {
@@ -308,16 +327,15 @@ func engineRequest(in *ModelRouterInput) engine.Request {
 	req.LongContext = size > 400_000
 	if n := len(in.Messages); n > 0 {
 		req.ToolTurn = in.ToolTurn || in.Messages[n-1].Role == "tool"
-		if text == "" {
-			for i := n - 1; i >= 0; i-- {
+		if in.Text == "" {
+			for i := n - 1; i >= 0 && text == ""; i-- {
 				if in.Messages[i].Role == "user" {
-					text = in.Messages[i].Content
-					break
+					text = routerMessageText(&in.Messages[i])
 				}
 			}
 		}
 	}
-	req.Text = truncateUTF8(text, routerClassifierTextLimit)
+	req.Text = truncateUTF8(text, engine.ClassifierTextLimit)
 	return req
 }
 
