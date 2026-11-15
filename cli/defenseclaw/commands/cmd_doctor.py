@@ -5121,7 +5121,12 @@ def _check_component_connector_compatibility(
 
 
 _DOCS_URL = venv_integrity.DOCS_URL
-_install_repair_hint = venv_integrity.install_repair_hint
+
+
+def _install_repair_hint(what: str) -> str:
+    """The command that repairs *what* on this host (Windows: the install command)."""
+
+    return venv_integrity.install_repair_hint(what, windows=os.name == "nt")
 
 
 def _scanner_repair_hint() -> str:
@@ -5154,26 +5159,17 @@ def _mcp_scanner_import_note(status: str, note: str, dist: str) -> tuple[str, st
     their wheels and the repair, which rebuilds the environment.
     """
     try:
-        probe = subprocess.run(
-            [sys.executable, "-I", "-c", "from mcpscanner import Config, Scanner"],
-            capture_output=True,
-            text=True,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            env=trusted_system_subprocess_env(),
-            # The first import after an install compiles and scans LiteLLM.
-            timeout=60.0,
-            check=False,
+        # The first import after an install compiles and scans LiteLLM.
+        error = venv_integrity.import_error(
+            "from mcpscanner import Config, Scanner", env=trusted_system_subprocess_env()
         )
-    except subprocess.TimeoutExpired:
-        slow = "its import did not finish within 60 s (a first start after an install can take longer)"
-        return "warn", f"{note}; {slow}, so run `defenseclaw doctor` again", ""
     except OSError as exc:
         return "warn", f"{note}; could not start {sys.executable} to import it: {exc}", ""
-    if probe.returncode == 0:
+    if error is None:
+        slow = "its import did not finish within 60 s (a first start after an install can take longer)"
+        return "warn", f"{note}; {slow}, so run `defenseclaw doctor` again", ""
+    if not error:
         return status, f"{note}, imports", ""
-    lines = [line.strip() for line in (probe.stderr or "").splitlines() if line.strip()]
-    error = lines[-1][:300] if lines else f"exit {probe.returncode}"
     detail = f"{dist} is installed but does not import ({error})"
     damaged = venv_integrity.damaged_files(venv_integrity.site_packages())
     if damaged:

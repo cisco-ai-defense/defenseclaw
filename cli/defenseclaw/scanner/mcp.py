@@ -408,7 +408,7 @@ def mcp_scanner_import_error(exc: ImportError) -> str:
     from defenseclaw import venv_integrity
 
     dist = settings.MCP_SCANNER_DIST
-    repair = venv_integrity.install_repair_hint("the Python environment")
+    repair = venv_integrity.install_repair_hint("the Python environment", windows=os.name == "nt")
     try:
         version = importlib_metadata.version(dist)
     except importlib_metadata.PackageNotFoundError:

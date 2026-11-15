@@ -51,7 +51,7 @@ DAMAGED_EXIT = 3
 DOCS_URL = "https://cisco-ai-defense.github.io/defenseclaw/docs"
 
 
-def install_repair_hint(what: str) -> str:
+def install_repair_hint(what: str, *, windows: bool) -> str:
     """The command that repairs *what* (a part of this install).
 
     On macOS and Linux the release upgrade resolver reinstalls the release at
@@ -59,10 +59,12 @@ def install_repair_hint(what: str) -> str:
     when the version is already current, so it cannot repair a missing part);
     on Windows, running the install command again does (from 1.0 the 0.8.x
     Setup package and its ``/repair`` are retired). Both build a fresh
-    environment and download again what their check finds damaged.
+    environment and download again what their check finds damaged. The
+    caller names the platform: doctor decides it from its own view of the
+    host, as every other doctor row does.
     """
 
-    if os.name == "nt":
+    if windows:
         return (
             "repair the install by running the install command again "
             f"({DOCS_URL}/get-started/windows/install-lifecycle/#repair)"
@@ -71,6 +73,35 @@ def install_repair_hint(what: str) -> str:
         f"repair {what} with the release upgrade resolver, `bash defenseclaw-upgrade.sh --yes` "
         f"(get and verify it as {DOCS_URL}/get-started/upgrade/ shows)"
     )
+
+
+def import_error(statement: str, env: dict[str, str] | None = None, timeout: float = 60.0) -> str | None:
+    """Run *statement* in a child of this interpreter (isolated mode).
+
+    Returns ``""`` when it imports, the last line of its error when it does
+    not, and ``None`` when it did not finish in *timeout* seconds. A damaged
+    package cannot break the caller this way. Raises OSError when the child
+    cannot start.
+    """
+    import subprocess
+
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-I", "-c", statement],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if probe.returncode == 0:
+        return ""
+    lines = [line.strip() for line in (probe.stderr or "").splitlines() if line.strip()]
+    return lines[-1][:300] if lines else f"exit {probe.returncode}"
 
 
 def site_packages() -> str:
