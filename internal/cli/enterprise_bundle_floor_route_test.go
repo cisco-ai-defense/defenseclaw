@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
@@ -126,7 +127,7 @@ func (d *routeFloorDevice) rendered(t *testing.T, user string) bool {
 
 func refusedWithFloorExit(t *testing.T, err error, code string) string {
 	t.Helper()
-	var coded *exitCodeError
+	var coded *cliusage.ExitCodeError
 	if !errors.As(err, &coded) || coded.ExitCode() != bundleFloorRefusedExit || !strings.Contains(err.Error(), code) {
 		t.Fatalf("floor-check = %v; want exit %d with %s", err, bundleFloorRefusedExit, code)
 	}
