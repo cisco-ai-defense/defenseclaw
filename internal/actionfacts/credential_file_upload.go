@@ -30,26 +30,13 @@ func projectCredentialFileUploads(facts Facts) []CredentialFileUploadFact {
 			command.ControlFlowUncertain {
 			continue
 		}
-		var sources []string
-		broad := false
-		switch command.Program {
-		case "curl":
-			for _, source := range StaticCurlDirectUploadFileSources(command) {
-				sources = append(sources, source.Path)
-			}
-		case "scp", "rsync", "wget":
-			// curl's file uploads are judged by CMD-CURL-UPLOAD as well; the
-			// other programs have no such rule, so every credentials-file
-			// shape counts here (a project .env, as for curl).
-			broad = true
-			// The read paths of a proven upload are the files it sends:
-			// the local operands of scp and rsync, the --post-file or
-			// --body-file of wget (GAP-0595).
-			sources = uploadedReadPaths(facts, command)
-		}
+		// Every upload client the projection reads counts, by the same
+		// closed shapes: a project .env is a credentials file whichever
+		// option sends it (GAP-0768, GAP-0770).
+		sources := uploadedFileSources(facts, command)
 		for _, source := range sources {
 			class := credentialFileUploadClass(source)
-			if class == "" && broad {
+			if class == "" {
 				class = credentialFileBroadClass(source)
 			}
 			if class == "" {
@@ -64,6 +51,21 @@ func projectCredentialFileUploads(facts Facts) []CredentialFileUploadFact {
 		}
 	}
 	return result
+}
+
+// uploadedFileSources is the local files a projected upload sends. curl names
+// them by its option table (the TLS and config files it reads are not sent);
+// any other upload client sends the files it reads: the local operands of
+// scp and rsync, the --post-file or --body-file of wget (GAP-0595).
+func uploadedFileSources(facts Facts, command CommandFact) []string {
+	if isCurlProgram(command.Program) {
+		var sources []string
+		for _, source := range StaticCurlDirectUploadFileSources(command) {
+			sources = append(sources, source.Path)
+		}
+		return sources
+	}
+	return uploadedReadPaths(facts, command)
 }
 
 // uploadedReadPaths is the read paths of a command that has an upload
