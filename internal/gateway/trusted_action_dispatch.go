@@ -788,6 +788,15 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// A shell named at run time ("$SHELL" -c TEXT, $BASH -ec TEXT, env
+	// "$SHELL" -c TEXT, "$SHELL" <<< TEXT) runs TEXT as the literal shell
+	// call does: that reading is judged too, and the stricter of the two
+	// readings counts (rel-1-0-10:GAP-0980).
+	if twin, ok := runTimeShellTwinRequest(request); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	// The commands an awk program starts through system(), print | and
 	// | getline, written as string literals, are run by the shell as the
 	// hook would run them directly (GAP-0499): that reading is judged too,
@@ -10028,6 +10037,27 @@ func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionReques
 	// Behind ProtectHome such a twin is left to the client reading.
 	if request.ProtectedHomeHook && strings.Count(rewritten, "( cd ") > strings.Count(command, "( cd ") &&
 		tactics.RunsProgram(rewritten, "ln", "gln", "link", "glink") {
+		return trustedActionRequest{}, false
+	}
+	return bashReadingRequest(request, command, rewritten), true
+}
+
+// runTimeShellTwinRequest returns the request for
+// actionfacts.RunTimeShellTwin of a POSIX Bash call: the call read with each
+// program word that names its shell at run time written as that shell.
+// Behind ProtectHome (managed hook peer) the hook client map lists the
+// targets of the same reading (hookpaths), so it is judged there too
+// (rel-1-0-10:GAP-0980).
+func runTimeShellTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false
+	}
+	rewritten, ok := actionfacts.RunTimeShellTwin(command)
+	if !ok || rewritten == command {
 		return trustedActionRequest{}, false
 	}
 	return bashReadingRequest(request, command, rewritten), true

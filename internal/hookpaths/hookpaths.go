@@ -2243,6 +2243,18 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(command); isTwin && wrapped != command {
 						addReading(wrapped, false)
 					}
+					// A shell named at run time ("$SHELL" -c TEXT) runs TEXT
+					// as the literal shell call does. The gateway judges that
+					// reading too (actionfacts.RunTimeShellTwin), and behind
+					// ProtectHome reads its targets only from this map, also
+					// of the call it wraps (rel-1-0-10:GAP-0980).
+					if shellTwin, isTwin := actionfacts.RunTimeShellTwin(command); isTwin && shellTwin != command {
+						addReading(shellTwin, true)
+						protectedDecision = protectedDecision || clientProtectedDecision(shellTwin, cwd, home)
+						if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(shellTwin); isTwin && wrapped != shellTwin {
+							addReading(wrapped, false)
+						}
+					}
 					// The commands an awk program starts through system(),
 					// print | and | getline, written as string literals, run
 					// as the hook would run them directly; the gateway judges
