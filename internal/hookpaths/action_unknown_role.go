@@ -107,7 +107,7 @@ func actionCallRoleUnknown(call *syntax.CallExpr, home string) bool {
 	}
 	program, known := staticProgramWord(words[0], home)
 	if !known {
-		return true
+		return !actionRunTimeProgramRunsText(words, home)
 	}
 	if actionInterpreterScriptArguments(words, home) {
 		return true
@@ -116,6 +116,39 @@ func actionCallRoleUnknown(call *syntax.CallExpr, home string) bool {
 	// A program the scan does not list is unknown, bare name or path alike;
 	// the GNU g prefix of a listed coreutil (gtee, gtruncate) is that coreutil.
 	return !actionRoleKnownProgram(base) && !actionRoleKnownProgram(strings.TrimPrefix(base, "g"))
+}
+
+// actionRunTimeProgramRunsText reports a program named at run time that is
+// given a shell -c option before its first operand ("$SHELL" -c TEXT,
+// $BASH -lc TEXT, "$SHELL" -o pipefail -c TEXT): a shell started through a
+// variable runs TEXT as code, so TEXT is no data of unknown role and a
+// protected write in it keeps the rel block in every pack. The options before
+// -c follow the shell's grammar: - and + clusters, -o/+o/-O/+O NAME (also
+// inside a cluster, -eo NAME) and --rcfile/--init-file FILE take a value word.
+// A run-time program without -c ($T send TEXT) stays unknown
+// (rel-1-0-10:GAP-0018, GAP-0975, GAP-0979).
+func actionRunTimeProgramRunsText(words []*syntax.Word, home string) bool {
+	for i := 1; i < len(words); i++ {
+		value, known := StaticWord(words[i], home)
+		if !known || value == "--" || len(value) < 2 || (value[0] != '-' && value[0] != '+') {
+			return false
+		}
+		if strings.HasPrefix(value, "--") {
+			if value == "--rcfile" || value == "--init-file" {
+				i++
+			}
+			continue
+		}
+		cluster := value[1:]
+		if strings.Trim(cluster, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
+			return false
+		}
+		if value[0] == '-' && strings.Contains(cluster, "c") {
+			return true
+		}
+		i += strings.Count(cluster, "o") + strings.Count(cluster, "O")
+	}
+	return false
 }
 
 // actionOptionWithAttachedValue reports an option that carries its value in the

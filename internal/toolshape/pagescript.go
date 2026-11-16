@@ -365,6 +365,7 @@ type jsReader struct {
 	// tokens squared. Spent, the scans stop and the reading is truncated.
 	work    *bounded.Counter
 	ends    map[int]int      // exprEnd by start token
+	starts  map[int]int      // chainStart by every token a finished walk crossed
 	assigns map[string][]int // assignment operators by the name they assign (built once)
 }
 
@@ -617,7 +618,7 @@ func AnalyzePageScript(code string) PageFlow {
 		trunc.Hit(bounded.Bytes)
 	}
 	work := bounded.NewCounter(&trunc, bounded.Time, maxPageWork)
-	r := &jsReader{trunc: &trunc, work: &work, ends: map[int]int{}}
+	r := &jsReader{trunc: &trunc, work: &work, ends: map[int]int{}, starts: map[int]int{}}
 	r.t = lexJS(code, &trunc)
 	r.buildMatch()
 
@@ -862,15 +863,31 @@ func (r *jsReader) paramNames(lo, hi int) []string {
 }
 
 // chainStart is the first token of the member and call chain that ends at
-// token j.
+// token j. Every token a walk steps to has the same start (the walk from it is
+// the rest of this one), so a finished walk records it for each of them: the
+// callbacks of one long chain (q.then(...).then(...)...) each walk back to the
+// first token of the chain, and without the record those walks cost the
+// square of its length.
 func (r *jsReader) chainStart(j int) int {
+	var walked []int
+	done := func(start int) int {
+		for _, k := range walked {
+			r.starts[k] = start
+		}
+		return start
+	}
 	for {
+		if start, ok := r.starts[j]; ok {
+			return done(start)
+		}
 		if !r.work.Take() {
+			// Spent: the reading is truncated and the part walk is not recorded.
 			return j + 1
 		}
+		walked = append(walked, j)
 		for j >= 0 && (r.is(j, ")") || r.is(j, "]")) {
 			if r.match[j] < 0 {
-				return j + 1
+				return done(j + 1)
 			}
 			j = r.match[j] - 1
 		}
@@ -881,7 +898,7 @@ func (r *jsReader) chainStart(j int) int {
 				continue
 			}
 		}
-		return j + 1
+		return done(j + 1)
 	}
 }
 

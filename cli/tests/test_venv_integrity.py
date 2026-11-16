@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -306,3 +308,197 @@ def test_import_error_reports_the_last_line_of_a_failed_import() -> None:
     assert venv_integrity.import_error("import json") == ""
     failed = venv_integrity.import_error("from json import no_such_name")
     assert failed.startswith("ImportError: cannot import name"), failed
+
+
+# --- rel-1-0-10 GAP-0938: doctor remembers a passing import probe -----------
+
+_PROBE_STATEMENT = "from mcpscanner import Config, Scanner"
+_KEY = {"python": "/v/bin/python", "defenseclaw": "1.0.10", "package": [1, 2], "site": [7, 8], "mcp": ["4.0", [3, 4]], "lite": ["1.1", [5, 6]]}
+
+
+def _probe(cache: Path, key: dict, result: str | None = "") -> tuple[str | None, object]:
+    with patch.object(venv_integrity, "import_error", return_value=result) as child:
+        return venv_integrity.cached_import_error(_PROBE_STATEMENT, str(cache), key), child
+
+
+def test_a_passing_probe_is_remembered_and_skips_the_child(tmp_path: Path) -> None:
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    first, child = _probe(cache, _KEY)
+    assert first == "" and child.call_count == 1
+    second, child = _probe(cache, dict(_KEY))
+    assert second == "" and child.call_count == 0
+    if os.name != "nt":
+        assert (cache.stat().st_mode & 0o077) == 0
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"python": "/other/bin/python"},
+        {"defenseclaw": "1.0.11"},
+        {"package": [1, 3]},
+        {"package": None},
+        {"site": [7, 9]},
+        {"site": [8, 8]},
+        {"site": None},
+        {"mcp": ["4.1", [3, 4]]},
+        {"mcp": ["4.0", [9, 4]]},
+        {"mcp": ["4.0", [3, 9]]},
+        {"lite": ["1.2", [5, 6]]},
+        {"lite": ["1.1", [5, 7]]},
+    ],
+)
+def test_every_part_of_the_key_runs_the_probe_again(tmp_path: Path, change: dict) -> None:
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    _probe(cache, _KEY)
+    _, child = _probe(cache, {**_KEY, **change})
+    assert child.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "not json", "[]", "null", "{\"key\": {}}", "{\"key\": null, \"error\": \"\", \"at\": 1}"],
+)
+def test_a_corrupt_cache_runs_the_probe_again(tmp_path: Path, content: str) -> None:
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    cache.write_text(content, encoding="utf-8")
+    result, child = _probe(cache, _KEY)
+    assert result == "" and child.call_count == 1
+    # and the run repaired the cache
+    _, child = _probe(cache, _KEY)
+    assert child.call_count == 0
+
+
+def test_a_cache_with_the_wrong_field_types_runs_the_probe_again(tmp_path: Path) -> None:
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    for record in (
+        {"key": _KEY, "error": 3, "at": time.time()},
+        {"key": _KEY, "at": "now"},
+        {"key": _KEY, "at": True},
+        {"key": _KEY, "at": time.time() + 3600},
+    ):
+        cache.write_text(json.dumps(record), encoding="utf-8")
+        _, child = _probe(cache, _KEY)
+        assert child.call_count == 1, record
+
+
+def test_a_broken_import_is_reported_every_time_and_never_stored(tmp_path: Path) -> None:
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    broken, child = _probe(cache, _KEY, _UNIMPORTABLE)
+    assert broken == _UNIMPORTABLE and child.call_count == 1
+    assert not cache.exists()
+    # a repair that changes no part of the key shows at once
+    repaired, child = _probe(cache, _KEY, "")
+    assert repaired == "" and child.call_count == 1
+    assert _probe(cache, _KEY)[1].call_count == 0
+
+
+def test_a_remembered_failure_from_an_older_record_is_ignored(tmp_path: Path) -> None:
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    cache.write_text(json.dumps({"key": _KEY, "error": _UNIMPORTABLE, "at": time.time()}), encoding="utf-8")
+    result, child = _probe(cache, _KEY, "")
+    assert result == "" and child.call_count == 1
+
+
+def test_a_pass_expires_after_a_day(tmp_path: Path) -> None:
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    cache.write_text(json.dumps({"key": _KEY, "at": time.time() - venv_integrity.PROBE_PASS_MAX_AGE - 5}))
+    assert _probe(cache, _KEY)[1].call_count == 1
+    cache.write_text(json.dumps({"key": _KEY, "at": time.time() - venv_integrity.PROBE_PASS_MAX_AGE + 600}))
+    assert _probe(cache, _KEY)[1].call_count == 0
+
+
+def test_a_timeout_and_an_unwritable_cache_are_not_remembered(tmp_path: Path) -> None:
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    assert _probe(cache, _KEY, None)[0] is None
+    assert not cache.exists()
+    missing = tmp_path / "no-such-dir" / venv_integrity.PROBE_CACHE_NAME
+    result, child = _probe(missing, _KEY)
+    assert result == "" and child.call_count == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_a_symlinked_cache_is_not_read(tmp_path: Path) -> None:
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps({"key": _KEY, "at": time.time()}))
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    cache.symlink_to(real)
+    assert _probe(cache, _KEY)[1].call_count == 1
+
+
+def test_probe_key_follows_the_site_packages_folder(tmp_path: Path, monkeypatch) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "httpx").mkdir()
+    monkeypatch.setattr(venv_integrity, "site_packages", lambda: str(site))
+    first = venv_integrity.probe_key("no_such_pkg_xyz", (), "1")
+    assert first["site"] and first["site"][1] == 1
+    assert venv_integrity.probe_key("no_such_pkg_xyz", (), "1") == first
+    # a dependency outside the key (httpx) is removed or upgraded
+    (site / "httpx").rmdir()
+    (site / "httpx-0.28.dist-info").mkdir()
+    after = venv_integrity.probe_key("no_such_pkg_xyz", (), "1")
+    assert after["site"] != first["site"]
+    monkeypatch.setattr(venv_integrity, "site_packages", lambda: str(tmp_path / "gone"))
+    assert venv_integrity.probe_key("no_such_pkg_xyz", (), "1")["site"] is None
+
+
+def test_a_removed_dependency_outside_the_key_runs_the_probe_again(tmp_path: Path, monkeypatch) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "httpx").mkdir()
+    monkeypatch.setattr(venv_integrity, "site_packages", lambda: str(site))
+    cache = tmp_path / venv_integrity.PROBE_CACHE_NAME
+    key = venv_integrity.probe_key("no_such_pkg_xyz", (), "1")
+    assert _probe(cache, key)[1].call_count == 1
+    assert _probe(cache, venv_integrity.probe_key("no_such_pkg_xyz", (), "1"))[1].call_count == 0
+    (site / "httpx").rmdir()
+    assert _probe(cache, venv_integrity.probe_key("no_such_pkg_xyz", (), "1"))[1].call_count == 1
+
+
+def test_probe_key_follows_the_package_folder_and_the_distribution_record(tmp_path: Path, monkeypatch) -> None:
+    pkg = tmp_path / "dcprobepkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    first = venv_integrity.probe_key("dcprobepkg", ("no-such-distribution-xyz",), "1.0.10")
+    assert first["package"] and first["no-such-distribution-xyz"] is None
+    assert first["python"] == sys.executable and first["defenseclaw"] == "1.0.10"
+    os.utime(pkg, ns=(1_000_000_000, 2_000_000_000))
+    assert venv_integrity.probe_key("dcprobepkg", ("no-such-distribution-xyz",), "1.0.10") != first
+    assert venv_integrity.probe_key("dcprobepkg", ("no-such-distribution-xyz",), "1.0.11") != first
+    assert venv_integrity.probe_key("no_such_pkg_xyz", (), "1")["package"] is None
+    real = venv_integrity.probe_key("pytest", ("pytest",), "1")
+    assert real["pytest"][0] and real["pytest"][1]  # version and a RECORD stamp
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="the scanners need Python 3.11")
+def test_doctor_runs_the_child_once_per_environment_and_still_fails_a_broken_one(tmp_path: Path) -> None:
+    def rows(error: str) -> tuple[dict, object]:
+        def run(argv, **_kwargs):
+            return subprocess.CompletedProcess(argv, 0, stdout="skill-scanner 2.3.2\n", stderr="")
+
+        cfg = type("Cfg", (), {"data_dir": str(tmp_path)})()
+        result = cmd_doctor._DoctorResult()
+        with (
+            patch("defenseclaw.commands.cmd_doctor.resolve_scanner_binary", side_effect=lambda b: "/opt/dc/.venv/bin/" + b),
+            patch("defenseclaw.commands.cmd_doctor.subprocess.run", side_effect=run),
+            patch("defenseclaw.commands.cmd_doctor._scanner_version_note", side_effect=lambda dist, v: ("pass", f"{dist} {v}")),
+            patch.object(venv_integrity, "damaged_files", return_value={}),
+            patch.object(venv_integrity, "probe_key", return_value=dict(_KEY)),
+            patch.object(venv_integrity, "import_error", return_value=error) as child,
+        ):
+            cmd_doctor._check_scanners(cfg, result)
+        return {c["label"]: c for c in result.checks}["Scanner: mcp-scanner"], child
+
+    row, child = rows("")
+    assert row["status"] == "pass" and child.call_count == 1
+    row, child = rows(_UNIMPORTABLE)  # remembered pass: no child, the old result
+    assert row["status"] == "pass" and child.call_count == 0
+    (tmp_path / venv_integrity.PROBE_CACHE_NAME).unlink()
+    row, child = rows(_UNIMPORTABLE)
+    assert row["status"] == "fail" and _UNIMPORTABLE in row["detail"] and child.call_count == 1
+    row, child = rows(_UNIMPORTABLE)  # a failure is never remembered: probed and reported every run
+    assert row["status"] == "fail" and child.call_count == 1
+    row, child = rows("")  # and a repair shows at once
+    assert row["status"] == "pass" and child.call_count == 1

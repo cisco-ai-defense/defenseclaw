@@ -42,8 +42,10 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 DAMAGED_EXIT = 3
@@ -102,6 +104,123 @@ def import_error(statement: str, env: dict[str, str] | None = None, timeout: flo
         return ""
     lines = [line.strip() for line in (probe.stderr or "").splitlines() if line.strip()]
     return lines[-1][:300] if lines else f"exit {probe.returncode}"
+
+
+# ``defenseclaw doctor`` runs the import probe of the MCP scanner SDK; the
+# import loads LiteLLM and takes seconds, so a probe that passed is remembered
+# per environment (GAP-0938). The record holds the interpreter, the DefenseClaw
+# version, the stat of the package folder and of the RECORD of each
+# distribution the probe imports, and the mtime and entry count of
+# site-packages (a dependency outside the key that is removed or upgraded
+# changes it); a reinstall, an upgrade or a repair changes at least one of
+# them and the probe runs again. A pass also expires after a day, because a
+# write into an installed file leaves none of those stamps changed (the
+# uv-cache hard links behind GAP-0006). A failure is never remembered, so a
+# repair shows at once. A ``__pycache__`` created beside the packages (a first
+# run as another user, such as sudo) changes the site-packages stamp and costs
+# one more probe, no more.
+PROBE_CACHE_NAME = "scanner_import_probe.json"
+PROBE_PASS_MAX_AGE = 24 * 3600
+
+
+def _stamp(path: str | os.PathLike[str] | None) -> list[int] | None:
+    """``[mtime_ns, size]`` of *path*, ``None`` when it cannot be read."""
+    if not path:
+        return None
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return [info.st_mtime_ns, info.st_size]
+
+
+def _site_stamp() -> list[int] | None:
+    """``[mtime_ns, entry count]`` of the site-packages folder, ``None`` when unreadable."""
+    site = site_packages()
+    try:
+        with os.scandir(site) as entries:
+            count = sum(1 for _ in entries)
+        return [os.stat(site).st_mtime_ns, count]
+    except OSError:
+        return None
+
+
+def probe_key(package: str, dists: tuple[str, ...], defenseclaw_version: str) -> dict[str, object]:
+    """What the import of *package* depends on, as plain JSON.
+
+    For each of *dists* (the distributions the import loads) the key holds the
+    version and the stat of its ``RECORD``; the *package* folder is stamped
+    too. Nothing here imports the package.
+    """
+    import importlib.metadata as importlib_metadata
+    import importlib.util
+
+    key: dict[str, object] = {"python": sys.executable, "defenseclaw": defenseclaw_version}
+    try:
+        spec = importlib.util.find_spec(package)
+    except (ImportError, ValueError):
+        spec = None
+    folders = list(spec.submodule_search_locations or []) if spec else []
+    key["package"] = _stamp(folders[0]) if folders else None
+    key["site"] = _site_stamp()
+    for name in dists:
+        try:
+            dist = importlib_metadata.distribution(name)
+        except importlib_metadata.PackageNotFoundError:
+            key[name] = None
+            continue
+        record = next(
+            (f for f in (dist.files or []) if f.name == "RECORD" and f.parent.name.endswith(".dist-info")),
+            None,
+        )
+        key[name] = [dist.version, _stamp(dist.locate_file(record) if record else None)]
+    return key
+
+
+def _read_probe_cache(path: str, key: dict[str, object], now: float) -> bool:
+    """``True`` when a pass for *key* is remembered and fresh; the probe runs again otherwise."""
+    try:
+        if os.path.islink(path) or not os.path.isfile(path):
+            return False
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+        if not isinstance(record, dict) or record.get("key") != key or record.get("error", "") != "":
+            return False
+        at = record.get("at")
+        if isinstance(at, bool) or not isinstance(at, (int, float)):
+            return False
+        return 0 <= now - at <= PROBE_PASS_MAX_AGE
+    except (OSError, ValueError):
+        return False
+
+
+def cached_import_error(
+    statement: str,
+    cache_path: str,
+    key: dict[str, object],
+    env: dict[str, str] | None = None,
+    timeout: float = 60.0,
+) -> str | None:
+    """:func:`import_error`, remembered in *cache_path* while *key* holds.
+
+    Only a pass is stored: a failure or a timeout (``None``) always probes
+    again. A cache that cannot be read or written only costs the probe; it
+    never changes the result.
+    """
+    now = time.time()
+    if cache_path:
+        if _read_probe_cache(cache_path, key, now):
+            return ""
+    error = import_error(statement, env=env, timeout=timeout)
+    if error == "" and cache_path:
+        try:
+            from defenseclaw.file_permissions import atomic_write_private_bytes
+
+            body = json.dumps({"key": key, "at": now}, sort_keys=True).encode("utf-8")
+            atomic_write_private_bytes(cache_path, body)
+        except OSError:
+            pass
+    return error
 
 
 def site_packages() -> str:
