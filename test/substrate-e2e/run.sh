@@ -100,27 +100,36 @@ stop_proxies() {
   PROXY_PIDS=()
 }
 
+# diagnostics collects pods, events and logs once, at the first teardown phase after a failure (uninstall deletes the
+# DefenseClaw namespace and cleanup the kind cluster, so on_exit is too late for them), or at exit.
+DIAGNOSED=0
 diagnostics() {
+  [ "$DIAGNOSED" = 1 ] && return 0
+  DIAGNOSED=1
+  log "diagnostics"
   local d="$E2E_ARTIFACTS/diagnostics"
   mkdir -p "$d"
   K get pods -A -o wide >"$d/pods.txt" 2>&1
   K get events -A --sort-by=.lastTimestamp >"$d/events.txt" 2>&1
   K get workerpool,pods -n "$E2E_NAMESPACE" -o yaml >"$d/lane-ns.yaml" 2>&1
   ATE get actor -a "$E2E_ATESPACE" -o yaml >"$d/actors.yaml" 2>&1
+  ATE get actor -a "$E2E_DC_LAUNCH_ATESPACE" -o yaml >"$d/actors-launch.yaml" 2>&1
   local ns p
+  # The gateway, leader, controller and callout pods are in the DefenseClaw namespace: their whole log (it names the
+  # reason of a SUBSTRATE-CHAIN-UNRECORDED step once per actor).
   for ns in ate-system "$E2E_NAMESPACE" "$E2E_DC_NAMESPACE"; do
     for p in $(K -n "$ns" get pods -o name 2>/dev/null); do
-      K -n "$ns" logs --tail=200 --all-containers "$p" >"$d/log-${ns}-${p#pod/}.txt" 2>&1
+      K -n "$ns" logs --tail=5000 --all-containers "$p" >"$d/log-${ns}-${p#pod/}.txt" 2>&1
     done
   done
 }
+diagnose_if_failed() { if [ "$FAILED" -ne 0 ]; then diagnostics; fi; }
 
 on_exit() {
   local rc=$?
   stop_proxies
   if [ "$FAILED" -ne 0 ] || [ "$rc" -ne 0 ]; then
     FAILED=1
-    log "diagnostics"
     diagnostics
   fi
   log "summary"
@@ -164,6 +173,7 @@ kube_user_setup() {
   rm -f "$csv"
   # kubelet restarts the API server pod from the changed manifest.
   sleep 5
+  # shellcheck disable=SC2046
   if ! retry 240 4 kubectl $(kctx) get --raw /readyz; then fail "the kind API server is ready after adding the test user"; return 1; fi
   export E2E_KUBE_TOKEN="$tok"
   pass "the kind API server knows a Kubernetes user for the launcher create flow"
@@ -300,6 +310,7 @@ YAML
 
 # proxy_actor <actor> <local-port>: forward the stub agent's port 8080.
 proxy_actor() {
+  # shellcheck disable=SC2046
   setsid nohup kubectl-ate $(kctx) proxy actor "$1" "$2:8080" -a "${3:-$E2E_ATESPACE}" >"$E2E_ARTIFACTS/proxy-$1.log" 2>&1 </dev/null &
   PROXY_PIDS+=("$!")
   retry 60 1 curl -sf -m 2 "http://127.0.0.1:$2/readyz"
@@ -362,19 +373,22 @@ phase_defenseclaw() {
     fi
     return 0
   fi
-  # defenseclaw.sh is sourced: it defines dc_install, dc_actor_policy, dc_hook_deny and dc_uninstall
+  # defenseclaw.sh is sourced: it defines dc_install, dc_actor_policy, dc_attributed_hook, dc_launcher_hook and
+  # dc_uninstall
   # with the helpers above (check, retry, ATE, K, proxy_actor, fetch_code).
   # shellcheck disable=SC1091
   . "$HERE/defenseclaw.sh"
-  dc_install && dc_actor_policy && dc_hook_deny && dc_launcher_hook
+  dc_install && dc_actor_policy && dc_attributed_hook && dc_launcher_hook
 }
 
 phase_uninstall() {
+  diagnose_if_failed
   log "uninstall leaves nothing open"
   if declare -F dc_uninstall >/dev/null; then dc_uninstall; else skip "dc_uninstall is not defined (no DefenseClaw phase ran)"; fi
 }
 
 phase_cleanup() {
+  diagnose_if_failed
   log "cleanup"
   stop_proxies
   local a

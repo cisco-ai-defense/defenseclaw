@@ -875,6 +875,9 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 			c.refuseOnce(st, base, EventForeignActor, "actor in a launcher atespace that DefenseClaw did not create", SignalForeignActor, "")
 			return reg, "foreign_actor", nil
 		}
+		if reg.Source == SourceAtespace {
+			c.attributeKit(ctx, a, &reg)
+		}
 		if err := c.o.Registry.Put(ctx, reg); err != nil {
 			return Registration{}, "", fmt.Errorf("%s: registry: %w", st.key, err)
 		}
@@ -882,6 +885,24 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 	reg.Template = ateapi.Key(a.GetActorTemplate())
 	st.reg, st.regOK, st.regAt, st.regState = reg, true, now, a.GetStatus().GetState()
 	return reg, "", nil
+}
+
+// attributeKit puts what the actor's attested template names (connector,
+// agent version, hook contract, kit version, digest) in the new registration
+// of an actor made outside DefenseClaw (GAP-0347). Without them the gateway
+// knows no connector for the actor, resolves no hook profile, and reports
+// every tool step as unrecorded (GAP-0339); a launched actor gets them from
+// the create route (GAP-0201). An unattested template, or one that can't be
+// read now, records none: admission decides about the actor, and its steps
+// are reported, never skipped. A registration is written once, so a later
+// pass does not add them.
+func (c *Controller) attributeKit(ctx context.Context, a *ateapi.Actor, reg *Registration) {
+	_, att, err := c.template(ctx, a.GetActorTemplate(), false)
+	if err != nil || !att.Attested {
+		return
+	}
+	reg.Connector, reg.AgentVersion, reg.HookContract = att.Connector, att.AgentVersion, att.HookContract
+	reg.KitVersion, reg.TemplateDigest = att.KitVersion, att.Digest
 }
 
 func (c *Controller) parentRegistration(ctx context.Context, tag *ateapi.ObjectRef) (Registration, error) {

@@ -350,6 +350,8 @@ func (a *APIServer) applyAgentHookToolChains(
 		(structuredAction || route == connector.ToolEventRouteResultContent || unroutedToolCall)
 	rootMissed := ""
 	switch {
+	case substrateStep && substrateRegistrationNamesNoConnector(ctx):
+		rootMissed = "the actor's registration names no connector (an actor made outside DefenseClaw from a template whose attestation names none), so no reviewed hook contract applies"
 	case substrateStep && unroutedToolCall:
 		rootMissed = "the actor's hook contract routes no tool-call lifecycle event " + strconv.Quote(req.HookEventName)
 	case substrateStep && !lifecycleEligible:
@@ -573,12 +575,28 @@ func (a *APIServer) applyAgentHookToolChains(
 			SuccessfulS4UTargetPrincipalIdentityDigest: s4uTicketResult.TargetPrincipalIdentityDigest,
 			SuccessfulS4UTicketCacheDigest:             s4uTicketResult.TicketArtifactIdentityDigest,
 		}
+		ran := outcome != connector.ToolLifecycleOutcomeDenied && outcome != connector.ToolLifecycleOutcomeCancelled
 		if outcome == connector.ToolLifecycleOutcomeFailure || outcome == connector.ToolLifecycleOutcomeUnknown {
 			// The call ran (or may have) and did not succeed: the secret-read
 			// chain start decides by what it printed (GAP-0337).
 			resolveInput.UnsuccessfulMayHaveRead = !toolResultProvesNothingRead(req)
 		}
+		if substrateActor && ran {
+			// A further result of a call the leader already resolved (Claude
+			// Code and Cursor post a failure result and then a PostToolUse for
+			// one failed call; the kit retries a post) is a replay there, and
+			// one whose content may show a read still starts the secret-read
+			// chain from the call's proposal (GAP-0348, GAP-0345).
+			resolveInput.ResultMayHaveRead = resolveInput.UnsuccessfulMayHaveRead ||
+				outcome == connector.ToolLifecycleOutcomeSuccess && !toolResultProvesNothingRead(req)
+			// After an earlier result proved the read failed, only a result
+			// that shows a read chains: Claude Code's PostToolUse after a
+			// PostToolUseFailure carries no output (GAP-0352).
+			resolveInput.ResultShowsRead = resolveInput.ResultMayHaveRead && resultShowsRead(req)
+		}
 		resolved, resolveErr := repository.ResolvePending(ctx, resolveInput)
+		var rootStatus audit.ToolChainPendingStatus
+		rootFailed := false
 		if rootRepository != nil {
 			// The root scope promotes its own copy of the proposal; a failure
 			// there leaves the session verdict as it is.
@@ -588,6 +606,7 @@ func (a *APIServer) applyAgentHookToolChains(
 				rootResolved.Status == audit.ToolChainPendingResolved {
 				rootResult, rootResolvedSuccess = rootResolved.Observation, true
 			}
+			rootStatus, rootFailed = rootResolved.Status, rootErr != nil
 			if rootErr != nil {
 				rootMissed = "the leader did not take the step: " + rootErr.Error()
 			}
@@ -595,15 +614,13 @@ func (a *APIServer) applyAgentHookToolChains(
 		if resolveErr != nil {
 			return resp, finalization
 		}
-		if substrateActor && resolved.Status == audit.ToolChainPendingMissing &&
-			outcome != connector.ToolLifecycleOutcomeDenied && outcome != connector.ToolLifecycleOutcomeCancelled &&
+		if substrateActor && ran && resultCallUnjoined(resolved.Status, rootRepository != nil, rootStatus, rootFailed) &&
 			resultMayBeAnUnjoinedRead(req, projection) {
-			// The call ran (or may have) but its proposal is not in the
-			// actor's window: its PreToolUse reached no leader (a replica
-			// cut off from it), so the read may be in no window at all. The
-			// step is reported unrecorded, and the leader keeps that for the
-			// callout (review rch3 R1). A repeated result of a resolved
-			// credentials read lands here too: the safe side.
+			// The call ran (or may have) but the actor window does not know
+			// it: its PreToolUse reached no leader (a replica cut off from
+			// it, or a leader that lost or evicted it since), so the read may
+			// be in no window at all. The step is reported unrecorded, and
+			// the leader keeps that for the callout (review rch3 R1).
 			rootMissed = "a tool result whose call is not in the actor's chain window (its call did not reach the leader)"
 		}
 		resolvedInvocation = resolved.Status == audit.ToolChainPendingResolved
@@ -856,6 +873,33 @@ func (a *APIServer) applyAgentHookToolChains(
 		}
 	}
 	return resp, finalization
+}
+
+// resultCallUnjoined reports a call result that no chain window joins (R1).
+// The actor window, which the callout reads, decides when it is bound: its
+// Missing is marked whatever the session says, so a session replay never
+// hides it (review rk347 P3-1); a result after a turn boundary (Stop
+// discards only the session's proposal) is joined there (GAP-0345); a
+// further result of a resolved call is a replay in both (GAP-0348). A root
+// call that failed is reported by the caller already.
+func resultCallUnjoined(session audit.ToolChainPendingStatus, rootBound bool, root audit.ToolChainPendingStatus, rootFailed bool) bool {
+	switch {
+	case !rootBound:
+		return session == audit.ToolChainPendingMissing
+	case rootFailed:
+		return false
+	}
+	rootJoined := root == audit.ToolChainPendingResolved || root == audit.ToolChainPendingReplay
+	return root == audit.ToolChainPendingMissing || session == audit.ToolChainPendingMissing && !rootJoined
+}
+
+// substrateRegistrationNamesNoConnector reports a verified actor whose
+// registration names no connector: an actor made outside DefenseClaw from an
+// unattested template (GAP-0347). Its binding resolves the empty hook
+// profile, so the step's real reason is that, not the lifecycle.
+func substrateRegistrationNamesNoConnector(ctx context.Context) bool {
+	reg, ok := substrateRegistrationFrom(ctx)
+	return ok && strings.TrimSpace(reg.Connector) == ""
 }
 
 // substrateChainUnrecordedRule is the finding of a Substrate actor's tool
@@ -3821,6 +3865,41 @@ func toolResultProvesNothingRead(req agentHookRequest) bool {
 		}
 	}
 	return true
+}
+
+// resultShowsRead reports a result whose own content shows its call may have
+// read: a line that is not blank, an exit status line, or a reader's error
+// naming one of the command's operands (GAP-0352). A result too large to
+// read shows one. It is the evidence a further result of a call needs to
+// start the secret-read chain once an earlier result proved the read failed
+// (the 1.0.10 lead's rule, STEER 7 and 8 2026-11-16): one that repeats the
+// failure, or carries no output, shows none; one that printed shows one, so a
+// no-read result never clears a read another result shows.
+func resultShowsRead(req agentHookRequest) bool {
+	var text []string
+	size := 0
+	if !collectResultText(req.Payload, &text, &size) {
+		return true
+	}
+	program, operands := "", []string(nil)
+	if command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs}); ok {
+		if words := strings.Fields(command); len(words) >= 2 {
+			program, operands = words[0], words[1:]
+		}
+	}
+	for _, chunk := range text {
+		for _, line := range strings.Split(chunk, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || isExitCodeLine(line) {
+				continue
+			}
+			if operand, ok := readerErrorOperand(program, line); program != "" && ok && slices.Contains(operands, operand) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // isExitCodeLine is the exit status line a connector adds to a failed

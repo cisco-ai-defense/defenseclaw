@@ -157,6 +157,9 @@ type Service struct {
 	// maxGone; past it, Egress still asks Current while it holds the entry.
 	gone     map[string]bool
 	goneList []string
+	// calls are the tool calls this leader prepared or resolved, for a
+	// further result of a call (GAP-0348, GAP-0345, GAP-0350; calls.go).
+	calls *callTable
 	// diskHook, set by tests only, runs before every disk operation on an
 	// actor's files: a store open or access (storeOf), a state file write
 	// and a purge's removals. A test blocks it to stand for a disk that does
@@ -334,7 +337,8 @@ func New(opts Options) (*Service, error) {
 			return nil, err
 		}
 	}
-	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}, gone: map[string]bool{}}
+	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}, gone: map[string]bool{},
+		calls: newCallTable()}
 	s.action.Store(&opts.EgressAction)
 	if err := s.load(); err != nil {
 		return nil, err
@@ -635,6 +639,7 @@ func (s *Service) purgeLocked(e *actorEntry) {
 	}
 	e.purged = true
 	delete(s.actors, e.actor.key())
+	s.calls.dropActor(e.actor.key())
 	s.purging[e.actor.key()] = true
 	s.purges = append(s.purges, job)
 }
@@ -1048,7 +1053,12 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 			return ObserveResponse{}, bad(err)
 		}
 		x.ConnectorInstanceID = instance
-		result, err = repo.ResolvePending(ctx, x)
+		var r audit.ToolChainResolvePendingResult
+		r, err = repo.ResolvePending(ctx, x)
+		if err == nil {
+			r, err = s.furtherResult(ctx, repo, e, in, x, r)
+		}
+		result = r
 	case OpPrepare:
 		var x audit.ToolChainPreparePendingInput
 		if err := decodeGob(in.Input, &x); err != nil {
@@ -1058,7 +1068,10 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 		if err := s.notePending(e, in.Scope, x.Projection); err != nil {
 			return ObserveResponse{}, err
 		}
-		result, err = repo.PreparePending(ctx, x)
+		var r audit.ToolChainPreparePendingResult
+		r, err = repo.PreparePending(ctx, x)
+		s.noteCall(e, in, x, r.Status, err)
+		result = r
 	case OpDiscard:
 		var x audit.ToolChainDiscardPendingForEventSessionInput
 		if err := decodeGob(in.Input, &x); err != nil {

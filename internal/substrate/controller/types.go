@@ -116,6 +116,16 @@ type Registration struct {
 	// Template is the actor's template, "<atespace>/<name>" (the controller
 	// sets it from the actor on every pass).
 	Template string `json:"template,omitempty"`
+	// Connector, AgentVersion, HookContract, KitVersion and TemplateDigest
+	// are what the template's signed attestation names. The controller
+	// records them for an actor made outside DefenseClaw (GAP-0347), so the
+	// gateway resolves its hook profile from the signed statement, as for a
+	// launched actor (GAP-0201). All empty for an unattested template.
+	Connector      string `json:"connector,omitempty"`
+	AgentVersion   string `json:"agent_version,omitempty"`
+	HookContract   string `json:"hook_contract,omitempty"`
+	KitVersion     string `json:"kit_version,omitempty"`
+	TemplateDigest string `json:"template_digest,omitempty"`
 	// Person is the verified OIDC subject; Workload a verified workload
 	// principal. Both empty for atespace attribution.
 	Person   string `json:"person,omitempty"`

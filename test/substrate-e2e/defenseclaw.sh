@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -6,8 +7,9 @@
 #
 #   dc_install       build the gateway image from this checkout (or take E2E_GATEWAY_IMAGE), install the chart
 #   dc_actor_policy  an actor created in the managed atespace gets its egress policy written by the controller
-#   dc_hook_deny     the stub agent posts hook events: a blocked command is denied by the real gateway, a
-#                    harmless one is allowed
+#   dc_attributed_hook  the stub agent of an actor made outside DefenseClaw posts a hook event: the real gateway
+#                    reports its step (its unattested template names no connector) and does not block it
+#   dc_launcher_hook an actor the launcher created: a harmless command is allowed, a metadata read is blocked
 #   dc_uninstall     helm uninstall leaves no DefenseClaw policy and no open egress
 
 DC_RELEASE=dc
@@ -38,7 +40,7 @@ dc_install() {
   local chart="$ROOT/deploy/helm/defenseclaw-substrate" ns=$E2E_DC_NAMESPACE image repo tag digest
   log "DefenseClaw: gateway image and chart"
   if ! image=$(dc_image); then fail "build and push the DefenseClaw gateway image"; return 1; fi
-  pass "the DefenseClaw gateway image is available ($(echo "$image" | sed 's/@.*//'))"
+  pass "the DefenseClaw gateway image is available (${image%%@*})"
   digest=${image#*@}; repo=${image%@*}; tag=${repo##*:}; repo=${repo%:*}
   K create namespace "$ns" >/dev/null 2>&1 || true
   # ate-api-server admits clients only from namespaces with this label (its NetworkPolicy); the bootstrap Job and the
@@ -114,17 +116,22 @@ dc_post() {
   printf ' '; tr -d '\n' <"$E2E_WORKDIR/hook.out"; echo
 }
 
-dc_hook_deny() {
-  log "DefenseClaw: a hook event reaches the real gateway"
+dc_attributed_hook() {
+  log "DefenseClaw: a hook event of an actor made outside DefenseClaw reaches the real gateway"
   if ! proxy_actor "$DC_ACTOR" "$E2E_PROXY_PORT"; then fail "the stub agent answers through the actor proxy"; return 1; fi
   local got
   # The first posts can fail while the new policy and the actor's registration settle.
   if retry 90 4 bash -c "$(declare -f dc_post); E2E_PROXY_PORT=$E2E_PROXY_PORT E2E_WORKDIR=$E2E_WORKDIR; dc_post '$DC_HOOK_ALLOW' | grep -q '^200 '"; then
     got=$(dc_post "$DC_HOOK_ALLOW"); echo "$got" >"$E2E_ARTIFACTS/hook-allow.txt"
-    if echo "$got" | grep -q '"action":"allow"' && echo "$got" | grep -q '"would_block":false'; then
-      pass "a harmless command (ls) is allowed by the real gateway"
+    # The actor was made with kubectl ate, so its registration is attributed, and its stub template is not attested:
+    # DefenseClaw knows no connector for it and can't put its tool steps in the chain window. The step is reported,
+    # never skipped silently, and the alert does not block it (GAP-0339, GAP-0347). The gateway log names the reason.
+    # The allow of the same command is proven for the launcher-created actor, whose registration names its connector.
+    if echo "$got" | grep -q '^200 ' && echo "$got" | grep -q '"would_block":false' &&
+      echo "$got" | grep -q 'SUBSTRATE-CHAIN-UNRECORDED' && ! echo "$got" | grep -q '"action":"block"'; then
+      pass "a harmless command of an actor with no known connector is reported, not blocked (SUBSTRATE-CHAIN-UNRECORDED)"
     else
-      fail "a harmless command is allowed by the gateway: $got"
+      fail "a harmless command of an actor with no known connector is reported, not blocked: $got"
     fi
   else
     fail "the real gateway answers a hook event from the stub agent through egress"
@@ -178,6 +185,7 @@ YAML
   retry 300 5 bash -c "kubectl $(kctx) -n $E2E_NAMESPACE get workerpool lp -o jsonpath='{.status.readyReplicas}' | grep -qx $E2E_POOL_REPLICAS" || { fail "launcher worker pool is ready"; return 1; }
 
   (umask 077; printf 'Authorization: Bearer %s\n' "$E2E_KUBE_TOKEN" >"$hdr")
+  # shellcheck disable=SC2046
   setsid nohup kubectl $(kctx) -n "$ns" port-forward svc/defenseclaw-admin "$port:443" >"$E2E_ARTIFACTS/port-forward.log" 2>&1 </dev/null &
   PROXY_PIDS+=("$!")
   if ! retry 30 1 bash -c "curl -sk -m 3 -o /dev/null https://127.0.0.1:$port/"; then fail "the admin listener answers through a port-forward"; return 1; fi
@@ -197,7 +205,7 @@ YAML
   local got
   retry 90 4 bash -c "$(declare -f dc_post); E2E_PROXY_PORT=$E2E_PROXY_PORT E2E_WORKDIR=$E2E_WORKDIR; dc_post '$DC_HOOK_ALLOW' | grep -q '^200 '"
   got=$(dc_post "$DC_HOOK_ALLOW"); echo "$got" >"$E2E_ARTIFACTS/launcher-hook-allow.txt"
-  if echo "$got" | grep -q '"action":"allow"'; then pass "a harmless command (ls) is allowed for a launcher-created actor"; else fail "a harmless command is allowed for a launcher-created actor: $got"; fi
+  if echo "$got" | grep -q '"action":"allow"' && echo "$got" | grep -q '"would_block":false'; then pass "a harmless command (ls) is allowed for a launcher-created actor"; else fail "a harmless command is allowed for a launcher-created actor: $got"; fi
   got=$(dc_post "$DC_HOOK_DENY"); echo "$got" >"$E2E_ARTIFACTS/launcher-hook-deny.txt"
   info "deny answer: $(echo "$got" | cut -c1-240)"
   if echo "$got" | grep -q '^200 ' && echo "$got" | grep -q -E '"action":"block"|"permissionDecision":"deny"'; then
