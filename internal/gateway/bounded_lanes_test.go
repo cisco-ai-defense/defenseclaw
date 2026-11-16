@@ -421,7 +421,12 @@ func boundedLaneTableErrors(lanes []boundedLaneCap) []string {
 // The cost of a group is about its number of decided calls times their size:
 // the MCP mapper's 1 MiB byte caps and its 64 Ki node cap decide 2 MiB and
 // 128 Ki inputs in each of the five tiers, so the nonshell lanes are split by
-// cap kind.
+// cap kind. Other grew to 18 lanes and 574 s on a hosted runner (run
+// 43831888457), more than a CI gateway shard plans under its 720 s cap
+// (rel-1-0-10:GAP-0941): the browser script, shell string and shell depth
+// lanes have their own groups, and each group runs every tier in at most about
+// 160 s under -race (GOMAXPROCS=4). The shadow lane check ran again in every
+// group; TestBoundRuleShadowLaneNeverDecides runs it once.
 var boundedLaneGroups = []struct {
 	name  string
 	match func(lane string) bool
@@ -435,6 +440,12 @@ var boundedLaneGroups = []struct {
 	{"NonShellNodes", boundedLaneNames("s7/nonshell mcp-nodes", "s7/nonshell mcp-depth", "s7/nonshell mcp-json-string")},
 	{"NonShellItems", boundedLaneNames("s7/nonshell mcp-twins", "s7/nonshell mcp-array", "s7/nonshell mcp-effects",
 		"s7/nonshell mcp-address-list", "s7/nonshell mcp-address-array")},
+	{"BrowserJS", func(lane string) bool { return strings.HasPrefix(lane, "s7/browserjs ") }},
+	{"ShellStrings", boundedLaneNames("awk command in nested shell strings", "shell-parse input bytes",
+		"inline program bytes")},
+	{"ShellDepth", boundedLaneNames("cap floor pieces", "cap floor here-document nest",
+		"sed backup reader eval depth", "prefix wrapper chain", "shell analysis depth",
+		"s7/winrecall script-wrapper depth", "s7/winrecall in-list wrapper body", "s7/sender reading depth")},
 }
 
 func boundedLaneNames(names ...string) func(string) bool {
@@ -523,6 +534,18 @@ func TestBoundRuleEveryLaneCapNonShellItems(t *testing.T) {
 	boundRuleEveryLaneCap(t, "NonShellItems")
 }
 
+func TestBoundRuleEveryLaneCapBrowserJS(t *testing.T) {
+	boundRuleEveryLaneCap(t, "BrowserJS")
+}
+
+func TestBoundRuleEveryLaneCapShellStrings(t *testing.T) {
+	boundRuleEveryLaneCap(t, "ShellStrings")
+}
+
+func TestBoundRuleEveryLaneCapShellDepth(t *testing.T) {
+	boundRuleEveryLaneCap(t, "ShellDepth")
+}
+
 func TestBoundRuleEveryLaneCapOther(t *testing.T) {
 	boundRuleEveryLaneCap(t, "Other")
 }
@@ -548,9 +571,6 @@ func boundedCheckLanes(t *testing.T, lanes []boundedLaneCap) {
 	if t.Failed() {
 		return
 	}
-	// A lane that ships in shadow does not decide: it has its own contract
-	// (bounded_shadow_lanes_test.go).
-	t.Run("shadow lanes", func(t *testing.T) { boundedCheckShadowLanes(t) })
 	for _, tier := range boundedTestTiers {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		floor := bounded.Unknown(tier.tier)
