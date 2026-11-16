@@ -2444,6 +2444,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		targets[BackupUnresolvedKey] = "1"
 		size += len(jsonString(BackupUnresolvedKey)) + 1 + len(jsonString("1")) + 1
 	}
+	// A write operand with a .. component the client cannot walk is an
+	// unknown target, for a managed gateway as for a per-user one
+	// (rel-1-0-10:GAP-1007).
+	if DotDotWalkUnresolved(facts, cwd) {
+		targets[DotDotWalkUnresolvedKey] = "1"
+		size += len(jsonString(DotDotWalkUnresolvedKey)) + 1 + len(jsonString("1")) + 1
+	}
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
 	var dotDotOperands []string
@@ -3528,6 +3535,7 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[NoDereferenceTouchSafeKey] != "" && targets[NoDereferenceTouchSafeKey] != "1") ||
 		(targets[BackupUnresolvedKey] != "" && targets[BackupUnresolvedKey] != "1") ||
+		(targets[DotDotWalkUnresolvedKey] != "" && targets[DotDotWalkUnresolvedKey] != "1") ||
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
 		!validShareBodyUnreadFact(targets[ShareBodyUnreadKey]) ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
