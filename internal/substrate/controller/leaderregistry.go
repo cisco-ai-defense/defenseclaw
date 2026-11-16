@@ -74,7 +74,9 @@ func (l *LeaderRegistry) GetFresh(ctx context.Context, atespace, uid string) (Re
 func fromLeader(r registry.Registration) Registration {
 	out := Registration{Atespace: r.Atespace, Name: r.Name, UID: r.UID, Template: r.Template, Profile: r.Profile,
 		Task: r.Unattended, BatchID: r.BatchID, ParentUID: r.ParentUID, ForkedBy: r.ForkedBy,
-		Approved: slices.Clone(r.Approved), Source: SourceLauncher}
+		Approved: slices.Clone(r.Approved), Source: SourceLauncher,
+		Connector: r.Connector, AgentVersion: r.HarnessVersion, HookContract: r.HookContract,
+		KitVersion: r.KitVersion, TemplateDigest: r.TemplateDigest}
 	switch {
 	case r.ParentUID != "":
 		out.Source = SourceFork
@@ -112,6 +114,8 @@ func (l *LeaderRegistry) Put(ctx context.Context, in Registration) error {
 	}
 	reg := registry.Registration{Atespace: in.Atespace, Name: in.Name, UID: in.UID, Template: in.Template, Profile: in.Profile,
 		Unattended: in.Task, BatchID: in.BatchID, ParentUID: in.ParentUID, ForkedBy: in.ForkedBy,
+		Connector: in.Connector, HarnessVersion: in.AgentVersion, HookContract: in.HookContract,
+		KitVersion: in.KitVersion, TemplateDigest: in.TemplateDigest,
 		Approved: slices.Clone(in.Approved), Attributed: true, CreatedAt: now().UTC()}
 	// Only a fork DefenseClaw made keeps the parent's person (and with it
 	// per-person secrets); a fork made outside DefenseClaw is attributed

@@ -350,6 +350,8 @@ func (a *APIServer) applyAgentHookToolChains(
 		(structuredAction || route == connector.ToolEventRouteResultContent || unroutedToolCall)
 	rootMissed := ""
 	switch {
+	case substrateStep && substrateRegistrationNamesNoConnector(ctx):
+		rootMissed = "the actor's registration names no connector (an actor made outside DefenseClaw from a template whose attestation names none), so no reviewed hook contract applies"
 	case substrateStep && unroutedToolCall:
 		rootMissed = "the actor's hook contract routes no tool-call lifecycle event " + strconv.Quote(req.HookEventName)
 	case substrateStep && !lifecycleEligible:
@@ -856,6 +858,15 @@ func (a *APIServer) applyAgentHookToolChains(
 		}
 	}
 	return resp, finalization
+}
+
+// substrateRegistrationNamesNoConnector reports a verified actor whose
+// registration names no connector: an actor made outside DefenseClaw from an
+// unattested template (GAP-0347). Its binding resolves the empty hook
+// profile, so the step's real reason is that, not the lifecycle.
+func substrateRegistrationNamesNoConnector(ctx context.Context) bool {
+	reg, ok := substrateRegistrationFrom(ctx)
+	return ok && strings.TrimSpace(reg.Connector) == ""
 }
 
 // substrateChainUnrecordedRule is the finding of a Substrate actor's tool
