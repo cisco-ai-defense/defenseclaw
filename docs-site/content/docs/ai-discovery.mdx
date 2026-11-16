@@ -1070,6 +1070,8 @@ The state is saved only after the collection was published, so a change that did
 
 With `ai_discovery.include_skill_manifests: true` (off by default), the record of a new or changed skill also carries its SKILL.md text, once per file version: one record carries the text, and every record of that file carries `manifest_hash`. The text is a content field, so the destination's redaction profile masks secrets before upload. A file over 256 KiB, the most the redaction detectors scan in one field, goes in ordered parts that end at a line and keep a PEM block whole, one part a scan, and at most 2 MiB of text goes out in one scan; a file that cannot be split that way, or needs more than 128 parts, sends only its hash. Progress is saved only after a publish, so a lost part is sent again.
 
+A managed scan also follows an agent folder a user moved with `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `COPILOT_HOME`. It reads the last literal assignment in `~/.zshenv`, `~/.zprofile`, `~/.zshrc`, `~/.bash_profile`, `~/.bashrc` or `~/.profile`, or on Windows the user's persistent environment (`HKU\<SID>\Environment`, read while the user is signed in), and uses the folder only when it is a real folder inside that user's home. A variable set in one terminal session only is not seen.
+
 ### Splunk: AI Discovery Inventory
 
 ![Splunk · AI Discovery Inventory dashboard](/images/splunk/ai-discovery-inventory.png)
