@@ -110,7 +110,7 @@ func TestDetectClaudeProjectSkillsOnlyInsideOwningHome(t *testing.T) {
 func TestDetectPlugins_EnumeratesChildBasenames(t *testing.T) {
 	tmp := t.TempDir()
 	pluginsDir := filepath.Join(tmp, ".codex", "plugins")
-	for _, name := range []string{"plugin-x", "plugin-y", "plugin-z"} {
+	for _, name := range []string{"plugin-x", "plugin-y", "plugin-z", ".remote-plugin-install-staging"} {
 		if err := os.MkdirAll(filepath.Join(pluginsDir, name), 0o700); err != nil {
 			t.Fatalf("mkdir %s: %v", name, err)
 		}
@@ -140,6 +140,10 @@ func TestDetectPlugins_EnumeratesChildBasenames(t *testing.T) {
 		if !slices.Contains(got.Basenames, want) {
 			t.Fatalf("basenames missing %q: %v", want, got.Basenames)
 		}
+	}
+	// Codex's own install staging folder is not a plugin.
+	if slices.Contains(got.Basenames, ".remote-plugin-install-staging") {
+		t.Fatalf("staging folder reported as a plugin: %v", got.Basenames)
 	}
 }
 
