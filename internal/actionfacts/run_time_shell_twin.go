@@ -110,6 +110,13 @@ func symbolicShellWord(word *syntax.Word, zeroIsShell bool, lastShell string) (s
 				program := wrapperProgramName(projectPOSIXWord(call.Args[0]).Value)
 				// A stream selector preserves a shell path emitted upstream.
 				if program == "head" && shell != "" {
+					for _, arg := range call.Args[1:] {
+						value := projectPOSIXWord(arg)
+						option := strings.TrimLeft(value.Value, "-nc")
+						if value.Expands || option != "" && strings.Trim(option, "0123456789") != "" {
+							valid = false
+						}
+					}
 					return false
 				}
 				switch program {
@@ -229,6 +236,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string,
 		}
 		return true
 	})
+	priorIndex, lastShell := 0, ""
 	var visit func(syntax.Node) bool
 	visit = func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
@@ -238,12 +246,12 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string,
 		if len(call.Args) == 0 {
 			return true
 		}
-		// Track the last operand of preceding top-level calls for $_.
-		// Its syntax is expanded by the same word reader as every parameter.
-		lastShell := ""
-		for _, stmt := range file.Stmts {
-			prior, ok := stmt.Cmd.(*syntax.CallExpr)
-			if !ok || prior.End().Offset() >= call.Pos().Offset() || len(prior.Args) == 0 {
+		// Advance once through preceding top-level calls for $_. Child
+		// readers retain the same preceding context without a quadratic walk.
+		for priorIndex < len(file.Stmts) && file.Stmts[priorIndex].End().Offset() < call.Pos().Offset() {
+			prior, ok := file.Stmts[priorIndex].Cmd.(*syntax.CallExpr)
+			priorIndex++
+			if !ok || len(prior.Args) == 0 {
 				continue
 			}
 			lastShell = ""

@@ -18,9 +18,9 @@ package gateway
 
 import (
 	"path/filepath"
+	"runtime"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
-	"runtime"
 )
 
 // clientWriteTarget returns the hook client's resolved target for a path
