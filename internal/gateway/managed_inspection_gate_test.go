@@ -67,6 +67,44 @@ func TestManagedGuardrailRefusesABuildWithNoCredentialProvider(t *testing.T) {
 	}
 }
 
+// A Secure Client inspection that got a token marks inspection observed, so
+// the endpoint health report says ok instead of unknown; a later token
+// failure marks it unavailable, and a replaced client cannot change state.
+func TestManagedInspectorMarksInspectionObserved(t *testing.T) {
+	s := managedInspectionSidecar(t)
+	s.cfg.CiscoAIDefense.Endpoint = "https://aidefense.example.com"
+	registerFakeCloudProvider(t, newFakeCloudProvider("token"), nil)
+
+	inspector, ok := s.newManagedInspector(context.Background(), "test").(*CiscoDefenseClawInspectClient)
+	if !ok || inspector == nil {
+		t.Fatal("newManagedInspector built no Secure Client inspection client")
+	}
+	observed := func() bool {
+		s.inspectionMu.RLock()
+		defer s.inspectionMu.RUnlock()
+		return s.inspectionObserved
+	}
+	if observed() {
+		t.Fatal("inspection observed before any request")
+	}
+
+	inspector.notifyAvailability(nil)
+	if available, _ := s.inspectionAvailability(); !available || !observed() {
+		t.Fatalf("after a successful request: available=%t observed=%t, want both true", available, observed())
+	}
+
+	inspector.notifyAvailability(errors.New("managed cloud token is empty"))
+	if available, detail := s.inspectionAvailability(); available || !strings.Contains(detail, "token is empty") {
+		t.Fatalf("after a token failure: available=%t detail=%q, want unavailable with the failure", available, detail)
+	}
+
+	s.setInspectionAvailability(nil) // a rebuild replaces the client
+	inspector.notifyAvailability(errors.New("late failure from the replaced client"))
+	if available, _ := s.inspectionAvailability(); !available {
+		t.Fatal("a replaced client's late outcome overwrote its successor's state")
+	}
+}
+
 func TestEnsureCMIDProviderRecordsInspectionAvailability(t *testing.T) {
 	s := managedInspectionSidecar(t)
 	if available, _ := s.inspectionAvailability(); available {
