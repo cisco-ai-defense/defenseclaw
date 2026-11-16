@@ -653,13 +653,25 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 				return false
 			}
 			reduced = true
-			if replaced, ok := flattenRedirected(stmt); replaced {
-				return ok
+			walk := func() bool {
+				if replaced, ok := flattenRedirected(stmt); replaced {
+					return ok
+				}
+				if allSimple && !flattenSubstitutions(stmt) {
+					return false
+				}
+				return stmt.Cmd != nil && keep(stmt.Cmd, stmt.Redirs...)
 			}
-			if allSimple && !flattenSubstitutions(stmt) {
-				return false
+			if !stmt.Background {
+				return walk()
 			}
-			return stmt.Cmd != nil && keep(stmt.Cmd, stmt.Redirs...)
+			// The shell runs a background statement in a child shell: its
+			// HOME, other variables and directory stay there, and the
+			// statements after it read the values from before it
+			// (rel-1-0-10:GAP-1021).
+			subshells++
+			defer func() { subshells-- }()
+			return childScope('s', walk)
 		}
 		if replaced, ok := flattenRedirected(stmt); replaced {
 			reduced = true

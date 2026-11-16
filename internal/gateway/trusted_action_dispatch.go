@@ -1065,6 +1065,14 @@ func dispatchTrustedActionWith(
 			}
 			evidenceCWDs := trustedSimpleCommandEvidenceCWDs(request, simples)
 			for index, simple := range simples {
+				if simple.UnprovenHome {
+					// The command reads ~ or $HOME after HOME got a value
+					// known only at run time (HOME=$(pwd)): its reading
+					// names the previous home, the file it reaches is not
+					// known, so the call is at least the unknown tier
+					// (rel-1-0-10:GAP-0996).
+					findings = withUnknownFinding(findings, unknownReasonFinding(runtimeHomeTitle, runtimeHomeReason, request.EnforcementCapable))
+				}
 				if simple.EvaluationFailure != "" {
 					if simple.EvaluationFailure == actionfacts.EvaluationFailureInternal {
 						findings = withSimpleCommandFindings(findings, trustedActionParseFailureFindings(request.EnforcementCapable))
@@ -10713,6 +10721,14 @@ const unresolvedBodyTitle = "This command runs a shell body that could not be re
 func trustedActionUnresolvedBodyFindings(enforcementCapable bool) []RuleFinding {
 	return unreadPartAlert(unreadPartFindings(unresolvedBodyTitle, enforcementCapable), enforcementCapable)
 }
+
+// runtimeHomeTitle and runtimeHomeReason are the unknown-tier finding of a
+// command that reads the home through a HOME set at run time
+// (actionfacts.SimpleCommand.UnprovenHome, rel-1-0-10:GAP-0996).
+const (
+	runtimeHomeTitle  = "Shell command reads the home folder through a HOME set at run time, judged as unknown"
+	runtimeHomeReason = "home_set_at_run_time"
+)
 
 // shellReadingBound is the reading bound a command is past
 // (trustedActionCommandBound).

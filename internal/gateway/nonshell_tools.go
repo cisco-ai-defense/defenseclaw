@@ -395,6 +395,15 @@ func nonShellContentOf(raw json.RawMessage) string {
 // CEL budget is spent). Like the MCP lane, outside the strict tier and
 // managed installs a finding is an alert. A call without a word any rule
 // needs is not parsed again.
+//
+// A list (&&, ||, ;) is judged as a whole and statement by statement, and
+// the findings are the union. The facts of the whole list leave a "~/"
+// operand dynamic, because an earlier statement may change HOME, so a read
+// of a home file by one statement had no path fact there and adding any
+// other statement dropped its finding (rel-1-0-10:GAP-0951). The statements
+// come from the walk the rule dispatch judges its children with
+// (actionfacts.SimpleCommands), which follows HOME, cd and the variables of
+// the list, and each is judged as the same statement sent alone.
 func shellToolFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	if !request.EnforcementCapable || ManagedEnterpriseActive() || nonShellLaneShadow(ctx) {
 		return findings
@@ -428,61 +437,90 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	hard := request.StrictPolicy || request.ManagedInstall
 	otherAccount := nonShellNamesOtherAccountCredential(facts)
 	out := append([]RuleFinding(nil), findings...)
+	// A finding of the lane is merged as the dispatch merges the finding of a
+	// statement (withSimpleCommandFindings): it replaces a weaker finding of
+	// the same rule and never a stronger one. Skipping every rule id already
+	// in the findings let a detection-only finding of the dispatch hide the
+	// lane's enforcing one (rel-1-0-10:GAP-0995).
 	add := func(ruleID, note string) {
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
 		if !ok {
 			return
 		}
 		finding := nonShellFinding(rule, note, request.Input.Tool, hard)
-		// A finding of the same rule the call already carries is kept. When
-		// the call names a credential file in another account's home, a
-		// stronger one replaces it: the regex fallback judges that home at a
-		// lower severity and alert-only, so an upload of another account's
-		// .git-credentials or .netrc was weaker than an upload of one's own
-		// (rel-1-0-10:GAP-0834, GAP-0835). The active home's own files keep
-		// the finding they carry, as on rel: a read of one's own
-		// .git-credentials, .netrc or .pgpass is judged like a read of one's
-		// own AWS or kube credentials (rel-1-0-10:GAP-0888).
-		if index := slices.IndexFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }); index >= 0 {
-			if otherAccount && nonShellFindingStronger(finding, out[index]) {
+		// When the call names a credential file in another account's home, a
+		// finding of the same rule that is stronger by enforcement or severity
+		// replaces the one the call carries: the regex fallback judges that
+		// home at a lower severity and alert-only, so an upload of another
+		// account's .git-credentials or .netrc was weaker than an upload of
+		// one's own (rel-1-0-10:GAP-0834, GAP-0835). Every other finding is
+		// merged by enforcement only (withSimpleCommandFindings, GAP-0995), so a
+		// read of the active home's own .git-credentials, .netrc or .pgpass is
+		// judged like a read of one's own AWS or kube credentials
+		// (rel-1-0-10:GAP-0888).
+		if otherAccount {
+			if index := slices.IndexFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }); index >= 0 &&
+				nonShellFindingStronger(finding, out[index]) {
 				out[index] = finding
+				return
 			}
-			return
 		}
-		out = append(out, finding)
+		out = withSimpleCommandFindings(out, []RuleFinding{finding})
 	}
-	if isShell {
-		for _, id := range toolshape.TextRules(command) {
-			add(id, "")
-		}
-		for _, c := range facts.Commands {
-			for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
+	judge := func(facts actionfacts.Facts, command, text string) {
+		if isShell {
+			for _, id := range toolshape.TextRules(command) {
 				add(id, "")
 			}
+			for _, c := range facts.Commands {
+				for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
+					add(id, "")
+				}
+			}
+		}
+		for _, p := range facts.Paths {
+			path := firstNonEmpty(p.Resolved, p.Normalized, p.Value)
+			text := text
+			if fileText, ok := patchTexts[p.Value]; ok {
+				text = fileText
+			}
+			ids := append(toolshape.PathRules(string(p.Access), path, text), homePathRuleIDs(facts, p, text)...)
+			for _, id := range ids {
+				// A link to /dev/null in a unit folder masks the unit: it stops
+				// what runs at boot or login, it does not start anything.
+				if id == "CMD-PERSIST-SYSTEM-SCHEDULE" && linksToDevNull(facts, p.CommandID) {
+					continue
+				}
+				add(id, "")
+			}
+			// The developer-token files of an account's home (the credentials
+			// table's class of PATH-GIT-CREDS) are read by the native file tools as
+			// the shell and MCP lanes read them (rel-1-0-10:GAP-0816). The class
+			// comes from the one table, so each branch's table decides which names
+			// are in it; the home is found by position.
+			if p.Access == actionfacts.PathAccessRead && developerTokenFileOfAccountHome(path) {
+				add("PATH-GIT-CREDS", "")
+			}
 		}
 	}
-	for _, p := range facts.Paths {
-		path := firstNonEmpty(p.Resolved, p.Normalized, p.Value)
-		text := text
-		if fileText, ok := patchTexts[p.Value]; ok {
-			text = fileText
-		}
-		ids := append(toolshape.PathRules(string(p.Access), path, text), homePathRuleIDs(facts, p, text)...)
-		for _, id := range ids {
-			// A link to /dev/null in a unit folder masks the unit: it stops
-			// what runs at boot or login, it does not start anything.
-			if id == "CMD-PERSIST-SYSTEM-SCHEDULE" && linksToDevNull(facts, p.CommandID) {
+	judge(facts, command, text)
+	if isShell {
+		for _, simple := range request.simpleMemo.commands(request.Input, facts) {
+			// A failed or capped reading is the dispatch's to judge (the unknown
+			// tier), an opaque value or an inert output adds no evidence, and a
+			// login guess only proves a state write, never a rule over its words
+			// (actionfacts.SimpleCommand).
+			if simple.EvaluationFailure != "" || simple.OpaqueValueAssignment ||
+				simple.LiteralOutputOnly || simple.LoginGuess {
 				continue
 			}
-			add(id, "")
-		}
-		// The developer-token files of an account's home (the credentials
-		// table's class of PATH-GIT-CREDS) are read by the native file tools as
-		// the shell and MCP lanes read them (rel-1-0-10:GAP-0816). The class
-		// comes from the one table, so each branch's table decides which names
-		// are in it; the home is found by position.
-		if p.Access == actionfacts.PathAccessRead && developerTokenFileOfAccountHome(path) {
-			add("PATH-GIT-CREDS", "")
+			child := request.Input
+			child.Command, child.Args, child.Argv = simple.Text, nil, nil
+			child.CWD = simple.CWD
+			if simple.AbsoluteOnly || child.CWD == "" {
+				child.CWD = request.Input.CWD
+			}
+			judge(actionfacts.Analyze(child), simple.Text, simple.Text)
 		}
 	}
 	// A sandbox call's relative operands name files in the guest's own
@@ -491,7 +529,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	// file of the home read the call placed there too (the lexical reading
 	// the semantic owners judge, sandboxGuestPlacedInput), so `printf ... >
 	// .config/systemd/user/x.service` from /sandbox gets the laptop's verdict
-	// (rel-1-0-10:GAP-1002).
+	// (rel-1-0-10:GAP-1002). It runs for the native file tools too.
 	if guest, ok := sandboxGuestPlacedInput(request, facts); ok {
 		guestFacts := actionfacts.Analyze(guest)
 		for _, p := range guestFacts.Paths {

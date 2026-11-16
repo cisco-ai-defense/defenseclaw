@@ -74,6 +74,13 @@ type SimpleCommand struct {
 	// and the directory the action starts in judges the command as well as
 	// any other (rel-1-0-6:GAP-0630 review 5).
 	AbsoluteOnly bool
+	// UnprovenHome means Text reads a file through ~ or $HOME after HOME got
+	// a value the walk could not read (HOME=$(pwd); cp ~/../f d): Text spells
+	// the previous home, and the file the shell reads is known only when it
+	// runs. A reader judges Text and adds the unknown tier
+	// (rel-1-0-10:GAP-0996). A write there is judged against the previous
+	// home only (GAP-2476): a scratch HOME=$(mktemp -d) keeps its writes.
+	UnprovenHome bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
 	// view can be produced, EvaluationFailureInternal when the reader
 	// itself failed, and EvaluationFailureSyntax when a text with a syntax
@@ -206,6 +213,12 @@ type simpleShellState struct {
 	// forked holds the forked loop variables that hold the value of one list
 	// word (simpleForkLoopBind) in this state, until their loop ends.
 	forked []string
+	// homeUnproven means HOME holds a value the walk could not read
+	// (HOME=$(pwd), HOME=$X, a declaration option that changes what the
+	// value means). HOME keeps its previous value, so a later ~ or $HOME
+	// write is still judged against a home the call can reach (GAP-2476),
+	// and a reading through it is marked UnprovenHome (rel-1-0-10:GAP-0996).
+	homeUnproven bool
 }
 
 // simpleLocal is the caller value of name saved by a local declaration in
@@ -224,11 +237,56 @@ const (
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
 		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
-		locals: slices.Clone(s.locals), forked: slices.Clone(s.forked)}
+		locals: slices.Clone(s.locals), forked: slices.Clone(s.forked), homeUnproven: s.homeUnproven}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
 	return copy
+}
+
+// noteHome records what assignments did to HOME (updateSimpleVariables): a
+// value the walk read proves the home, a value it could not read leaves the
+// home unproven.
+func (s *simpleShellState) noteHome(set, known bool) {
+	if set {
+		s.homeUnproven = !known
+	}
+}
+
+// simpleReadsThroughUnprovenHome reports whether the reading text of a
+// statement spelled with ~ or HOME (source) reads, under the home of state
+// while that home is unproven (SimpleCommand.UnprovenHome), a path that
+// another home makes an account's file: one that climbs out of the home
+// (~/../f) or one of the credentials-file table (~/.git-credentials).
+// A test script that sets HOME to its own folder and reads its own files
+// there (export HOME=$T; tail "$HOME/init.log") reads no such path.
+func simpleReadsThroughUnprovenHome(input Input, state simpleShellState, source, text string, resolved bool) bool {
+	home := state.vars["HOME"]
+	if !state.homeUnproven || !resolved || home == "" ||
+		!strings.Contains(source, "~") && !strings.Contains(source, "HOME") {
+		return false
+	}
+	reading := input
+	reading.Command, reading.Args, reading.Argv, reading.CWD = text, nil, nil, state.cwd
+	prefix := strings.TrimSuffix(home, "/") + "/"
+	for _, fact := range Analyze(reading).Paths {
+		if fact.Access != PathAccessRead || !strings.HasPrefix(fact.Value, prefix) {
+			continue
+		}
+		relative := strings.TrimPrefix(fact.Value, prefix)
+		if slices.Contains(strings.Split(relative, "/"), "..") {
+			return true
+		}
+		if _, credential := MatchCredentialFileShape(relative); credential {
+			return true
+		}
+	}
+	return false
+}
+
+// simpleHomeChanged reports whether state holds another HOME than prior.
+func simpleHomeChanged(prior, state simpleShellState) bool {
+	return prior.vars["HOME"] != state.vars["HOME"] || prior.homeUnproven != state.homeUnproven
 }
 
 // simplePieces holds the commands a walk reads from the text of the call as it
@@ -557,11 +615,13 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			state := prior.clone()
 			simpleApplyLoopBinds(state.vars, part.binds, login)
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 && len(call.Assigns) != 0 && len(stmt.Redirs) == 0 {
-				updateSimpleVariables(state.vars, call.Assigns)
+				state.noteHome(updateSimpleVariables(state.vars, call.Assigns))
 				changed = true
 				nextVariants = append(nextVariants, state)
-				if part.maySkip && len(prior.forked) != 0 {
-					// The assignment may not run: the word of the loop stays.
+				if part.maySkip && (len(prior.forked) != 0 || simpleHomeChanged(prior, state)) {
+					// The assignment may not run: the word of the loop, and the
+					// HOME it would change (false && HOME=/x, true || HOME=/x),
+					// stay as they were (rel-1-0-10:GAP-0996).
 					nextVariants = append(nextVariants, prior)
 				}
 				continue
@@ -638,7 +698,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
 				AbsoluteOnly:            state.cwdUnknown && !relative,
-				UnresolvedFolder:        relative}
+				UnresolvedFolder:        relative,
+				UnprovenHome:            simpleReadsThroughUnprovenHome(input, state, part.text, text, resolvedVariable)}
 			if text == part.text {
 				pieces.add(command)
 			}
@@ -659,7 +720,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						ResolvedVariable:        resolvedVariable,
 						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound),
 						UnboundUser:             simpleUnboundUser(reading, effective, bound),
-						AbsoluteOnly:            command.AbsoluteOnly}
+						AbsoluteOnly:            command.AbsoluteOnly,
+						UnprovenHome:            command.UnprovenHome}
 					if reading == unprefixed {
 						pieces.add(alone)
 					}
@@ -775,6 +837,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			}
 			if call != nil {
 				simpleForgetUserVars(state.vars, CallBindsUserNames(call))
+				if simpleCallReadsHome(call) {
+					// read HOME: the value is known only when it runs, and
+					// HOME keeps the previous one (rel-1-0-10:GAP-0996).
+					state.homeUnproven = true
+				}
 			}
 			nextCWD, changedDirectory := simpleCommandNextCWD(text, &state, effective)
 			if !changedDirectory {
@@ -809,8 +876,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				state.vars[part.read.name] = part.read.word
 			}
 			nextVariants = append(nextVariants, state)
-			if part.maySkip && len(prior.forked) != 0 {
-				// The statement may not run: the word of the loop stays.
+			if part.maySkip && (len(prior.forked) != 0 || simpleHomeChanged(prior, state)) {
+				// The statement may not run: the word of the loop, and the
+				// HOME it would change (false && export HOME=/x), stay as
+				// they were (rel-1-0-10:GAP-0996).
 				nextVariants = append(nextVariants, prior)
 			}
 		}
@@ -1186,7 +1255,7 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 		if !slices.ContainsFunc(result, func(previous simpleShellState) bool {
 			return previous.cwd == state.cwd && previous.cwdUnknown == state.cwdUnknown &&
 				slices.Equal(previous.dirStack, state.dirStack) && maps.Equal(previous.vars, state.vars) &&
-				slices.Equal(previous.locals, state.locals)
+				slices.Equal(previous.locals, state.locals) && previous.homeUnproven == state.homeUnproven
 		}) {
 			result = append(result, state)
 		}
@@ -1356,10 +1425,12 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 		if !known || assign.Index != nil || assign.Array != nil {
 			if assign.Name.Value != "HOME" {
 				delete(vars, assign.Name.Value)
+			} else {
+				state.homeUnproven = true
 			}
 			continue
 		}
-		updateSimpleVariables(vars, []*syntax.Assign{assign})
+		state.noteHome(updateSimpleVariables(vars, []*syntax.Assign{assign}))
 	}
 }
 
@@ -1460,24 +1531,34 @@ func simpleEndFunctionBody(states []simpleShellState, scope string) []simpleShel
 	return ended
 }
 
-func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) {
+// updateSimpleVariables applies assigns to vars. It reports whether one of
+// them set HOME and whether the walk read the value HOME has after them.
+func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) (homeSet, homeKnown bool) {
 	for _, assign := range assigns {
 		if assign == nil || assign.Name == nil || assign.Index != nil || assign.Array != nil {
 			continue
 		}
 		name := assign.Name.Value
+		known := true
 		if assign.Value == nil {
 			vars[name] = ""
-		} else if value, known := simpleStaticWord(assign.Value, vars); known {
+		} else if value, static := simpleStaticWord(assign.Value, vars); static {
 			vars[name] = value
-		} else if name != "HOME" {
-			delete(vars, name)
+		} else {
+			known = false
+			if name != "HOME" {
+				delete(vars, name)
+			}
 		}
 		// A HOME value the walk cannot read (HOME=$(echo $HOME), HOME=$X)
 		// keeps the previous HOME: an unknown HOME dropped every later ~
-		// write (GAP-2476). A home that a run-time value really moves to is
-		// outside what the static check can follow.
+		// write (GAP-2476). The home a run-time value moves to is not known,
+		// so the state records it as unproven (rel-1-0-10:GAP-0996).
+		if name == "HOME" {
+			homeSet, homeKnown = true, known
+		}
 	}
+	return homeSet, homeKnown
 }
 
 // The full action may bind a value that the simple-command walk cannot
@@ -1544,6 +1625,11 @@ func simpleBoundVariables(file *syntax.File) (bound map[string]bool) {
 // it spells (any when it is not static). The statements after the call read
 // no value for them; the statements before it do.
 func CallBindsUserNames(call *syntax.CallExpr) []string {
+	return callBindsNames(call, simpleUserNames)
+}
+
+// callBindsNames is CallBindsUserNames for the names in wanted.
+func callBindsNames(call *syntax.CallExpr, wanted []string) []string {
 	if call == nil || len(call.Args) == 0 {
 		return nil
 	}
@@ -1553,7 +1639,7 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 	}
 	var names []string
 	add := func(name string) {
-		if slices.Contains(simpleUserNames, name) && !slices.Contains(names, name) {
+		if slices.Contains(wanted, name) && !slices.Contains(names, name) {
 			names = append(names, name)
 		}
 	}
@@ -1577,7 +1663,7 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 			name, known := simpleStaticWord(call.Args[index], nil)
 			switch {
 			case !known:
-				for _, user := range simpleUserNames {
+				for _, user := range wanted {
 					add(user)
 				}
 			case options && name == "--":
@@ -1604,7 +1690,7 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 		}
 	case ".", "source":
 		// The sourced file is code the walk does not read.
-		for _, name := range simpleUserNames {
+		for _, name := range wanted {
 			add(name)
 		}
 	case "eval", "trap":
@@ -1621,7 +1707,7 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 		for _, arg := range code {
 			text, known := simpleStaticWord(arg, nil)
 			if !known {
-				for _, name := range simpleUserNames {
+				for _, name := range wanted {
 					add(name)
 				}
 				return names
@@ -1633,6 +1719,19 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 		}
 	}
 	return names
+}
+
+// simpleCallReadsHome reports a read, mapfile, readarray or printf -v call
+// that binds HOME to a value it reads when it runs (rel-1-0-10:GAP-0996).
+func simpleCallReadsHome(call *syntax.CallExpr) bool {
+	if call == nil || len(call.Args) == 0 {
+		return false
+	}
+	switch program, _ := simpleStaticWord(call.Args[0], nil); program {
+	case "read", "mapfile", "readarray", "printf":
+		return slices.Contains(callBindsNames(call, []string{"HOME"}), "HOME")
+	}
+	return false
 }
 
 // simpleStaticWordOrEmpty reports a static word that starts with prefix.
