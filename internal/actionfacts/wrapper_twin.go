@@ -539,15 +539,25 @@ var wrappedShellPrograms = map[string]bool{"sh": true, "bash": true, "dash": tru
 // the options after -c. ok is false for the plain SHELL -c STRING, for a
 // script or stdin shell, and for a word that is not static.
 func shellOptionsString(args []*syntax.Word, at int) (int, bool) {
+	if at >= len(args) {
+		return 0, false
+	}
+	if name := projectPOSIXWord(args[at]); name.Expands || !wrappedShellPrograms[wrapperProgramName(name.Value)] {
+		return 0, false
+	}
+	return shellOptionsAfter(args, at)
+}
+
+// shellOptionsAfter is shellOptionsString for a shell whose program word
+// args[at] the caller has already read as a shell (a static shell name, or
+// a shell named at run time, RunTimeShellWord).
+func shellOptionsAfter(args []*syntax.Word, at int) (int, bool) {
 	static := func(i int) (string, bool) {
 		if i >= len(args) {
 			return "", false
 		}
 		word := projectPOSIXWord(args[i])
 		return word.Value, !word.Expands
-	}
-	if name, ok := static(at); !ok || !wrappedShellPrograms[wrapperProgramName(name)] {
-		return 0, false
 	}
 	command, noexec := false, false
 	for i := at + 1; i < len(args); i++ {

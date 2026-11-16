@@ -468,6 +468,26 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					}
 				}
 				roleUnknown := memo.nonWritesExcused() && !callHasGlob && actionCallRoleUnknown(call, home)
+				// Opaque program text still names a protected file. Preserve
+				// its drive prefix only here: a quoted assignment or a known
+				// program operand must retain its shell field/option reading.
+				opaqueUnknown := !stateOnly && (windowsHost || spelledWindows) &&
+					!memo.nonWritesExcused() && !callHasGlob && actionCallRoleUnknown(call, home)
+				opaqueMentions := func(word *syntax.Word) bool {
+					if !opaqueUnknown {
+						return false
+					}
+					value, known := actionWordValue(word, values, effectiveCWD, home)
+					if !known {
+						return false
+					}
+					for _, span := range actionWindowsMentionToken.FindAllStringIndex(value, -1) {
+						if check(value[span[0]:span[1]], false, effectiveCWD) {
+							return true
+						}
+					}
+					return false
+				}
 				// A statement that only reads, outside a pipeline and not a cd, names
 				// the file to read it: its words leave the text scan too (a quoted
 				// remote command, a shell body), as a read-only statement's hit words
@@ -508,7 +528,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					if slices.Contains(inert, word) {
 						continue
 					}
-					if actionExpandedWordGlob(word, values, effectiveCWD, home, check) || checkBraceFields(word, false) || checkWord(word) {
+					if actionExpandedWordGlob(word, values, effectiveCWD, home, check) || checkBraceFields(word, false) || checkWord(word) || opaqueMentions(word) {
 						read := readOnly && plainReads[stmt] && !actionWordHasUnquotedGlob(word, command)
 						if readOnly && (direct[stmt] || read) {
 							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values), enters: actionCallChangesDirectory(call, home) || callHasGlob, read: read})
@@ -1411,6 +1431,7 @@ func patchCommandResolutionChange(line string) bool {
 const actionLiteralTilde = "\x1e"
 
 var actionMentionToken = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
+var actionWindowsMentionToken = lazyregexp.New(`(?:[A-Za-z]:)?[A-Za-z0-9_./~*?\[\]\x1e-]+`)
 
 // actionURLAuthorityToken reports a mention token that is the //host/... part
 // of a URL (scheme://host/...): a token stops at the colon, so the scan reads

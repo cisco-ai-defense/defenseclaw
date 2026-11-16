@@ -794,6 +794,24 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// A shell named at run time ("$SHELL" -c TEXT, $BASH -ec TEXT, env
+	// "$SHELL" -c TEXT, "$SHELL" <<< TEXT) runs TEXT as the literal shell
+	// call does: that reading is judged too, and the stricter of the two
+	// readings counts (rel-1-0-10:GAP-0980).
+	shellTwin, shellTwinOK, shellCaps := runTimeShellTwinRequest(request)
+	if shellTwinOK {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, shellTwin))
+		}()
+	}
+	if shellCaps.Any() {
+		// A program word past the bounds of that reading (command
+		// substitutions nested past its depth, more words than its budget)
+		// is not read: the call is truncated (bound rule, rel-1-0-10:GAP-1041).
+		defer func() {
+			findings = withBoundedTruncation(findings, shellCaps, request)
+		}()
+	}
 	// The commands an awk program starts through system(), print | and
 	// | getline, written as string literals, are run by the shell as the
 	// hook would run them directly (GAP-0499): that reading is judged too,
@@ -3911,7 +3929,7 @@ func provenStateCandidateMatches(
 	lineStaysOff func() bool,
 ) bool {
 	if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
-		spellings := []string{candidate.Resolved, candidate.Value, candidate.Normalized}
+		spellings, written := []string{candidate.Resolved, candidate.Value, candidate.Normalized}, candidate.Value
 		candidate.Resolved = entry
 		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 			return true
@@ -3920,8 +3938,8 @@ func provenStateCandidateMatches(
 			// The gateway cannot follow the directory through a link
 			// the user can make; the hook placed the entry as the user
 			// and lists it only when it is in the state tree (GAP-2549).
-			for _, spelling := range spellings {
-				if placed := request.ResolvedWriteTargets[spelling]; filepath.IsAbs(placed) {
+			for _, placed := range clientWriteTargets(request.ResolvedWriteTargets, written, spellings...) {
+				if filepath.IsAbs(placed) {
 					candidate.Resolved = placed
 					if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 						return true
@@ -3932,11 +3950,9 @@ func provenStateCandidateMatches(
 		return false
 	}
 	physical := ""
-	for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
-		if value, found := request.ResolvedWriteTargets[spelling]; found {
-			physical = value
-			break
-		}
+	if found := clientWriteTargets(request.ResolvedWriteTargets, candidate.Value,
+		candidate.Resolved, candidate.Value, candidate.Normalized); len(found) > 0 {
+		physical = found[0]
 	}
 	if physical == "" && !request.SkipLocalFilesystemResolution {
 		if request.ProtectedHomeHook {
@@ -10048,6 +10064,28 @@ func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionReques
 		return trustedActionRequest{}, false
 	}
 	return bashReadingRequest(request, command, rewritten), true
+}
+
+// runTimeShellTwinRequest returns the request for
+// actionfacts.RunTimeShellTwin of a POSIX Bash call: the call read with each
+// program word that names its shell at run time written as that shell.
+// Behind ProtectHome (managed hook peer) the hook client map lists the
+// targets of the same reading (hookpaths), so it is judged there too
+// (rel-1-0-10:GAP-0980). caps is the caps that reading hit
+// (rel-1-0-10:GAP-1041), with or without a twin.
+func runTimeShellTwinRequest(request trustedActionRequest) (twin trustedActionRequest, ok bool, caps bounded.CapSet) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false, caps
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false, caps
+	}
+	rewritten, ok, caps := actionfacts.RunTimeShellTwin(command)
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false, caps
+	}
+	return bashReadingRequest(request, command, rewritten), true, caps
 }
 
 // stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of
