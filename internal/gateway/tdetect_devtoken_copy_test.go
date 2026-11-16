@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // TestOwnDeveloperTokenCopyKeepsTheRelTierFiveTiers pins the 30 cells of a
@@ -34,6 +35,7 @@ func TestOwnDeveloperTokenCopyKeepsTheRelTierFiveTiers(t *testing.T) {
 	for _, p := range gap0437Packs {
 		hook := gap0437Server(t, p, "claudecode", "action")
 		inspect := gap0437Server(t, p, "openclaw", "action")
+		inspect.inspectToolScanTimeout = 30 * time.Second // policy semantics, not latency
 		for _, file := range []string{".git-credentials", ".netrc", ".pgpass"} {
 			command := fmt.Sprintf("cp %s/%s /tmp/staged", home, file)
 			for route, out := range map[string]map[string]any{

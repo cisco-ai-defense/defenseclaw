@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // TestCredentialFileCopyIsJudgedLikeItsReadFiveTiers: a copy reads its source
@@ -30,6 +31,9 @@ func TestCredentialFileCopyIsJudgedLikeItsReadFiveTiers(t *testing.T) {
 	}
 	for _, p := range gap0437Packs {
 		a := gap0437Server(t, p, "openclaw", "action")
+		// Policy semantics, not latency: a slow host (the Windows runner)
+		// must not turn a verdict into a 504 scan timeout.
+		a.inspectToolScanTimeout = 30 * time.Second
 		warmDefenseClawControl(t, a.handleInspectTool, "/api/v1/inspect/tool", map[string]any{
 			"tool": "exec", "connector": "openclaw", "args": map[string]any{"command": "ls", "workdir": t.TempDir()},
 		})
