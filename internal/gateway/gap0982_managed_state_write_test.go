@@ -39,10 +39,10 @@ func TestClientWriteTargetNativeSpelling(t *testing.T) {
 		t.Fatal(err)
 	}
 	targets := map[string]string{native: native}
-	if got, ok := clientWriteTarget(targets, native); !ok || got != native {
+	if got, ok := firstClientWriteTarget(targets, native); !ok || got != native {
 		t.Fatalf("native spelling: %q, %v", got, ok)
 	}
-	got, ok := clientWriteTarget(targets, filepath.ToSlash(native))
+	got, ok := firstClientWriteTarget(targets, filepath.ToSlash(native))
 	if runtime.GOOS == "windows" {
 		if !ok || got != native {
 			t.Fatalf("forward-slash spelling on Windows: %q, %v", got, ok)
@@ -50,7 +50,7 @@ func TestClientWriteTargetNativeSpelling(t *testing.T) {
 	} else if filepath.ToSlash(native) == native && (!ok || got != native) {
 		t.Fatalf("POSIX spelling: %q, %v", got, ok)
 	}
-	if _, ok := clientWriteTarget(targets, ""); ok {
+	if _, ok := firstClientWriteTarget(targets, ""); ok {
 		t.Fatal("an empty spelling has no target")
 	}
 }

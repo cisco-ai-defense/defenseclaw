@@ -19,39 +19,65 @@ package gateway
 import (
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
-// clientWriteTarget returns the hook client's resolved target for a path
-// spelling of a write operand. The client keys its map by the path as its own
-// operating system spells it: on Windows the native path
-// (C:\Users\u\.defenseclaw\config.yaml). The POSIX reading of the same call
-// (a Git Bash Bash tool, or a PowerShell call the partial reading places
-// with forward slashes) spells it C:/Users/u/.defenseclaw/config.yaml, so a
-// managed gateway, which may not resolve the user home itself, found no
-// target and proved no state write: a redirect into the state from a call
-// the analysis read in part was allowed on Windows only
-// (rel-1-0-10:GAP-0982). On Windows the native spelling of the same path is
-// looked up only after the full filesystem walk succeeds. Lexical cleaning
-// could select a different operand across a junction followed by .. (GAP-1006).
-func clientWriteTarget(targets map[string]string, spelling string) (string, bool) {
-	if value, found := targets[spelling]; found {
-		return value, true
+// clientWriteTargets returns the hook client's resolved targets for one write
+// operand, given the operand as written and its spellings (resolved, as
+// written, normalized), in the order to try them.
+//
+// Every exact key comes first, in spelling order, as on every system: the
+// client keys its map by the operand as it was written.
+//
+// On Windows the native spelling of the same operand is looked up after
+// that. The POSIX reading of a call (a Git Bash Bash tool, or a PowerShell
+// call the partial reading places with forward slashes) spells
+// C:/Users/u/.defenseclaw/config.yaml where the client keyed
+// C:\Users\u\.defenseclaw\config.yaml, so a managed gateway, which may not
+// resolve the user home itself, found no target and proved no state write
+// (rel-1-0-10:GAP-0982). Only the separators change, and only of a spelling
+// the filesystem walk resolves. When the operand as written has a ..
+// component, a spelling the analysis cleaned lexically names another file:
+// across a junction jx\..\.defenseclaw is the state, while the cleaned
+// .\.defenseclaw is an ordinary folder the same call may write first, whose
+// entry would then answer for the state write (rel-1-0-10:GAP-1006). Such an
+// operand is respelled only as written.
+func clientWriteTargets(targets map[string]string, written string, spellings ...string) []string {
+	var found []string
+	for _, spelling := range spellings {
+		if value, ok := targets[spelling]; ok {
+			found = append(found, value)
+		}
 	}
-	if runtime.GOOS != "windows" || spelling == "" {
-		return "", false
+	if runtime.GOOS != "windows" {
+		return found
 	}
-	native := filepath.FromSlash(spelling)
-	if native == spelling {
-		return "", false
+	if hasDotDotSegment(written) {
+		spellings = []string{written}
 	}
-	// The map is keyed by operand spelling, including an alias. Resolve the
-	// complete operand before matching, but never substitute the physical
-	// target as a key belonging to another operand (or directory-entry write).
-	if _, resolved := hookpaths.ResolveWriteTarget(native); !resolved {
-		return "", false
+	for _, spelling := range spellings {
+		native := filepath.FromSlash(spelling)
+		if spelling == "" || native == spelling {
+			continue
+		}
+		if _, resolved := hookpaths.ResolveWriteTarget(native); !resolved {
+			continue
+		}
+		if value, ok := targets[native]; ok {
+			found = append(found, value)
+		}
 	}
-	value, found := targets[native]
-	return value, found
+	return found
+}
+
+// hasDotDotSegment reports a .. component under either separator.
+func hasDotDotSegment(path string) bool {
+	for _, part := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }

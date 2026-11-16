@@ -3912,7 +3912,7 @@ func provenStateCandidateMatches(
 	lineStaysOff func() bool,
 ) bool {
 	if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
-		spellings := []string{candidate.Resolved, candidate.Value, candidate.Normalized}
+		spellings, written := []string{candidate.Resolved, candidate.Value, candidate.Normalized}, candidate.Value
 		candidate.Resolved = entry
 		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 			return true
@@ -3921,8 +3921,8 @@ func provenStateCandidateMatches(
 			// The gateway cannot follow the directory through a link
 			// the user can make; the hook placed the entry as the user
 			// and lists it only when it is in the state tree (GAP-2549).
-			for _, spelling := range spellings {
-				if placed, _ := clientWriteTarget(request.ResolvedWriteTargets, spelling); filepath.IsAbs(placed) {
+			for _, placed := range clientWriteTargets(request.ResolvedWriteTargets, written, spellings...) {
+				if filepath.IsAbs(placed) {
 					candidate.Resolved = placed
 					if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 						return true
@@ -3933,11 +3933,9 @@ func provenStateCandidateMatches(
 		return false
 	}
 	physical := ""
-	for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
-		if value, found := clientWriteTarget(request.ResolvedWriteTargets, spelling); found {
-			physical = value
-			break
-		}
+	if found := clientWriteTargets(request.ResolvedWriteTargets, candidate.Value,
+		candidate.Resolved, candidate.Value, candidate.Normalized); len(found) > 0 {
+		physical = found[0]
 	}
 	if physical == "" && !request.SkipLocalFilesystemResolution {
 		if request.ProtectedHomeHook {

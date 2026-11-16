@@ -4,39 +4,48 @@
 package gateway
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
-func TestGAP1006JunctionParentKeepsStateVerdict(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("native junction lookup")
+// firstClientWriteTarget is clientWriteTargets for one spelling of an operand
+// written that way.
+func firstClientWriteTarget(targets map[string]string, spelling string) (string, bool) {
+	if found := clientWriteTargets(targets, spelling, spelling); len(found) > 0 {
+		return found[0], true
 	}
-	home := t.TempDir()
-	cwd := filepath.Join(home, "project")
+	return "", false
+}
+
+// gap1006Fixture is a home with the DefenseClaw state, an ordinary
+// project/.defenseclaw folder, and project/jx, a junction (a link on POSIX)
+// to the state.
+func gap1006Fixture(t *testing.T) (home, cwd string) {
+	t.Helper()
+	home = t.TempDir()
+	cwd = filepath.Join(home, "project")
 	state := filepath.Join(home, ".defenseclaw")
-	for _, dir := range []string{filepath.Join(home, ".ssh"), state, filepath.Join(state, "policies"), cwd} {
+	decoy := filepath.Join(cwd, ".defenseclaw")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(state, "policies"), decoy} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, file := range []string{filepath.Join(state, "config.yaml"), filepath.Join(state, "policies", "default.yaml"),
-		filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "notes.txt")} {
-		if err := os.WriteFile(file, []byte("marker\n"), 0o600); err != nil {
+		filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "notes.txt"), filepath.Join(decoy, "config.yaml")} {
+		if err := os.WriteFile(file, []byte("fixture\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-	}
-	decoy := filepath.Join(cwd, ".defenseclaw")
-	if err := os.MkdirAll(decoy, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(decoy, "config.yaml"), []byte("ordinary\n"), 0o600); err != nil {
-		t.Fatal(err)
 	}
 	link := filepath.Join(cwd, "jx")
 	if runtime.GOOS == "windows" {
@@ -48,43 +57,120 @@ func TestGAP1006JunctionParentKeepsStateVerdict(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	return home, cwd
+}
+
+// gap1006ManagedDecide judges one call for a managed hook peer whose gateway
+// reads the write targets from the hook client's map, as a managed install
+// does (the peer home, the client map in the context).
+func gap1006ManagedDecide(t *testing.T, home, cwd, posture, tool, command string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": cwd,
+		"tool_name": tool, "tool_input": map[string]any{"command": command}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installToolCallCorpusProfileConnector(t, "claudecode", posture)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), posture)
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{Home: home})
+	if resolved, decoded := hookpaths.Decode(hookpaths.Resolve(body)); decoded {
+		ctx = context.WithValue(ctx, resolvedWritesContextKey{}, resolved)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	rt := claudeCodeHookProfileRuntime(connector.HookProfile{Name: "claudecode"})
+	return rt.Evaluate(api, ctx, agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse"}, body, payload).Action
+}
+
+// TestGAP1006JunctionParentKeepsStateVerdict: a write through a junction
+// followed by .. reaches the DefenseClaw state, after the same call wrote an
+// ordinary file at the operand's lexically cleaned spelling. The managed
+// gateway looks the operand up by its exact key first and never by a cleaned
+// spelling, so the state write blocks in the managed and managed strict
+// packs, as on rel/1.0.10; the ordinary write alone stays allowed
+// (rel-1-0-10:GAP-1006). The unmanaged tiers read no client map
+// (rel-1-0-10:GAP-1007, a follow-up).
+func TestGAP1006JunctionParentKeepsStateVerdict(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the native-spelling lookup is Windows only; TestClientWriteTargetsNeverRespellACleanedOperand runs everywhere")
+	}
+	home, cwd := gap1006Fixture(t)
 	nat, fwd := home, filepath.ToSlash(home)
 	q := func(p string) string { return "'" + p + "'" }
 	targets := []struct{ id, path string }{
-		{"lkDirect", q(fwd + "/project/jx/config.yaml")}, {"lkDirectN", q(nat + `\project\jx\config.yaml`)},
-		{"lkDots", q(fwd + "/project/jx/../.defenseclaw/config.yaml")}, {"lkDotsN", q(nat + `\project\jx\..\.defenseclaw\config.yaml`)},
-		{"lkDotsMix", q(fwd + `/project/jx\..\.defenseclaw/config.yaml`)}, {"lkDotsRel", "jx/../.defenseclaw/config.yaml"},
-		{"decoyFwd", q(fwd + "/project/.defenseclaw/config.yaml")}, {"decoyNat", q(nat + `\project\.defenseclaw\config.yaml`)},
+		{"lkDots", q(fwd + "/project/jx/../.defenseclaw/config.yaml")},
+		{"lkDotsN", q(nat + `\project\jx\..\.defenseclaw\config.yaml`)},
+		{"lkDotsMix", q(fwd + `/project/jx\..\.defenseclaw/config.yaml`)},
 	}
-	forms := []struct{ id, f string }{
-		{"gt", "echo x > %s"}, {"gtgt", "echo x >> %s"}, {"tee", "echo x | tee %s"}, {"c24", "/opt/tools/add-key notes.txt > %s"},
+	firsts := []struct{ id, f string }{
 		{"decoy-then", "echo y > " + q(fwd+"/project/.defenseclaw/config.yaml") + "; echo x > %s"},
 		{"decoyN-then", "echo y > " + q(nat+`\project\.defenseclaw\config.yaml`) + "; echo x > %s"},
 	}
-
-	env := boundedEnv{home: home, cwd: cwd}
-	for _, tier := range boundedTestTiers {
-		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+	cells := 0
+	for _, posture := range []string{"default", "strict"} {
 		for _, tg := range targets {
-			if tg.id != "lkDots" && tg.id != "lkDotsMix" && tg.id != "lkDotsN" {
-				continue
-			}
-			for _, fm := range forms {
-				if !strings.HasPrefix(fm.id, "decoy") {
-					continue
-				}
+			for _, fm := range firsts {
 				for _, tool := range []string{"Bash", "PowerShell"} {
-					if tool == "Bash" && tg.id == "lkDotsN" {
+					// The 20 cells of GAP-1006: the Bash cell of the
+					// all-backslash spelling kept its block.
+					if tg.id == "lkDotsN" && tool == "Bash" {
 						continue
 					}
-					t.Run(tier.name+"/"+tg.id+"/"+fm.id+"/"+tool, func(t *testing.T) {
-						got, _ := boundedDecideClaudeCode(t, api, env, boundedLaneCall{tool: tool, input: map[string]any{"command": fmt.Sprintf(fm.f, tg.path)}})
-						if got != "block" {
-							t.Errorf("state write action %s", got)
-						}
-					})
+					cells++
+					name := posture + "/" + tg.id + "/" + fm.id + "/" + tool
+					if got := gap1006ManagedDecide(t, home, cwd, posture, tool, fmt.Sprintf(fm.f, tg.path)); got != "block" {
+						t.Errorf("%s: managed state write action %s, want block", name, got)
+					}
 				}
 			}
+		}
+		for _, tool := range []string{"Bash", "PowerShell"} {
+			for _, decoy := range []string{q(fwd + "/project/.defenseclaw/config.yaml"), q(nat + `\project\.defenseclaw\config.yaml`)} {
+				if got := gap1006ManagedDecide(t, home, cwd, posture, tool, "echo x > "+decoy); got == "block" {
+					t.Errorf("%s/%s: the ordinary project file write alone blocked", posture, tool)
+				}
+			}
+		}
+	}
+	if cells != 20 {
+		t.Fatalf("%d managed cells, want the 20 of GAP-1006", cells)
+	}
+	t.Logf("GAP1006 managed state-write cells checked: %d", cells)
+}
+
+// TestClientWriteTargetsNeverRespellACleanedOperand: the exact key of the
+// operand as written answers before any other spelling, and an operand with
+// a .. component is respelled only as written (rel-1-0-10:GAP-1006).
+func TestClientWriteTargetsNeverRespellACleanedOperand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The POSIX reading spells the operand with forward slashes; the
+		// client keyed the ordinary file the call wrote first natively.
+		root := t.TempDir()
+		written := filepath.ToSlash(filepath.Join(root, "jx")) + "/../config.yaml"
+		cleaned := filepath.ToSlash(filepath.Join(root, "config.yaml"))
+		targets := map[string]string{written: "state", filepath.FromSlash(cleaned): "decoy"}
+		if found := clientWriteTargets(targets, written, cleaned, written, cleaned); len(found) == 0 || found[0] != "state" {
+			t.Fatalf("the exact key of the operand as written must answer first: %v", found)
+		}
+		delete(targets, written)
+		if found := clientWriteTargets(targets, written, cleaned, written, cleaned); len(found) != 0 {
+			t.Fatalf("a cleaned spelling of a .. operand matched another file: %v", found)
+		}
+	}
+	for _, path := range []string{`a\..\b`, "a/../b", `a\b/..`, ".."} {
+		if !hasDotDotSegment(path) {
+			t.Errorf("hasDotDotSegment(%q) = false", path)
+		}
+	}
+	for _, path := range []string{`a\b`, "a/b..", "..a/b", ""} {
+		if hasDotDotSegment(path) {
+			t.Errorf("hasDotDotSegment(%q) = true", path)
 		}
 	}
 }
@@ -97,13 +183,13 @@ func TestGAP1006UnresolvableNativeLookupDoesNotUseCleanedKey(t *testing.T) {
 	native := root + string(filepath.Separator) + "missing" + string(filepath.Separator) + ".." + string(filepath.Separator) + "ordinary.txt"
 	spelling := filepath.ToSlash(native)
 	targets := map[string]string{filepath.Clean(native): "decoy"}
-	if _, ok := clientWriteTarget(targets, spelling); ok {
+	if _, ok := firstClientWriteTarget(targets, spelling); ok {
 		t.Fatal("unresolved path matched a lexical decoy")
 	}
 	// Resolve a real direct operand without requiring it to exist as a file.
 	direct := filepath.Join(root, "ordinary.txt")
 	targets = map[string]string{direct: direct}
-	if got, ok := clientWriteTarget(targets, filepath.ToSlash(direct)); !ok || got != direct {
+	if got, ok := firstClientWriteTarget(targets, filepath.ToSlash(direct)); !ok || got != direct {
 		t.Fatal("direct spelling lost")
 	}
 }
@@ -130,11 +216,11 @@ func TestGAP0982NativeAliasKeepsOperandKey(t *testing.T) {
 	native := filepath.Join(alias, "config.yaml")
 	spelling := filepath.ToSlash(native)
 	targets := map[string]string{native: target}
-	if got, ok := clientWriteTarget(targets, spelling); !ok || got != target {
+	if got, ok := firstClientWriteTarget(targets, spelling); !ok || got != target {
 		t.Fatal("native alias operand entry lost")
 	}
 	// An answer recorded for a different operand is not this alias's entry.
-	if _, ok := clientWriteTarget(map[string]string{target: target}, spelling); ok {
+	if _, ok := firstClientWriteTarget(map[string]string{target: target}, spelling); ok {
 		t.Fatal("different operand key matched")
 	}
 }
