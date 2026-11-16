@@ -174,3 +174,40 @@ func TestGAP1027WindowsRecordOnlyForARolledBackConfig(t *testing.T) {
 		t.Fatalf("stale record reported: %+v", r.Errors)
 	}
 }
+
+// rel-1-0-10 GAP-1038: Setup /ensure CONFIG= with a config the preflight
+// refuses exits 1639 and now records the rejection (cause config_refused);
+// status warns and verify fails until a config is applied.
+func TestGAP1038WindowsPreflightRefusedConfigIsReported(t *testing.T) {
+	_, supplied, record := gap1027Host(t)
+	opts := &windowsEnterpriseLifecycleOptions{configPath: supplied}
+	noteWindowsEnterpriseConfigRequest("ensure", opts)
+	refused := enterprisestatus.New("ensure", "standalone", "windows", "1.0.10")
+	refused.Installed = true
+	refused.AddError("invalid_arguments", "rule pack strict-x is not installed")
+	refused.LabelRunningDeployment(0)
+	refused.Finish("windows", enterprisestatus.WindowsExitInvalidArgs)
+	recordWindowsEnterpriseConfigOutcome(refused, opts)
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("no record after the refused config: %v", err)
+	}
+	if !strings.Contains(string(raw), enterprisestatus.ConfigRejectedCauseRefused) || !strings.Contains(string(raw), `"exit_code": 1639`) {
+		t.Fatalf("record = %s", raw)
+	}
+	if status := gap1027ReadStatus("status"); status.CoverageComplete || !hasWindowsWarning(status, enterprisestatus.CodeConfigRejected) {
+		t.Fatalf("status coverage %v warnings %+v", status.CoverageComplete, status.Warnings)
+	}
+	if verify := gap1027ReadStatus("verify"); verify.OK || verify.ExitCode != enterprisestatus.WindowsExitFailure {
+		t.Fatalf("verify ok %v exit %d", verify.OK, verify.ExitCode)
+	}
+}
+
+func hasWindowsWarning(r *enterprisestatus.Result, code string) bool {
+	for _, w := range r.Warnings {
+		if w.Code == code {
+			return true
+		}
+	}
+	return false
+}

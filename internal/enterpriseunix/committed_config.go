@@ -31,7 +31,7 @@ import (
 //
 // The kept rejected file is also the record that the administrator's
 // config is not the one running: status warns and verify fails with
-// config_rejected while it is current. It stops being current once
+// config_rejected (enterprisestatus.CodeConfigRejected) while it is current. It stops being current once
 // config.yaml is written again after the revert (a corrected push, or the
 // last applied config pushed back) and a run applies or confirms it, or a
 // run applies an explicit --config. The revert stamps the kept file with
@@ -45,7 +45,6 @@ const (
 	rejectedReasonName = "rejected-config.reason"
 	maxRejectedReason  = 1 << 10
 	codeConfigReverted = "config_reverted"
-	codeConfigRejected = "config_rejected"
 )
 
 func (e *Env) committedConfigPath() string {

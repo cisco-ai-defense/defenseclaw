@@ -22,8 +22,9 @@ import (
 // rejection, and status warns and verify fails with config_rejected while
 // the deployment still runs the config it ran when the request failed. Linux
 // and macOS report an in-place edit the same way from the kept
-// rejected-config.yaml (internal/enterpriseunix/committed_config.go); this
-// file is the Windows record and the rule shared by every platform.
+// rejected-config.yaml (internal/enterpriseunix/committed_config.go) and
+// share only the code with this file, which is the Windows record, its rule
+// (DecideConfigRejected) and its status and verify report.
 //
 // The record holds digests, closed codes and a time, never config bytes,
 // messages or account names: the full result of the failed run is in the
@@ -53,7 +54,7 @@ const (
 	// not verify coverage and rolled back.
 	ConfigRejectedCauseRouteConfigDrift = "route_config_drift"
 	// ConfigRejectedCauseRefused: the run refused the config before it
-	// changed anything.
+	// changed anything (its preflight, exit 1639, or a later check, 1603).
 	ConfigRejectedCauseRefused = "config_refused"
 	// ConfigRejectedCauseTransactionFailed: any other failure of the run
 	// that applied the config; the transaction rolled back.
@@ -99,23 +100,25 @@ const (
 	ConfigRejectedClear
 )
 
-// DecideConfigRejected is the rule for a finished run that was given a
-// config with digest requested (empty: no config, nothing changes).
+// DecideConfigRejected is the Windows rule for a finished run that was
+// given a config with digest requested (empty: no config, nothing changes).
 // atStart and now are the installed config.yaml digests before and after
-// the run ("" when unreadable). failureExit is the platform's generic
-// failure code (1603 on Windows, 1 on Linux and macOS): a busy or
-// invalid-arguments result, a pending transaction and a run that left
-// nothing installed keep the record as it is. A failed run records only
-// when config.yaml is what it was at the start and is not the requested
-// config, so a run that failed after it applied the config records nothing.
-func DecideConfigRejected(r *Result, requested, atStart, now string, failureExit int) ConfigRejectedDecision {
+// the run ("" when unreadable). A success clears the record. A run records
+// the rejection when it failed (1603), or refused the supplied config in its
+// preflight (ConfigRefused, which exits 1639 as invalid arguments), with
+// config.yaml what it was at the start and not the requested config, so a
+// run that failed after it applied the config records nothing. Any other
+// result keeps the record as it is: busy (1618), other invalid arguments, a
+// pending transaction, a run that left nothing installed.
+func DecideConfigRejected(r *Result, requested, atStart, now string) ConfigRejectedDecision {
 	if r == nil || requested == "" || !r.Installed || r.TransactionPending {
 		return ConfigRejectedKeep
 	}
 	if len(r.Errors) == 0 && r.ExitCode == ExitOK {
 		return ConfigRejectedClear
 	}
-	if r.ExitCode != failureExit || atStart == "" || now == "" || now != atStart || requested == now {
+	refused := r.ConfigRefused && r.ExitCode == WindowsExitInvalidArgs
+	if (r.ExitCode != WindowsExitFailure && !refused) || atStart == "" || now == "" || now != atStart || requested == now {
 		return ConfigRejectedKeep
 	}
 	return ConfigRejectedWrite

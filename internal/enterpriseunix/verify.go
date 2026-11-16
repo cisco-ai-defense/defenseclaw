@@ -239,7 +239,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// enables no connector for the eligible users fail verify only;
 		// status reports them as warnings with security_complete false.
 		for _, warning := range r.Warnings {
-			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected ||
+			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == enterprisestatus.CodeConfigRejected ||
 				warning.Code == codeNoConnectorsEnabled || warning.Code == codeSandboxPackDir || warning.Code == codeLegacySandbox || warning.Code == codeCoworkIncomplete {
 				problems = append(problems, warning.Message)
 			}
@@ -1221,7 +1221,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	if problem := env.rejectedConfigProblem(); problem != "" {
 		// Not a verifyInstalled problem: the installed files match the
 		// record, and ensure must stay a no-op until config.yaml changes.
-		r.AddWarning(codeConfigRejected, problem)
+		r.AddWarning(enterprisestatus.CodeConfigRejected, problem)
 	}
 	r.ResetCompleteness()
 	for _, service := range []struct {
@@ -1241,11 +1241,11 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 			r.AddWarning(codeMachinePolicyIncomplete, problem)
 		}
 	}
-	if hasMessageCode(r.Warnings, codeConfigRejected) {
+	if hasMessageCode(r.Warnings, enterprisestatus.CodeConfigRejected) {
 		// The coverage the administrator's config asks for is not in place:
 		// the deployment runs the config it ran before (GAP-1027, as on
 		// Windows).
-		r.MarkCoverageIncomplete(codeConfigRejected)
+		r.MarkCoverageIncomplete(enterprisestatus.CodeConfigRejected)
 	}
 	if !r.Readiness.SensorHelper {
 		r.MarkSecurityIncomplete("the sensor helper is not ready")
@@ -1312,7 +1312,7 @@ func (l *lifecycle) describeRunning(ctx context.Context, record *Deployment) {
 	r := l.result
 	before := len(r.Warnings)
 	l.describe(ctx, record, false)
-	r.LabelRunningDeployment(before, codeConfigRejected)
+	r.LabelRunningDeployment(before, enterprisestatus.CodeConfigRejected)
 }
 
 // codeSandboxPackDir warns about a sandbox packs folder other accounts could

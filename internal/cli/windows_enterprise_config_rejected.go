@@ -102,7 +102,7 @@ func recordWindowsEnterpriseConfigOutcome(result *enterprisestatus.Result, opts 
 	}
 	path := filepath.Join(dir, enterprisestatus.ConfigRejectedFileName)
 	installed := windowsEnterpriseInstalledConfigSHA256()
-	switch enterprisestatus.DecideConfigRejected(result, opts.configRequestedSHA256, opts.configInstalledSHA256AtStart, installed, enterprisestatus.WindowsExitFailure) {
+	switch enterprisestatus.DecideConfigRejected(result, opts.configRequestedSHA256, opts.configInstalledSHA256AtStart, installed) {
 	case enterprisestatus.ConfigRejectedWrite:
 		data, err := enterprisestatus.NewConfigRejectedRecord(result, opts.configRequestedSHA256, installed, windowsEnterpriseNow()).Marshal()
 		if err == nil {

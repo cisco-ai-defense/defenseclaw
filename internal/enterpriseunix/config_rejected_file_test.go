@@ -40,7 +40,7 @@ func TestGAP1027FailedConfigFileEnsureIsReportedUntilApplied(t *testing.T) {
 
 			h.healthy = true
 			status := h.run(Options{Action: ActionStatus})
-			if !hasWarning(status, codeConfigRejected) || status.CoverageComplete || status.SecurityComplete {
+			if !hasWarning(status, enterprisestatus.CodeConfigRejected) || status.CoverageComplete || status.SecurityComplete {
 				t.Fatalf("status after the rolled-back ensure: ok %v coverage %v security %v warnings %+v",
 					status.OK, status.CoverageComplete, status.SecurityComplete, status.Warnings)
 			}
@@ -68,7 +68,7 @@ func TestGAP1027FailedConfigFileEnsureIsReportedUntilApplied(t *testing.T) {
 			// reasons; config_rejected is no longer one of them.
 			after := h.run(Options{Action: ActionStatus})
 			for _, w := range after.Warnings {
-				if w.Code == codeConfigRejected || strings.Contains(w.Message, codeConfigRejected) {
+				if w.Code == enterprisestatus.CodeConfigRejected || strings.Contains(w.Message, enterprisestatus.CodeConfigRejected) {
 					t.Fatalf("status after the applied config still reports it: %+v", after.Warnings)
 				}
 			}
@@ -101,7 +101,7 @@ func TestGAP1027RefusedConfigFileIsReported(t *testing.T) {
 	if got := h.read(h.env.Layout.ConfigPath); got != applied {
 		t.Fatal("config.yaml changed after a refused --config")
 	}
-	if status := h.run(Options{Action: ActionStatus}); !hasWarning(status, codeConfigRejected) || status.CoverageComplete {
+	if status := h.run(Options{Action: ActionStatus}); !hasWarning(status, enterprisestatus.CodeConfigRejected) || status.CoverageComplete {
 		t.Fatalf("status after a refused --config: coverage %v warnings %+v", status.CoverageComplete, status.Warnings)
 	}
 }

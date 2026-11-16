@@ -54,16 +54,9 @@ func TestGAP1027DecideConfigRejected(t *testing.T) {
 		{"pending transaction keeps", pending, gap1027Requested, gap1027Baseline, gap1027Baseline, ConfigRejectedKeep},
 		{"nothing installed keeps", gone, gap1027Requested, gap1027Baseline, gap1027Baseline, ConfigRejectedKeep},
 	} {
-		if got := DecideConfigRejected(tc.r, tc.requested, tc.atStart, tc.now, WindowsExitFailure); got != tc.want {
+		if got := DecideConfigRejected(tc.r, tc.requested, tc.atStart, tc.now); got != tc.want {
 			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
 		}
-	}
-	unix := New("ensure", "standalone", "linux", "1.0.10")
-	unix.Installed = true
-	unix.AddError("apply_failed", "the gateway did not start")
-	unix.Finish("linux", 0)
-	if got := DecideConfigRejected(unix, gap1027Requested, gap1027Baseline, gap1027Baseline, UnixExitFailure); got != ConfigRejectedWrite {
-		t.Errorf("linux rolled back: got %d, want write", got)
 	}
 }
 
@@ -193,5 +186,38 @@ func TestGAP1027ConfigRejectedIsSettledOrStrict(t *testing.T) {
 	if len(corrupt.Errors) != 1 || corrupt.Errors[0].Code != CodeConfigRejected || corrupt.CoverageComplete ||
 		!strings.Contains(corrupt.Errors[0].Message, "cannot be read") {
 		t.Fatalf("corrupt record: %+v coverage %v", corrupt.Errors, corrupt.CoverageComplete)
+	}
+}
+
+// rel-1-0-10 GAP-1038: a supplied config the Windows preflight refuses is
+// invalid arguments (1639) and is recorded with cause config_refused; other
+// invalid arguments are not.
+func TestGAP1038PreflightRefusedConfigIsRecorded(t *testing.T) {
+	refusal := func(configRefused bool) *Result {
+		r := New("ensure", "standalone", "windows", "1.0.10")
+		r.Installed = true
+		r.ConfigRefused = configRefused
+		r.AddError("invalid_arguments", "rule pack strict-x is not installed")
+		r.Finish("windows", WindowsExitInvalidArgs)
+		return r
+	}
+	refused := refusal(true)
+	if got := DecideConfigRejected(refused, gap1027Requested, gap1027Baseline, gap1027Baseline); got != ConfigRejectedWrite {
+		t.Fatalf("preflight refusal: got %d, want write", got)
+	}
+	if got := NewConfigRejectedRecord(refused, gap1027Requested, gap1027Baseline, time.Now()); got.Cause != ConfigRejectedCauseRefused || got.ExitCode != WindowsExitInvalidArgs {
+		t.Fatalf("record = %+v", got)
+	}
+	for name, tc := range map[string]struct {
+		r                       *Result
+		requested, atStart, now string
+	}{
+		"invalid arguments not about the config": {refusal(false), gap1027Requested, gap1027Baseline, gap1027Baseline},
+		"refused config is the running one":      {refusal(true), gap1027Baseline, gap1027Baseline, gap1027Baseline},
+		"config.yaml changed during the run":     {refusal(true), gap1027Requested, gap1027Baseline, gap1027Other},
+	} {
+		if got := DecideConfigRejected(tc.r, tc.requested, tc.atStart, tc.now); got != ConfigRejectedKeep {
+			t.Errorf("%s: got %d, want keep", name, got)
+		}
 	}
 }
