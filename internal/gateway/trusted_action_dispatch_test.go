@@ -2357,7 +2357,7 @@ func TestTrustedActionBashStaticExpansionUsesExecutionDialect(t *testing.T) {
 	}
 }
 
-func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testing.T) {
+func TestTrustedActionEmbeddedExecutionRequiresIndependentProof(t *testing.T) {
 	const connector = "trusted-action-embedded-category-test"
 	// The nested reverse-tunnel case exercises a strict-only atomic. The test's
 	// purpose is the incomplete-outer-action shadow boundary.
@@ -2372,7 +2372,8 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 		ruleID  string
 		// enforced: an awk call's literal command is judged as the hook
 		// running it directly (s7/awk-command, rel-1-0-10:GAP-0499), so its
-		// finding enforces; the other carriers stay shadow-only.
+		// finding enforces. A resolved shell script has its own complete proof;
+		// unresolved carriers stay shadow-only.
 		enforced bool
 	}{
 		{
@@ -2397,9 +2398,16 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 			ruleID:  "PATH-ETC-SHADOW",
 		},
 		{
-			name:    "stdin interpreter network action",
-			command: `echo 'curl ` + webhook + `' | bash`,
-			ruleID:  "C2-WEBHOOK-SITE",
+			name:     "literal shell network control",
+			command:  "bash -c 'curl " + webhook + "'",
+			ruleID:   "C2-WEBHOOK-SITE",
+			enforced: true,
+		},
+		{
+			name:     "stdin interpreter network action",
+			command:  `echo 'curl ` + webhook + `' | bash`,
+			ruleID:   "C2-WEBHOOK-SITE",
+			enforced: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
