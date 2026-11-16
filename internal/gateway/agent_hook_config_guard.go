@@ -1309,11 +1309,12 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 	// of the whole call stops placing operands at its own bound, and a chain
 	// padded with cd steps past it hid the write from the sandbox while the
 	// laptop still alerted (substrate-1 GAP-0304). A statement repeated in
-	// one directory is read once; the read stops at the call's statement
-	// budget, past which the call already carries the evaluation-limit
-	// finding (trustedCallOverStatementBudget).
+	// one directory is read once. Like the laptop guard, it reads a command
+	// up to agentHookConfigMaxPlacedBytes, past the statement budget too:
+	// such a call carries the evaluation-limit finding and still names the
+	// write, as on the laptop (substrate-1 GAP-0359).
 	command := agentHookConfigRawShellCommand(input)
-	if command == "" || !path.IsAbs(input.CWD) ||
+	if command == "" || len(command) > agentHookConfigMaxPlacedBytes || !path.IsAbs(input.CWD) ||
 		!strings.Contains(command, "cd") && !strings.Contains(command, "pushd") {
 		return "", "", ""
 	}
@@ -1328,9 +1329,6 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 		if seen[key] || !path.IsAbs(statement.Dir) {
 			continue
 		}
-		if len(seen) == maxSandboxHookConfigStatements {
-			break
-		}
 		seen[key] = true
 		placed := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: statement.Command, CWD: statement.Dir, ActiveHome: input.ActiveHome})
 		if target := sandboxAgentHookConfigWrite(placed, input.ActiveHome); target != "" {
@@ -1340,10 +1338,10 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 	return "", "", ""
 }
 
-// maxSandboxHookConfigStatements bounds the placed statements the sandbox
-// hook-config guard reads: the trusted-action statement budget (128), past
-// which the call is judged as truncated whatever the guard finds.
-const maxSandboxHookConfigStatements = 128
+// agentHookConfigMaxPlacedBytes bounds the command the hook-config guards
+// split into placed statements (agentHookConfigPlacedCommands and the
+// sandbox guard): a longer one is read only as the whole call.
+const agentHookConfigMaxPlacedBytes = 8192
 
 // sandboxAgentHookConfigWrite is the first hook file a reading writes,
 // appends or deletes, by its lexical path in the guest's namespace, or "".
@@ -1485,7 +1483,7 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 // agentHookConfigPlacedCommands keeps each literal shell body and each
 // statement's directory. All shell decisions consume this same placement.
 func agentHookConfigPlacedCommands(command, cwd, home string, depth int) []hookpaths.PlacedStatement {
-	if depth > 4 || command == "" || len(command) > 8192 {
+	if depth > 4 || command == "" || len(command) > agentHookConfigMaxPlacedBytes {
 		return nil
 	}
 	root := hookpaths.PlacedStatement{Command: command, Dir: cwd}

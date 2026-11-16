@@ -4178,9 +4178,12 @@ type placedReading struct {
 const placedReadingFirstView = 6
 
 // maxSandboxGuestPlacedChildren bounds the distinct simple-command readings
-// of one sandbox call; they share the call's semantic budget. A call with
-// more is truncated (sandboxGuestPlacedChildren).
-const maxSandboxGuestPlacedChildren = 16
+// of one sandbox call at the call's own statement budget (128, the bound of
+// trustedCallOverStatementBudget); they share the call's semantic budget. A
+// call with more is truncated (sandboxGuestPlacedChildren). A cap of 16 gave
+// ACTION-COMPOUND-LIMIT to a cd followed by 17 or more distinct commands, a
+// setup script the laptop allows (substrate-1 GAP-0359).
+const maxSandboxGuestPlacedChildren = 128
 
 // views returns the placed facts, then each child's.
 func (placed placedReading) views() []actionfacts.Facts {
