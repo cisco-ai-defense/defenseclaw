@@ -213,6 +213,11 @@ type simpleShellState struct {
 	// forked holds the forked loop variables that hold the value of one list
 	// word (simpleForkLoopBind) in this state, until their loop ends.
 	forked []string
+	// folderVars are the variables assigned from a current-folder head while
+	// the folder was unknown (X=$PWD/f after cd "$D"): their value is the
+	// relative spelling in that folder, which the next cd moves away from, so
+	// the next cd forgets them (rel-1-0-10:GAP-1042).
+	folderVars []string
 	// homeUnproven means HOME holds a value the walk could not read
 	// (HOME=$(pwd), HOME=$X, a declaration option that changes what the
 	// value means). HOME keeps its previous value, so a later ~ or $HOME
@@ -237,7 +242,8 @@ const (
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
 		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
-		locals: slices.Clone(s.locals), forked: slices.Clone(s.forked), homeUnproven: s.homeUnproven}
+		locals: slices.Clone(s.locals), forked: slices.Clone(s.forked), folderVars: slices.Clone(s.folderVars),
+		homeUnproven: s.homeUnproven}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
@@ -420,7 +426,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			return syntaxTailCommands(input, tail, source, depth, interpreter, inherited, guess)
 		}
 	}
-	if !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&
+	if !input.folderUnknown && !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&
 		!strings.Contains(source, "eval") && !strings.Contains(source, "trap") &&
 		!strings.Contains(source, " -") {
 		return nil
@@ -468,7 +474,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		}
 		return compactSimpleStatesForFuture(states, parts[index:], futureSafe[index])
 	}
-	if !reduced && len(parts) == 1 {
+	// A body that starts in an unknown folder (Input.folderUnknown) is read
+	// whole: a single statement of it is a reading in that folder.
+	if !reduced && len(parts) == 1 && !input.folderUnknown {
 		file, parsed := shellparse.Parse(parts[0].text)
 		if !parsed || len(file.Stmts) != 1 {
 			return nil
@@ -512,10 +520,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		initialVars["PWD"] = simplePathClean(input.CWD)
 	}
 	states := map[string][]simpleShellState{
-		"0": {{cwd: input.CWD, vars: initialVars}},
+		"0": {{cwd: input.CWD, cwdUnknown: input.folderUnknown && input.CWD == "", vars: initialVars}},
 	}
 	result := make([]SimpleCommand, 0, len(parts))
-	changed := reduced || len(parts) != 1
+	changed := reduced || len(parts) != 1 || input.folderUnknown
 	unproven := false
 	// syntaxUnread: a nested body with a syntax error was read only in part
 	// (syntaxTailCommands).
@@ -615,7 +623,15 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			state := prior.clone()
 			simpleApplyLoopBinds(state.vars, part.binds, login)
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 && len(call.Assigns) != 0 && len(stmt.Redirs) == 0 {
-				state.noteHome(updateSimpleVariables(state.vars, call.Assigns))
+				assigns, folderNames := call.Assigns, []string(nil)
+				if folder, names, ok := simpleUnknownFolderAssignment(part.text, &state); ok {
+					if folderCall, ok := folder.Cmd.(*syntax.CallExpr); ok && len(folderCall.Args) == 0 &&
+						len(folderCall.Assigns) == len(assigns) {
+						assigns, folderNames = folderCall.Assigns, names
+					}
+				}
+				state.noteHome(updateSimpleVariables(state.vars, assigns))
+				state.setFolderVars(simpleAssignNames(assigns), folderNames)
 				changed = true
 				nextVariants = append(nextVariants, state)
 				if part.maySkip && (len(prior.forked) != 0 || simpleHomeChanged(prior, state)) {
@@ -738,7 +754,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if call != nil {
 				var innerCWDUnknown bool
 				var innerInterpreter string
-				script, shared, nested, static := simpleNestedScript(call, effective, &innerCWDUnknown, &innerInterpreter)
+				nestedCall, nestedVars := call, effective
+				if state.cwdUnknown || state.cwd == "" && input.CWD == "" {
+					nestedCall, nestedVars = simpleUnknownFolderNestedCall(part.text, call, effective)
+				}
+				script, shared, nested, static := simpleNestedScript(nestedCall, nestedVars, &innerCWDUnknown, &innerInterpreter)
 				if nested {
 					if !static {
 						if simplePotentialShellScript(call.Args, effective) && simpleRuntimeWords(call.Args) {
@@ -762,6 +782,12 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					if innerCWDUnknown {
 						innerInput.CWD = ""
 					}
+					// A body that starts after a cd the walk could not follow,
+					// or in a call with no folder at all, starts in a folder
+					// the walk does not know: its walk knows that, so a
+					// current-folder head or a relative operand of the body is
+					// read as on the top level (rel-1-0-10:GAP-1042).
+					innerInput.folderUnknown = innerInput.CWD == "" && (state.cwdUnknown || input.CWD == "")
 					if shared {
 						if resolved, ok := simpleResolvedVariables(script, effective); ok {
 							innerInput.Command = resolved
@@ -833,7 +859,14 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok {
 				// export HOME=v sets HOME for the commands after it, as
 				// HOME=v; export HOME does (GAP-2476).
+				var folderNames []string
+				if folder, names, ok := simpleUnknownFolderAssignment(part.text, &state); ok {
+					if folderDecl, ok := folder.Cmd.(*syntax.DeclClause); ok && len(folderDecl.Args) == len(decl.Args) {
+						decl, folderNames = folderDecl, names
+					}
+				}
 				updateSimpleDeclVariables(&state, decl, part.scope)
+				state.setFolderVars(simpleAssignNames(decl.Args), folderNames)
 			}
 			if call != nil {
 				simpleForgetUserVars(state.vars, CallBindsUserNames(call))
@@ -857,6 +890,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				}
 			}
 			if changedDirectory {
+				// A value spelled relative to the folder the walk did not know
+				// names another file in the next one.
+				simpleForgetUserVars(state.vars, state.folderVars)
+				state.folderVars = nil
 				if state.cwd != "" {
 					state.vars["OLDPWD"] = state.cwd
 				} else {
@@ -1255,7 +1292,8 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 		if !slices.ContainsFunc(result, func(previous simpleShellState) bool {
 			return previous.cwd == state.cwd && previous.cwdUnknown == state.cwdUnknown &&
 				slices.Equal(previous.dirStack, state.dirStack) && maps.Equal(previous.vars, state.vars) &&
-				slices.Equal(previous.locals, state.locals) && previous.homeUnproven == state.homeUnproven
+				slices.Equal(previous.locals, state.locals) && previous.homeUnproven == state.homeUnproven &&
+				slices.Equal(previous.folderVars, state.folderVars)
 		}) {
 			result = append(result, state)
 		}
@@ -2203,8 +2241,16 @@ func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState, 
 // (simpleResolvedVariables, simpleResolvedDirectoryStackTildes,
 // rel-1-0-10:GAP-1024); held reports such a written folder. The value of an
 // assignment is left as written: the variable keeps the folder the shell
-// gave it, which a later cd does not move.
+// gave it, which a later cd does not move. Only an assignment made while the
+// folder is unknown is read with its heads written
+// (simpleUnknownFolderAssignment), and the next cd forgets it.
 func simpleResolvedCurrentFolderHeads(source string, state *simpleShellState) (resolved string, ok, held bool) {
+	return simpleResolvedCurrentFolderHeadsIn(source, state, false)
+}
+
+// simpleResolvedCurrentFolderHeadsIn is simpleResolvedCurrentFolderHeads;
+// assignments also writes the heads in the value of an assignment.
+func simpleResolvedCurrentFolderHeadsIn(source string, state *simpleShellState, assignments bool) (resolved string, ok, held bool) {
 	if !strings.Contains(source, "PWD") && !strings.Contains(source, "pwd") && !strings.Contains(source, "~+") {
 		return "", false, false
 	}
@@ -2279,7 +2325,7 @@ func simpleResolvedCurrentFolderHeads(source string, state *simpleShellState) (r
 		case *syntax.Redirect:
 			return node.Op != syntax.Hdoc && node.Op != syntax.DashHdoc
 		case *syntax.Assign:
-			return false
+			return assignments
 		case *syntax.CallExpr:
 			if len(node.Args) != 0 {
 				programs[node.Args[0]] = true
@@ -2346,6 +2392,107 @@ func CurrentFolderHeadsAsRelative(command string) (string, bool) {
 	state := simpleShellState{cwdUnknown: true, vars: map[string]string{}}
 	resolved, ok, _ := simpleResolvedCurrentFolderHeads(command, &state)
 	return resolved, ok
+}
+
+// simpleUnknownFolderAssignment re-reads an assignment statement (X=v,
+// export X=v, declare X=v) made while the folder is unknown, with each
+// current-folder head of an assigned value written as that folder itself:
+// X=$PWD/.ssh/id_rsa after cd "$D" gives X the value .ssh/id_rsa in the
+// unknown folder, as X=.ssh/id_rsa does, where the head left X unread and
+// cat "$X" named nothing (rel-1-0-10:GAP-1042). names are the variables
+// whose value had such a head. ok is false when no value has one.
+func simpleUnknownFolderAssignment(text string, state *simpleShellState) (stmt *syntax.Stmt, names []string, ok bool) {
+	if !state.cwdUnknown {
+		return nil, nil, false
+	}
+	resolved, changed, _ := simpleResolvedCurrentFolderHeadsIn(text, state, true)
+	if !changed || resolved == text {
+		return nil, nil, false
+	}
+	before, parsedBefore := shellparse.Parse(text)
+	after, parsedAfter := shellparse.Parse(resolved)
+	if !parsedBefore || !parsedAfter || len(before.Stmts) != 1 || len(after.Stmts) != 1 {
+		return nil, nil, false
+	}
+	var assigns []*syntax.Assign
+	switch command := before.Stmts[0].Cmd.(type) {
+	case *syntax.CallExpr:
+		assigns = command.Assigns
+	case *syntax.DeclClause:
+		assigns = command.Args
+	}
+	for _, assign := range assigns {
+		if assign == nil || assign.Name == nil || assign.Value == nil {
+			continue
+		}
+		start, end := int(assign.Value.Pos().Offset()), int(assign.Value.End().Offset())
+		if start < 0 || end > len(text) || start >= end {
+			continue
+		}
+		if value := text[start:end]; strings.Contains(value, "PWD") || strings.Contains(value, "pwd") || strings.Contains(value, "~+") {
+			names = append(names, assign.Name.Value)
+		}
+	}
+	return after.Stmts[0], names, len(names) != 0
+}
+
+// simpleUnknownFolderNestedCall is the call that starts a nested shell
+// (source) as the walk reads its body while the folder is unknown: the
+// caller expands a current-folder head in a double-quoted body (bash -c
+// "cat $PWD/f") to that unknown folder, so the head is the folder itself (.)
+// and the body is static: cat ./f, a relative operand the body's walk reads
+// in the unknown folder (Input.folderUnknown), where the head left the body
+// unread (rel-1-0-10:GAP-1042). $(pwd) and `pwd` print PWD. A body with a cd
+// of its own is left as it was: there the expanded folder is no longer the
+// current one.
+func simpleUnknownFolderNestedCall(source string, call *syntax.CallExpr, vars map[string]string) (*syntax.CallExpr, map[string]string) {
+	if _, held := vars["PWD"]; held || !strings.Contains(source, "PWD") && !strings.Contains(source, "pwd") ||
+		strings.Contains(source, "cd ") || strings.Contains(source, "pushd") || strings.Contains(source, "popd") {
+		return call, vars
+	}
+	if strings.Contains(source, "$(pwd)") || strings.Contains(source, "`pwd`") {
+		file, parsed := shellparse.Parse(strings.NewReplacer("$(pwd)", "$PWD", "`pwd`", "$PWD").Replace(source))
+		if !parsed || len(file.Stmts) != 1 {
+			return call, vars
+		}
+		rewritten, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+		if !ok {
+			return call, vars
+		}
+		call = rewritten
+	}
+	folder := make(map[string]string, len(vars)+1)
+	for name, value := range vars {
+		folder[name] = value
+	}
+	folder["PWD"] = "."
+	return call, folder
+}
+
+// simpleAssignNames are the names assigns give a value.
+func simpleAssignNames(assigns []*syntax.Assign) []string {
+	var names []string
+	for _, assign := range assigns {
+		if assign != nil && assign.Name != nil {
+			names = append(names, assign.Name.Value)
+		}
+	}
+	return names
+}
+
+// setFolderVars records an assignment of assigned: a name it gave a value
+// relative to the unknown folder (folder) is a folder variable, any other
+// name it assigned is no longer one.
+func (s *simpleShellState) setFolderVars(assigned, folder []string) {
+	s.folderVars = slices.DeleteFunc(s.folderVars, func(name string) bool { return slices.Contains(assigned, name) })
+	for _, name := range folder {
+		if !slices.Contains(s.folderVars, name) {
+			s.folderVars = append(s.folderVars, name)
+		}
+	}
+	if len(s.folderVars) == 0 {
+		s.folderVars = nil
+	}
 }
 
 // simpleBareOperandStart reports a first character after which a word reads

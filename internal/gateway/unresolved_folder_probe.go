@@ -237,13 +237,17 @@ func unresolvedFolderCurrentFolderTwin(request trustedActionRequest) (bool, boun
 // whose relative operand may be a named protected file in a folder the call
 // does not give. A twin, a statement of a split call read on its own pass and
 // a managed call the hook client placed (the gateway places it where the
-// client ran it) add nothing here.
+// client ran it) add nothing here. The folder the client places is the one
+// the call starts in: a statement after a cd the walk could not follow runs
+// in another folder, which that folder does not place. The Codex hook sends
+// the folder with every call, so such a statement was allowed there where the
+// Claude Code hook gave it the unknown tier (rel-1-0-10:GAP-1042).
 func withUnresolvedFolderTier(findings []RuleFinding, request trustedActionRequest, facts actionfacts.Facts, statement bool) []RuleFinding {
 	if request.hostTwinDepth != 0 || request.stateProofOnly || request.simpleCommandPass && !statement {
 		return findings
 	}
 	noFolder := !path.IsAbs(request.Input.CWD)
-	if noFolder && path.IsAbs(request.ResolvedWriteTargets[hookpaths.CWDKey]) {
+	if noFolder && !statement && path.IsAbs(request.ResolvedWriteTargets[hookpaths.CWDKey]) {
 		return findings
 	}
 	if slices.ContainsFunc(findings, RuleFinding.contributesToEnforcement) {

@@ -17,7 +17,11 @@ import (
 // /proc/self/environ and cloud-token files read cat-like reads only). A
 // template, a project copy and a neighbouring name stay allowed. The read is
 // the oracle, never a hard-coded letter, so a later change of a rule's
-// severity moves both together.
+// severity moves both together. A copy of the account's own .git-credentials
+// or .netrc keeps the stronger verdict rel gives it (the lead ruling of
+// 2026-11-16, TestOwnDeveloperTokenCopyKeepsTheRelTierFiveTiers), while their
+// read keeps the alert of GAP-0888: for those two the copy is never weaker
+// than the read.
 func TestCredentialFileCopyIsJudgedLikeItsReadFiveTiers(t *testing.T) {
 	files := []string{
 		"~/.aws/credentials", "~/.kube/config", "~/.docker/config.json", "~/.git-credentials",
@@ -37,9 +41,12 @@ func TestCredentialFileCopyIsJudgedLikeItsReadFiveTiers(t *testing.T) {
 			if read == "allow" && p.pack != "permissive" {
 				t.Errorf("%s: cat %s is allowed, the oracle needs a verdict", p.name, file)
 			}
+			atLeast := file == "~/.git-credentials" || file == "~/.netrc"
+			rank := map[string]int{"allow": 0, "alert": 1, "block": 2}
 			for _, form := range []string{"cp %s /tmp/staged", "rsync -a %s /tmp/staged", "install %s /tmp/staged"} {
 				command := fmt.Sprintf(form, file)
-				if got, out := tdetectVerdict(t, a, command); got != read {
+				got, out := tdetectVerdict(t, a, command)
+				if atLeast && rank[got] < rank[read] || !atLeast && got != read {
 					t.Errorf("%s: %q is %s, its read is %s: %v", p.name, command, got, read, out)
 				}
 			}

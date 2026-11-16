@@ -442,10 +442,10 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	// the same rule and never a stronger one. Skipping every rule id already
 	// in the findings let a detection-only finding of the dispatch hide the
 	// lane's enforcing one (rel-1-0-10:GAP-0995).
-	// merge adds the lane's finding of ruleID; ownToken marks a finding the
-	// lane derives from a developer-token file of the active home itself
-	// (ownDeveloperTokenFile).
-	merge := func(ruleID, note string, ownToken bool) {
+	// merge adds the lane's finding of ruleID; token says whether the lane
+	// derives it from a developer-token file of the active home itself
+	// (ownDeveloperTokenAccess), and whether the call reads it or reaches it another way.
+	merge := func(ruleID, note string, token ownTokenAccess) {
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
 		if !ok {
 			return
@@ -459,22 +459,33 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			// alert-only, so an upload of another account's .git-credentials
 			// or .netrc was weaker than an upload of one's own
 			// (rel-1-0-10:GAP-0834, GAP-0835).
-			if otherAccount && nonShellFindingStronger(finding, out[index]) {
+			//
+			// A call that reaches the active home's own .git-credentials,
+			// .netrc or .pgpass other than by reading it (a copy, a find that
+			// hands it to a program) keeps the verdict rel gives it: the
+			// catalog finding of the rule, CRITICAL, a block in strict and
+			// managed installs. Since a copy counts as a read of its source for
+			// the credential-file rules (b1d66c243c), the call carries the
+			// typed owner's alert of the read, which the lane kept, so a copy
+			// fell to alert MEDIUM (HIGH for .pgpass) and to allow in the
+			// permissive pack. The GAP-0888 ruling covers reads only, and of
+			// these files the tier of one's own AWS and kube files is not
+			// extended to a copy (lead, 2026-11-16).
+			if (otherAccount || token == ownTokenOther) && nonShellFindingStronger(finding, out[index]) {
 				out[index] = finding
 				return
 			}
 			// A read of the active home's own .git-credentials, .netrc or
-			// .pgpass keeps the alert the call carries, the tier of a read
-			// of one's own AWS or kube credentials, in every pack
-			// (rel-1-0-10:GAP-0888). The rank merge below would make it a
-			// block in strict and managed installs.
-			if ownToken && !otherAccount && out[index].contributesToAlertOnly() {
+			// .pgpass keeps the alert the call carries, the tier rel gives
+			// it, in every pack (rel-1-0-10:GAP-0888). The rank merge below
+			// would make it a block in strict and managed installs.
+			if token == ownTokenRead && !otherAccount && out[index].contributesToAlertOnly() {
 				return
 			}
 		}
 		out = withSimpleCommandFindings(out, []RuleFinding{finding})
 	}
-	add := func(ruleID, note string) { merge(ruleID, note, false) }
+	add := func(ruleID, note string) { merge(ruleID, note, ownTokenNone) }
 	judge := func(facts actionfacts.Facts, command, text string) {
 		if isShell {
 			for _, id := range toolshape.TextRules(command) {
@@ -492,7 +503,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			if fileText, ok := patchTexts[p.Value]; ok {
 				text = fileText
 			}
-			own := ownDeveloperTokenFile(facts, p, path)
+			own := ownDeveloperTokenAccess(facts, p, path)
 			ids := append(toolshape.PathRules(string(p.Access), path, text), homePathRuleIDs(facts, p, text)...)
 			for _, id := range ids {
 				// A link to /dev/null in a unit folder masks the unit: it stops
@@ -582,15 +593,36 @@ func linksToDevNull(facts actionfacts.Facts, commandID int64) bool {
 	return false
 }
 
-// ownDeveloperTokenFile reports a path fact that names a file of the
+// ownTokenAccess is how a call reaches a developer-token file of the active
+// home itself (ownDeveloperTokenAccess).
+type ownTokenAccess int
+
+const (
+	// ownTokenNone: no such file, or a file of another account's home.
+	ownTokenNone ownTokenAccess = iota
+	// ownTokenRead: the call reads the file (cat, a native Read).
+	ownTokenRead
+	// ownTokenOther: the call reaches it another way: the source of a copy
+	// (cp, rsync, install), a starting point a find hands to a program.
+	ownTokenOther
+)
+
+// ownDeveloperTokenAccess reports whether a path fact names a file of the
 // developer-token class (developerTokenFileOfAccountHome) in the active home
-// of the call itself (activeHomeRelative), not in another account's home.
-func ownDeveloperTokenFile(facts actionfacts.Facts, p actionfacts.PathFact, path string) bool {
+// of the call itself (activeHomeRelative), not in another account's home, and
+// whether its command reads it or reaches it another way.
+func ownDeveloperTokenAccess(facts actionfacts.Facts, p actionfacts.PathFact, path string) ownTokenAccess {
 	if !developerTokenFileOfAccountHome(path) {
-		return false
+		return ownTokenNone
 	}
-	_, own := activeHomeRelative(facts, p)
-	return own
+	if _, own := activeHomeRelative(facts, p); !own {
+		return ownTokenNone
+	}
+	if command, ok := integrityCommandByID(facts, p.CommandID); ok &&
+		(!hasOperation(command, actionfacts.OperationRead) || hasOperation(command, actionfacts.OperationCopy)) {
+		return ownTokenOther
+	}
+	return ownTokenRead
 }
 
 // developerTokenFileOfAccountHome reports an absolute path that is a file of

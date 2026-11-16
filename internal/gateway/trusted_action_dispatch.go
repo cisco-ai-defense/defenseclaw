@@ -1237,6 +1237,52 @@ func dispatchTrustedActionWith(
 				}
 				findings = withSimpleCommandFindings(findings, childFindings)
 			}
+			// A find hands its starting points to the program it runs: that
+			// program on each starting point is judged as the statement
+			// alone, for the call and for each of its statements, and the
+			// strictest finding is kept (rel-1-0-10:GAP-1048).
+			inputs := []actionfacts.Input{request.Input}
+			for _, simple := range simples {
+				if simple.EvaluationFailure == "" && !simple.OpaqueValueAssignment && !simple.LiteralOutputOnly &&
+					!simple.LoginGuess {
+					input := request.Input
+					input.Command, input.Args, input.Argv, input.CWD = simple.Text, nil, nil, simple.CWD
+					if simple.AbsoluteOnly {
+						input.CWD = request.Input.CWD
+					}
+					inputs = append(inputs, input)
+				}
+			}
+			for index, input := range inputs {
+				text, _ := trustedBashCommandInput(input)
+				if !strings.Contains(text, "-exec") && !strings.Contains(text, "-ok") {
+					continue
+				}
+				inputFacts := facts
+				if index != 0 {
+					inputFacts = actionfacts.Analyze(input)
+				}
+				readings, truncated := actionfacts.FindHandedReadings(inputFacts)
+				if truncated {
+					findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
+				}
+				for _, reading := range readings {
+					child := request
+					child.Input = input
+					child.Input.Command, child.Input.Args, child.Input.Argv = reading, nil, nil
+					child.LegacyText = reading
+					child.conflictSource = nil
+					child.record, child.recordTelemetry = nil, nil
+					child.simpleCommandPass = true
+					parent := request.Input
+					if wholeCommandKnown {
+						parent.Command = wholeCommand
+					}
+					child.parentPatch = &parent
+					child.generation, child.budget = generation, budget
+					findings = withSimpleCommandFindings(findings, dispatchTrustedAction(ctx, child))
+				}
+			}
 		}()
 	}
 	options := ruleScanOptions{

@@ -88,6 +88,12 @@ type Input struct {
 	// such a body where it is defined and judges the apply_patch envelope
 	// in it, run or not (rel-1-0-6:GAP-0928 review 12).
 	StraightLineFunctions bool `json:"-"`
+	// folderUnknown is set by the walk (SimpleCommands) on the input of a
+	// nested shell body that starts after a cd the walk could not follow
+	// (CWD is then empty): the body starts in that unknown folder, not in no
+	// folder, so its current-folder heads and relative operands are read as
+	// the top level reads them (rel-1-0-10:GAP-1042).
+	folderUnknown bool
 	// CurrentWindowsDrive is trusted caller context: the drive letter of the
 	// directory the hook payload reported, for a gateway that could not place
 	// that directory itself (CWD is empty). A Windows path with no drive of
